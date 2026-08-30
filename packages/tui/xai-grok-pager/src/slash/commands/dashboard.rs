@@ -1,59 +1,31 @@
-//! `/dashboard` — open the Agent Dashboard view.
+//! `/dashboard`: open the Agent Dashboard view.
 //!
-//! Centralised overview of every running session (top-level + subagents)
-//! with peek, attach, and dispatch from one screen. The dashboard reuses
-//! the existing fullscreen subagent takeover for "attach to subagent",
-//! so attaching never bypasses `active_subagent`.
+//! The dashboard shows every running session, top-level and subagents, with peek, attach, and dispatch from one screen.
+//! Attaching to a subagent reuses the existing fullscreen takeover, so attaching never bypasses `active_subagent`.
 //!
-//! Same `Action`-only run path as other session-less commands, no args.
-//! `/sessions` is an alias (see [`SlashCommand::aliases`]): the dashboard
-//! replaced the removed sessions picker modal for switching, renaming, and
-//! closing active sessions. Visibility is feature-flag-gated: the
-//! command is hidden by default in the registry and revealed when the
-//! dashboard feature is enabled (`dashboard_enabled()`), via
-//! [`crate::app::agent_view::AgentView::set_dashboard_visible`]. When
-//! `[dashboard].enabled = false` or `GROK_AGENT_DASHBOARD=0` is set, the
-//! dispatcher prints a friendly toast and refuses to open. The dashboard is
-//! independent of leader mode.
+//! Like other session-less commands it runs through `Action` only and takes no args.
+//! The command is hidden in the registry until `dashboard_enabled()` reveals it via [`crate::app::agent_view::AgentView::set_dashboard_visible`].
+//! With `[dashboard].enabled = false` or `GROK_AGENT_DASHBOARD=0` the dispatcher shows a toast and refuses to open.
+//! The dashboard is independent of leader mode.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 use crate::slash::{ModeSupport, Remedy};
 
-/// Open the Agent Dashboard view.
 pub struct DashboardCommand;
 
 impl SlashCommand for DashboardCommand {
-    fn name(&self) -> &str {
-        "dashboard"
-    }
-
-    /// `/agents-dashboard` is registered as an alias. The canonical
-    /// name remains `/dashboard`.
-    ///
-    /// `/sessions` survives the sessions-modal removal as an alias: the
-    /// dashboard is the replacement surface for switching, renaming, and
-    /// closing active sessions, so old muscle memory redirects here. As an
-    /// alias it inherits the feature-flag gate (`set_dashboard_visible`
-    /// hides by canonical name) and the minimal-mode gate below.
-    fn aliases(&self) -> &[&str] {
-        &["agents-dashboard", "sessions"]
-    }
-
-    fn description(&self) -> &str {
-        "Open the Agent Dashboard"
-    }
-
-    fn usage(&self) -> &str {
-        "/dashboard"
-    }
-
-    /// The agent dashboard is intentionally out of scope in minimal mode
-    /// (single-session standalone — K14/§6.15).
-    fn mode_support(&self) -> ModeSupport {
-        ModeSupport::FullscreenOnly(Remedy::SwitchMode {
+    slash_meta! {
+        name: "dashboard",
+        // `/sessions` stays as an alias after the sessions picker modal was removed, so old muscle memory redirects here
+        // The dashboard replaced that modal for switching, renaming, and closing active sessions.
+        // The aliases inherit the feature gate (`set_dashboard_visible` hides by canonical name) and the minimal-mode gate below
+        aliases: ["agents-dashboard", "sessions"],
+        description: "Open the Agent Dashboard",
+        usage: "/dashboard",
+        mode_support: ModeSupport::FullscreenOnly(Remedy::SwitchMode {
             why: "minimal is single-session",
-        })
+        }),
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
@@ -104,8 +76,7 @@ mod tests {
         assert_eq!(cmd.name(), "dashboard");
     }
 
-    /// `/sessions` (removed picker modal) and `/agents-dashboard`
-    /// both spell this command.
+    /// `/sessions` (the removed picker modal) and `/agents-dashboard` both spell this command.
     #[test]
     fn aliases_include_sessions() {
         let cmd = DashboardCommand;

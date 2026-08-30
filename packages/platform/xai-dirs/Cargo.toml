@@ -6,7 +6,6 @@ version = "0.1.0"
 description = "Home-directory resolution generally: USERPROFILE-first home_dir, plus grok-home ($GROK_HOME or <home>/.grok)"
 
 [dependencies]
-dirs = { workspace = true }
 dunce = { workspace = true }
 tracing = { workspace = true }
 

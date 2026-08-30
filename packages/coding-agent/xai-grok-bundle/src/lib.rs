@@ -1,10 +1,8 @@
-//! On-disk cache for the xAI-published subagent bundle: personas, roles,
-//! agents, skills, and workflows written under `<grok home>/bundled`.
+//! On-disk cache for the subagent bundle xAI publishes: personas, roles, agents, skills, and workflows written under `<grok home>/bundled`.
 //!
-//! Writes are checksum-tracked through `manifest.json`, so a file the user
-//! edited by hand is never overwritten and never pruned. Archive extraction
-//! is bounded (entry count, per-entry size, total decompressed size) and every
-//! path is sanitized before it is joined onto the cache root.
+//! `manifest.json` records a checksum for every file this crate writes, so a file the user edited by hand is never overwritten and never pruned.
+//! Archive extraction is bounded (entry count, per-entry size, total decompressed size).
+//! Every path is sanitized before it is joined onto the cache root.
 
 use anyhow::{Context, Result, bail};
 use prod_mc_cli_chat_proxy_types::SubagentBundle;
@@ -146,8 +144,8 @@ pub fn write_bundle_to_cache(root: &Path, bundle: &SubagentBundle) -> Result<Bun
         }
     }
 
-    // JSON payload has no workflows field. Keep managed workflows from the
-    // last archive extract so a JSON fallback does not delete them.
+    // The JSON payload has no workflows field
+    // Keep the managed workflows from the last archive extraction, so falling back to JSON does not delete them
     if let Some(old_manifest) = old_manifest.as_ref() {
         for (path, checksum) in &old_manifest.checksums {
             if path.starts_with("workflows/") {
@@ -294,8 +292,7 @@ pub fn checksum_file(path: &Path) -> Result<String> {
     Ok(checksum_bytes(&bytes))
 }
 
-/// True when `relative_path` is in the bundle manifest and the on-disk bytes
-/// still match that checksum (not a local/agent overwrite).
+/// True when `relative_path` is in the bundle manifest and the file on disk still matches that checksum, untouched since the cache wrote it.
 pub fn is_managed_bundle_file(root: &Path, relative_path: &str) -> bool {
     let relative_path = relative_path.replace('\\', "/");
     let Ok(Some(manifest)) = read_cached_manifest(root) else {
@@ -1463,8 +1460,8 @@ mod tests {
             .append_data(&mut h, "bundle.json", v.as_bytes())
             .unwrap();
 
-        // 51 entries of 1 MB each = 51 MB > 50 MB limit.
-        // Each entry is at the per-entry limit (not over), so only the aggregate check fires.
+        // 51 entries of 1 MB each total 51 MB, just over the 50 MB limit
+        // Each entry is exactly at the per-entry limit, so only the aggregate check fires
         let big = vec![0u8; ARCHIVE_MAX_ENTRY_SIZE as usize];
         for i in 0..51 {
             let path = format!("subagents/personas/p{i}.toml");
@@ -1525,8 +1522,8 @@ mod tests {
 
     #[test]
     fn sanitize_accepts_shared_data_under_skills() {
-        // Non-skill directories under skills/ (e.g., shared/personas/) are
-        // valid archive entries -- they carry data that skills read at runtime.
+        // Directories under skills/ that are not skills (e.g., shared/personas/) are valid archive entries
+        // They carry data files that skills read at runtime
         assert_eq!(
             sanitize_relative_path("skills/shared/personas/reviewer.md"),
             Some("skills/shared/personas/reviewer.md".to_string())

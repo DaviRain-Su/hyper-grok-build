@@ -1,5 +1,4 @@
-//! Top-level input routing for [`AgentView`]: `handle_input` fans events
-//! out to the active pane/overlay handlers; pane and input-mode setters.
+//! Top-level input routing for [`AgentView`]: `handle_input` fans events out to the active pane/overlay handlers, plus the pane and input-mode setters.
 #[cfg(test)]
 use super::paste::paste_key_tests;
 #[cfg(test)]
@@ -28,8 +27,7 @@ pub(crate) enum ExternalPromptEditorAccess {
     OwnedElsewhere,
 }
 impl AgentView {
-    /// The composer is the logical editing surface regardless of pane focus
-    /// (like the other global chords); overlays and dropdowns still own input.
+    /// The composer is the editing target regardless of pane focus (like the other global chords); overlays and dropdowns still own input.
     pub(crate) fn external_prompt_editor_access(&self) -> ExternalPromptEditorAccess {
         let owned_elsewhere = !matches!(self.prompt_mode, super::PromptMode::Normal)
             || self.active_subagent.is_some()
@@ -62,12 +60,9 @@ impl AgentView {
             ExternalPromptEditorAccess::Ready
         }
     }
-    /// True when the scrollback pane is focused with nothing layered on top —
-    /// no viewer, modal, btw, or open search. This is the precise state in
-    /// which a bare `q`/`Esc` should close the enclosing surface (the subagent
-    /// fullscreen view or the dashboard session overlay). Both close-key guards
-    /// share this one predicate so a future sub-state addition can't make the
-    /// mirrored checks drift apart.
+    /// True when the scrollback pane is focused with nothing layered on top: no viewer, modal, btw, or open search.
+    /// In this exact state a bare `q`/`Esc` closes the enclosing view (the subagent fullscreen view or the dashboard session overlay).
+    /// Both close-key guards share this one predicate so a future sub-state addition can't make the mirrored checks drift apart.
     pub(crate) fn is_bare_scrollback(&self) -> bool {
         self.active_pane == AgentPane::Scrollback
             && self.block_viewer.is_none()
@@ -82,41 +77,11 @@ impl AgentView {
             && self.btw_state.is_none()
             && self.scrollback_search.is_none()
     }
-    /// Whether no input-demanding overlay — a [`BlockingCard`] or the plan
-    /// approval — is awaiting a response.
+    /// Whether no input-demanding overlay (a [`BlockingCard`] or the plan approval) is awaiting a response.
     pub(crate) fn no_input_overlay_pending(&self) -> bool {
         self.blocking_card().is_none() && self.plan_approval_view.is_none()
     }
-    /// Whether an agent-owned modal, viewer, or focused overlay must receive
-    /// Space/Esc before Codex Live's global mute/stop shortcuts.
-    ///
-    /// Keep this aligned with the early-return surfaces in `handle_input_inner`:
-    /// Live replaces only the ordinary composer and must never steal input from
-    /// permission/question/plan flows or from a viewer layered above it.
-    #[cfg(feature = "codex-live")]
-    pub(crate) fn live_key_intercept_blocked(&self) -> bool {
-        !self.no_input_overlay_pending()
-            || self.active_modal.is_some()
-            || self.extensions_modal.is_some()
-            || self.persona_detail.is_some()
-            || self.agents_modal.is_some()
-            || self.block_viewer.is_some()
-            || self.line_viewer.is_some()
-            || self.image_viewer.is_some()
-            || self.video_viewer.is_some()
-            || self.gboom.is_some()
-            || self.inline_edit.is_some()
-            || self.rewind_state.is_some()
-            || self.jump_state.is_some()
-            || self.btw_state.is_some()
-            || self.scrollback_search.is_some()
-            || self.active_subagent.is_some()
-            || self.show_goal_detail
-            || self.show_workflows
-            || self.prompt.any_dropdown_open()
-    }
-    /// Whether FocusGained should move focus from Scrollback → Prompt.
-    ///
+    /// Whether FocusGained should move focus from Scrollback to Prompt.
     pub(crate) fn should_restore_prompt_on_focus_gained(&self) -> bool {
         if self.active_pane != AgentPane::Scrollback {
             return false;
@@ -129,11 +94,9 @@ impl AgentView {
         }
         !self.vim_mode && self.session.state.is_idle()
     }
-    /// Surfaces that own input ahead of the dashboard overlay cascade.
-    /// That cascade runs before `handle_input`, so without this guard Left/Esc
-    /// on an empty prompt would exit the overlay instead of reaching `/gboom`
-    /// (turn/close), video (seek/close), image (close), `/agents`, persona
-    /// detail, or the block viewer.
+    /// Views that own input ahead of the dashboard overlay cascade.
+    /// That cascade runs before `handle_input`, so without this guard Left/Esc on an empty prompt would exit the overlay.
+    /// It would never reach `/gboom` (turn/close), video (seek/close), image (close), `/agents`, persona detail, or the block viewer.
     pub(super) fn modal_owns_input(&self) -> bool {
         self.extensions_modal.is_some()
             || self.active_modal.is_some()
@@ -144,19 +107,14 @@ impl AgentView {
             || self.persona_detail.is_some()
             || self.block_viewer.is_some()
     }
-    /// Prompt pane focused with an empty draft and no overlay or prompt-local
-    /// sub-state owning keys — the state where a bare Left backs out of the
-    /// dashboard overlay (mirror of the dashboard's Right = open detail). A
-    /// non-empty draft (Left = caret move), scrollback focus (Left = collapse),
-    /// an active history search, and an open `@` file-search dropdown (which
-    /// owns Right/Up/Down picker nav) all fail the guard, leaving those
-    /// behaviours untouched. The dropdown is only open while the draft holds
-    /// an `@` token, so `text().is_empty()` already covers it — the explicit
-    /// check keeps the predicate honest if that coupling ever changes. An open
-    /// modal or media surface ([`Self::modal_owns_input`]) also fails the guard
-    /// so those own Esc/Left rather than the overlay back-out stealing them. An
-    /// open `/jump` picker fails it too, so the picker owns Esc/Left instead of
-    /// being left latent.
+    /// Prompt pane focused with an empty draft and no overlay or prompt-local sub-state owning keys.
+    /// This is the state where a bare Left backs out of the dashboard overlay, mirroring the dashboard's Right opening detail.
+    /// A non-empty draft (Left moves the caret), scrollback focus (Left collapses), and an active history search all fail the guard.
+    /// An open `@` file-search dropdown fails it too; the dropdown owns Right/Up/Down picker nav.
+    /// The dropdown is only open while the draft holds an `@` token, so `text().is_empty()` already covers it.
+    /// The explicit check keeps the predicate honest if that coupling ever changes.
+    /// An open modal or media view ([`Self::modal_owns_input`]) also fails the guard, so those own Esc/Left instead of the overlay back-out stealing them.
+    /// An open `/jump` picker fails it too, so the picker owns Esc/Left instead of being left latent.
     pub(crate) fn is_empty_focused_prompt(&self) -> bool {
         self.active_pane == AgentPane::Prompt
             && self.prompt.text().is_empty()
@@ -171,11 +129,9 @@ impl AgentView {
     ) -> Vec<&crate::views::workflows::WorkflowRunSnapshot> {
         self.workflow_runs.iter().rev().collect()
     }
-    /// No per-pane `Esc` consumer is pending (text selection, link highlight,
-    /// goal detail, rewind overlay, open `/btw` panel, or open `/jump` picker),
-    /// so `Esc` is free to back out of the dashboard overlay rather than
-    /// clear/dismiss one of them first. Shared by both overlay back-out guards
-    /// so a future Esc consumer is added once here.
+    /// No per-pane `Esc` consumer is pending (text selection, link highlight, goal detail, rewind overlay, open `/btw` panel, or open `/jump` picker).
+    /// `Esc` is then free to back out of the dashboard overlay rather than clear or dismiss one of them first.
+    /// Shared by both overlay back-out guards so a future Esc consumer is added once here.
     pub(crate) fn no_esc_consumer_pending(&self) -> bool {
         self.persistent_text_selection.is_none()
             && self.highlighted_link_idx.is_none()
@@ -185,31 +141,23 @@ impl AgentView {
             && self.btw_state.is_none()
             && self.jump_state.is_none()
     }
-    /// Effective screen mode of this process, as injected per agent at
-    /// session creation (`apply_app_scoped_gates` →
-    /// `PromptWidget::set_screen_mode`; the mode is fixed for the process
-    /// lifetime). The global-free minimal check for per-agent input policy —
-    /// unwired test agents default to Fullscreen, and tests opt in with
-    /// `prompt.set_screen_mode(ScreenMode::Minimal)` instead of mutating the
-    /// `MINIMAL_MODE_ACTIVE` process global.
+    /// Effective screen mode of this process, injected per agent at session creation.
+    /// `apply_app_scoped_gates` calls `PromptWidget::set_screen_mode`; the mode is fixed for the process lifetime.
+    /// This checks per-agent input policy without touching the process global.
+    /// Unwired test agents default to Fullscreen.
+    /// Tests opt in with `prompt.set_screen_mode(ScreenMode::Minimal)` instead of mutating the `MINIMAL_MODE_ACTIVE` process global.
     pub(crate) fn is_minimal_mode(&self) -> bool {
         self.prompt.slash_controller.screen_mode().is_minimal()
     }
-    /// Whether a bare Esc pressed right now would reach
-    /// [`Self::try_handle_esc_policy`]'s mid-turn cancel (assuming a turn is
-    /// running — callers gate on that): the hint-bar predicate deciding when
-    /// to advertise `Esc` instead of `Ctrl+C` for CancelTurn. Composed from
-    /// the same predicates input routing uses, so the hint cannot claim Esc
-    /// while a higher-priority consumer (dropdown, search, viewer/modal,
-    /// agents/persona modal, needs-input overlay, queued-prompt or inline
-    /// edit, subagent-view close, selection/link/goal/rewind/btw/jump,
-    /// latent composer mode) would steal the press. Conservative on purpose:
-    /// when false, the registry `Ctrl+C` is shown, which always cancels.
-    /// `esc_owned_before_agent` is the app-level ownership snapshot
-    /// (`AppView::esc_owned_before_agent`: voice dictation listening or
-    /// pending cold-start, a focused dev tracing pane, the top-level cloud /
-    /// import-Claude modals, and the dashboard's attached-agent popup — all
-    /// consume Esc before any agent routing), passed down by the draw path.
+    /// Whether a bare Esc pressed right now would reach [`Self::try_handle_esc_policy`]'s mid-turn cancel (callers gate on a turn actually running).
+    /// This is the hint-bar predicate deciding when to advertise `Esc` instead of `Ctrl+C` for CancelTurn.
+    /// Composed from the same predicates input routing uses, so the hint cannot claim Esc while a higher-priority consumer would steal the press
+    /// (dropdown, search, viewer/modal, agents/persona modal, needs-input overlay, queued-prompt or inline edit, subagent-view close,
+    /// selection/link/goal/rewind/btw/jump, latent composer mode).
+    /// Conservative on purpose: when false, the registry `Ctrl+C` is shown, which always cancels.
+    /// `esc_owned_before_agent` is the app-level ownership snapshot, passed down by the draw path.
+    /// `AppView::esc_owned_before_agent` covers voice dictation listening or pending cold-start, a focused dev tracing pane, the top-level cloud
+    /// and import-Claude modals, and the dashboard's attached-agent popup; all consume Esc before any agent routing.
     pub(crate) fn esc_would_cancel_turn(&self, esc_owned_before_agent: bool) -> bool {
         if esc_owned_before_agent
             || !crate::app::esc_cancels_turn(self.is_minimal_mode(), self.vim_mode)
@@ -237,19 +185,19 @@ impl AgentView {
             && self.no_esc_consumer_pending()
             && self.no_input_overlay_pending()
     }
-    /// Esc on the prompt pane in a dashboard overlay backs out to the dashboard list (the prompt-focus mirror of the Left-arrow back-out), but only
-    /// for an empty, Normal-mode composer with no per-pane Esc consumer pending. Beyond [`Self::is_empty_focused_prompt`] it also requires
-    /// `PromptInputMode::Normal` (so a Bash/Remember empty prompt keeps Esc as its mode-exit, matching the full-screen view) and
-    /// [`Self::no_esc_consumer_pending`] (so Esc still clears or dismisses a pending text selection / link highlight / goal detail / rewind first;
-    /// Esc, unlike Left, is their consumer). A non-empty draft fails the guard so Esc still arms "press again to clear".
+    /// Esc on the prompt pane in a dashboard overlay backs out to the dashboard list (the prompt-focus mirror of the Left-arrow back-out).
+    /// It only applies to an empty, Normal-mode composer with no per-pane Esc consumer pending.
+    /// Beyond [`Self::is_empty_focused_prompt`] it also requires `PromptInputMode::Normal`.
+    /// A Bash/Remember empty prompt therefore keeps Esc as its mode-exit, matching the full-screen view.
+    /// It also requires [`Self::no_esc_consumer_pending`], so Esc clears or dismisses a pending text selection / link highlight / goal detail / rewind first.
+    /// Esc, unlike Left, is their consumer.
+    /// A non-empty draft fails the guard so Esc still shows "press again to clear".
     /// Used only in the overlay cascade; the full-screen Esc policy (clear / rewind while idle; mid-turn cancel or swallow) is untouched.
     ///
-    /// Also gated to an idle agent (no running, cancelling, or wake turn):
-    /// while one is in flight, Esc must fall through to
-    /// [`Self::try_handle_esc_policy`] (running → cancel in minimal / non-vim
-    /// mode, swallow in vim mode; cancelling → retry CancelTurn), not detach
-    /// to the dashboard. Detach mid-turn stays on
-    /// Ctrl+\ / Left.
+    /// Also gated to an idle agent (no running, cancelling, or wake turn).
+    /// While one is in flight, Esc must fall through to [`Self::try_handle_esc_policy`], not detach to the dashboard.
+    /// There, running cancels in minimal / non-vim mode and swallows in vim mode; cancelling retries CancelTurn.
+    /// Detach mid-turn stays on Ctrl+\ / Left.
     pub(crate) fn overlay_esc_backs_out_from_prompt(&self) -> bool {
         self.is_empty_focused_prompt()
             && self.prompt_input_mode == PromptInputMode::Normal
@@ -258,11 +206,10 @@ impl AgentView {
             && !self.session.state.is_cancelling()
             && !self.wake_turn_active()
     }
-    /// True when a pending plan / Q&A overlay is at its top navigation state
-    /// (nothing left for `Esc` to clear), so the next `Esc` backs out of the
-    /// dashboard overlay instead of dead-ending. Graduated: earlier presses
-    /// keep their in-overlay meaning. Dashboard-overlay only; the overlay
-    /// stays pending (no answer sent).
+    /// True when a pending plan / Q&A overlay is at its top navigation state (nothing left for `Esc` to clear).
+    /// The next `Esc` then backs out of the dashboard overlay instead of dead-ending.
+    /// Graduated: earlier presses keep their in-overlay meaning.
+    /// Dashboard-overlay only; the overlay stays pending (no answer sent).
     pub(crate) fn overlay_esc_backs_out(&self) -> bool {
         if !self.in_dashboard_overlay {
             return false;
@@ -281,13 +228,10 @@ impl AgentView {
         }
         self.card_esc() == Some(EscStep::BackOutOverlay)
     }
-    /// Whether the pending plan-approval overlay is at a state where `Esc` /
-    /// `Left` have nothing else to do, so they back out to the dashboard:
-    ///   - `Preview` line viewer: no-ops once the input bar, accepted search
-    ///     matcher, and visual selection are all cleared (those consume `Esc`
-    ///     first, keeping the back-out graduated).
-    ///   - `Preview` with no viewer, or empty `Prompt` feedback: one-press
-    ///     exit; a typed draft keeps `Esc`'s step-back behaviour.
+    /// Whether the pending plan-approval overlay is at a state where `Esc` / `Left` have nothing else to do, so they back out to the dashboard:
+    ///   - `Preview` line viewer: no-ops once the input bar, accepted search matcher, and visual selection are all cleared
+    ///     (those consume `Esc` first, keeping the back-out graduated).
+    ///   - `Preview` with no viewer, or empty `Prompt` feedback: one-press exit; a typed draft keeps `Esc`'s step-back behaviour.
     fn plan_overlay_at_back_out_top(&self) -> bool {
         use crate::views::plan_approval_view::PlanApprovalFocus;
         let Some(pav) = self.plan_approval_view.as_ref() else {
@@ -311,10 +255,9 @@ impl AgentView {
             PlanApprovalFocus::Commenting => false,
         }
     }
-    /// True when a pending overlay has no in-overlay use for a bare `Left`, so
-    /// it backs out of the dashboard overlay: the plan line-viewer `Preview`
-    /// and the single-question Q&A navigation surface. Plan feedback (caret
-    /// move) and multi-question Q&A (previous question) keep `Left`.
+    /// True when a pending overlay has no in-overlay use for a bare `Left`, so it backs out of the dashboard overlay.
+    /// That covers the plan line-viewer `Preview` and single-question Q&A navigation.
+    /// Plan feedback (caret move) and multi-question Q&A (previous question) keep `Left`.
     /// Dashboard-overlay only.
     pub(crate) fn overlay_left_backs_out(&self) -> bool {
         use crate::views::plan_approval_view::PlanApprovalFocus;
@@ -344,12 +287,12 @@ impl AgentView {
     ///
     /// Routes key events through three levels:
     /// 1. Pane-specific (prompt widget or scrollback navigation)
-    /// 2. Agent-level (cancel, yolo -- checked if pane didn't consume)
+    /// 2. Agent-level (cancel, yolo; checked if the pane didn't consume)
     /// 3. Return Unchanged (bubbles to app_view for global actions)
     pub fn handle_input(&mut self, ev: &Event, registry: &ActionRegistry) -> InputOutcome {
         self.handle_input_inner(ev, registry, false)
     }
-    /// Enable prompt-focused conversation paging on a normal full-TUI agent surface.
+    /// Enable prompt-focused conversation paging on a normal full-TUI agent view.
     pub(in crate::app) fn handle_input_with_prompt_paging(
         &mut self,
         ev: &Event,
@@ -1317,8 +1260,8 @@ impl AgentView {
         let registry = ActionRegistry::defaults();
         self.handle_agent_action_with_registry(action_id, &registry)
     }
-    /// Model/palette while plan approval owns the keyboard. `typing`: bare
-    /// keys (e.g. `?`) go to the prompt; only Ctrl/Super/Alt chords pass.
+    /// Model/palette while plan approval owns the keyboard.
+    /// `typing`: bare keys (e.g. `?`) go to the prompt; only Ctrl/Super/Alt chords pass.
     fn try_plan_overlay_agent_action(
         &mut self,
         key: &crossterm::event::KeyEvent,
@@ -1415,16 +1358,11 @@ impl AgentView {
                     if let Some(items) = cmd.suggest_args(&ctx, "")
                         && !items.is_empty()
                     {
-                        let hidden_ids = crate::config_toml_edit::hidden_model_ids();
-                        let scoped =
-                            crate::app::modals::model_picker_view_items(&items, &hidden_ids, false);
                         self.active_modal = Some(crate::views::modal::ActiveModal::ArgPicker {
                             command: command.to_string(),
                             args_query: String::new(),
-                            items: scoped,
+                            items: items.clone(),
                             original_items: items,
-                            show_all: false,
-                            hidden_ids,
                             state: crate::views::picker::PickerState::input_active(),
                             previous_palette: None,
                             window: crate::views::modal_window::ModalWindowState::new(),
@@ -1515,16 +1453,11 @@ impl AgentView {
             let _switched = self.set_active_pane(AgentPane::Scrollback, false);
         }
     }
-    /// Propagate a vim-mode change to this view AND every nested
-    /// subagent view.
+    /// Propagate a vim-mode change to this view and every nested subagent view.
     ///
-    /// `ToggleVimMode` / `SetVimMode` only walk the top-level
-    /// `app.agents`, so without this an already-open subagent view keeps
-    /// its stale `vim_mode`. The bug that surfaces: the user opens a
-    /// subagent, runs `/vim-mode`, presses Tab to focus the subagent's
-    /// scrollback, and `j`/`k` forward to the prompt (the vim-OFF
-    /// fallback) instead of navigating — because the subagent view never
-    /// saw the toggle.
+    /// `ToggleVimMode` / `SetVimMode` only walk the top-level `app.agents`, so without this an already-open subagent view keeps its stale `vim_mode`.
+    /// The bug that shows up: the user opens a subagent, runs `/vim-mode`, and presses Tab to focus the subagent's scrollback.
+    /// `j`/`k` then forward to the prompt (the vim-off fallback) instead of navigating, because the subagent view never saw the toggle.
     pub(crate) fn set_vim_mode_recursive(&mut self, enabled: bool) {
         self.vim_mode = enabled;
         for child in self.subagent_views.values_mut() {
@@ -1795,9 +1728,8 @@ mod command_palette_input_default_tests {
     use super::test_fixtures::make_agent;
     use crate::actions::ActionId;
     use crate::views::modal::ActiveModal;
-    /// Type-to-find: the command palette opens directly in INPUT mode
-    /// (`search_active = true`) so a letter filters immediately. Under vim, Esc
-    /// drops to nav and `i` re-enters input (covered by the PTY scenario).
+    /// Type-to-find: the command palette opens directly in input mode (`search_active = true`) so a letter filters immediately.
+    /// Under vim, Esc drops to nav and `i` re-enters input (covered by the PTY scenario).
     #[test]
     fn command_palette_opens_in_input_mode() {
         let mut agent = make_agent();
@@ -1823,18 +1755,17 @@ mod btw_focus_tests {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use ratatui::layout::Rect;
-    /// Idle agent focused on the prompt (the realistic state while `/btw` is
-    /// open). `make_agent` starts in scrollback focus (vim default), and these
-    /// tests don't render, so we focus the prompt and seed `last_btw_area`
-    /// (keyboard scrollability reads from it). 80x14 → 76-col body, 12 rows.
+    /// Idle agent focused on the prompt (the realistic state while `/btw` is open).
+    /// `make_agent` starts in scrollback focus (vim default), and these tests don't render.
+    /// So focus the prompt and seed `last_btw_area`; keyboard scrollability reads from it.
+    /// 80x14 gives a 76-col body and 12 rows.
     fn prompt_focused_agent() -> AgentView {
         let mut agent = make_agent();
         agent.set_active_pane(AgentPane::Prompt, true);
         agent.last_btw_area = Rect::new(0, 0, 80, 14);
         agent
     }
-    /// A `/btw` answer with far more lines than the panel can show, so it is
-    /// always scrollable regardless of the test terminal width.
+    /// A `/btw` answer with far more lines than the panel can show, so it is always scrollable regardless of the test terminal width.
     fn long_btw_answer() -> String {
         (0..40)
             .map(|i| format!("line{i:02}"))
@@ -2093,9 +2024,8 @@ mod btw_focus_tests {
         agent.handle_minimal_input(&key(KeyCode::Down), &reg);
         assert_eq!(done_scroll_offset(&agent), 0);
     }
-    /// A hidden `/jump` picker shadowed by the `/btw` panel must not let one Esc
-    /// close both: the first Esc drops the shadowed picker (and is spent there),
-    /// the panel survives, and only a second Esc dismisses it.
+    /// A hidden `/jump` picker shadowed by the `/btw` panel must not let one Esc close both.
+    /// The first Esc drops the shadowed picker (and is spent there), the panel survives, and only a second Esc dismisses it.
     #[test]
     fn esc_over_shadowed_jump_picker_spares_btw_panel() {
         let mut agent = prompt_focused_agent();
@@ -2416,10 +2346,8 @@ mod jump_backout_key_tests {
     fn ctrl_c() -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
     }
-    /// In the dashboard overlay, a bare Esc backs out via
-    /// `no_esc_consumer_pending`; the open `/jump` picker must count as a
-    /// consumer so Esc dismisses it (restoring the viewport) instead of
-    /// exiting the overlay and leaving the picker latent.
+    /// In the dashboard overlay, a bare Esc backs out via `no_esc_consumer_pending`.
+    /// The open `/jump` picker must count as a consumer so Esc dismisses it (restoring the viewport) instead of exiting the overlay with the picker latent.
     #[test]
     fn jump_picker_is_an_esc_consumer() {
         let mut agent = make_agent();
@@ -2433,8 +2361,7 @@ mod jump_backout_key_tests {
             "an open /jump picker consumes Esc"
         );
     }
-    /// The Left-arrow mirror: an open picker fails `is_empty_focused_prompt`
-    /// so the overlay Left back-out defers to the picker's own handling.
+    /// The Left-arrow mirror: an open picker fails `is_empty_focused_prompt`, so the overlay Left back-out defers to the picker's own handling.
     #[test]
     fn jump_picker_defeats_empty_focused_prompt() {
         let mut agent = make_agent();
@@ -2449,8 +2376,7 @@ mod jump_backout_key_tests {
             "an open /jump picker owns Esc/Left in the overlay back-out"
         );
     }
-    /// `/jump` must not swallow Ctrl+C while `/compact` is running — same
-    /// hatch as a running turn.
+    /// `/jump` must not swallow Ctrl+C while `/compact` is running; the same escape hatch as a running turn.
     #[test]
     fn jump_picker_ctrl_c_cancels_compact() {
         let mut agent = make_agent();
@@ -2469,8 +2395,7 @@ mod jump_backout_key_tests {
             "Ctrl+C during /compact with /jump open must cancel, got {outcome:?}"
         );
     }
-    /// Once a wake cancel is in flight, Ctrl+C must reach the same quit
-    /// escalation as a stuck normal cancel instead of re-sending forever.
+    /// Once a wake cancel is in flight, Ctrl+C must reach the same quit escalation as a stuck normal cancel instead of re-sending forever.
     #[test]
     fn ctrl_c_escalates_to_quit_while_wake_cancel_is_stuck() {
         let mut agent = make_agent();
@@ -2537,9 +2462,8 @@ mod voice_stop_click_during_plan_review_tests {
             modifiers: KeyModifiers::NONE,
         })
     }
-    /// Recording-row [stop] click keeps working while the plan approval's
-    /// line-viewer overlay owns mouse routing — the row stays visible (the
-    /// overlay excludes it), so the viewer must not swallow the click.
+    /// Recording-row [stop] click keeps working while the plan approval's line-viewer overlay owns mouse routing.
+    /// The row stays visible (the overlay excludes it), so the viewer must not swallow the click.
     #[test]
     fn stop_click_dispatches_voice_toggle_under_plan_approval_viewer() {
         let mut agent = make_agent();
@@ -2553,8 +2477,7 @@ mod voice_stop_click_during_plan_review_tests {
             "[stop] click under the plan viewer must dispatch VoiceToggle, got {outcome:?}"
         );
     }
-    /// Same intercept on the approval's feedback surface (viewer closed,
-    /// prompt pane focused).
+    /// Same intercept on the approval's feedback view (viewer closed, prompt pane focused).
     #[test]
     fn stop_click_dispatches_voice_toggle_in_plan_feedback() {
         let mut agent = make_agent();
@@ -2604,8 +2527,8 @@ mod rich_textarea_paste_routing_tests {
         assert_eq!(agent.prompt.text(), "hidden prompt");
     }
 }
-/// Pasting while the scrollback pane holds the keyboard (prompt unfocused) must land in
-/// the composer, mirroring how a typed character focus-forwards into the prompt.
+/// Pasting while the scrollback pane holds the keyboard (prompt unfocused) must land in the composer.
+/// This mirrors how a typed character focus-forwards into the prompt.
 #[cfg(test)]
 mod scrollback_paste_focus_forward_tests {
     use super::test_fixtures::{make_agent, make_followup_permission_state};
@@ -2620,8 +2543,8 @@ mod scrollback_paste_focus_forward_tests {
         agent.set_active_pane(AgentPane::Scrollback, true);
         (agent, ActionRegistry::defaults())
     }
-    /// The `ActionThenForward` round-trip the event loop performs: dispatch `FocusPrompt`
-    /// to focus the prompt pane, then re-process the same paste through it so the text lands.
+    /// The `ActionThenForward` round-trip the event loop performs.
+    /// Dispatch `FocusPrompt` to focus the prompt pane, then re-process the same paste through it so the text lands.
     #[test]
     fn paste_from_scrollback_round_trip_lands_in_composer() {
         let (mut agent, reg) = scrollback_agent();
@@ -2635,8 +2558,7 @@ mod scrollback_paste_focus_forward_tests {
         assert!(matches!(out, InputOutcome::Changed));
         assert_eq!(agent.prompt.text(), "pasted text");
     }
-    /// A parked blocking card stays parked: `FocusPrompt` would unpark it and the
-    /// overlay would swallow the re-dispatched paste, so a paste here is inert.
+    /// A parked blocking card stays parked: `FocusPrompt` would unpark it and the overlay would swallow the re-dispatched paste, so a paste here is inert.
     #[test]
     fn paste_from_scrollback_does_not_unpark_a_pending_overlay() {
         let (mut agent, reg) = scrollback_agent();

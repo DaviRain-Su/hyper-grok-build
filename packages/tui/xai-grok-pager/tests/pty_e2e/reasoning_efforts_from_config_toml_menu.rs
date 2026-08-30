@@ -2,9 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// The `reasoning_efforts` menu is settable from the client config TOML, not
-/// just the server: a `[model.<id>]` override renders in `/effort`, independent
-/// of what the server sent.
+/// The `reasoning_efforts` menu is settable from the client config TOML, not just the server.
+/// A `[model.<id>]` override renders in `/effort`, independent of what the server sent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn reasoning_efforts_from_config_toml_menu() {

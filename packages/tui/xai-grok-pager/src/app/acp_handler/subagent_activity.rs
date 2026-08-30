@@ -2,9 +2,8 @@ use super::*;
 
 /// Update the activity label on a subagent's collapsed scrollback block.
 ///
-/// Skips the write (and cache invalidation) when the label hasn't changed,
-/// so the per-delta common case ("Responding" stays "Responding") allocates
-/// nothing.
+/// Skips the write (and cache invalidation) when the label hasn't changed.
+/// Most deltas keep the same label ("Responding" stays "Responding"), so the common case allocates nothing.
 pub(super) fn sync_activity_label(
     scrollback: &mut crate::scrollback::state::ScrollbackState,
     entry_id: Option<crate::scrollback::entry::EntryId>,
@@ -20,12 +19,10 @@ pub(super) fn sync_activity_label(
     }
 }
 
-/// Fan a subagent's computed activity label out to both surfaces that show
-/// it — the collapsed scrollback block and the [`SubagentInfo`] backing the
-/// tasks pane / dashboard rows — so the two can't drift.
+/// Fan a subagent's computed activity label out to both places that show it, so the two can't drift.
+/// Those are the collapsed scrollback block and the [`SubagentInfo`] backing the tasks pane and dashboard rows.
 ///
-/// A finished row accepts only the `None` clear: buffered child-rail updates
-/// race `SubagentFinished` and must not re-stamp it.
+/// Once `finished` is set, only a clear (`None`) lands: buffered updates from the child race `SubagentFinished` and must not re-stamp the label.
 pub(super) fn sync_subagent_activity(
     parent: &mut AgentView,
     child_key: &str,
@@ -45,8 +42,8 @@ pub(super) fn sync_subagent_activity(
     info.activity_label = activity_label;
 }
 
-/// Resolve a subagent child view's live activity into the display label the
-/// fan-out stamps ("Waiting" while the child is busy between activities).
+/// Resolve a subagent child view's live activity into the display label [`sync_subagent_activity`] stamps.
+/// A child that is busy between activities shows "Waiting".
 pub(super) fn subagent_activity_label(child_view: &AgentView) -> Option<String> {
     match child_view.resolve_turn_activity() {
         Some(a) => Some(crate::app::subagent::format_activity_label(&a)),
@@ -55,13 +52,11 @@ pub(super) fn subagent_activity_label(child_view: &AgentView) -> Option<String> 
     }
 }
 
-/// Synthesize a finish for a stuck row when a kill found nothing live to stop
-/// (else `pending_kill` times out → "running"). `status` is the real terminal
-/// status for an already-finished orphan, else `"cancelled"`.
+/// Synthesize a finish for a stuck row when a kill found nothing live to stop (otherwise `pending_kill` times out and the row reads "running").
+/// `status` is the real terminal status for an already-finished orphan, else `"cancelled"`.
 ///
-/// When the child had already finished, the retained terminal status wins over
-/// the call's default (`cancelled`) so a failed child is not repainted as
-/// cancelled while still carrying its failure text.
+/// When the child had already finished, the retained terminal status wins over the call's default (`cancelled`).
+/// That keeps a failed child from being repainted as cancelled while it still carries its failure text.
 pub(crate) fn finalize_killed_subagent(
     app: &mut AppView,
     session_id: &acp::SessionId,

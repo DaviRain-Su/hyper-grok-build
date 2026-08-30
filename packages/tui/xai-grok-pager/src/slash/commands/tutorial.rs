@@ -4,35 +4,22 @@
 //! only way the tutorial opens — it never auto-shows.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 use crate::slash::{ModeSupport, Remedy};
 
 /// Open the onboarding tutorial.
 pub struct TutorialCommand;
 
 impl SlashCommand for TutorialCommand {
-    fn name(&self) -> &str {
-        "tutorial"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["tour", "onboarding"]
-    }
-
-    fn description(&self) -> &str {
-        "Quick tips to get the most out of Grok Build"
-    }
-
-    fn usage(&self) -> &str {
-        "/tutorial"
-    }
-
-    /// Gated off rather than merely hidden: minimal has no modal host, so the
-    /// overlay's input intercept would freeze the session invisibly.
-    fn mode_support(&self) -> ModeSupport {
-        ModeSupport::FullscreenOnly(Remedy::SwitchMode {
+    slash_meta! {
+        name: "tutorial",
+        aliases: ["tour", "onboarding"],
+        description: "Quick tips to get the most out of Grok Build",
+        usage: "/tutorial",
+        // Gated off rather than merely hidden: minimal has no modal host, so the overlay's input intercept would freeze the session invisibly.
+        mode_support: ModeSupport::FullscreenOnly(Remedy::SwitchMode {
             why: "the tutorial overlay needs fullscreen",
-        })
+        }),
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {

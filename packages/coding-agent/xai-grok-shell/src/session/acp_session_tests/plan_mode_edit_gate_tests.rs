@@ -1,14 +1,5 @@
-//! Plan-mode edit gate through the real `prepare_tool_call` path: plan mode
-//! is read-only except the plan file in EVERY permission mode. The fixture's
-//! `PermissionHandle::allow_all()` is the always-approve worst case — before
-//! the gate, it silently approved any edit in plan mode (the "yolo edits in
-//! plan mode" bug); these tests pin that the gate rejects
-//! BEFORE the permission layer can auto-approve.
 use super::support::*;
 use super::*;
-/// Build an actor whose toolset parses grok `search_replace` plus the plan
-/// tools (so `${{ tools.by_kind.exit_plan }}` resolves in the rejection
-/// message), with a gateway drain answering session notifications.
 async fn build_gate_actor() -> SessionActor {
     use xai_grok_tools::implementations::grok_build::enter_plan_mode::EnterPlanModeTool;
     use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeTool;
@@ -19,7 +10,6 @@ async fn build_gate_actor() -> SessionActor {
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
     *actor.agent.borrow_mut() = test_agent_with_tools(vec![
-        // search_replace's requirements demand a Read tool in the same toolset.
         ToolConfig::from_id("GrokBuild:read_file"),
         ToolConfig::from_id("GrokBuild:search_replace"),
         ToolConfig::for_tool::<EnterPlanModeTool>(),
@@ -35,42 +25,6 @@ async fn build_gate_actor() -> SessionActor {
     });
     actor
 }
-/// Flip the fixture's tracker to Active (plan file: `/tmp/test-session/plan.md`).
-fn activate_plan_mode(actor: &SessionActor) {
-    let mut tracker = actor.plan_mode.lock();
-    assert!(tracker.enter_pending());
-    assert!(tracker.activate());
-}
-fn search_replace_call(id: &str, path: &str) -> ToolCallResponse {
-    ToolCallResponse {
-        id: id.to_string(),
-        kind: "function".to_string(),
-        function: crate::sampling::types::ToolCallFunction::new(
-            "search_replace",
-            format!(r#"{{"file_path":"{path}","old_string":"a","new_string":"b"}}"#),
-        ),
-    }
-}
-fn pre_tool_use_registry(script: &str) -> xai_grok_hooks::discovery::HookRegistry {
-    let (mut registry, _) = xai_grok_hooks::discovery::load_hooks(None, None);
-    registry.append_specs(vec![xai_grok_hooks::config::HookSpec {
-        name: "test/pretooluse".into(),
-        event: xai_grok_hooks::event::HookEventName::PreToolUse,
-        handler_type: xai_grok_hooks::config::HandlerType::Command,
-        configured_matcher: None,
-        matcher: None,
-        enabled: true,
-        command: Some(std::path::PathBuf::from(script)),
-        command_raw: Some(script.to_string()),
-        url: None,
-        url_raw: None,
-        timeout_ms: 5000,
-        source_dir: std::path::PathBuf::from("/tmp"),
-        extra_env: std::collections::HashMap::new(),
-        layer: xai_grok_hooks::config::HookProvenance::File,
-    }]);
-    registry
-}
 async fn prepare(
     actor: &SessionActor,
     call: ToolCallResponse,
@@ -84,24 +38,6 @@ async fn prepare(
     .expect("prepare_tool_call must not hang (a hang means a permission prompt was issued)")
     .expect("prepare_tool_call must not error")
 }
-/// Last tool_result pushed for `call_id`, or panic.
-async fn tool_result_text(actor: &SessionActor, call_id: &str) -> String {
-    let conv = actor.chat_state_handle.get_conversation().await;
-    conv.iter()
-        .rev()
-        .find_map(|item| match item {
-            xai_grok_sampling_types::ConversationItem::ToolResult(tr)
-                if tr.tool_call_id == call_id =>
-            {
-                Some(tr.content.to_string())
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("no tool_result for {call_id} in {conv:?}"))
-}
-/// The headline: plan mode Active + allow-all permissions (the always-approve
-/// worst case) still rejects a grok edit outside the plan file, without ever
-/// reaching the permission layer, and steers the model to `exit_plan_mode`.
 #[tokio::test(flavor = "current_thread")]
 async fn plan_mode_rejects_grok_edit_outside_plan_file_despite_allow_all_permissions() {
     let local = tokio::task::LocalSet::new();
@@ -109,8 +45,11 @@ async fn plan_mode_rejects_grok_edit_outside_plan_file_despite_allow_all_permiss
         .run_until(async {
             let actor = build_gate_actor().await;
             activate_plan_mode(&actor);
-            let result =
-                prepare(&actor, search_replace_call("call_gate", "/tmp/src/main.rs")).await;
+            let result = prepare(
+                &actor,
+                search_replace_call_at("call_gate", "/tmp/src/main.rs"),
+            )
+            .await;
             assert!(
                 matches!(result, Err(ToolLoop::Continue)),
                 "gate must reject with Continue (tool not executed); got {result:?}"
@@ -123,8 +62,6 @@ async fn plan_mode_rejects_grok_edit_outside_plan_file_despite_allow_all_permiss
         })
         .await;
 }
-/// The carve-out: the plan file itself prepares cleanly (the gate defers to
-/// `should_auto_approve_edit`, the same predicate as the permission bypass).
 #[tokio::test(flavor = "current_thread")]
 async fn plan_mode_allows_plan_file_edit() {
     let local = tokio::task::LocalSet::new();
@@ -134,7 +71,7 @@ async fn plan_mode_allows_plan_file_edit() {
             activate_plan_mode(&actor);
             let result = prepare(
                 &actor,
-                search_replace_call("call_plan_file", "/tmp/test-session/plan.md"),
+                search_replace_call_at("call_plan_file", "/tmp/test-session/plan.md"),
             )
             .await;
             assert!(
@@ -145,8 +82,6 @@ async fn plan_mode_allows_plan_file_edit() {
         })
         .await;
 }
-/// Control: with plan mode inactive the same edit prepares cleanly — the gate
-/// is plan-scoped, not a general edit block.
 #[tokio::test(flavor = "current_thread")]
 async fn inactive_plan_mode_does_not_gate_edits() {
     let local = tokio::task::LocalSet::new();
@@ -155,7 +90,7 @@ async fn inactive_plan_mode_does_not_gate_edits() {
             let actor = build_gate_actor().await;
             let result = prepare(
                 &actor,
-                search_replace_call("call_no_plan", "/tmp/src/main.rs"),
+                search_replace_call_at("call_no_plan", "/tmp/src/main.rs"),
             )
             .await;
             assert!(
@@ -166,27 +101,24 @@ async fn inactive_plan_mode_does_not_gate_edits() {
         })
         .await;
 }
-/// The gate must see a PreToolUse hook's rewrite: the model edits the plan file
-/// (allowed), the hook redirects it outside, and the gate rejects. Pins hook
-/// dispatch running before the plan gate.
 #[tokio::test(flavor = "current_thread")]
 async fn plan_gate_sees_hook_rewritten_path() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let mut actor = build_gate_actor().await;
-            actor.hook_resolved_workspace_root = "/tmp".to_string();
-            *actor.hook_registry.borrow_mut() = Some(
-                std::sync::Arc::new(
-                    pre_tool_use_registry(
-                        r#"echo '{"hookSpecificOutput":{"updatedInput":{"file_path":"/tmp/src/main.rs","old_string":"a","new_string":"b"}}}'"#,
-                    ),
-                ),
+            install_pre_tool_use_hooks(
+                &mut actor,
+                vec![pre_tool_use_spec(
+                    "test/pretooluse",
+                    None,
+                    r#"echo '{"hookSpecificOutput":{"updatedInput":{"file_path":"/tmp/src/main.rs","old_string":"a","new_string":"b"}}}'"#,
+                )],
             );
             activate_plan_mode(&actor);
             let result = prepare(
                     &actor,
-                    search_replace_call("call_hook_gate", "/tmp/test-session/plan.md"),
+                    search_replace_call_at("call_hook_gate", "/tmp/test-session/plan.md"),
                 )
                 .await;
             assert!(

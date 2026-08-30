@@ -2,14 +2,13 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// macOS-only, REAL host clipboard: Ctrl+V (raw 0x16) with plain TEXT on the
-/// pasteboard must echo fast. The native pasteboard snapshot pre-gate skips
-/// the heavy `osascript` attachment probe entirely when no raster is present,
-/// so the paste cost is roughly one `pbpaste` read plus a frame.
+/// macOS-only, REAL host clipboard: Ctrl+V (raw 0x16) with plain TEXT on the pasteboard must echo fast.
+/// Before running the heavy `osascript` attachment probe, the paste path snapshots the native pasteboard.
+/// When that snapshot holds no raster the probe is skipped entirely, so the paste costs roughly one `pbpaste` read plus a frame.
 ///
-/// WARNING: this test OVERWRITES the machine-global clipboard. The prior TEXT
-/// contents are restored best-effort on exit (drop guard, panic included); a
-/// prior IMAGE clipboard cannot be restored — `pbpaste` only reads text.
+/// WARNING: this test OVERWRITES the machine-global clipboard.
+/// The prior TEXT contents are restored best-effort on exit (drop guard, panic included).
+/// A prior IMAGE clipboard cannot be restored: `pbpaste` only reads text.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
@@ -30,8 +29,7 @@ async fn paste_ctrl_v_text_echoes_fast_macos() {
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
 
-    // Ctrl+V on the welcome screen promotes to a session and re-processes the
-    // chord through its prompt, which reads the host clipboard via pbpaste.
+    // Ctrl+V on the welcome screen promotes to a session and re-processes the chord through its prompt, which reads the host clipboard via pbpaste
     let start = Instant::now();
     harness.inject_keys(&[0x16]).expect("inject Ctrl+V");
     harness

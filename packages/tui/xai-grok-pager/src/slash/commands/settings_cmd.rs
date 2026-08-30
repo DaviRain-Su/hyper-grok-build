@@ -1,29 +1,19 @@
-//! `/settings` -- open the settings modal.
+//! `/settings`: open the settings modal.
 //!
-//! No `/settings <id>` direct-jump — args are silently discarded and
-//! the modal always opens. Use the in-modal `/` filter to search.
+//! There is no direct jump to one setting: args are silently discarded and the modal always opens.
+//! Use the in-modal `/` filter to search.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
-/// Open the settings modal.
 pub struct SettingsCommand;
 
 impl SlashCommand for SettingsCommand {
-    fn name(&self) -> &str {
-        "settings"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["config", "preferences", "prefs"]
-    }
-
-    fn description(&self) -> &str {
-        "Open the settings modal"
-    }
-
-    fn usage(&self) -> &str {
-        "/settings"
+    slash_meta! {
+        name: "settings",
+        aliases: ["config", "preferences", "prefs"],
+        description: "Open the settings modal",
+        usage: "/settings",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
@@ -76,7 +66,6 @@ mod tests {
         );
     }
 
-    /// Args are silently discarded — modal always opens.
     #[test]
     fn args_still_dispatches_open_settings() {
         let models = ModelState::default();

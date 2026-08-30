@@ -1,7 +1,7 @@
-//! `/workflows` -- browse the workflow catalog in the extensions modal.
+//! `/workflows`: browse the workflow catalog in the extensions modal.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 use crate::views::extensions_modal::ExtensionsTab;
 use xai_grok_telemetry::events::ExtensionsModalTrigger;
 
@@ -9,16 +9,10 @@ use xai_grok_telemetry::events::ExtensionsModalTrigger;
 pub struct WorkflowsCommand;
 
 impl SlashCommand for WorkflowsCommand {
-    fn name(&self) -> &str {
-        "workflows"
-    }
-
-    fn description(&self) -> &str {
-        "Browse installed workflows"
-    }
-
-    fn usage(&self) -> &str {
-        "/workflows"
+    slash_meta! {
+        name: "workflows",
+        description: "Browse installed workflows",
+        usage: "/workflows",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {

@@ -1,16 +1,11 @@
-//! Shell command suggestion controller.
+//! Manages ghost text state, progressive matching, and ACP integration for shell command suggestions.
 //!
-//! Manages ghost text state, progressive matching, and ACP integration
-//! for shell command suggestions. Ghost text is rendered as dimmed italic
-//! text after the cursor. Progressive matching trims the ghost when the
-//! user types a character that matches the ghost's prefix, avoiding
-//! unnecessary network requests.
+//! Ghost text is rendered as dimmed italic text after the cursor.
+//! Progressive matching trims the ghost when the user types a character that matches the ghost's prefix, avoiding unnecessary network requests.
 //!
-//! ACP integration: on text change (after debounce), sends an
-//! `x.ai/suggest` request through the Effect pipeline. Stale responses
-//! are discarded via generation tracking.
+//! On a text change (after debounce), the controller sends an `x.ai/suggest` request through the Effect pipeline.
+//! Stale responses are discarded via generation tracking.
 
-/// Source of a shell command suggestion.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SuggestionSource {
     #[default]
@@ -33,12 +28,10 @@ impl SuggestionSource {
     }
 }
 
-/// Ghost text state for shell command suggestions.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GhostTextState {
     /// Current ghost text to render (may be trimmed by progressive matching).
     pub(crate) text: String,
-    /// Where this suggestion came from.
     pub(crate) source: SuggestionSource,
     /// Original full suggestion text before progressive matching.
     pub(crate) full_text: String,
@@ -54,29 +47,24 @@ pub struct GhostSuggestionParsed {
 }
 
 /// A single completion item from an ACP `x.ai/suggest` response.
-// `Default` (empty item) exists for downstream test fixtures — functional-
-// update construction (`..Default::default()`) keeps out-of-crate literals
-// (e.g. xai-grok-pager-minimal's) compiling when optional fields are added.
+// `Default` (empty item) exists for downstream test fixtures
+// With `..Default::default()`, out-of-crate literals (e.g. xai-grok-pager-minimal's) keep compiling when optional fields are added.
 #[derive(Debug, Clone, Default)]
 pub struct CompletionItemParsed {
     pub display: String,
     pub description: String,
-    /// Whole-line replacement — always safe to `set_text` (the shell keeps
-    /// this backward-shaped for range-unaware pagers).
+    /// Whole-line replacement, always safe to `set_text`; the shell keeps it a full line for pagers that do not understand ranges.
     pub insert_text: String,
     pub source: SuggestionSource,
     pub priority: i32,
-    /// Byte range in the REQUEST text the completion targets. `None` (older
-    /// shells, whole-line items, or malformed wire data) keeps the
-    /// whole-line accept behavior. Parsed atomically with `token_text`:
-    /// present only as a pair.
+    /// Byte range in the REQUEST text the completion targets.
+    /// `None` (older shells, whole-line items, or malformed wire data) keeps the whole-line accept behavior.
+    /// Parsed atomically with `token_text`: present only as a pair.
     pub replace_range: Option<std::ops::Range<usize>>,
-    /// Replacement for `replace_range` (path/file token completions);
-    /// `Some` exactly when `replace_range` is.
+    /// Replacement for `replace_range` (path/file token completions); `Some` exactly when `replace_range` is.
     pub token_text: Option<String>,
-    /// The provider capped its scan/results — the set may be incomplete, so
-    /// Tab must not conclude from it (dropdown-only). Absent on the wire
-    /// (older shells) parses as `false`.
+    /// The provider capped its scan or results, so the set may be incomplete and Tab must not insta-accept or fill from it, only open the dropdown.
+    /// Absent on the wire (older shells) parses as `false`.
     pub truncated: bool,
 }
 
@@ -130,8 +118,7 @@ impl SuggestResponseParsed {
                         let source_str = item.get("source").and_then(|s| s.as_str()).unwrap_or("");
                         let priority =
                             item.get("priority").and_then(|p| p.as_i64()).unwrap_or(0) as i32;
-                        // Optional `[start, end]`; anything malformed
-                        // degrades to the legacy whole-line accept.
+                        // Optional `[start, end]`; anything malformed degrades to the legacy whole-line accept
                         let replace_range = item.get("replaceRange").and_then(|r| {
                             let arr = r.as_array()?;
                             let (start, end) = match arr.as_slice() {
@@ -144,11 +131,9 @@ impl SuggestResponseParsed {
                             .get("tokenText")
                             .and_then(|t| t.as_str())
                             .map(str::to_owned);
-                        // The pair is atomic: a range without its token
-                        // would splice the whole-line `insertText` into a
-                        // token span (`cat no` → `cat cat notes.md`), a
-                        // token without its range has nowhere to go — half
-                        // pairs degrade to the rangeless whole-line accept.
+                        // The pair is atomic
+                        // A range without its token splices the whole-line `insertText` into a token span (`cat no` becomes `cat cat notes.md`)
+                        // A token without its range has nowhere to go, so half pairs degrade to the rangeless whole-line accept
                         let (replace_range, token_text) = match (replace_range, token_text) {
                             (Some(r), Some(t)) => (Some(r), Some(t)),
                             _ => (None, None),
@@ -179,7 +164,6 @@ impl SuggestResponseParsed {
     }
 }
 
-/// How much of the ghost text to accept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcceptMode {
     /// Accept the entire ghost text (Right arrow).
@@ -191,55 +175,46 @@ pub enum AcceptMode {
 /// Action requested by `text_changed` for the caller to dispatch.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SuggestionAction {
-    /// Text progressively matched the ghost — no network request needed.
+    /// Text progressively matched the ghost; no network request needed.
     Matched,
     /// Spawn a debounce timer. On expiry, call `on_debounce_expired`.
     Debounce { generation: u64 },
 }
 
-/// Wire `limit` for `x.ai/suggest` fetches. Matches the shell file
-/// provider's ranked-result cap (`MAX_RESULTS` in the shell crate's
-/// `file_provider.rs`): the provider ranks BEFORE capping, the dropdown
-/// renders 6 rows and scrolls the rest. Both fetch sites (Tab and the
-/// as-you-type debounce) must send the same value or their candidate sets
-/// diverge.
+/// Wire `limit` for `x.ai/suggest` fetches.
+/// Matches the shell file provider's ranked-result cap (`MAX_RESULTS` in the shell crate's `file_provider.rs`), which ranks BEFORE capping.
+/// The dropdown renders 6 rows and scrolls the rest.
+/// Both fetch sites (Tab and the as-you-type debounce) must send the same value or their candidate sets diverge.
 pub const SHELL_SUGGEST_WIRE_LIMIT: usize = 50;
 
-/// Terminal-Tab decision over the current dropdown items — computed by
-/// [`SuggestionController::tab_decision`], executed by the view. Owning the
-/// whole policy here (staleness, source shape, single-candidate, LCP) keeps
-/// the view from reading item internals.
+/// Terminal-Tab decision over the current dropdown items, computed by [`SuggestionController::tab_decision`] and executed by the view.
+/// Owning the whole policy here (staleness, source shape, single-candidate, LCP) keeps the view from reading item internals.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TabAction {
     /// Exactly one token candidate: accept it immediately, no dropdown flash.
     InstaAccept,
-    /// Write the shared prefix over the validated span (bash's first Tab),
-    /// then re-fetch for the longer token.
+    /// Write the shared prefix over the validated span (bash's first Tab), then re-fetch for the longer token.
     Fill(std::ops::Range<usize>, String),
     /// Ambiguous (or whole-line/mixed sources): open the dropdown.
     Open,
-    /// No usable candidates: none fetched, or outdated by an edit / cursor
-    /// move. The key path fetches on this; the landing path does nothing.
+    /// No usable candidates: none fetched, or outdated by an edit or a cursor move.
+    /// The key path fetches on this; the landing path does nothing.
     Nothing,
 }
 
-/// A resolved dropdown accept: what to write, decided against the draft
-/// BEFORE the dropdown closed (so nothing depends on state surviving
-/// `close()`). Produced by [`SuggestionController::accept_completion`],
-/// applied by `PromptWidget::apply_completion_splice`.
+/// A resolved dropdown accept: what to write, decided against the draft BEFORE the dropdown closed.
+/// Nothing therefore depends on state surviving `close()`.
+/// Produced by [`SuggestionController::accept_completion`], applied by `PromptWidget::apply_completion_splice`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum CompletionSplice {
-    /// Rangeless (legacy-shell) item: replace the whole line — safe because
-    /// wire `insert_text` is always a full line by protocol contract.
+    /// Rangeless (legacy-shell) item: replace the whole line; safe because wire `insert_text` is always a full line by protocol contract.
     WholeLine(String),
     /// Token item with a still-valid span: replace that range in place.
     Token(std::ops::Range<usize>, String),
-    /// The item's span no longer fits the draft: accept is a
-    /// draft-preserving no-op — never a clobber.
+    /// The item's span no longer fits the draft: accept does nothing rather than clobber it.
     Stale,
 }
 
-/// State for the shell command completion dropdown.
 #[derive(Debug, Default)]
 pub struct CompletionDropdownState {
     pub open: bool,
@@ -247,20 +222,19 @@ pub struct CompletionDropdownState {
     pub selected: usize,
     pub hovered: Option<usize>,
     pub generation: u64,
-    /// The request text `items` were computed for — set atomically with the
-    /// items when a response lands, so item `replace_range` offsets always
-    /// validate against the text they actually index into.
+    /// The request text `items` were computed for, set atomically with the items when a response lands.
+    /// Item `replace_range` offsets therefore always validate against the text they actually index into.
     pub request_text: String,
-    /// Cursor position the request was built at. Items target the token AT
-    /// this cursor; [`SuggestionController::tab_decision`] refuses items
-    /// when the live cursor has moved anywhere else (e.g. a mouse click) —
-    /// the only tolerated drift is typing at the end.
+    /// Cursor position the request was built at.
+    /// Items target the token AT this cursor.
+    /// [`SuggestionController::tab_decision`] refuses items when the live cursor has moved anywhere else (e.g. a mouse click).
+    /// The only tolerated drift is typing at the end.
     pub request_cursor: usize,
 }
 
 impl CompletionDropdownState {
-    /// Move the selection by `delta` (negative = up, positive = down),
-    /// wrapping around at the ends. Used for keyboard arrow nav.
+    /// Move the selection by `delta` (negative moves up, positive down), wrapping around at the ends.
+    /// Used for the keyboard arrows.
     pub fn move_selection(&mut self, delta: isize) {
         if self.items.is_empty() {
             return;
@@ -270,8 +244,8 @@ impl CompletionDropdownState {
         self.selected = new;
     }
 
-    /// Move the selection by `delta`, clamping at the first and last item
-    /// (no wrap-around). Used for mouse-wheel scrolling.
+    /// Move the selection by `delta`, clamping at the first and last item (no wrap-around).
+    /// Used for mouse-wheel scrolling.
     pub fn scroll_selection(&mut self, delta: isize) {
         if self.items.is_empty() {
             return;
@@ -281,11 +255,9 @@ impl CompletionDropdownState {
         self.selected = new;
     }
 
-    /// Accept the currently selected item, or `None` when there are no
-    /// items. Moves the item out to avoid cloning and closes the dropdown.
-    /// Deliberately independent of [`open`](Self::open) (a render flag):
-    /// the single-candidate insta-accept consumes an item that was never
-    /// rendered.
+    /// Accept the currently selected item, or `None` when there are no items.
+    /// Moves the item out to avoid cloning and closes the dropdown.
+    /// Deliberately independent of [`open`](Self::open) (a render flag): the single-candidate insta-accept consumes an item never rendered.
     pub fn accept(&mut self) -> Option<CompletionItemParsed> {
         if self.items.is_empty() {
             return None;
@@ -296,8 +268,8 @@ impl CompletionDropdownState {
         Some(item)
     }
 
-    // The `request_text`/`request_cursor` anchor is left in place (inert
-    // without items); a landing overwrites it atomically with the items.
+    // The `request_text`/`request_cursor` anchor stays in place; it has no effect without items
+    // A landing response overwrites it atomically with the items
     pub fn close(&mut self) {
         self.open = false;
         self.selected = 0;
@@ -306,20 +278,17 @@ impl CompletionDropdownState {
     }
 }
 
-/// Manages ghost text state, progressive matching, and ACP integration.
 #[derive(Default)]
 pub struct SuggestionController {
     ghost: GhostTextState,
     generation: u64,
     last_request_text: String,
-    /// Generation of a Tab-triggered fetch whose landing should run the
-    /// terminal Tab semantics (armed by [`Self::begin_tab_completion`],
-    /// consumed by [`Self::take_pending_tab`]).
+    /// Generation of a Tab-triggered fetch whose landing should run the terminal Tab decision.
+    /// Armed by [`Self::begin_tab_completion`], consumed by [`Self::take_pending_tab`].
     tab_pending: Option<u64>,
-    /// Whether the as-you-type suggestion pipeline (debounced fetches +
-    /// ghost rendering) is enabled. Resolved at construction from the
-    /// `GROK_SUGGESTIONS` env var. Tab-triggered completion in bash mode
-    /// deliberately does NOT consult this — it is always on.
+    /// Whether the as-you-type suggestion pipeline (debounced fetches and ghost rendering) is enabled.
+    /// Resolved at construction from the `GROK_SUGGESTIONS` env var.
+    /// Tab-triggered completion in bash mode deliberately does NOT consult this; it is always on.
     pub enabled: bool,
     /// Completion dropdown state (populated from `SuggestResponse.completions`).
     pub dropdown: CompletionDropdownState,
@@ -369,11 +338,9 @@ impl SuggestionController {
         self.dropdown.close();
     }
 
-    /// Wholesale suggestion-state discard (prompt emptied, `set_text` swap):
-    /// the ghost and the dropdown items belonged to the OLD draft, and any
-    /// in-flight fetch was for it, so clear both, disarm a pending Tab, and
-    /// bump the generation so late responses are discarded instead of
-    /// resurrecting stale state.
+    /// Wholesale suggestion-state discard (prompt emptied, `set_text` swap).
+    /// The ghost and the dropdown items belonged to the OLD draft, and any in-flight fetch was for it.
+    /// Clear both, disarm a pending Tab, and bump the generation so late responses are discarded instead of resurrecting stale state.
     pub fn invalidate_draft(&mut self) {
         self.clear_ghost();
         self.last_request_text.clear();
@@ -395,9 +362,8 @@ impl SuggestionController {
     }
 
     /// Accept ghost text. Returns the accepted portion, or `None` if empty.
-    /// Closes the completion dropdown (accepted ghost text supersedes it)
-    /// and bumps the generation so in-flight responses for the pre-accept
-    /// text are discarded when they land.
+    /// Closes the completion dropdown (accepted ghost text supersedes it).
+    /// Bumps the generation so in-flight responses for the pre-accept text are discarded when they land.
     pub fn accept_ghost(&mut self, mode: AcceptMode) -> Option<String> {
         if self.ghost.text.is_empty() {
             return None;
@@ -430,12 +396,9 @@ impl SuggestionController {
         }
     }
 
-    /// Resolve what accepting the selected item WOULD write, without
-    /// consuming it or touching any state. The view probes this before an
-    /// insta-accept: a splice into an atomic prompt element must degrade to
-    /// opening the dropdown, not consume the candidate.
-    /// [`Self::accept_completion`] delegates here so the two can never
-    /// resolve differently.
+    /// Resolve what accepting the selected item WOULD write, without consuming it or touching any state.
+    /// The view probes this before an insta-accept: a splice into an atomic prompt element must open the dropdown, not consume the candidate.
+    /// [`Self::accept_completion`] delegates here so the two can never resolve differently.
     pub fn peek_completion_splice(&self, current_text: &str) -> Option<CompletionSplice> {
         if self.dropdown.generation != self.generation || self.dropdown.items.is_empty() {
             return None;
@@ -455,13 +418,10 @@ impl SuggestionController {
         })
     }
 
-    /// Accept the selected completion-dropdown item, refusing stale state:
-    /// items populated for a superseded generation just close the dropdown
-    /// and accept nothing (the refreshed fetch is already in flight). The
-    /// item's span is resolved against `current_text` BEFORE the dropdown
-    /// closes (see [`CompletionSplice`]). A successful accept bumps the
-    /// generation so in-flight responses for the pre-accept text are
-    /// discarded when they land.
+    /// Accept the selected completion-dropdown item, refusing stale state.
+    /// Items populated for a superseded generation just close the dropdown and accept nothing (the refreshed fetch is already in flight).
+    /// The item's span is resolved against `current_text` BEFORE the dropdown closes (see [`CompletionSplice`]).
+    /// A successful accept bumps the generation so in-flight responses for the pre-accept text are discarded when they land.
     pub fn accept_completion(&mut self, current_text: &str) -> Option<CompletionSplice> {
         if self.dropdown.generation != self.generation {
             self.dropdown.close();
@@ -473,10 +433,9 @@ impl SuggestionController {
         Some(resolved)
     }
 
-    /// Try progressive matching: if `new_text` extends `last_request_text`
-    /// by exactly one character that matches the ghost's first character,
-    /// trim the ghost and return `true`. Otherwise clear the ghost and
-    /// return `false`.
+    /// Try progressive matching.
+    /// If `new_text` extends `last_request_text` by exactly one character that matches the ghost's first character, trim the ghost and return `true`.
+    /// Otherwise clear the ghost and return `false`.
     pub fn try_progressive_match(&mut self, new_text: &str) -> bool {
         if self.ghost.text.is_empty() {
             return false;
@@ -516,41 +475,34 @@ impl SuggestionController {
         true
     }
 
-    /// Update the progressive-match anchor: the text the on-screen ghost is
-    /// relative to (reset to the CURRENT text whenever a response lands).
-    /// Distinct from [`CompletionDropdownState::request_text`], which pins
-    /// the fetch-time text the dropdown items' ranges index into.
+    /// Update the progressive-match anchor: the text the on-screen ghost is relative to (reset to the CURRENT text whenever a response lands).
+    /// Distinct from [`CompletionDropdownState::request_text`], which pins the fetch-time text the dropdown items' ranges index into.
     pub fn set_last_request_text(&mut self, text: &str) {
         self.last_request_text.clear();
         self.last_request_text.push_str(text);
     }
 
-    /// The whole terminal-Tab policy over the current dropdown items:
-    /// staleness (generation AND cursor consistency), source shape, the
-    /// single-candidate rule, and the shared-prefix rule — one seam, so the
-    /// view executes without reading item internals. Only complete token
-    /// edits (path/file source AND a range+token pair AND an exhaustive
-    /// scan) get shell semantics; everything else — whole-line, mixed, or
-    /// degraded sets — always [`TabAction::Open`].
+    /// The whole terminal-Tab policy over the current dropdown items, decided here so the view executes without reading item internals.
+    /// It covers staleness (generation AND cursor consistency), source shape, the single-candidate rule, and the shared-prefix rule.
+    /// Only complete token edits (path/file source AND a range-and-token pair AND an exhaustive scan) get the shell's Tab behavior.
+    /// Everything else (whole-line, mixed, or degraded sets) is always [`TabAction::Open`].
     pub fn tab_decision(&self, current_text: &str, current_cursor: usize) -> TabAction {
         if self.dropdown.generation != self.generation || self.dropdown.items.is_empty() {
             return TabAction::Nothing;
         }
-        // Items target the token at the FETCH-time cursor. The only
-        // tolerated drift is typing at the end (the same growth the range
-        // stretch rule accepts); any other cursor move — a mouse click in
-        // particular reports no text change — makes them stale, and Tab
-        // must fetch for the token actually under the cursor.
+        // Items target the token at the FETCH-time cursor
+        // The only tolerated drift is typing at the end (the same growth the range stretch rule accepts)
+        // Any other cursor move (a mouse click in particular reports no text change) makes them stale
+        // Tab must then fetch for the token actually under the cursor
         let grown = current_text
             .len()
             .saturating_sub(self.dropdown.request_text.len());
         if current_cursor != self.dropdown.request_cursor + grown {
             return TabAction::Nothing;
         }
-        // Source alone is not enough: old shells send rangeless `path` rows
-        // whose whole-line fallback would clobber the draft on insta-accept
-        // (`ls | gr` → `grep`), and a truncated (capped) scan may hide the
-        // row that disproves a sole match or an LCP.
+        // Source alone is not enough
+        // Old shells send rangeless `path` rows whose whole-line fallback would clobber the draft on insta-accept (`ls | gr` becomes `grep`)
+        // A truncated (capped) scan may hide the row that disproves a sole match or an LCP
         let token_shaped = self.dropdown.items.iter().all(|i| {
             matches!(
                 i.source,
@@ -570,14 +522,10 @@ impl SuggestionController {
         TabAction::Open
     }
 
-    /// Shared-prefix fill for terminal-like Tab: when every dropdown item
-    /// targets the SAME span and their replacements share a common prefix
-    /// that strictly extends the typed token, return the validated span and
-    /// the prefix to write (bash's first-Tab behavior). `None` on any
-    /// ambiguity — stale generation, mixed or missing ranges, no shared
-    /// prefix, or one that doesn't extend what's typed (e.g. candidates
-    /// differing in case) — and [`Self::tab_decision`] falls back to
-    /// opening the dropdown.
+    /// Shared-prefix fill for terminal-like Tab (bash's first-Tab behavior): the validated span and the prefix to write.
+    /// `Some` only when every item targets the SAME span and their replacements share a prefix that strictly extends the typed token.
+    /// `None` on any ambiguity: stale generation, mixed or missing ranges, no shared prefix, or one that only matches what's typed (differing case).
+    /// [`Self::tab_decision`] then falls back to opening the dropdown.
     fn common_prefix_fill(&self, current_text: &str) -> Option<(std::ops::Range<usize>, String)> {
         if self.dropdown.generation != self.generation {
             return None;
@@ -600,11 +548,9 @@ impl SuggestionController {
                 return None;
             }
         }
-        // Token texts are rendered shell literals (`a b`/`a$c` arrive as
-        // `a\ b`/`a\$c`), so their byte LCP can end mid-escape (`a\`) —
-        // filling that would write a dangling backslash (line
-        // continuation). Trim the incomplete escape; the strict-extension
-        // check below then decides whether anything is left to fill.
+        // Token texts are rendered shell literals (`a b`/`a$c` arrive as `a\ b`/`a\$c`), so their byte LCP can end mid-escape (`a\`)
+        // Filling that would write a dangling backslash (line continuation)
+        // Trim the incomplete escape; the strict-extension check below then decides whether anything is left to fill
         if lcp.bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1 {
             lcp = &lcp[..lcp.len() - 1];
         }
@@ -613,12 +559,10 @@ impl SuggestionController {
         (lcp.len() > typed.len() && lcp.starts_with(typed)).then(|| (range, lcp.to_owned()))
     }
 
-    /// Re-validate a completion item's `replace_range` against the current
-    /// text. Offsets index into [`CompletionDropdownState::request_text`];
-    /// the only drift a live dropdown survives is progressive typing, so a
-    /// range that reached the request text's end absorbs the typed tail —
-    /// but ONLY while the grown span still extends toward `replacement` (a
-    /// prefix of it). Anything else returns `None`: no-op, never a clobber.
+    /// Re-validate a completion item's `replace_range` against the current text.
+    /// Offsets index into [`CompletionDropdownState::request_text`]; the only drift a live dropdown survives is progressive typing.
+    /// A range that reached the request text's end absorbs the typed tail, but ONLY while the grown span is still a prefix of `replacement`.
+    /// Anything else returns `None`: a no-op, never a clobber.
     fn validated_replace_range(
         &self,
         range: std::ops::Range<usize>,
@@ -645,29 +589,24 @@ impl SuggestionController {
             .then_some(range.start..end)
     }
 
-    /// Arm a Tab-triggered deterministic completion fetch. Deliberately
-    /// independent of [`enabled`](Self::enabled): Tab in bash mode always
-    /// completes. Bumps the generation (discarding any in-flight response)
-    /// and returns it for the fetch effect; `run_tab_on_load` marks the
-    /// landing response to run the terminal Tab semantics once (the
-    /// post-accept/fill refreshes pass `false` so their items land
-    /// silently and wait for the next Tab).
+    /// Arm a Tab-triggered deterministic completion fetch; the generation bump discards any in-flight response.
+    /// Deliberately independent of [`enabled`](Self::enabled): Tab in bash mode always completes.
+    /// `run_tab_on_load` makes the landing run the terminal Tab decision once.
+    /// The post-accept and post-fill refreshes pass `false` so their items land silently and wait for the next Tab.
     pub fn begin_tab_completion(&mut self, run_tab_on_load: bool) -> u64 {
         self.generation += 1;
         self.tab_pending = run_tab_on_load.then_some(self.generation);
         self.generation
     }
 
-    /// A Tab-armed fetch is still in flight for the current draft (nothing
-    /// invalidated it since arming): a repeat Tab keeps the marker and lets
-    /// that landing run the Tab semantics once — no second RPC.
+    /// A Tab-armed fetch is still in flight for the current draft (nothing invalidated it since arming).
+    /// A repeat Tab keeps the marker and lets that landing run the Tab decision once, with no second RPC.
     pub fn tab_fetch_pending(&self) -> bool {
         self.tab_pending == Some(self.generation)
     }
 
-    /// Consume the pending-Tab mark when the response for `generation`
-    /// lands. `true` only when this is the fetch Tab armed AND it is still
-    /// current (an edit since the Tab makes it stale).
+    /// Consume the pending-Tab mark when the response for `generation` lands.
+    /// `true` only when this is the fetch Tab armed AND it is still current (an edit since the Tab makes it stale).
     pub fn take_pending_tab(&mut self, generation: u64) -> bool {
         if self.tab_pending == Some(generation) {
             self.tab_pending = None;
@@ -683,9 +622,8 @@ impl SuggestionController {
 
     /// Called on each text change. Returns the action the caller should take.
     ///
-    /// If slash is active (or has an inline ghost), suppresses the pipeline
-    /// entirely. Otherwise, tries progressive matching first; if no match,
-    /// increments generation and requests a debounce.
+    /// If slash is active (or has an inline ghost), suppresses the pipeline entirely.
+    /// Otherwise, tries progressive matching first; if no match, increments generation and requests a debounce.
     pub fn text_changed(
         &mut self,
         text: &str,
@@ -693,17 +631,15 @@ impl SuggestionController {
         slash_has_inline_ghost: bool,
     ) -> Option<SuggestionAction> {
         if !self.enabled {
-            // No as-you-type pipeline, but Tab-fetched completion state is
-            // text-specific: the edit outdates the dropdown items and any
-            // in-flight Tab fetch (the generation bump makes them stale).
+            // No as-you-type pipeline, but what a Tab fetch populated belongs to the old text
+            // This edit outdates the dropdown items and any in-flight Tab fetch; the generation bump makes them stale
             self.invalidate_draft();
             return None;
         }
 
         if slash_active || slash_has_inline_ghost {
-            // Suppression must invalidate, not just hide: an already-armed
-            // debounce or pending Tab landing would otherwise repopulate
-            // suggestion state behind the slash UI.
+            // Suppression must invalidate, not just hide
+            // An already-armed debounce or pending Tab landing would otherwise repopulate suggestion state behind the slash UI
             self.invalidate_draft();
             return None;
         }
@@ -717,10 +653,9 @@ impl SuggestionController {
             return Some(SuggestionAction::Matched);
         }
 
-        // Non-matching edit: `try_progressive_match` clears ghost+dropdown
-        // on a ghost mismatch, but a ghost-less dropdown (pure path/file
-        // items) would leak through its empty-ghost early return — this
-        // edit outdated those items, so tear the dropdown down here.
+        // `try_progressive_match` clears the ghost and dropdown on a ghost mismatch
+        // A ghost-less dropdown (pure path/file items) would leak through its empty-ghost early return
+        // This edit outdated those items, so tear the dropdown down here
         self.dropdown.close();
         self.generation += 1;
         Some(SuggestionAction::Debounce {
@@ -728,16 +663,15 @@ impl SuggestionController {
         })
     }
 
-    /// Called when a debounce timer expires. If the generation still matches,
-    /// returns `true` and the caller should fire the ACP request.
+    /// Called when a debounce timer expires.
+    /// If the generation still matches, returns `true` and the caller should fire the ACP request.
     pub fn on_debounce_expired(&self, generation: u64) -> bool {
         generation == self.generation
     }
 
-    /// Called when an ACP `x.ai/suggest` response arrives, with the text and
-    /// cursor the request was built from (the anchor item `replace_range`
-    /// offsets index into, and the position Tab targets). Takes ownership to
-    /// avoid copying strings. Discards stale responses.
+    /// Called when an ACP `x.ai/suggest` response arrives, with the text and cursor the request was built from.
+    /// Those are the anchor item `replace_range` offsets index into and the position Tab targets.
+    /// Takes ownership to avoid copying strings. Discards stale responses.
     pub fn on_suggestions_loaded(
         &mut self,
         response: SuggestResponseParsed,
@@ -749,8 +683,8 @@ impl SuggestionController {
         }
 
         match response.ghost {
-            // The ghost is the env-gated as-you-type surface: Tab-triggered
-            // (always-on) fetches feed only the dropdown items.
+            // The ghost renders only when the env var enables the as-you-type pipeline
+            // Tab-triggered (always-on) fetches feed only the dropdown items
             Some(ghost) if self.enabled => self.set_ghost_fields(ghost.suffix, ghost.source),
             _ => self.clear_ghost(),
         }
@@ -774,8 +708,8 @@ fn common_str_prefix<'a>(a: &'a str, b: &str) -> &'a str {
     &a[..n]
 }
 
-/// Find the byte offset after the first word in `s`. A "word" is optional
-/// leading whitespace followed by a run of non-whitespace characters.
+/// Find the byte offset after the first word in `s`.
+/// A "word" is optional leading whitespace followed by a run of non-whitespace characters.
 fn one_word_end(s: &str) -> usize {
     let leading_ws = s.len() - s.trim_start().len();
     let after_ws = &s[leading_ws..];

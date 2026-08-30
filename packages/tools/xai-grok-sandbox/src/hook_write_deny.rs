@@ -5,7 +5,10 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use xai_grok_config::{GlobalHookSource, missing_configured_sources, resolve_global_hook_sources};
+use xai_grok_config::{
+    GlobalHookSource, missing_configured_sources, resolve_global_hook_sources,
+    resolve_trust_boundary_sources,
+};
 
 #[cfg(unix)]
 use xai_grok_config::validated_hook_json_files_for_sources;
@@ -131,7 +134,9 @@ fn reject_hardlinked_files(sources: &[GlobalHookSource]) -> Result<(), HookWrite
     for s in sources {
         let is_file_slot = matches!(
             s.kind,
-            GlobalHookSourceKind::RegistryFile | GlobalHookSourceKind::ConfiguredSource
+            GlobalHookSourceKind::RegistryFile
+                | GlobalHookSourceKind::ConfiguredSource
+                | GlobalHookSourceKind::TrustBoundaryFile
         );
         if !is_file_slot || !s.path.exists() || s.path.is_dir() {
             continue;
@@ -195,12 +200,14 @@ pub fn resolve_hook_write_deny_snapshot() -> Result<Vec<GlobalHookSource>, HookW
                 .join(", "),
         ));
     }
-    reject_hardlinked_files(&resolved.sources)?;
+    let mut sources = resolved.sources;
+    sources.extend(resolve_trust_boundary_sources(grok.as_path())?);
+    reject_hardlinked_files(&sources)?;
     #[cfg(unix)]
     {
-        validated_hook_json_files_for_sources(&resolved.sources)?;
+        validated_hook_json_files_for_sources(&sources)?;
     }
-    Ok(resolved.sources)
+    Ok(sources)
 }
 
 #[cfg(target_os = "linux")]

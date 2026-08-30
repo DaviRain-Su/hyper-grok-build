@@ -2,19 +2,14 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// **Campaign nudge via the real remote path** — the production source
-/// (`GET /v1/settings` → `RemoteSettings.campaigns` → process cache seed →
-/// apply/dismiss), unlike the sibling test which injects the campaign through
-/// `GROK_CAMPAIGNS_OVERRIDE`.
+/// **Campaign nudge via the real remote path.**
+/// The campaign arrives through `GET /v1/settings`: the response fills `RemoteSettings.campaigns` and seeds the process cache for apply and dismiss.
+/// The sibling test injects the campaign through `GROK_CAMPAIGNS_OVERRIDE` instead.
 ///
-/// - boot with a `[models].default` in config.toml plus a **server-served**
-///   campaign nudging a *different* model → a (possibly not first — see
-///   [`wait_for_model_via_new_sessions`]) new session opens on the
-///   **campaign** model;
-/// - pick the config model via `/model` → the remote campaign id is recorded
-///   dismissed in `campaigns_state.json`;
-/// - reboot against the *same* server settings → the **config** model wins
-///   and stays winning across `/new`.
+/// - Boot with a `[models].default` in config.toml plus a **server-served** campaign nudging a *different* model.
+///   A new session, possibly not the first (see [`wait_for_model_via_new_sessions`]), opens on the **campaign** model.
+/// - Pick the config model via `/model`. The remote campaign id is recorded dismissed in `campaigns_state.json`.
+/// - Reboot against the *same* server settings. The **config** model wins and stays winning across `/new`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn campaign_remote_settings_nudge_and_dismiss() {
@@ -29,8 +24,8 @@ async fn campaign_remote_settings_nudge_and_dismiss() {
     .await
     .expect("start content with two models");
 
-    // Serve the campaign from the settings endpoint (replaces the preset, so
-    // `allow_access` must be restated or the pager parks on the upsell screen).
+    // Serve the campaign from the settings endpoint
+    // This replaces the preset settings, so `allow_access` must be restated or the pager parks on the upsell screen
     content.server().set_settings(json!({
         "allow_access": true,
         "campaigns": [
@@ -47,10 +42,8 @@ async fn campaign_remote_settings_nudge_and_dismiss() {
     )
     .expect("write config.toml");
 
-    // Session (OAuth) auth, not the harness's default XAI_API_KEY: the
-    // settings fetch requires `auth_manager.auth()` — in ApiKey/BYOK mode the
-    // pager never requests `/v1/settings`, so a remote campaign would be
-    // structurally unreachable (see `spawn_polling_session`'s doc).
+    // Use session (OAuth) auth, not the harness's default XAI_API_KEY: the settings fetch requires `auth_manager.auth()`
+    // In ApiKey/BYOK mode the pager never requests `/v1/settings`, so a remote campaign could never arrive (see `spawn_polling_session`'s doc)
     seed_fake_oauth(&content, "pty-campaign-remote");
     let binary = pager_binary().expect("resolve pager binary");
     let spawn = || -> PtyHarness {
@@ -65,7 +58,7 @@ async fn campaign_remote_settings_nudge_and_dismiss() {
         .expect("spawn pager")
     };
 
-    // ── Phase 1+2: the campaign applies to a new session; a pick dismisses. ──
+    // ── Phases 1 and 2: the campaign applies to a new session; a pick dismisses. ──
     {
         let mut h = spawn();
         h.wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
@@ -81,7 +74,7 @@ async fn campaign_remote_settings_nudge_and_dismiss() {
             h.screen_contents()
         );
 
-        // Explicit pick of the config model → persists default + dismisses.
+        // Picking the config model explicitly persists it as the default and dismisses the campaign
         h.inject_keys(format!("/model {CONFIG_MODEL}\r").as_bytes())
             .expect("pick model");
 
@@ -105,7 +98,7 @@ async fn campaign_remote_settings_nudge_and_dismiss() {
         h.quit().expect("clean quit");
     }
 
-    // ── Phase 3: reboot against the SAME settings → the config model wins. ──
+    // ── Phase 3: reboot against the SAME settings; the config model wins. ──
     {
         let mut h = spawn();
         h.wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
@@ -117,9 +110,8 @@ async fn campaign_remote_settings_nudge_and_dismiss() {
                     h.screen_contents()
                 )
             });
-        // Give the settings fetch time to land, then prove a fresh session
-        // still resolves to the user's model (dismissed campaigns never
-        // re-apply, even once the remote campaign is in the cache).
+        // Give the settings fetch time to land, then prove a fresh session still resolves to the user's model
+        // The dismissed campaign never re-applies, even once the fetch has put it back in the cache
         let _ = h.inject_keys(b"/new\r");
         h.update(Duration::from_millis(4000));
         h.wait_for_text(CONFIG_MODEL, Duration::from_secs(10))

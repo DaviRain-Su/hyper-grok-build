@@ -610,7 +610,7 @@ impl SessionActor {
     ) {
         let files = self.agent.borrow().prompt_context().agents_md_files.clone();
         let grok_home = xai_grok_config::grok_home();
-        let vendor_homes = dirs::home_dir()
+        let vendor_homes = xai_dirs::home_dir()
             .map(|home_dir| {
                 vec![
                     (

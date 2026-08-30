@@ -1,11 +1,10 @@
-//! `/hooks` and `/plugins` -- open the hooks/plugins modal.
+//! `/hooks` and `/plugins`: open the hooks/plugins modal.
 //!
-//! These commands always open the tabbed modal. All hook/plugin management
-//! (install, uninstall, trust, etc.) is done through the modal's UI — no
-//! subcommands are passed through to the shell via the slash command.
+//! These commands always open the tabbed modal.
+//! All hook/plugin management (install, uninstall, trust, etc.) is done through the modal's UI; no subcommands are passed through to the shell.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 use crate::views::extensions_modal::ExtensionsTab;
 use xai_grok_telemetry::events::ExtensionsModalTrigger;
 
@@ -13,16 +12,10 @@ use xai_grok_telemetry::events::ExtensionsModalTrigger;
 pub struct HooksCommand;
 
 impl SlashCommand for HooksCommand {
-    fn name(&self) -> &str {
-        "hooks"
-    }
-
-    fn description(&self) -> &str {
-        "View hooks"
-    }
-
-    fn usage(&self) -> &str {
-        "/hooks"
+    slash_meta! {
+        name: "hooks",
+        description: "View hooks",
+        usage: "/hooks",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
@@ -37,20 +30,11 @@ impl SlashCommand for HooksCommand {
 pub struct PluginsCommand;
 
 impl SlashCommand for PluginsCommand {
-    fn name(&self) -> &str {
-        "plugins"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["plugin"]
-    }
-
-    fn description(&self) -> &str {
-        "View plugins"
-    }
-
-    fn usage(&self) -> &str {
-        "/plugins"
+    slash_meta! {
+        name: "plugins",
+        aliases: ["plugin"],
+        description: "View plugins",
+        usage: "/plugins",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
@@ -65,16 +49,10 @@ impl SlashCommand for PluginsCommand {
 pub struct MarketplaceCommand;
 
 impl SlashCommand for MarketplaceCommand {
-    fn name(&self) -> &str {
-        "marketplace"
-    }
-
-    fn description(&self) -> &str {
-        "View marketplace"
-    }
-
-    fn usage(&self) -> &str {
-        "/marketplace"
+    slash_meta! {
+        name: "marketplace",
+        description: "View marketplace",
+        usage: "/marketplace",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
@@ -89,16 +67,10 @@ impl SlashCommand for MarketplaceCommand {
 pub struct SkillsCommand;
 
 impl SlashCommand for SkillsCommand {
-    fn name(&self) -> &str {
-        "skills"
-    }
-
-    fn description(&self) -> &str {
-        "View skills"
-    }
-
-    fn usage(&self) -> &str {
-        "/skills"
+    slash_meta! {
+        name: "skills",
+        description: "View skills",
+        usage: "/skills",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {

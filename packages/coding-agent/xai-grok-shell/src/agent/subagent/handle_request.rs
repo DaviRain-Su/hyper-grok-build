@@ -15,8 +15,6 @@ use xai_grok_telemetry::subagent_spawn::{SubagentSpawnPhase, phase_region};
 use xai_grok_telemetry::{instrument_task, region};
 use xai_grok_tools::implementations::{grok_build, opencode};
 const INITIAL_PROMPT_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-/// Budget for the pre-completion child transcript flush (replay buffer +
-/// persistence to disk). Mirrors the workflow-shutdown persistence bound.
 const CHILD_COMPLETION_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 pub(super) fn task_model_override_error(
     requested: Option<&str>,
@@ -31,8 +29,6 @@ pub(super) fn task_model_override_error(
     let requested = requested?;
     crate::agent::models::task_model_error_for_catalog(requested, available, is_session_auth)
 }
-/// Runtime adapter for one shell child. Shared lifecycle state is owned by the
-/// `xai-grok-tools` coordinator actor and reached only through `reporter`.
 #[tracing::instrument(
     name = "subagent.handle_request",
     skip_all,
@@ -60,6 +56,7 @@ pub(crate) async fn run_shell_child(
         spawn_timer.record(SubagentSpawnPhase::QueueWait, queued);
     }
     let spawn_prepare_span = phase_region(SubagentSpawnPhase::SpawnPrepare);
+    crate::waterfall::mark(&request.id, crate::waterfall::stage::CHILD_ENTER);
     let mut completion_data = ShellCompletionData::from_context(&ctx);
     if request.owner.is_workflow() && cancel_token.is_cancelled() {
         return child_run_output(
@@ -1429,9 +1426,13 @@ pub(crate) async fn run_shell_child(
                     definition_background,
                     control: ShellChildRuntime {
                         child_cmd_tx: child_handle.cmd_tx.clone(),
+                        message_delivery: child_handle.message_delivery(),
+                        active_message_target_session_id: child_session_id.0.to_string(),
                         child_signals: child_handle.signals_handle.clone(),
                         _child_thread: None,
                         receipt_sink,
+                        #[cfg(test)]
+                        force_queue_envelope: false,
                         active_message_parent_session_id: ctx.parent_session_id.clone(),
                         active_message_parent_prompt_index: ctx
                             .active_message_parent_prompt_index
@@ -1491,6 +1492,7 @@ pub(crate) async fn run_shell_child(
         Some(outcome) => outcome,
         None => attempt.as_mut().await,
     };
+    crate::waterfall::mark(&request.id, crate::waterfall::stage::TURN_DONE);
     let OneTurnAttemptOutcome {
         mut result,
         trace,
@@ -1995,6 +1997,7 @@ pub(crate) async fn run_shell_child(
             }
         }
     }
+    crate::waterfall::mark(&request.id, crate::waterfall::stage::FLUSH_DONE);
     let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown(
         crate::session::ShutdownKind::Graceful,
     ));
@@ -2052,17 +2055,11 @@ pub(crate) async fn run_shell_child(
             "error": &result.error,
         })),
     );
+    crate::waterfall::mark(&request.id, crate::waterfall::stage::CHILD_DONE);
     child_run_output(result, completion_data, disposed_snapshot_ref)
 }
-/// What the completion path did with a subagent worktree.
 pub(crate) enum Disposal {
-    /// The gate kept it, or something before the pointer failed. No resume
-    /// pointer on purpose: a pointer sends resume down the rehydrate path,
-    /// which deletes the directory to rebuild it from a snapshot that lacks
-    /// whatever kept it. The snapshot ref stays durable either way.
     Kept,
-    /// The pointer reached disk. Whether the removal then succeeded is a
-    /// separate question, and resume works in both cases.
     Snapshotted {
         snapshot_ref: String,
         worktree_removed: bool,
@@ -2085,13 +2082,6 @@ impl Disposal {
         }
     }
 }
-/// Capture the worktree into a durable ref, ask whether deleting it would lose
-/// anything, and only then persist the resume pointer and remove the directory.
-/// Capture first and persist before removing, so a crash mid-disposal never
-/// strands a snapshot the resume path cannot find.
-///
-/// The other removal path, `cancel_pending_shell_child`, skips all of this:
-/// there the child never ran, so the directory is the one the checkout made.
 #[tracing::instrument(skip_all)]
 pub(crate) async fn dispose_worktree_after_completion(
     worktree: &std::path::Path,

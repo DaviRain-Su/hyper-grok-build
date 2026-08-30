@@ -2,10 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Overlay-steal precedence: while a turn is streaming, opening the slash
-/// dropdown and pressing **Esc dismisses the dropdown and does NOT cancel the
-/// turn** (it never reaches the mid-turn Esc policy). The pane-level slash
-/// handler returns `Changed` before `try_handle_esc_policy` ever runs.
+/// While a turn is streaming, Esc on an open slash dropdown dismisses the dropdown and does NOT cancel the turn.
+/// The pane-level slash handler returns `Changed` before `try_handle_esc_policy` ever runs, so the key never reaches the mid-turn Esc policy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn mid_turn_slash_dropdown_esc_dismisses_not_cancel() {
@@ -33,8 +31,8 @@ async fn mid_turn_slash_dropdown_esc_dismisses_not_cancel() {
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("stream started");
 
-    // Open the slash dropdown mid-turn. "/mod" narrows to `/model`, whose
-    // description renders only in the dropdown (not in the typed text).
+    // Open the slash dropdown mid-turn
+    // "/mod" narrows to `/model`, whose description renders only in the dropdown (not in the typed text)
     inject_keys_paced(&mut harness, b"/mod");
     harness
         .wait_for_text("Switch the active model", Duration::from_secs(10))
@@ -58,8 +56,7 @@ async fn mid_turn_slash_dropdown_esc_dismisses_not_cancel() {
         "pager panicked\nscreen:\n{screen}"
     );
 
-    // Settle a little more and re-confirm the turn was never cancelled by the
-    // dropdown-dismiss Esc.
+    // Settle a little more and re-confirm the Esc that dismissed the dropdown never cancelled the turn
     harness.update(Duration::from_millis(600));
     assert!(
         !harness.contains_text("Turn cancelled by user"),

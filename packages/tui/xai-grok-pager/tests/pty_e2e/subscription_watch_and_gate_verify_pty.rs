@@ -1,7 +1,6 @@
 // Per-test-case module for the `pty_e2e` integration test crate.
 //
-// End-to-end coverage for free→paid subscription auto-detection
-// (`src/app/subscription.rs`).
+// End-to-end coverage for free-to-paid subscription auto-detection (`src/app/subscription.rs`)
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -14,9 +13,8 @@ const PAID_TIER: &str = "SuperGrokPro";
 /// Display name delivered via `/settings` `subscription_tier_display`.
 const PAID_TIER_DISPLAY: &str = "SuperGrok Pro";
 
-/// Count of live subscription checks the client made against the mock
-/// (`GET /v1/user?include=subscription`). Plain `/v1/user` enrichment
-/// fetches are deliberately excluded.
+/// Count of live subscription checks the client made against the mock (`GET /v1/user?include=subscription`).
+/// Plain `/v1/user` enrichment fetches are deliberately excluded.
 fn user_check_count(content: &ContentController) -> usize {
     content
         .requests()
@@ -25,8 +23,7 @@ fn user_check_count(content: &ContentController) -> usize {
         .count()
 }
 
-/// Count of `GET /v1/settings` fetches (the qualifying-tier check refetches
-/// settings, so a post-upgrade increase marks detection completing).
+/// Count of `GET /v1/settings` fetches (the qualifying-tier check refetches settings, so a post-upgrade increase marks detection completing).
 fn settings_count(content: &ContentController) -> usize {
     content
         .requests()
@@ -35,8 +32,7 @@ fn settings_count(content: &ContentController) -> usize {
         .count()
 }
 
-/// Count of `GET /v1/models` catalog fetches. Post-upgrade the shell must
-/// re-fetch so tier-targeted models land without restart.
+/// Count of `GET /v1/models` catalog fetches. Post-upgrade the shell must re-fetch so tier-targeted models land without restart.
 fn models_count(content: &ContentController) -> usize {
     content
         .requests()
@@ -45,17 +41,14 @@ fn models_count(content: &ContentController) -> usize {
         .count()
 }
 
-/// Paid-only model id used to prove the post-unblock catalog actually
-/// replaced the free list in the picker (not merely that `/v1/models` was hit).
+/// Paid-only model id used to prove the post-unblock catalog actually replaced the free list in the picker (not merely that `/v1/models` was hit).
 const PAID_ONLY_MODEL: &str = "composer-paid-only";
 
 /// Minimal unsigned JWT with a `tier` claim matching [`PAID_TIER`].
 ///
-/// Proto `prod_auth.SubscriptionTier`: 5 = `supergrok_heavy` = live
-/// `/user` string `SuperGrokPro`. Must match
-/// `jwt_claim_matches_user_subscription_tier` or post-unblock catalog
-/// refresh treats the claim as stale and never re-fetches `/v1/models`
-/// within the test timeout.
+/// Proto `prod_auth.SubscriptionTier`: 5 is `supergrok_heavy`, the live `/user` string `SuperGrokPro`.
+/// It must match `jwt_claim_matches_user_subscription_tier`.
+/// Otherwise the post-unblock catalog refresh treats the claim as stale and never re-fetches `/v1/models` within the test timeout.
 fn paid_tier_jwt() -> String {
     use base64::Engine;
     let enc = |v: &serde_json::Value| {
@@ -66,12 +59,11 @@ fn paid_tier_jwt() -> String {
     format!("{header}.{payload}.sig")
 }
 
-/// Bind the fixed local-dev OIDC issuer (`http://localhost:22255`) and return a
-/// paid-tier JWT on refresh. Call **after** free-tier watch polling so early
-/// checks still see connection-refused (hermetic free path) and only the
-/// post-upgrade refresh succeeds with a paid token.
+/// Bind the fixed local-dev OIDC issuer (`http://localhost:22255`) and return a paid-tier JWT on refresh.
+/// Call AFTER free-tier watch polling so early checks still see connection-refused (hermetic free path).
+/// Only the post-upgrade refresh then succeeds with a paid token.
 ///
-/// Minimal raw HTTP (no axum dep in this crate): discovery + token only.
+/// Minimal raw HTTP (no axum dep in this crate): discovery and token endpoints only.
 async fn start_local_oidc_paid_refresh() -> tokio::task::JoinHandle<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -124,8 +116,7 @@ async fn start_local_oidc_paid_refresh() -> tokio::task::JoinHandle<()> {
     })
 }
 
-/// Pump the PTY until `cond` holds or `timeout` elapses (panics with a
-/// screen dump on timeout).
+/// Pump the PTY until `cond` holds or `timeout` elapses (panics with a screen dump on timeout).
 fn pump_until(
     harness: &mut PtyHarness,
     timeout: Duration,
@@ -143,14 +134,11 @@ fn pump_until(
     }
 }
 
-/// Like [`seed_fake_oauth`], but under the `GROK_LOCAL_AUTH` dev issuer
-/// (`http://localhost:22255`). Two reasons: `is_xai_oauth2_issuer()` accepts
-/// the local issuer, so the subscription gate applies (an enterprise/unknown
-/// issuer bypasses it); and the qualifying-tier JWT refresh then hits
-/// `localhost:22255` — instant connection-refused instead of a real network
-/// call to auth.x.ai (hermetic, no CI-network flake). Pair with
-/// `GROK_LOCAL_AUTH=1` in the spawn env so the shell's scope-key lookup
-/// resolves this entry.
+/// Like [`seed_fake_oauth`], but under the `GROK_LOCAL_AUTH` dev issuer (`http://localhost:22255`). Two reasons:
+/// `is_xai_oauth2_issuer()` accepts the local issuer, so the subscription gate applies (an enterprise/unknown issuer bypasses it).
+/// The qualifying-tier JWT refresh then hits `localhost:22255`: instant connection-refused instead of a real network call to auth.x.ai.
+/// That keeps the test hermetic, with no CI-network flake.
+/// Pair with `GROK_LOCAL_AUTH=1` in the spawn env so the shell's scope-key lookup resolves this entry.
 fn seed_fake_oauth_local_issuer(content: &ContentController, user: &str) {
     let grok_home = content.home().join(".grok");
     std::fs::create_dir_all(&grok_home).expect("create temp .grok");
@@ -175,9 +163,8 @@ fn seed_fake_oauth_local_issuer(content: &ContentController, user: &str) {
     .expect("seed fake local-issuer oauth auth.json");
 }
 
-/// Spawn the pager with local-issuer session auth (see
-/// [`seed_fake_oauth_local_issuer`]) plus `extra_env`. Does NOT wait for the
-/// welcome screen — gate tests assert on the very first paint.
+/// Spawn the pager with local-issuer session auth (see [`seed_fake_oauth_local_issuer`]) plus `extra_env`.
+/// Does NOT wait for the welcome screen; gate tests assert on the very first paint.
 fn spawn_subscription_pager(
     content: &ContentController,
     oauth_user: &str,
@@ -201,8 +188,7 @@ fn spawn_subscription_pager(
     .expect("spawn pager with subscription session auth")
 }
 
-/// [`spawn_subscription_pager`] driven into a live session
-/// (welcome → prompt → mock response).
+/// [`spawn_subscription_pager`] driven into a live session: welcome, then a prompt, then the mock response.
 fn spawn_subscription_session(
     content: &ContentController,
     oauth_user: &str,
@@ -223,15 +209,13 @@ fn spawn_subscription_session(
 
 /// Watch cadence while free, upgrade detection, then dormancy once paid.
 ///
-/// Also covers W-17: after free→paid unblock the shell refreshes the model
-/// catalog with a **paid** JWT (mock IdP on `:22255`) and the paid-only model
-/// id appears in the `/model` picker — not merely that `/v1/models` was called.
+/// After the free-to-paid unblock the shell must refresh the model catalog with a paid JWT (mock IdP on `:22255`).
+/// The paid-only model id must appear in the `/model` picker, not merely `/v1/models` being called.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn subscription_watch_polls_free_tier_then_goes_dormant_after_upgrade() {
     // Start free-targeted (no paid-only model); swap after upgrade.
-    // OIDC mock is started only after free-phase polling so early refresh
-    // still connection-refuses (keeps the free watch path hermetic).
+    // OIDC mock is started only after free-phase polling so early refresh still connection-refuses (keeps the free watch path hermetic)
     let content = ContentController::start_with_models(vec![MockModel::new("grok-3")])
         .await
         .expect("start content");
@@ -254,10 +238,8 @@ async fn subscription_watch_polls_free_tier_then_goes_dormant_after_upgrade() {
     // Now enable hermetic paid JWT refresh for the post-unblock catalog path.
     let oidc = start_local_oidc_paid_refresh().await;
 
-    // Server-side upgrade: the live tier flips to a qualifying value and
-    // settings now carry the paid display tier. Swap the model catalog *before*
-    // recording models_before so an in-flight free fetch cannot falsely satisfy
-    // the post-upgrade re-fetch wait.
+    // Server-side upgrade: the live tier flips to a qualifying value and settings now carry the paid display tier
+    // Swap the model catalog BEFORE recording models_before so an in-flight free fetch cannot falsely satisfy the post-upgrade re-fetch wait
     let settings_before = settings_count(&content);
     content.server().set_user_subscription_tier(Some(PAID_TIER));
     content.server().set_settings(json!({
@@ -270,8 +252,7 @@ async fn subscription_watch_polls_free_tier_then_goes_dormant_after_upgrade() {
     ]);
     let models_before = models_count(&content);
 
-    // Detection: the qualifying check refetches /v1/settings (that's how the
-    // paid display tier reaches the client and disarms the watch).
+    // Detection: the qualifying check refetches /v1/settings (that's how the paid display tier reaches the client and disarms the watch)
     pump_until(
         &mut harness,
         Duration::from_secs(30),
@@ -279,8 +260,7 @@ async fn subscription_watch_polls_free_tier_then_goes_dormant_after_upgrade() {
         "settings refetch after the qualifying tier was detected",
     );
 
-    // W-17: after gate lift + successful paid JWT refresh the shell must
-    // re-fetch /v1/models (fire-and-forget `on_auth_changed`).
+    // After gate lift and a successful paid JWT refresh the shell must re-fetch /v1/models (fire-and-forget `on_auth_changed`)
     pump_until(
         &mut harness,
         Duration::from_secs(30),
@@ -288,8 +268,8 @@ async fn subscription_watch_polls_free_tier_then_goes_dormant_after_upgrade() {
         "model catalog re-fetch after free→paid subscription unblock",
     );
 
-    // Stronger than a GET count: switch to the paid-only model id. Status bar
-    // shows it on success (same pattern as same_agent_type_switch_no_modal).
+    // Stronger than a GET count: switch to the paid-only model id
+    // The status bar shows it on success (same pattern as same_agent_type_switch_no_modal)
     harness
         .inject_keys(format!("/model {PAID_ONLY_MODEL}\r").as_bytes())
         .expect("switch to paid-only model");
@@ -297,8 +277,7 @@ async fn subscription_watch_polls_free_tier_then_goes_dormant_after_upgrade() {
         .wait_for_text(PAID_ONLY_MODEL, Duration::from_secs(20))
         .expect("paid-only model applied after upgrade catalog refresh");
 
-    // Dormancy: once the paid tier lands, a full 6s quiet window (>=6
-    // would-be ticks at the 1s cadence) passes with zero new checks.
+    // Dormancy: once the paid tier lands, a full 6s quiet window (>=6 would-be ticks at the 1s cadence) passes with zero new checks
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let base = user_check_count(&content);
@@ -320,14 +299,13 @@ async fn subscription_watch_polls_free_tier_then_goes_dormant_after_upgrade() {
     oidc.abort();
 }
 
-/// A genuinely-free user gated at startup still gets the paywall — but only
-/// after a live subscription check confirmed the block (the gate is never
-/// painted straight from the stale source).
+/// A genuinely-free user gated at startup still gets the paywall, but only after a live subscription check confirmed the block.
+/// The gate is never painted straight from the stale source.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn startup_gate_shows_paywall_for_free_user_after_live_check() {
     let content = ContentController::start().await.expect("start content");
-    // Explicit deny + gate copy. Absent allow_access now fails open.
+    // Explicit deny and gate copy. An absent allow_access fails open.
     content.server().set_settings(json!({
         "allow_access": false,
         "gate_message": GATE_MSG,
@@ -340,9 +318,8 @@ async fn startup_gate_shows_paywall_for_free_user_after_live_check() {
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
-    // The verified gate renders. Normally the check response resolves the
-    // deferral within seconds; the budget also covers the 30s hung-check
-    // safety net under full-suite contention.
+    // The verified gate renders. Normally the check response resolves the deferral within seconds.
+    // The budget also covers the 30s hung-check safety net under full-suite contention
     harness
         .wait_for_text(GATE_MSG, Duration::from_secs(45))
         .expect("gate copy renders for a genuinely-free user");
@@ -360,17 +337,13 @@ async fn startup_gate_shows_paywall_for_free_user_after_live_check() {
     harness.quit().expect("clean quit");
 }
 
-/// Verify-before-paywall: a user who ALREADY subscribed never sees a
-/// paywall flash when a stale gated settings snapshot reaches the client.
+/// Verify-before-paywall: a user who ALREADY subscribed never sees a paywall flash when a stale gated settings snapshot reaches the client.
 ///
-/// The stale snapshot is delivered via the `/new` settings refresh — the
-/// only active `/v1/settings` consumer at that point (watch disabled via
-/// env, announcements poll at its 5-min default, gate poll only runs while
-/// gated, startup fetches settled). Queueing it at startup instead races
-/// the shell's concurrent startup fetches: a slow gated fetch landing after
-/// the verify check stores fresh settings can legitimately re-carry the
-/// gate — a time-travel artifact of the scripted one-shot, not a client
-/// bug (observed as a flake).
+/// The stale snapshot is delivered via the `/new` settings refresh, the only active `/v1/settings` consumer at that point.
+/// (Watch disabled via env, announcements poll at its 5-min default, gate poll only runs while gated, startup fetches settled.)
+/// Queueing it at startup instead races the shell's concurrent startup fetches.
+/// A slow gated fetch landing after the verify check stores fresh settings can legitimately re-carry the gate.
+/// That is a time-travel artifact of the scripted one-shot, not a client bug (observed as a flake).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn stale_gate_push_never_flashes_paywall_for_subscribed_user() {
@@ -383,20 +356,18 @@ async fn stale_gate_push_never_flashes_paywall_for_subscribed_user() {
     }));
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} paid path."));
 
-    // Watch disabled so the deferral's own VerifyPendingGate is the only
-    // subscription-check traffic (deferral does not depend on the watch).
+    // Watch disabled so the deferral's own VerifyPendingGate is the only subscription-check traffic (deferral does not depend on the watch)
     let mut harness = spawn_subscription_session(
         &content,
         "pty-subgate-paid",
         &[EnvOp::set("GROK_SUBSCRIPTION_WATCH_INTERVAL_SECS", "0")],
     );
 
-    // Let startup fetches fully settle so the scripted one-shot below can
-    // only be consumed by the /new refresh.
+    // Let startup fetches fully settle so the scripted one-shot below can only be consumed by the /new refresh
     harness.update(Duration::from_secs(2));
     let checks_before = user_check_count(&content);
 
-    // One stale gated snapshot: the "remote settings stale moment".
+    // One stale gated snapshot simulates remote settings going stale
     content.enqueue_response(
         "/v1/settings",
         ScriptedResponse::json(
@@ -406,10 +377,9 @@ async fn stale_gate_push_never_flashes_paywall_for_subscribed_user() {
     );
     harness.inject_keys(b"/new\r").expect("run /new");
 
-    // Sample the screen across the deferral window: the gate copy must
-    // never appear. The deferred gate could only surface via a gated check
-    // result (impossible — the live tier is paid and the fresh settings
-    // allow) or the 30s hung-check net, which the resolving check disarms.
+    // Sample the screen across the deferral window: the gate copy must never appear
+    // A gated check result is impossible (the live tier is paid and the fresh settings allow)
+    // The 30s hung-check net is the only other surface, and the resolving check disarms it
     let end = Instant::now() + Duration::from_secs(8);
     while Instant::now() < end {
         harness.update(Duration::from_millis(150));
@@ -420,8 +390,7 @@ async fn stale_gate_push_never_flashes_paywall_for_subscribed_user() {
         );
     }
 
-    // Positive anchors: the deferral's live check actually ran, and the
-    // session is fully usable (prompt round-trips).
+    // Positive anchors: the deferral's live check actually ran, and the session is fully usable (prompt round-trips)
     assert!(
         user_check_count(&content) > checks_before,
         "expected a live subscription check for the deferred gate; requests: {:?}",

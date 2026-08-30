@@ -1,16 +1,15 @@
 //! Source mapping for rendered markdown back to original source.
 //!
-//! Used for copy-paste operations: when the user selects rendered text,
-//! we can look up the corresponding original markdown source.
+//! Used for copy-paste operations: when the user selects rendered text, we can look up the corresponding original markdown source.
 
 use std::ops::Range;
 
 /// Maps rendered byte positions back to source byte positions.
 ///
-/// Direction: rendered (new) → source (old)
+/// The direction is from rendered (new) positions to source (old) positions.
 #[derive(Debug, Clone, Default)]
 pub struct SourceMap {
-    /// Segments: (rendered_range, source_range)
+    /// Each segment is a (rendered_range, source_range) pair.
     segments: Vec<(Range<usize>, Range<usize>)>,
 }
 
@@ -21,7 +20,6 @@ impl SourceMap {
     }
 
     /// Add a mapping from rendered position to source position.
-    ///
     /// The rendered text and source text must have the same length.
     pub fn add(&mut self, rendered_start: usize, source_range: Range<usize>) {
         let len = source_range.end - source_range.start;
@@ -33,8 +31,7 @@ impl SourceMap {
 
     /// Given a rendered byte range, return the corresponding source range.
     ///
-    /// Returns None if the range doesn't map cleanly (e.g., spans multiple
-    /// non-contiguous source regions).
+    /// Returns None if the range doesn't map cleanly (e.g., spans multiple non-contiguous source regions).
     pub fn to_source(&self, rendered: Range<usize>) -> Option<Range<usize>> {
         let mut source_start = None;
         let mut source_end = None;
@@ -107,8 +104,7 @@ impl SourceMap {
 
 // ## Restoring Byte-Level Source Maps (if ever needed)
 //
-// The ratatui rendering path currently only tracks line-level source mapping
-// (`line_source_map`), which is sufficient for copy/selection operations.
+// The ratatui rendering path currently only tracks line-level source mapping (`line_source_map`), which is sufficient for copy/selection operations
 // Byte-level `SourceMap` was removed for simplicity and ~6% speedup.
 //
 // To restore byte-level source maps:

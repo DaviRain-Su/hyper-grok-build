@@ -2575,3 +2575,100 @@ async fn test_windows_replace_exe_sweeps_accumulated_asides() {
         "other executables' leftovers must be untouched"
     );
 }
+
+#[cfg(unix)]
+fn assert_decoded_executable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755, "decoded binary must be executable");
+}
+#[cfg(not(unix))]
+fn assert_decoded_executable(_path: &std::path::Path) {}
+
+#[tokio::test]
+async fn download_and_decode_round_trips_each_codec() {
+    use std::io::Write;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let payload = b"\x7fELF grok binary payload".to_vec();
+    let zst = zstd::encode_all(&payload[..], 3).unwrap();
+    let gz = {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&payload).unwrap();
+        enc.finish().unwrap()
+    };
+
+    for (suffix, codec, body) in [("zst", Codec::Zstd, zst), ("gz", Codec::Gzip, gz)] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/grok-1.2.3-linux-x86_64.{suffix}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("grok-1.2.3-linux-x86_64");
+        let url = format!("{}/grok-1.2.3-linux-x86_64.{suffix}", server.uri());
+        download_and_decode(&url, &dest, codec, false)
+            .await
+            .unwrap_or_else(|e| panic!("decode .{suffix}: {e}"));
+
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            payload,
+            ".{suffix} decode mismatch"
+        );
+        assert_decoded_executable(&dest);
+    }
+}
+
+#[tokio::test]
+async fn download_and_decode_errs_on_corrupt() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/grok-1.2.3-linux-x86_64.zst"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"not a zstd frame".to_vec()))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("grok-1.2.3-linux-x86_64");
+    let url = format!("{}/grok-1.2.3-linux-x86_64.zst", server.uri());
+    let result = download_and_decode(&url, &dest, Codec::Zstd, false).await;
+
+    assert!(
+        result.is_err(),
+        "a corrupt .zst must error so the caller falls back"
+    );
+    assert!(
+        !dest.exists(),
+        "no partial binary published from a bad decode"
+    );
+}
+
+#[tokio::test]
+async fn download_cli_artifact_falls_back_to_plain() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let payload = b"\x7fELF grok binary payload".to_vec();
+    let server = MockServer::start().await; // only the plain object exists; .zst/.gz 404
+    Mock::given(method("GET"))
+        .and(path("/grok-1.2.3-linux-x86_64"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(payload.clone()))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("grok-1.2.3-linux-x86_64");
+    download_cli_artifact_from_gcs(&server.uri(), "grok-1.2.3-linux-x86_64", &dest, false)
+        .await
+        .expect("fall back to the plain binary when compressed forms are absent");
+
+    assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    assert_decoded_executable(&dest);
+}

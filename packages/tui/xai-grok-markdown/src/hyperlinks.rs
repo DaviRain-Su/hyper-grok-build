@@ -2,19 +2,13 @@
 //!
 //! Three coordinate systems are in play:
 //!
-//! 1. **Source bytes** -- offsets into the raw markdown the parser saw.
-//!    `LinkTarget::source_range` lives here.
-//! 2. **Transformed bytes** -- what `apply_transforms` produces for a *chunk*
-//!    of source bytes between two render events.  In pretty mode the
-//!    transforms strip `[` and rewrite `](` as ` (`, so transformed bytes
-//!    do not line up with source bytes.
-//! 3. **Display cells** -- `(line_index, display_column)`.  What
-//!    `HyperlinkTarget` exposes for the OSC 8 layer to consume.
+//! 1. **Source bytes**: offsets into the raw markdown the parser saw. `LinkTarget::source_range` lives here.
+//! 2. **Transformed bytes**: what `apply_transforms` produces for a *chunk* of source bytes between two render events.
+//!    In pretty mode the transforms strip `[` and rewrite `](` as ` (`, so transformed bytes do not line up with source bytes.
+//! 3. **Display cells**: `(line_index, display_column)`, what `HyperlinkTarget` exposes for the OSC 8 layer to consume.
 //!
-//! A chunk's transformed string is split on `\n` into *segments*; one
-//! segment becomes one rendered line.  A link spanning multiple segments
-//! (a wrapped or autolink-bracketed link) produces one `HyperlinkTarget`
-//! per segment, all sharing the same `id`.
+//! A chunk's transformed string is split on `\n` into *segments*; one segment becomes one rendered line.
+//! A link spanning multiple segments (a wrapped or autolink-bracketed link) produces one `HyperlinkTarget` per segment, all sharing the same `id`.
 
 use crate::buffers::{
     LinkTarget, Transform, ceil_char_boundary, floor_char_boundary, unicode_display_width,
@@ -23,9 +17,8 @@ use crate::output::HyperlinkTarget;
 
 /// One link's projection onto the current chunk's transformed string.
 ///
-/// Returned by `chunk_link_offsets`; bounds are in coordinate system #2
-/// (transformed bytes within the chunk), to be mapped onto display cells
-/// later by `emit_segment_hyperlinks`.
+/// Returned by `chunk_link_offsets`; bounds are in coordinate system #2 (transformed bytes within the chunk).
+/// `emit_segment_hyperlinks` later maps them onto display cells.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ChunkLinkRange {
     /// Start byte (inclusive) within the chunk's transformed string.
@@ -36,32 +29,21 @@ pub(crate) struct ChunkLinkRange {
     pub(crate) link_idx: usize,
 }
 
-/// Project a source byte position into the chunk's transformed coordinate
-/// space (system #1 -> system #2). See file docstring.
+/// Project a source byte position into the chunk's transformed coordinate space (system #1 to system #2). See the module doc.
 ///
-/// Walks `transforms` in source order, accumulating `(to.len() - range.len())`
-/// for every transform fully consumed before `src_pos`.  When the chunk has
-/// no transforms (or `pretty` is false), the caller skips this and uses
-/// `src_pos - chunk_start` directly.
+/// Walks `transforms` in source order, accumulating `(to.len() - range.len())` for every transform fully consumed before `src_pos`.
+/// When the chunk has no transforms (or `pretty` is false), the caller skips this and uses `src_pos - chunk_start` directly.
 ///
 /// **Invariants assumed of the inputs:**
-/// 1. `transforms` is sorted by `range.start` (the existing `apply_transforms`
-///    relies on the same invariant; the parser pushes transforms in source
-///    order).
-/// 2. No transform's source range overlaps the bytes a caller intends to
-///    locate — i.e. transforms touch *boundary* characters around link text
-///    (the `[` and `](` markers), never the link text itself.  All transforms
-///    pushed by the parser today (link bracket removal, bullet substitutions)
-///    satisfy this; the `debug_assert!` at the call sites in `render_ratatui`
-///    enforces it via the cursor invariant.
+/// 1. `transforms` is sorted by `range.start` (`apply_transforms` relies on the same invariant; the parser pushes transforms in source order).
+/// 2. No transform's source range overlaps the bytes a caller intends to locate.
+///    Transforms touch *boundary* characters around link text (the `[` and `](` markers), never the link text itself.
+///    All transforms pushed by the parser today (link bracket removal, bullet substitutions) satisfy this.
+///    The `debug_assert!` at the call sites in `render_ratatui` enforces it via the cursor invariant.
 ///
-/// **Straddle policy** (when a transform DOES contain `src_pos` despite the
-/// invariant above): the source position is clamped to the start of the
-/// transform's replacement string.  Both endpoints (start/end) clamp the
-/// same direction, so a link whose endpoint straddles a transform produces
-/// a column range that excludes the straddling bytes.  This is intentional
-/// rather than precise — a future transform that intentionally rewrites
-/// link text should add a typed mapping instead of relying on this clamp.
+/// **Straddle policy** (a transform contains `src_pos` despite invariant 2): the source position clamps to the start of the replacement string.
+/// Both endpoints clamp the same direction, so a link whose endpoint straddles a transform gets a column range that excludes the straddling bytes.
+/// The clamp is deliberately coarse; a future transform that rewrites link text should add a typed mapping instead.
 pub(crate) fn source_to_chunk_offset(
     src_pos: usize,
     chunk_start: usize,
@@ -97,13 +79,10 @@ pub(crate) fn source_to_chunk_offset(
     raw.max(0) as usize
 }
 
-/// One `ChunkLinkRange` per link whose source range overlaps
-/// `[chunk_start, chunk_end)`.
+/// One `ChunkLinkRange` per link whose source range overlaps `[chunk_start, chunk_end)`.
 ///
-/// `from_idx` is the caller's monotonic cursor: links before this index
-/// have already been processed in earlier chunks (see the module doc on
-/// the source-order invariant).  Returned bounds live in the chunk's
-/// transformed coordinate space.
+/// `from_idx` is the caller's monotonic cursor; links before it were handled in earlier chunks (see the module doc's source-order invariant).
+/// Returned bounds live in the chunk's transformed coordinate space.
 pub(crate) fn chunk_link_offsets(
     link_targets: &[LinkTarget],
     from_idx: usize,
@@ -141,12 +120,10 @@ pub(crate) fn chunk_link_offsets(
     out
 }
 
-/// Push one `HyperlinkTarget` per `ChunkLinkRange` that overlaps this
-/// segment (system #2 -> system #3).
+/// Push one `HyperlinkTarget` per `ChunkLinkRange` that overlaps this segment (system #2 to system #3).
 ///
-/// `seg_x_offset` is where this segment starts within the chunk's
-/// transformed string; the caller advances it by `segment.len() + 1`
-/// per iteration to account for the `\n` consumed by `split('\n')`.
+/// `seg_x_offset` is where this segment starts within the chunk's transformed string.
+/// The caller advances it by `segment.len() + 1` per iteration to account for the `\n` consumed by `split('\n')`.
 /// `col` is the running display column on the in-progress line.
 pub(crate) fn emit_segment_hyperlinks(
     chunk_links: &[ChunkLinkRange],
@@ -196,20 +173,13 @@ mod hyperlink_tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    /// Slice the rendered line by display-cell `column_range`.  Display
-    /// width != char count for CJK and other wide characters, so we
-    /// accumulate width per char until we land inside the requested
-    /// range.
+    /// Slice the rendered line by display-cell `column_range`.
+    /// Display width differs from char count for CJK and other wide characters, so we accumulate width per char until we land inside the range.
     ///
-    /// Zero-width chars (combining marks, ZWJ, control chars) at the
-    /// boundary are AMBIGUOUSLY attached: a zero-width char at exactly
-    /// `col == range.start` is included in the slice (it does not
-    /// advance `col`), while a zero-width char at `col == range.end`
-    /// is also included (it satisfies `end <= range.end`).  No callers
-    /// in the test suite use combining marks today; if a future caller
-    /// needs to disambiguate, change the boundary condition to attach
-    /// zero-width chars to whichever side semantically owns the grapheme
-    /// cluster.
+    /// Zero-width chars (combining marks, ZWJ, control chars) are included at both boundaries.
+    /// At `range.start` they do not advance `col`; at `range.end` they still satisfy `end <= range.end`.
+    /// No caller in the test suite uses combining marks today.
+    /// A future caller can change the boundary condition to attach zero-width chars to the side that owns the grapheme cluster.
     fn slice_by_cells(rendered: &str, range: std::ops::Range<usize>) -> String {
         use unicode_width::UnicodeWidthChar;
         let mut col = 0usize;
@@ -227,12 +197,8 @@ mod hyperlink_tests {
         out
     }
 
-    /// Find the parser-produced (link-text) hyperlink — by convention the
-    /// one whose `column_range` slices to `expected_slice` in the
-    /// rendered output.  Since `render_markdown_ratatui_full` now also
-    /// emits a url_scan target for the pretty-mode `(url)` suffix, tests
-    /// that previously checked `hyperlinks.len() == 1` must explicitly
-    /// pick the parser-produced entry.
+    /// Find the parser-produced (link-text) hyperlink: the one whose `column_range` slices to `expected_slice` in the rendered output.
+    /// `render_markdown_ratatui_full` also emits a url_scan target for the pretty-mode `(url)` suffix, so tests cannot assume a single hyperlink.
     fn parser_link_text<'a>(
         out: &'a crate::output::MarkdownRenderOutput,
         expected_slice: &str,
@@ -251,16 +217,14 @@ mod hyperlink_tests {
             })
     }
 
-    /// `[link](url)` in pretty mode renders as `link (url)`.  The
-    /// `HyperlinkTarget`'s column range must cover the rendered "link"
-    /// glyphs (4 cells), not include the stripped `[` or the rewritten ` (`.
+    /// `[link](url)` in pretty mode renders as `link (url)`.
+    /// The `HyperlinkTarget`'s column range must cover the rendered "link" glyphs (4 cells), not include the stripped `[` or the rewritten ` (`.
     #[test]
     fn pretty_inline_link_column_range_excludes_brackets() {
         let text = "Here is a [link](https://example.com) in text.\n";
         let (out, _) = render_markdown_ratatui_full(text, test_style::STYLE, true, None);
 
-        // The parser produces one HyperlinkTarget over the link text;
-        // the url_scan pass produces a second over the `(url)` suffix.
+        // The parser produces one HyperlinkTarget over the link text; the url_scan pass produces a second over the `(url)` suffix
         let h = parser_link_text(&out, "link");
         assert_eq!(h.url, "https://example.com");
         let rendered = line_to_string(&out.lines[h.line_index]);
@@ -275,17 +239,14 @@ mod hyperlink_tests {
         );
     }
 
-    /// In non-pretty mode the rendered text keeps `[link](url)` literally
-    /// in place, but the parser's `LinkTarget` source range still points at
-    /// just `link`.  The column range therefore covers `link` (4 cells),
-    /// shifted by the leading `[` that's now visible in the output.
+    /// In non-pretty mode the rendered text keeps `[link](url)` verbatim, but the parser's `LinkTarget` source range still points at just `link`.
+    /// The column range therefore covers `link` (4 cells), shifted by the leading `[` that's now visible in the output.
     #[test]
     fn non_pretty_inline_link_column_range_covers_text_not_brackets() {
         let text = "[link](https://example.com)\n";
         let (out, _) = render_markdown_ratatui_full(text, test_style::STYLE, false, None);
 
-        // Non-pretty: `[link](url)` is rendered literally; url_scan also
-        // finds the URL inside `(url)` so two hyperlinks are emitted.
+        // Non-pretty: `[link](url)` is rendered literally; url_scan also finds the URL inside `(url)` so two hyperlinks are emitted
         let h = parser_link_text(&out, "link");
         let rendered = line_to_string(&out.lines[h.line_index]);
         let slice: String = rendered
@@ -296,17 +257,14 @@ mod hyperlink_tests {
         assert_eq!(slice, "link");
     }
 
-    /// Two links with identical text on the same line MUST produce two
-    /// distinct `HyperlinkTarget`s with distinct URLs and disjoint column
-    /// ranges.  This is the case the substring approach got wrong (both
-    /// would resolve to the first occurrence).
+    /// Two links with identical text on the same line MUST produce two distinct `HyperlinkTarget`s with distinct URLs and disjoint column ranges.
+    /// This is the case the substring approach got wrong (both would resolve to the first occurrence).
     #[test]
     fn duplicated_link_text_on_one_line_produces_distinct_targets() {
         let text = "See [click](https://a.example) and [click](https://b.example) here.\n";
         let (out, _) = render_markdown_ratatui_full(text, test_style::STYLE, true, None);
 
-        // Two parser-produced link-text hyperlinks (cover "click") plus
-        // two url_scan-produced hyperlinks for the `(url)` suffixes.
+        // Two parser-produced link-text hyperlinks (cover "click") plus two url_scan-produced hyperlinks for the `(url)` suffixes
         let click_targets: Vec<&HyperlinkTarget> = out
             .hyperlinks
             .iter()
@@ -343,15 +301,14 @@ mod hyperlink_tests {
         );
     }
 
-    /// CJK characters in link text consume 2 cells each.  The column range
-    /// must reflect display width, not byte length (`日本語` is 9 bytes / 6 cells).
+    /// CJK characters in link text consume 2 cells each.
+    /// The column range must reflect display width, not byte length (`日本語` is 9 bytes / 6 cells).
     #[test]
     fn cjk_link_uses_display_width_for_column_range() {
         let text = "[日本語](https://example.com)\n";
         let (out, _) = render_markdown_ratatui_full(text, test_style::STYLE, true, None);
 
-        // The parser produces one hyperlink over the CJK link text; the
-        // url_scan pass produces a second over the `(url)` suffix.
+        // The parser produces one hyperlink over the CJK link text; the url_scan pass produces a second over the `(url)` suffix
         let h = parser_link_text(&out, "日本語");
         assert_eq!(
             h.column_range.len(),
@@ -360,14 +317,11 @@ mod hyperlink_tests {
         );
     }
 
-    /// `<https://example.com>` autolink: parser records the source range
-    /// over the entire `<...>`-bounded text.  Because pulldown-cmark fires
-    /// multiple sub-chunks within a single autolink (the `<`, the URL
-    /// text, and the `>`), the in-render translation may emit multiple
-    /// `HyperlinkTarget`s — but they MUST all share the same `id` and
-    /// `url`, and their column ranges must collectively cover the
-    /// rendered URL on a single line.  This is the same semantic shape
-    /// as a link that wraps across two rendered lines.
+    /// `<https://example.com>` autolink: the parser records the source range over the entire `<...>`-bounded text.
+    /// pulldown-cmark fires multiple sub-chunks within a single autolink (the `<`, the URL text, and the `>`).
+    /// The in-render translation may therefore emit multiple `HyperlinkTarget`s.
+    /// They MUST all share the same `id` and `url`, and their column ranges must collectively cover the rendered URL on a single line.
+    /// This is the same shape as a link that wraps across two rendered lines.
     #[test]
     fn autolink_emits_grouped_targets_for_same_logical_link() {
         let text = "Visit <https://example.com> for info.\n";
@@ -412,25 +366,21 @@ mod hyperlink_tests {
         );
     }
 
-    /// Two links with prose between them on the same line: the second
-    /// link's column range must be measured from the start of the line
-    /// (i.e. the running `cur_col_in_line` survives across emit chunks).
+    /// Two links with prose between them on the same line: the second link's column range must be measured from the start of the line.
+    /// The running `cur_col_in_line` must survive across emit chunks.
     #[test]
     fn two_links_with_prose_between_have_correct_columns() {
         let text = "Pre [a](https://a.example) mid [b](https://b.example) post.\n";
         let (out, _) = render_markdown_ratatui_full(text, test_style::STYLE, true, None);
 
-        // Two parser-produced link-text targets (covering "a" and "b")
-        // plus two url_scan-produced targets for the `(url)` suffixes.
+        // Two parser-produced link-text targets (covering "a" and "b") plus two url_scan-produced targets for the `(url)` suffixes
         let h0 = parser_link_text(&out, "a");
         let h1 = parser_link_text(&out, "b");
         assert_eq!(h0.line_index, h1.line_index);
     }
 
-    /// Streaming byte-by-byte must produce the same hyperlinks (parser +
-    /// url_scan) as a single full render.  Both code paths run the
-    /// `url_scan` pass after parsing, so the sets must be equal (modulo
-    /// ordering, which both paths normalise via the same sort key).
+    /// Streaming byte-by-byte must produce the same hyperlinks (parser + url_scan) as a single full render.
+    /// Both code paths run the `url_scan` pass after parsing and sort by the same key, so the outputs must be equal.
     #[test]
     fn streaming_byte_by_byte_matches_full_render() {
         let text = "# Header\n\nSee [docs](https://example.com/docs) and [api](https://example.com/api).\n\n";
@@ -438,8 +388,8 @@ mod hyperlink_tests {
 
         let mut renderer = StreamingMarkdownRenderer::new(test_style::STYLE, true);
         for byte in text.as_bytes() {
-            // Push one byte at a time.  The input is pure ASCII so each
-            // single-byte slice is a valid UTF-8 string.
+            // Push one byte at a time
+            // The input is pure ASCII so each single-byte slice is a valid UTF-8 string
             let buf = [*byte];
             let s = std::str::from_utf8(&buf).expect("ascii test input");
             renderer.push_and_render(s, None);
@@ -447,9 +397,8 @@ mod hyperlink_tests {
         renderer.finish(None);
         let view = renderer.view();
 
-        // Compare on `(url, line_index, column_range)` — ids are
-        // intentionally independent between the two code paths (full
-        // re-render restarts id counters; streaming preserves continuity).
+        // Compare on `(url, line_index, column_range)`; ids are intentionally independent between the two code paths
+        // A full re-render restarts id counters; streaming preserves continuity
         let extract = |hs: &[HyperlinkTarget]| -> Vec<(String, usize, std::ops::Range<usize>)> {
             let mut v: Vec<_> = hs
                 .iter()
@@ -465,12 +414,10 @@ mod hyperlink_tests {
         );
     }
 
-    /// A link whose source bytes straddle the frozen/tail boundary in the
-    /// streaming renderer must still produce a `HyperlinkTarget` pointing
-    /// at the right rendered line and columns.  In pretty mode,
-    /// `[my link](url)` renders as `my link (url)`, so the renderer
-    /// produces 2 targets: one parser-produced over the link text, and
-    /// one from the url_scan pass over the `(url)` suffix.
+    /// A link whose source bytes straddle the frozen/tail boundary in the streaming renderer must still produce a `HyperlinkTarget`.
+    /// The target must point at the right rendered line and columns.
+    /// In pretty mode, `[my link](url)` renders as `my link (url)`, so the renderer produces 2 targets.
+    /// One is parser-produced over the link text; one comes from the url_scan pass over the `(url)` suffix.
     #[test]
     fn streaming_link_across_chunk_boundaries_resolves_correctly() {
         let part1 = "Para one.\n\nSee [my ";
@@ -478,9 +425,7 @@ mod hyperlink_tests {
         let full_text = format!("{part1}{part2}");
 
         let (full, _) = render_markdown_ratatui_full(&full_text, test_style::STYLE, true, None);
-        // Both code paths now run url_scan, so the full-render output
-        // contains the parser-produced link-text hyperlink and the
-        // url_scan-produced URL-suffix hyperlink.
+        // Both code paths run url_scan, so the full render has the parser-produced link-text hyperlink and the url_scan URL-suffix hyperlink
         assert_eq!(full.hyperlinks.len(), 2);
         let expected = parser_link_text(&full, "my link");
 
@@ -507,9 +452,8 @@ mod hyperlink_tests {
         assert_eq!(got.column_range, expected.column_range);
     }
 
-    /// Covers the case where the URL literal itself contains `](` (plus a streaming
-    /// split inside the tag source). The dest-anchored rfind logic also protects
-    /// realistic nested-image-in-link cases (see nested_image_in_link_finds_outer_closer).
+    /// Covers the case where the URL literal itself contains `](` (plus a streaming split inside the tag source).
+    /// The dest-anchored rfind logic also protects realistic nested-image-in-link cases (see nested_image_in_link_finds_outer_closer).
     #[test]
     fn dest_url_containing_bracket_paren_with_streaming_split() {
         let text = "[t](<u](v>) end\n";
@@ -541,8 +485,8 @@ mod hyperlink_tests {
         assert_eq!(view_link.column_range, link.column_range);
     }
 
-    /// Realistic trigger for the bug: nested image inside a link (common in LLM
-    /// output: badges, thumbnails, etc.). The outer closer must be found correctly.
+    /// Realistic trigger for the bug: nested image inside a link (common in LLM output: badges, thumbnails, etc.).
+    /// The outer closer must be found correctly.
     #[test]
     fn nested_image_in_link_finds_outer_closer() {
         let text = "[![badge](https://img.shields.io/v1.svg)](https://github.com/repo) end\n";
@@ -560,19 +504,15 @@ mod hyperlink_tests {
         );
     }
 
-    /// Markdown links inside table cells must produce `HyperlinkTarget`s
-    /// the same way links inside paragraphs do — otherwise the pager's OSC 8
-    /// overlay never learns about them and the link is not clickable and
-    /// not styled.  Before the fix, `Tag::Link` events inside table cells
-    /// were swallowed by the table state machine, leaving the link text
-    /// as plain text in `StyledCell::spans` with no URL attached.
+    /// Markdown links inside table cells must produce `HyperlinkTarget`s the same way links inside paragraphs do.
+    /// Otherwise the pager's OSC 8 overlay never learns about them and the link is not clickable and not styled.
+    /// Before the fix, `Tag::Link` events inside table cells were swallowed by the table state machine.
+    /// That left the link text as plain text in `StyledCell::spans` with no URL attached.
     ///
     /// This test asserts:
     /// 1. A `HyperlinkTarget` is emitted with the cell's URL.
-    /// 2. Its `column_range` covers the rendered link text glyphs
-    ///    (not the brackets, not the URL).
-    /// 3. The link text span carries the same `link_text` styling
-    ///    paragraph links get (bold in the test style).
+    /// 2. Its `column_range` covers the rendered link text glyphs (not the brackets, not the URL).
+    /// 3. The link text span carries the same `link_text` styling paragraph links get (bold in the test style).
     #[test]
     fn link_inside_table_cell_emits_hyperlink_and_styling() {
         let text = "\
@@ -602,9 +542,8 @@ mod hyperlink_tests {
              got slice={slice:?} from rendered={rendered:?}"
         );
 
-        // (3) The link text span carries `link_text` styling (bold in the
-        // test style).  The cell wrapper splits the cell into multiple
-        // spans; find the span whose content is "click".
+        // (3) The link text span carries `link_text` styling (bold in the test style)
+        // The cell wrapper splits the cell into multiple spans; find the span whose content is "click"
         let cell_line = &out.lines[link.line_index];
         let click_span = cell_line
             .spans
@@ -622,14 +561,11 @@ mod hyperlink_tests {
         );
     }
 
-    /// Paragraph links must keep the `link_text` foreground color even when
-    /// the `text` style sets its own foreground.  Previously the parser
-    /// pushed `ms.text` as a highlight after the link_text highlight whenever
-    /// no `Heading`/`Emphasis`/`Strong`/`Strikethrough` ancestor was present
-    /// — and `merge_styles` lets the later fg color win, so `ms.text`'s color
-    /// silently clobbered `link_text`'s color on plain paragraph links.
-    /// Regression: extending `ancestor_styles` to recognise `Link`/`Image`
-    /// keeps the link_text color intact.
+    /// Paragraph links must keep the `link_text` foreground color even when the `text` style sets its own foreground.
+    /// Previously the parser pushed `ms.text` as a highlight after the link_text highlight.
+    /// It did so whenever no `Heading`/`Emphasis`/`Strong`/`Strikethrough` ancestor was present.
+    /// `merge_styles` lets the later fg color win, so `ms.text`'s color silently clobbered `link_text`'s color on plain paragraph links.
+    /// Regression: extending `ancestor_styles` to recognise `Link`/`Image` keeps the link_text color intact.
     #[test]
     fn paragraph_link_keeps_link_text_fg_over_default_text_fg() {
         use crate::MarkdownStyle;
@@ -668,14 +604,12 @@ mod hyperlink_tests {
         );
     }
 
-    /// Links wrapped in inline formatting (`**[click](url)**`,
-    /// `[**click**](url)`, `*[click](url)*`, `~~[click](url)~~`) must keep
-    /// the `link_text` foreground while still gaining the formatting effect.  The
-    /// Strong/Emphasis ancestor's inner style carries the theme's default
-    /// text fg and its highlight is pushed at `Event::Text` time — *after*
-    /// the `link_text` highlight from `Tag::Link` start — so merge_styles'
-    /// last-wins fg ordering let it clobber the link color.  Regression:
-    /// inline-format ancestors contribute effects only inside a link.
+    /// Links wrapped in inline formatting must keep the `link_text` foreground while still gaining the formatting effect.
+    /// Covered forms: `**[click](url)**`, `[**click**](url)`, `*[click](url)*`, `~~[click](url)~~`.
+    /// The Strong/Emphasis ancestor's inner style carries the theme's default text fg.
+    /// Its highlight is pushed at `Event::Text` time, *after* the `link_text` highlight from `Tag::Link` start.
+    /// merge_styles' last-wins fg ordering therefore let it clobber the link color.
+    /// Regression: inline-format ancestors contribute effects only inside a link.
     #[test]
     fn formatted_link_keeps_link_fg_and_gains_effects() {
         use crate::MarkdownStyle;
@@ -732,10 +666,8 @@ mod hyperlink_tests {
         }
     }
 
-    // Soft break inside link text: the link stays on one rendered line
-    // and the fragments sharing this link's id cover exactly "link text".
-    // SoftBreak splits a link into multiple HyperlinkTargets with the
-    // same id (OSC 8 wrapped-link grouping), so we check the union.
+    // Soft break inside link text: the link stays on one rendered line and the fragments sharing this link's id cover exactly "link text"
+    // SoftBreak splits a link into multiple HyperlinkTargets with the same id (OSC 8 wrapped-link grouping), so we check the union
     #[test]
     fn soft_break_inside_link_text_preserves_column_range() {
         let md = "foo [link\ntext](https://example.com) bar";

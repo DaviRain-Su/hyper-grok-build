@@ -518,13 +518,13 @@ async fn get_worktree_info_nested_plain_repo_does_not_inherit_marker() {
 
 #[tokio::test]
 async fn get_worktree_info_tilde_collapses_home_prefix() {
-    let Some(home) = std::env::var("HOME").ok().filter(|h| !h.is_empty()) else {
+    let Some(home) = xai_dirs::home_dir() else {
         return;
     };
     let tmp = tempfile::tempdir().unwrap();
     let clone = tmp.path().join("clone");
     init_repo_on_branch(&clone, "wt-branch");
-    let fake_main = PathBuf::from(&home).join("xai-fake-main-repo-for-wt-display");
+    let fake_main = home.join("xai-fake-main-repo-for-wt-display");
     std::fs::write(
         clone.join(".git").join("grok-worktree-source"),
         fake_main.display().to_string(),

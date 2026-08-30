@@ -69,12 +69,11 @@ impl AgentView {
             cause,
         };
         self.prompt.set_text("");
-        // Or undo puts the draft back while the slot still holds it, and the next send restores a
-        // second copy over the top.
+        // Or undo puts the draft back while the slot still holds it, and the next send restores a second copy over the top
         self.prompt.clear_history();
 
-        // A second stash discards the draft in the slot. The history does not hold it: `Ctrl+S` was
-        // the only way back.
+        // A second stash discards the draft in the slot
+        // The history does not hold it: `Ctrl+S` was the only way back
         self.prompt_stash = Some(entry);
 
         self.note_stash_change_in_minimal(
@@ -142,9 +141,9 @@ impl AgentView {
             return InputOutcome::Unchanged;
         }
 
-        // A pasted image is still landing off-thread, so neither direction can run yet: stashing
-        // would drop the chip into the emptied composer, and popping would merge it into the
-        // draft coming back. Wait, then let the chord read the settled composer.
+        // A pasted image is still landing off-thread, so neither direction can run yet
+        // Stashing would drop the chip into the emptied composer, and popping would merge it into the draft coming back
+        // Wait, then let the chord read the settled composer
         if self.paste_probe_in_flight > 0 {
             self.deferred_send = Some(super::AgentDeferredSend::Stash);
             return InputOutcome::Changed;
@@ -440,8 +439,8 @@ mod tests {
         ));
     }
 
-    /// Popping while an image is still landing would merge that image into the draft coming back,
-    /// so the empty-composer direction has to wait for the probe just like the stash direction.
+    /// Popping while an image is still landing would merge that image into the draft coming back.
+    /// The empty-composer direction therefore has to wait for the probe just like the stash direction.
     #[test]
     fn a_pop_during_an_image_paste_waits_for_the_image() {
         let mut agent = test_fixtures::make_agent();
@@ -477,8 +476,8 @@ mod tests {
         );
     }
 
-    /// The mouse click on a history row is a second accept path, and it drifted from the keyboard
-    /// one: it left the slot full, so the next send restored a draft the user already had.
+    /// The mouse click on a history row is a second accept path, and it drifted from the keyboard one.
+    /// It left the slot full, so the next send restored a draft the user already had.
     #[test]
     fn accepting_a_recalled_stash_empties_the_slot_on_either_input() {
         let mut agent = test_fixtures::make_agent();

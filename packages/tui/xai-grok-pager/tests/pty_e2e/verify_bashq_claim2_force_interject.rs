@@ -2,10 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// The queue-pane (Ctrl+Enter) arm of send-now on a bash row: the selected
-/// `!` row is promoted to run NOW as its own bash turn (silent cancel of the
-/// running turn) — it must execute as real bash, never reaching the model as
-/// prompt text and never rendering a "❯ !…" block.
+/// Ctrl+Enter in the queue pane sends the selected `!` row now: it runs as its own bash turn and silently cancels the running turn.
+/// The row must execute as real bash, never reach the model as prompt text, and never render a "❯ !…" block.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 #[cfg(unix)]
@@ -50,7 +48,7 @@ async fn verify_bashq_claim2_force_interject() {
         .wait_for_text("STEPONE", Duration::from_secs(30))
         .expect("turn 1 streaming");
 
-    // `CLAIMTWO_%s_OK` keeps the output sentinel out of the queue-row text.
+    // The `%s` keeps `CLAIMTWO_FS_OK` out of the queue-row text, so seeing it later proves the bash ran
     harness
         .inject_keys(b"!printf 'CLAIMTWO_%s_OK\\n' FS\r")
         .expect("submit bash-mode command mid-turn");
@@ -66,7 +64,7 @@ async fn verify_bashq_claim2_force_interject() {
         .inject_keys(CTRL_ENTER)
         .expect("send the selected bash row now");
 
-    // Send-now: the row executes as real bash NOW, as its own turn.
+    // Send-now: the row executes as real bash immediately, as its own turn
     harness
         .wait_for_text("CLAIMTWO_FS_OK", Duration::from_secs(30))
         .expect("queued bash executed via send-now");
@@ -79,8 +77,7 @@ async fn verify_bashq_claim2_force_interject() {
         !users.iter().any(|u| u.contains("CLAIMTWO")),
         "FORCE-SEND CORRUPTION: bash command reached the model as prompt text: {users:#?}"
     );
-    // A row wrongly sent as a model prompt would commit a "❯ !printf…" block
-    // and consume the STEPTWO continuation.
+    // If the row had been sent as a model prompt, it would commit a "❯ !printf…" block and consume the STEPTWO continuation
     assert!(
         !harness.contains_text("\u{276F} !printf"),
         "bash row must not render a user-prompt block\nscreen:\n{}",
@@ -91,7 +88,6 @@ async fn verify_bashq_claim2_force_interject() {
         "no model continuation may run for a bash send-now\nscreen:\n{}",
         harness.screen_contents()
     );
-    // The send-now cancel of turn 1 is silent.
     assert!(
         !harness.contains_text("Turn cancelled by user"),
         "send-now cancel must not render a cancelled marker\nscreen:\n{}",

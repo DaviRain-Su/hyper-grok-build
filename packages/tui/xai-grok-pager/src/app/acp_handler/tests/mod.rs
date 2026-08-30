@@ -196,8 +196,7 @@ pub(super) fn make_app_with_agent(session_id: &str) -> AppView {
     );
     app
 }
-/// A server-shape interjection broadcast (no `interjectionId`, like the
-/// shared-queue interject path — every pane renders it).
+/// A server-shape interjection broadcast (no `interjectionId`, like the shared-queue interject path; every pane renders it).
 pub(super) fn interjection_broadcast(
     session_id: &str,
     text: &str,
@@ -437,8 +436,7 @@ pub(super) fn queue_changed_running(
 ) -> acp::ExtNotification {
     queue_changed_running_ex(session_id, ids, running, None, None, None)
 }
-/// Like [`queue_changed_running`], with optional running-turn display
-/// fields (`runningText` / `runningKind` / `runningCombinedTexts`).
+/// Like [`queue_changed_running`], with optional running-turn display fields (`runningText` / `runningKind` / `runningCombinedTexts`).
 pub(super) fn queue_changed_running_ex(
     session_id: &str,
     ids: &[&str],
@@ -601,9 +599,8 @@ pub(super) fn make_fired_notif_with_subagent(
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
     acp::ExtNotification::new("x.ai/scheduled_task_fired", std::sync::Arc::from(raw))
 }
-/// Set up an app with two agents; the active view points to agent 1, but
-/// agent 0 owns the scheduled task. Handlers that gate on `active_view`
-/// will mutate the wrong agent (or silently no-op).
+/// Set up an app with two agents; the active view points to agent 1, but agent 0 owns the scheduled task.
+/// Handlers that gate on `active_view` will mutate the wrong agent (or silently no-op).
 pub(super) fn make_app_two_agents() -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
@@ -646,7 +643,7 @@ pub(super) fn announcements_update_notif(
         ),
     )
 }
-/// Id of the item the banner slot currently selects (None = banner closed).
+/// Id of the item the banner slot currently selects (`None` means the banner is closed).
 pub(super) fn shown_banner_id(app: &AppView) -> Option<String> {
     crate::views::announcements::first_session_announcement(
             &app.active_announcements,
@@ -741,7 +738,7 @@ pub(super) fn make_agent_chunk_message(
         response_tx: tx,
     })
 }
-/// `AgentMessageChunk` with `promptId`/`isReplay` + optional `eventId`.
+/// `AgentMessageChunk` with `promptId`/`isReplay` and an optional `eventId`.
 pub(super) fn make_agent_chunk_meta(
     session_id: &str,
     text: &str,
@@ -770,7 +767,7 @@ pub(super) fn make_agent_chunk_meta(
         response_tx: tx,
     })
 }
-/// `promptId`-tagged chunk (no `eventId`) — drives the viewer live-delta path.
+/// `promptId`-tagged chunk (no `eventId`); drives the viewer live-delta path.
 pub(super) fn make_agent_chunk_message_with_prompt(
     session_id: &str,
     text: &str,
@@ -869,8 +866,7 @@ pub(super) fn xai_unhandled_notif(
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
-/// Build an `agent_message_chunk` notification carrying both `totalTokens`
-/// and an explicit `eventId`, for context/dedup interaction tests.
+/// Build an `agent_message_chunk` notification carrying both `totalTokens` and an explicit `eventId`, for context/dedup interaction tests.
 pub(super) fn make_token_notification_with_event(
     session_id: &str,
     total_tokens: u64,
@@ -913,8 +909,7 @@ pub(super) fn prompt_complete_ext(session_id: &str) -> acp::ExtNotification {
 pub(super) fn insert_agent(app: &mut AppView, id: AgentId, session_id: Option<&str>) {
     app.agents.insert(id, make_agent(session_id));
 }
-/// Build an `x.ai/session/prompt_complete` ext-notification with an explicit
-/// `stopReason` and optional `agentResult`.
+/// Build an `x.ai/session/prompt_complete` ext-notification with an explicit `stopReason` and optional `agentResult`.
 pub(super) fn prompt_complete_ext_with_reason(
     session_id: &str,
     stop_reason: &str,
@@ -930,10 +925,33 @@ pub(super) fn prompt_complete_ext_with_reason(
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
     acp::ExtNotification::new("x.ai/session/prompt_complete", std::sync::Arc::from(raw))
 }
-/// Build an `x.ai/session/prompt_complete` ext-notification carrying a
-/// `promptId` (shells with the lost-response fix). Built through the
-/// typed [`PromptCompletePayload`] so the test wire shape can never
-/// drift from what `handle_prompt_complete` parses.
+/// Failed `x.ai/session/prompt_complete` carrying the typed `errorKind`.
+/// Built through the typed [`PromptCompletePayload`] so the test wire shape can never drift from what `handle_prompt_complete` parses.
+/// Callers pass an `agent_result` with no canonical truncation text.
+/// A rail test therefore fails if its typed-kind read is deleted; the text fallback cannot mask it.
+pub(super) fn prompt_complete_ext_failed_with_error_kind(
+    session_id: &str,
+    agent_result: &str,
+    error_kind: &str,
+) -> acp::ExtNotification {
+    let raw = serde_json::value::to_raw_value(
+            &PromptCompletePayload {
+                session_id: session_id.to_string(),
+                stop_reason: Some("error".to_string()),
+                prompt_id: None,
+                agent_result: Some(agent_result.to_string()),
+                cancel_trigger: None,
+                cancellation_category: None,
+                cancellation_context: None,
+                error_kind: Some(error_kind.to_string()),
+                meta: None,
+            },
+        )
+        .unwrap();
+    acp::ExtNotification::new("x.ai/session/prompt_complete", std::sync::Arc::from(raw))
+}
+/// Build an `x.ai/session/prompt_complete` ext-notification carrying a `promptId` (shells with the lost-response fix).
+/// Built through the typed [`PromptCompletePayload`] so the test wire shape can never drift from what `handle_prompt_complete` parses.
 pub(super) fn prompt_complete_ext_with_prompt_id(
     session_id: &str,
     prompt_id: &str,
@@ -948,15 +966,15 @@ pub(super) fn prompt_complete_ext_with_prompt_id(
                 cancel_trigger: None,
                 cancellation_category: None,
                 cancellation_context: None,
+                error_kind: None,
                 meta: None,
             },
         )
         .unwrap();
     acp::ExtNotification::new("x.ai/session/prompt_complete", std::sync::Arc::from(raw))
 }
-/// Build a live `AgentMessageChunk` whose meta carries `promptId` plus a
-/// `turnStartMs` `start_ms_ago` milliseconds in the past — drives the viewer
-/// adoption path with a known authoritative turn start.
+/// Build a live `AgentMessageChunk` whose meta carries `promptId` plus a `turnStartMs` `start_ms_ago` milliseconds in the past.
+/// Drives the viewer adoption path with a known authoritative turn start.
 pub(super) fn make_viewer_chunk_with_turn_start(
     session_id: &str,
     prompt_id: &str,
@@ -1016,7 +1034,7 @@ pub(super) fn make_replay_chunk_with_turn_start(
         response_tx: tx,
     })
 }
-/// Replayed TodoWrite — tracker suppresses it (`changed == false`).
+/// Replayed TodoWrite; the tracker suppresses it (`changed == false`).
 pub(super) fn send_replay_suppressed_tool_call(
     app: &mut AppView,
     session_id: &str,
@@ -1084,9 +1102,8 @@ pub(super) fn send_replay_bash_tool_call(
         app,
     );
 }
-/// Build a durable `TurnCompleted` update on the `x.ai/session/update` rail,
-/// optionally stamped `isReplay`. Built through the typed `SessionNotification`
-/// so the wire shape can't drift from what the dispatch parses.
+/// Build a durable `TurnCompleted` update on the `x.ai/session/update` rail, optionally stamped `isReplay`.
+/// Built through the typed `SessionNotification` so the wire shape can't drift from what the dispatch parses.
 pub(super) fn xai_turn_completed_notif(
     session_id: &str,
     prompt_id: &str,
@@ -1099,6 +1116,7 @@ pub(super) fn xai_turn_completed_notif(
             prompt_id: prompt_id.into(),
             stop_reason: stop_reason.into(),
             agent_result: None,
+            error_kind: None,
             usage: None,
             elapsed_ms: None,
         },
@@ -1130,10 +1148,38 @@ pub(super) fn xai_turn_completed_replay(
             prompt_id: prompt_id.into(),
             stop_reason: stop_reason.into(),
             agent_result: agent_result.map(str::to_string),
+            error_kind: None,
             usage: None,
             elapsed_ms,
         },
         meta: Some(meta),
+    };
+    acp::ExtNotification::new(
+        "x.ai/session/update",
+        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+    )
+}
+/// Failed `TurnCompleted` carrying `agent_result` plus the typed `error_kind` field.
+/// Callers pass an `agent_result` with no canonical truncation text.
+/// A rail test therefore fails if its typed-kind read is deleted; the text fallback cannot mask it.
+pub(super) fn xai_turn_completed_failed_with_error_kind(
+    session_id: &str,
+    prompt_id: &str,
+    agent_result: &str,
+    error_kind: &str,
+    is_replay: bool,
+) -> acp::ExtNotification {
+    let payload = SessionNotification {
+        session_id: acp::SessionId::new(session_id),
+        update: XaiSessionUpdate::TurnCompleted {
+            prompt_id: prompt_id.into(),
+            stop_reason: "error".into(),
+            agent_result: Some(agent_result.to_string()),
+            error_kind: Some(error_kind.to_string()),
+            usage: None,
+            elapsed_ms: None,
+        },
+        meta: Some(serde_json::json!({ "isReplay": is_replay })),
     };
     acp::ExtNotification::new(
         "x.ai/session/update",
@@ -1153,6 +1199,7 @@ pub(super) fn xai_turn_completed_notif_with_cancel_trigger(
             prompt_id: prompt_id.into(),
             stop_reason: stop_reason.into(),
             agent_result: None,
+            error_kind: None,
             usage: None,
             elapsed_ms: None,
         },
@@ -1168,8 +1215,7 @@ pub(super) fn xai_turn_completed_notif_with_cancel_trigger(
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
-/// A live durable `TurnCompleted`, optionally stamped with the shell
-/// completion clock (`agentTimestampMs`) the wake marker's elapsed reads.
+/// A live durable `TurnCompleted`, optionally stamped with the shell completion clock (`agentTimestampMs`) the wake marker's elapsed reads.
 pub(super) fn xai_wake_turn_completed_notif(
     session_id: &str,
     prompt_id: &str,
@@ -1185,6 +1231,7 @@ pub(super) fn xai_wake_turn_completed_notif(
             prompt_id: prompt_id.into(),
             stop_reason: "end_turn".into(),
             agent_result: None,
+            error_kind: None,
             usage: None,
             elapsed_ms: None,
         },
@@ -1195,8 +1242,7 @@ pub(super) fn xai_wake_turn_completed_notif(
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
-/// Build a `HookExecution` update (one successful run) on the
-/// `x.ai/session/update` rail, optionally stamped `isReplay`.
+/// Build a `HookExecution` update (one successful run) on the `x.ai/session/update` rail, optionally stamped `isReplay`.
 /// `prompt_id == None` models pre-attribution shells.
 pub(super) fn xai_hook_execution_notif_for_prompt(
     session_id: &str,
@@ -1284,8 +1330,7 @@ pub(super) fn work_status_lines(sb: &ScrollbackState) -> Vec<String> {
         })
         .collect()
 }
-/// Register two running background commands on the (idle) agent through
-/// the wire.
+/// Register two running background commands on the (idle) agent through the wire.
 pub(super) fn seed_two_bg_tasks(app: &mut AppView, session_id: &str) {
     let _ = handle_ext_notification(
         &make_task_backgrounded_notif(session_id, "tc-1", "task-1", "sleep 98"),
@@ -1300,8 +1345,7 @@ pub(super) fn seed_two_bg_tasks(app: &mut AppView, session_id: &str) {
 pub(super) fn interjection_ext(session_id: &str, text: &str) -> acp::ExtNotification {
     interjection_ext_with_id(session_id, text, None)
 }
-/// Build an `x.ai/session/interjection` ext-notification with an optional
-/// `interjectionId` (the originator-dedup key).
+/// Build an `x.ai/session/interjection` ext-notification with an optional `interjectionId` (the originator-dedup key).
 pub(super) fn interjection_ext_with_id(
     session_id: &str,
     text: &str,
@@ -1324,9 +1368,8 @@ pub(super) fn last_interjection_text(sb: &ScrollbackState) -> Option<String> {
             _ => None,
         })
 }
-/// Switch the active view to `id` via the canonical helper. Wrapping
-/// here keeps the source-scan invariant test
-/// (`no_direct_active_view_assignment_outside_switch_to_agent`) happy.
+/// Switch the active view to `id` via the canonical helper.
+/// Wrapping here keeps the source-scan invariant test (`no_direct_active_view_assignment_outside_switch_to_agent`) happy.
 pub(super) fn switch_active_to(app: &mut AppView, id: AgentId) {
     crate::app::dispatch::switch_to_agent(
         app,
@@ -1387,8 +1430,8 @@ pub(super) fn make_commands_update_message(
         response_tx: tx,
     })
 }
-/// Build a `ToolCallUpdate` notification carrying a Bash `raw_output`
-/// chunk for `tool_call_id`. Used to drive the bg-task stdout route.
+/// Build a `ToolCallUpdate` notification carrying a Bash `raw_output` chunk for `tool_call_id`.
+/// Used to drive the bg-task stdout route.
 pub(super) fn make_bash_stdout_message(
     session_id: &str,
     tool_call_id: &str,
@@ -1596,9 +1639,8 @@ pub(super) fn run_subagent_lifecycle_via_method(
     let finish = snapshot_after_subagent_finish(&app, child_sid);
     (spawn, finish)
 }
-/// Shared temp `GROK_HOME` for disk-replay tests. `grok_home()` uses a
-/// process-wide `OnceLock`, so parallel tests must not each set `GROK_HOME`
-/// to a different tempdir.
+/// Shared temp `GROK_HOME` for disk-replay tests.
+/// `grok_home()` uses a process-wide `OnceLock`, so parallel tests must not each set `GROK_HOME` to a different tempdir.
 pub(super) fn replay_disk_test_home() -> &'static std::path::Path {
     use std::sync::OnceLock;
     static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
@@ -1611,8 +1653,8 @@ pub(super) fn replay_disk_test_home() -> &'static std::path::Path {
         })
         .path()
 }
-/// Runs `f` with a thread-local grok home override so disk replay tests do not
-/// depend on process-wide `grok_home()` cache order when the full suite runs.
+/// Runs `f` with a thread-local grok home override.
+/// Disk replay tests then do not depend on process-wide `grok_home()` cache order when the full suite runs.
 pub(super) fn with_replay_disk_home<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
     let home = replay_disk_test_home();
     crate::app::subagent::set_replay_grok_home_for_tests(Some(home.to_path_buf()));
@@ -1697,8 +1739,7 @@ pub(super) fn write_subagent_meta_json(
     let json = format!(r#"{{"prompt":{}}}"#, serde_json::to_string(prompt).unwrap());
     std::fs::write(sessions_dir.join("meta.json"), json).unwrap();
 }
-/// The persisted echo of a task prompt wraps differently from the
-/// injected copy, so compare with internal whitespace collapsed.
+/// The persisted echo of a task prompt wraps differently from the injected copy, so compare with internal whitespace collapsed.
 fn subagent_prompt_text_eq(a: &str, b: &str) -> bool {
     a.split_whitespace().eq(b.split_whitespace())
 }
@@ -1755,8 +1796,7 @@ pub(super) fn spawn_subagent_with_optional_updates(
         app,
     );
 }
-/// A minimal `GoalUpdated` `update` object (the required wire fields) for
-/// `sess-A`; callers add optional fields before dispatching.
+/// A minimal `GoalUpdated` `update` object (the required wire fields) for `sess-A`; callers add optional fields before dispatching.
 pub(super) fn goal_update_value(
     goal_id: &str,
     status: &str,
@@ -1778,8 +1818,7 @@ pub(super) fn goal_update_value(
             "finished_subagent_tokens": 0,
         })
 }
-/// Wrap an `update` object in the session envelope and run it through the
-/// real handler; returns whether the notification requested a redraw.
+/// Wrap an `update` object in the session envelope and run it through the real handler; returns whether the notification requested a redraw.
 pub(super) fn dispatch_goal_update(
     app: &mut AppView,
     update: serde_json::Value,
@@ -1795,8 +1834,7 @@ pub(super) fn dispatch_goal_update(
         app,
     )
 }
-/// Build + dispatch a `GoalUpdated` for `sess-A` with the given id /
-/// status / elapsed; returns whether the notification requested a redraw.
+/// Build and dispatch a `GoalUpdated` for `sess-A` with the given id / status / elapsed; returns whether the notification requested a redraw.
 pub(super) fn send_goal_update(
     app: &mut AppView,
     goal_id: &str,
@@ -1805,8 +1843,7 @@ pub(super) fn send_goal_update(
 ) -> bool {
     dispatch_goal_update(app, goal_update_value(goal_id, status, elapsed_ms))
 }
-/// Build a minimal `RequestPermission` message that carries `session_id`
-/// and one `AllowOnce` option.
+/// Build a minimal `RequestPermission` message that carries `session_id` and one `AllowOnce` option.
 pub(super) fn make_permission_message(
     session_id: &str,
 ) -> (
@@ -1833,9 +1870,8 @@ pub(super) fn make_permission_message(
     });
     (msg, rx)
 }
-/// Build an `x.ai/session_notification` carrying
-/// `InteractionResolved{tool_call_id}` (the first-answer-wins broadcast that
-/// tells every other pane to retract its shared interaction modal).
+/// Build an `x.ai/session_notification` carrying `InteractionResolved{tool_call_id}`.
+/// This is the first-answer-wins broadcast that tells every other pane to retract its shared interaction modal.
 pub(super) fn interaction_resolved_ext(
     session_id: &str,
     tool_call_id: &str,
@@ -1887,9 +1923,8 @@ pub(super) fn make_task_backgrounded_notif(
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
     acp::ExtNotification::new("x.ai/task_backgrounded", std::sync::Arc::from(raw))
 }
-/// Like [`make_task_backgrounded_notif`] but stamped `_meta.isReplay:
-/// true` via the typed [`ReplayMetaStamp`](crate::acp::meta::ReplayMetaStamp),
-/// mirroring the `session/load` replay envelope.
+/// Like [`make_task_backgrounded_notif`] but stamped `_meta.isReplay: true` via the typed [`ReplayMetaStamp`](crate::acp::meta::ReplayMetaStamp).
+/// Mirrors the `session/load` replay envelope.
 pub(super) fn make_replayed_task_backgrounded_notif(
     session_id: &str,
     tool_call_id: &str,
@@ -1912,8 +1947,8 @@ pub(super) fn make_replayed_task_backgrounded_notif(
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
     acp::ExtNotification::new("x.ai/session/update", std::sync::Arc::from(raw))
 }
-/// Register a pending Execute tool call in the tracker and send an InProgress
-/// update to create the scrollback entry. Returns the agent for further use.
+/// Register a pending Execute tool call in the tracker and send an InProgress update to create the scrollback entry.
+/// Returns the agent for further use.
 pub(super) fn setup_pending_execute_tool(app: &mut AppView, tc_id: &str) {
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     let meta = crate::acp::meta::NotificationMeta::default();
@@ -2081,9 +2116,8 @@ pub(super) fn make_models_update_notif(
     let raw = serde_json::value::to_raw_value(&state).unwrap();
     acp::ExtNotification::new("x.ai/models/update", std::sync::Arc::from(raw))
 }
-/// `x.ai/models/update` carrying a single reasoning-capable model whose
-/// catalog-default effort is `default_effort` (what the broadcast reports
-/// for every client — never the per-session selection).
+/// `x.ai/models/update` carrying a single reasoning-capable model whose catalog-default effort is `default_effort`.
+/// The broadcast reports that catalog default for every client, never the per-session selection.
 pub(super) fn make_reasoning_models_update_notif(
     current_model_id: &str,
     default_effort: &str,
@@ -2102,10 +2136,8 @@ pub(super) fn make_reasoning_models_update_notif(
     let raw = serde_json::value::to_raw_value(&state).unwrap();
     acp::ExtNotification::new("x.ai/models/update", std::sync::Arc::from(raw))
 }
-/// Seed a session's model catalog with the given ids and mark
-/// `current_model_id` as the active one (must be in the list). Used by
-/// the `ModelChanged` broadcast tests to set up a starting state that
-/// the simulated remote/local switch then transitions away from.
+/// Seed a session's model catalog with the given ids and mark `current_model_id` as the active one (must be in the list).
+/// Used by the `ModelChanged` broadcast tests to set up a starting state that the simulated remote/local switch then transitions away from.
 pub(super) fn seed_models(agent: &mut AgentView, current: &str, available: &[&str]) {
     for id in available {
         let model_id = acp::ModelId::new(std::sync::Arc::from(*id));
@@ -2219,10 +2251,8 @@ pub(super) fn seed_owner_agent_with_open_modal(app: &mut AppView) {
         ),
     );
 }
-/// Build a `server_status` notification using the SHELL's canonical
-/// `McpServerStatusPayload` so the test exercises the actual wire
-/// type — not a synthesized json object that could drift from
-/// the shell.
+/// Build a `server_status` notification using the SHELL's canonical `McpServerStatusPayload`.
+/// The test then exercises the actual wire type, not a synthesized json object that could drift from the shell.
 pub(super) fn make_server_status_notif(
     session_id: &str,
     name: &str,
@@ -2244,17 +2274,14 @@ pub(super) fn make_server_status_notif(
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
     acp::ExtNotification::new("x.ai/mcp/server_status", std::sync::Arc::from(raw))
 }
-/// `mcp/servers_updated` real wire shape — `{ mcpServers: [...] }`
-/// with NO `sessionId`. Regression guard: anything that tries to
-/// extract a session id here must fail and fall through to the
-/// broadcast path.
+/// `mcp/servers_updated` real wire shape: `{ mcpServers: [...] }` with NO `sessionId`.
+/// Regression guard: anything that tries to extract a session id here must fail and fall through to the broadcast path.
 pub(super) fn make_servers_updated_notif() -> acp::ExtNotification {
     let payload = serde_json::json!({ "mcpServers": [] });
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
     acp::ExtNotification::new("x.ai/mcp/servers_updated", std::sync::Arc::from(raw))
 }
-/// Real post-handshake / auth-recovery wire shape:
-/// `McpToolsChanged { sessionId, serverName, tools }`.
+/// Real post-handshake / auth-recovery wire shape: `McpToolsChanged { sessionId, serverName, tools }`.
 pub(super) fn make_tools_changed_notif_post_h2(
     session_id: &str,
 ) -> acp::ExtNotification {
@@ -2266,16 +2293,14 @@ pub(super) fn make_tools_changed_notif_post_h2(
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
     acp::ExtNotification::new("x.ai/mcp/tools_changed", std::sync::Arc::from(raw))
 }
-/// Legacy / forward-compat wire shape: older shells emit
-/// `{ serverName, tools }` with NO sessionId. The pager must fall
-/// back to active_view for this shape.
+/// Legacy / forward-compat wire shape: older shells emit `{ serverName, tools }` with NO sessionId.
+/// The pager must fall back to active_view for this shape.
 pub(super) fn make_tools_changed_notif_pre_h2() -> acp::ExtNotification {
     let payload = serde_json::json!({ "serverName": "grok_com_linear", "tools": [] });
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
     acp::ExtNotification::new("x.ai/mcp/tools_changed", std::sync::Arc::from(raw))
 }
-/// Real `mcp_initialized` wire shape:
-/// `{ sessionId, mcpToolCount, elapsedMs }`.
+/// Real `mcp_initialized` wire shape: `{ sessionId, mcpToolCount, elapsedMs }`.
 pub(super) fn make_mcp_initialized_notif(session_id: &str) -> acp::ExtNotification {
     let payload = serde_json::json!({
             "sessionId": session_id,

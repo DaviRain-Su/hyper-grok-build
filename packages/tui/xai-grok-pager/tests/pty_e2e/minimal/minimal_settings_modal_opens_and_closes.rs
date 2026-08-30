@@ -2,9 +2,8 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// `/settings` opens the full settings editor inline in minimal mode —
-/// hosted in the grown live viewport, reusing the real `render_settings_modal`
-/// so behavior matches the full TUI — and Esc closes it back to the prompt.
+/// `/settings` opens the full settings editor inline in minimal mode, and Esc closes it back to the prompt.
+/// The editor is hosted in the grown live viewport and reuses the real `render_settings_modal`, so behavior matches the full TUI.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_settings_modal_opens_and_closes() {
@@ -12,13 +11,11 @@ async fn minimal_settings_modal_opens_and_closes() {
     let mut harness = spawn_minimal(&content);
     wait_minimal_ready(&mut harness);
 
-    // Open the settings editor (paced so the slash dropdown opens rather than
-    // the bytes paste-coalescing), then submit.
+    // Open the settings editor, pacing the keys so the slash dropdown opens instead of the bytes coalescing into a paste, then submit
     inject_keys_paced(&mut harness, b"/settings");
     harness.inject_keys(b"\r").expect("submit /settings");
 
-    // "Appearance" is the first settings category header — it renders only in
-    // the settings editor, never in the status line or the slash dropdown.
+    // "Appearance" is the first settings category header; it renders only in the settings editor, never in the status line or the slash dropdown
     harness
         .wait_for_text("Appearance", Duration::from_secs(10))
         .expect("settings editor renders inline");

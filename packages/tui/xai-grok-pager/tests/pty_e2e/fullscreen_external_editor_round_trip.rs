@@ -2,11 +2,9 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// The full TUI reaches the external editor through the command palette's
-/// `/edit-prompt` entry (`Ctrl+G` stays with the tasks pane there). The
-/// palette route hands the existing draft to a local non-interactive editor
-/// script, restores the TUI, and leaves the edited text in the composer
-/// until the user submits it.
+/// The full TUI reaches the external editor through the command palette's `/edit-prompt` entry (`Ctrl+G` stays with the tasks pane there).
+/// The palette route hands the existing draft to a local non-interactive editor script and restores the TUI.
+/// The edited text stays in the composer until the user submits it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn fullscreen_external_editor_round_trip() {
@@ -14,9 +12,8 @@ async fn fullscreen_external_editor_round_trip() {
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} edited prompt received."));
 
     let dir = tempfile::tempdir().expect("temp editor dir");
-    // The DECRST prefix mimics a real vim exit: it resets bracketed paste,
-    // mouse reporting and focus events on the shared tty, which the pager
-    // must re-assert after the editor returns.
+    // The DECRST prefix mimics a real vim exit: it resets bracketed paste, mouse reporting and focus events on the shared tty
+    // The pager must re-assert those modes after the editor returns
     let editor = fake_editor_command(
         dir.path(),
         "#!/bin/sh\n\
@@ -48,9 +45,8 @@ async fn fullscreen_external_editor_round_trip() {
         .expect("turn rendered");
 
     inject_keys_paced(&mut harness, b"draft to polish");
-    // Ctrl+P opens the command palette; picking the /edit-prompt entry
-    // dispatches it draft-preservingly (unlike typing the command, which
-    // would replace the composer text).
+    // Ctrl+P opens the command palette; picking the /edit-prompt entry dispatches it while keeping the draft
+    // Typing the command instead would replace the composer text
     inject_keys_paced(&mut harness, b"\x10");
     inject_keys_paced(&mut harness, b"edit-prompt");
     inject_keys_paced(&mut harness, b"\r");
@@ -63,9 +59,8 @@ async fn fullscreen_external_editor_round_trip() {
         )
         .expect("edited draft restored to composer");
 
-    // The editor reset the shared terminal modes on exit (the DECRST prefix
-    // in the script above); the pager must have re-asserted them, or the
-    // session is left without bracketed paste and mouse reporting.
+    // The editor reset the shared terminal modes on exit (the DECRST prefix in the script above)
+    // The pager must have re-asserted them, or the session is left without bracketed paste and mouse reporting
     let modes = harness.terminal_modes();
     assert!(
         modes.bracketed_paste,
@@ -85,8 +80,8 @@ async fn fullscreen_external_editor_round_trip() {
     harness
         .wait_for_full_text("second turn done", Duration::from_secs(30))
         .expect("edited draft submitted");
-    // The exact wrapped form pins both delivery and the newline strip: an
-    // unstripped editor newline would arrive as `edited externally\n\n</user_query>`.
+    // The exact wrapped form pins two facts: the edited draft reached the wire, and the editor's trailing newline was stripped
+    // An unstripped editor newline would arrive as `edited externally\n\n</user_query>`
     let user_messages = all_user_message_blobs(&content);
     assert!(
         user_messages.iter().any(|message| {

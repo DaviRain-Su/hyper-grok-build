@@ -1,8 +1,7 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
-    /// The pager reconciles the authoritative shared prompt queue from the
-    /// `x.ai/queue/changed` broadcast, and an empty broadcast clears it.
+    /// The pager reconciles the authoritative shared prompt queue from the `x.ai/queue/changed` broadcast, and an empty broadcast clears it.
     #[test]
     fn queue_changed_reconciles_shared_queue() {
         let mut app = make_app_with_agent("sess-1");
@@ -123,17 +122,15 @@
         assert!(!child.queue.is_visible());
     }
 
-    /// When a server-origin row being edited disappears from a later
-    /// broadcast (drained / removed by another client), the queue handler
-    /// exits `EditingQueued` so the composer isn't stranded.
+    /// A later broadcast can drop the server-origin row being edited (another client drained or removed it).
+    /// The queue handler then exits `EditingQueued` so the composer isn't stranded.
     #[test]
     fn queue_changed_exits_editing_when_server_row_disappears() {
         use crate::app::agent_view::PromptMode;
 
         let mut app = make_app_with_agent("sess-1");
 
-        // Establish the shared queue with p1 present, then put the agent in
-        // EditingQueued{server_id: Some("p1")}.
+        // Establish the shared queue with p1 present, then put the agent in EditingQueued{server_id: Some("p1")}
         assert!(handle_ext_notification(
             &queue_changed_ext("sess-1", &["p1"]),
             &mut app
@@ -148,8 +145,7 @@
             };
         }
 
-        // A rebroadcast where p1 is gone (drained or removed elsewhere)
-        // must cancel the editor.
+        // A rebroadcast where p1 is gone (drained or removed elsewhere) must cancel the editor
         assert!(handle_ext_notification(
             &queue_changed_ext("sess-1", &[]),
             &mut app
@@ -162,9 +158,8 @@
         );
     }
 
-    /// When a server-origin row being edited is STILL in the broadcast,
-    /// the editor is preserved (the row's contents may have changed —
-    /// last-writer-wins handles that on the next submit).
+    /// When a server-origin row being edited is STILL in the broadcast, the editor is preserved.
+    /// The row's contents may have changed; last-writer-wins handles that on the next submit.
     #[test]
     fn queue_changed_preserves_editing_when_server_row_still_present() {
         use crate::app::agent_view::PromptMode;
@@ -204,9 +199,8 @@
         );
     }
 
-    /// `queue_changed_ext` with per-entry versions/kinds and a running id —
-    /// for the optimistic-echo send-now race tests, which assert the
-    /// interject fires with the row's authoritative (broadcast) version.
+    /// Like `queue_changed_ext` but with per-entry versions/kinds and a running id.
+    /// The send-now race tests use it to assert the interject fires with the row's authoritative (broadcast) version.
     fn queue_changed_versioned(
         session_id: &str,
         entries: &[(&str, u64, &str)],
@@ -236,10 +230,8 @@
         )
     }
 
-    /// Arm the rapid double-Enter race: a bash command sent mid-turn (its
-    /// server row still an optimistic echo) followed immediately by Enter on
-    /// the empty composer. Returns the echo's prompt id after asserting the
-    /// send-now was PARKED (not fired) against the unconfirmed row.
+    /// Sets up the rapid double-Enter race: a bash command sent mid-turn (its server row still an optimistic echo), then Enter on the empty composer.
+    /// Returns the echo's prompt id after asserting the send-now was PARKED (not fired) against the unconfirmed row.
     fn park_send_now_on_optimistic_bash_row(app: &mut AppView) -> String {
         use crate::app::actions::{Action, Effect};
         use crate::app::app_view::InputOutcome;
@@ -267,9 +259,8 @@
             .cloned()
             .expect("the echo id must be tracked as optimistic");
 
-        // Enter #2 immediately (empty composer): the send-now must PARK —
-        // firing the interject now would overtake the in-flight prompt RPC
-        // shell-side and no-op, silently dropping the send-now.
+        // Enter #2 immediately (empty composer): the send-now must PARK
+        // Firing the interject now would overtake the in-flight prompt RPC shell-side and no-op, silently dropping the send-now
         let outcome = app
             .agents
             .get_mut(&AgentId(0))
@@ -286,11 +277,10 @@
         echo_id
     }
 
-    /// Rapid double-Enter on a queued bash command: the parked send-now fires
-    /// exactly when the confirming broadcast lands, carrying the row's
-    /// authoritative version (firing it early no-opped
-    /// shell-side, dropped the send-now, and the armed cancel expectation hid
-    /// the still-queued row — the command looked like it disappeared).
+    /// Rapid double-Enter on a queued bash command: the parked send-now fires when the confirming broadcast lands.
+    /// It fires with the row's authoritative (broadcast) version.
+    /// Firing it early no-opped shell-side and dropped the send-now.
+    /// The cancel expectation it set hid the still-queued row, so the command looked like it disappeared.
     #[test]
     fn parked_send_now_fires_on_confirming_broadcast() {
         use crate::app::actions::Effect;
@@ -333,8 +323,8 @@
         );
     }
 
-    /// The natural drain wins the race: the parked row is confirmed directly
-    /// as the RUNNING turn — nothing to promote, the park just clears.
+    /// The natural drain wins the race: the parked row is confirmed directly as the RUNNING turn.
+    /// There is nothing to promote, so the park just clears.
     #[test]
     fn parked_send_now_clears_when_row_confirmed_running() {
         use crate::app::actions::Effect;
@@ -357,8 +347,7 @@
         );
     }
 
-    /// A broadcast that does not list the parked row (its RPC still in
-    /// flight) keeps the park armed; the later confirming broadcast fires it.
+    /// A broadcast that does not list the parked row (its RPC still in flight) keeps the park in place; the later confirming broadcast fires it.
     #[test]
     fn parked_send_now_survives_unrelated_broadcast() {
         use crate::app::actions::Effect;
@@ -405,12 +394,11 @@
         );
     }
 
-    /// Correlation wiring: `handle_queue_changed` adopts `current_prompt_id` from
-    /// `runningPromptId` only when it was `None`, never overriding an already-set one.
+    /// `handle_queue_changed` adopts `current_prompt_id` from `runningPromptId` only when it was `None`, never overriding an already-set one.
     #[test]
     fn queue_changed_adopts_running_prompt_id_only_when_unset() {
-        // Shell and pager share the xai-prompt-queue type, so serializing the payload as the
-        // shell emits it pins the wire shape the handler consumes, not cross-crate compat.
+        // Shell and pager share the xai-prompt-queue type
+        // Serializing the payload as the shell emits it pins the wire shape the handler consumes, not cross-crate compat
         let shell_payload = xai_grok_shell::session::prompt_queue::QueueChanged {
             session_id: "sess-1".to_string(),
             entries: Vec::new(),
@@ -428,7 +416,7 @@
 
         let notif = acp::ExtNotification::new("x.ai/queue/changed", raw.into());
 
-        // Case 1: current_prompt_id is None -> adopt it.
+        // Case 1: current_prompt_id is None, so adopt it
         let mut app = make_app_with_agent("sess-1");
         assert!(
             app.agents
@@ -450,8 +438,8 @@
             "adopts running_prompt_id when current_prompt_id was None"
         );
 
-        // Case 2: current_prompt_id already set (the single-client drip-feed
-        // case) -> must NOT be overridden, behaviorally inert.
+        // Case 2: current_prompt_id is already set (one client drip-feeding its own prompts), so the broadcast must NOT override it
+        // The broadcast changes nothing here
         let mut app = make_app_with_agent("sess-1");
         app.agents
             .get_mut(&AgentId(0))
@@ -471,9 +459,8 @@
         );
     }
 
-    /// When nothing is running locally (`current_prompt_id == None`), a
-    /// `running_prompt_id` broadcast is adopted directly and the turn-start
-    /// shim renders the queued prompt's user block + sets `TurnRunning`.
+    /// When nothing is running locally (`current_prompt_id == None`), a `running_prompt_id` broadcast is adopted directly.
+    /// The turn-start shim renders the queued prompt's user block and sets `TurnRunning`.
     #[test]
     fn running_prompt_adopted_directly_with_turn_start_shim_when_idle() {
         let mut app = make_app_with_agent("sess-1");
@@ -555,16 +542,12 @@
         }
     }
 
-    /// Regression: when the shell promotes
-    /// a server-initiated / auto-wake prompt (synthetic id `task-completed-…`,
-    /// injected when a background task finishes) to the running turn, it
-    /// broadcasts `x.ai/queue/changed` with `runningPromptId` = that synthetic
-    /// id. The pager must NOT adopt it via the turn-start shim: those turns run
-    /// inside the actor and emit no `prompt_complete` / `PromptResponse`, so
-    /// `start_turn()` here would strand the pager on "Responding…" forever
-    /// (the exact reported bug — a background task finishing left the spinner
-    /// running indefinitely). It must stay Idle (content still renders via the
-    /// live-delta path, which no longer claims `current_prompt_id` for a driver).
+    /// Regression: a finished background task makes the shell promote its auto-wake prompt (synthetic id `task-completed-…`) to the running turn.
+    /// The shell then broadcasts `x.ai/queue/changed` carrying that synthetic id as `runningPromptId`.
+    /// The pager must NOT adopt it via the turn-start shim: those turns run inside the actor and emit no `prompt_complete` or `PromptResponse`.
+    /// `start_turn()` here would strand the pager on "Responding…" forever.
+    /// That was the reported bug: the spinner never stopped after a background task finished.
+    /// The agent stays Idle; content still renders via the live-delta path, which no longer claims `current_prompt_id` for a driver.
     #[test]
     fn queue_changed_does_not_adopt_server_initiated_running_prompt() {
         let mut app = make_app_with_agent("sess-1");
@@ -592,9 +575,8 @@
         );
     }
 
-    /// Cron (`scheduler-fired-…`) is a synthetic id but is client-driven via
-    /// `MvpAgent::prompt()` and DOES emit `prompt_complete`, so the queue-changed
-    /// adoption must STILL fire for it (the exit exists, so it won't strand).
+    /// Cron (`scheduler-fired-…`) is a synthetic id but is client-driven via `MvpAgent::prompt()` and DOES emit `prompt_complete`.
+    /// The queue-changed adoption must STILL fire for it (the exit exists, so it won't strand).
     /// This is the counterpart to the auto-wake skip above.
     #[test]
     fn queue_changed_adopts_scheduler_fired_running_prompt() {
@@ -619,23 +601,19 @@
         );
     }
 
-    /// Regression (queue shim terminal-in-replay): the
-    /// terminal-aware adoption must hold on the `queue/changed` turn-start path,
-    /// not only the load paths. After a load records a finished turn in
-    /// `replayed_terminal_prompts`, a later `queue/changed` re-reporting that
-    /// same (already-ended) `runningPromptId` must NOT re-adopt it. The pid is
-    /// user-driven (so it passes the pid-only synthetic guard) — only the
-    /// agent-aware `should_adopt_running_prompt`, which consults
-    /// `replayed_terminal_prompts`, stops the viewer re-stranding on "Waiting…",
-    /// mirroring the `SessionLoaded` / reconnect adoption.
+    /// Regression: the terminal-aware adoption guard must hold on the `queue/changed` turn-start path, not only the load paths.
+    /// A load records each finished turn in `replayed_terminal_prompts`.
+    /// A later `queue/changed` that re-reports the same, already-ended `runningPromptId` must NOT re-adopt it.
+    /// The pid is user-driven, so it passes the pid-only synthetic guard.
+    /// Only the agent-aware `should_adopt_running_prompt`, which consults `replayed_terminal_prompts`, stops the viewer re-stranding on "Waiting…".
+    /// This mirrors the `SessionLoaded` and reconnect adoption.
     #[test]
     fn queue_changed_does_not_readopt_terminal_in_replay_running_prompt() {
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
 
-        // A load's replay records the running turn's durable terminal; the load
-        // then completes (loading_replay clears, the terminal set persists until
-        // the next replay window).
+        // A load's replay records the running turn's durable terminal; the load then completes
+        // The load clears loading_replay; the terminal set persists until the next replay window
         app.agents.get_mut(&id).unwrap().session.loading_replay = true;
         let _ = handle_ext_notification(
             &xai_turn_completed_notif("sess-1", "p-run", "end_turn", true),
@@ -666,9 +644,8 @@
         );
     }
 
-    /// No regression: a running prompt NOT in the replay terminal set is still
-    /// adopted by the queue shim (the agent-aware guard is precise — it blocks
-    /// only ended turns, not normal queue-handoff adoption).
+    /// No regression: a running prompt NOT in the replay terminal set is still adopted by the queue shim.
+    /// The agent-aware guard blocks only ended turns, not normal queue-handoff adoption.
     #[test]
     fn queue_changed_still_adopts_running_prompt_not_terminal_in_replay() {
         let mut app = make_app_with_agent("sess-1");
@@ -695,14 +672,11 @@
         assert!(agent.session.state.is_turn_running());
     }
 
-    /// Regression (live-delta path): the auto-wake turn streams its reply as a
-    /// synthetic-promptId `session/update`. On a driver (not a viewer) the
-    /// content must render, but the turn must NOT be claimed — no role flip, no
-    /// `current_prompt_id`, no `TurnRunning` — otherwise it strands the
-    /// turn-status and poisons the slot so later real turns' PromptResponses get
-    /// discarded. (Pairs with the `handle_queue_changed` skip above: together
-    /// they keep synthetic auto-wake turns out of the running slot on BOTH the
-    /// queue-broadcast and the streaming-delta paths.)
+    /// Regression (live-delta path): the auto-wake turn streams its reply as a `session/update` stamped with its synthetic promptId.
+    /// On a driver (not a viewer) the content must render, but the turn must NOT be claimed: no role flip, no `current_prompt_id`, no `TurnRunning`.
+    /// Claiming it would strand the turn-status and poison the slot, so later real turns' PromptResponses get discarded.
+    /// This pairs with the `handle_queue_changed` skip above.
+    /// Together they keep synthetic auto-wake turns out of the running slot on BOTH the queue-broadcast and streaming-delta paths.
     #[test]
     fn synthetic_auto_wake_delta_renders_without_claiming_turn() {
         let mut app = make_app_with_agent("sess-1");
@@ -729,10 +703,8 @@
         assert!(!agent.attached_as_viewer);
     }
 
-    /// FIFO handoff: the leader's running broadcast for the next prompt
-    /// can arrive BEFORE the previous turn's PromptResponse. The pager must NOT
-    /// corrupt the in-flight turn — it stashes the adoption and applies it once
-    /// PromptResponse clears `current_prompt_id`.
+    /// FIFO handoff: the leader's running broadcast for the next prompt can arrive BEFORE the previous turn's PromptResponse.
+    /// The pager must NOT corrupt the in-flight turn: it stashes the adoption and applies it once PromptResponse clears `current_prompt_id`.
     #[test]
     fn running_prompt_stashed_during_handoff_then_adopted_on_prompt_response() {
         use crate::app::dispatch::dispatch;
@@ -741,7 +713,7 @@
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
 
-        // p1: idle submit → drains locally, turn running.
+        // p1: an idle submit drains locally and starts the turn
         let effects = dispatch(Action::SendPrompt("first".into()), &mut app);
         let pid_first = match &effects[0] {
             Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
@@ -752,7 +724,7 @@
             Some(pid_first.as_str())
         );
 
-        // p2: running submit → immediate server send + optimistic echo.
+        // p2: a mid-turn submit sends to the server immediately and leaves an optimistic echo
         let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
         let pid_second = match &effects[0] {
             Effect::SendPrompt {
@@ -778,7 +750,7 @@
         );
         assert!(app.pending_running_adoptions.contains_key(&id));
 
-        // p1's PromptResponse → finish_turn clears current → adopt p2 (shim).
+        // p1's PromptResponse runs finish_turn, which clears current, so p2 is adopted (shim)
         let scroll_before = app.agents[&id].scrollback.len();
         let effects = dispatch(
             Action::TaskComplete(TaskResult::PromptResponse {
@@ -800,7 +772,7 @@
             app.agents[&id].scrollback.len() > scroll_before,
             "shim renders p2's user block on adoption"
         );
-        // No re-send — p2 was already sent at enqueue time.
+        // No re-send: p2 was already sent at enqueue time
         assert!(
             !effects
                 .iter()
@@ -809,9 +781,8 @@
         );
     }
 
-    /// Regression: in the FIFO handoff the leader's user-echo (no `promptId`)
-    /// arrives before the deferred turn-start shim arms `expect_user_echo`, so
-    /// without arming it at stash time the 2nd queued prompt renders twice.
+    /// Regression: in the FIFO handoff the leader's user-echo (no `promptId`) arrives before the deferred turn-start shim sets `expect_user_echo`.
+    /// Without setting it at stash time, the 2nd queued prompt renders twice.
     #[test]
     fn fifo_handoff_user_echo_not_duplicated() {
         use crate::app::dispatch::dispatch;
@@ -853,13 +824,12 @@
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
 
-        // p1 from idle; its echo consumes the armed skip, so the 2nd handoff
-        // starts with skip == false (the condition that triggered the dup).
+        // p1 from idle; its echo consumes the pending skip, so the 2nd handoff starts with skip == false (the condition that triggered the dup)
         let _ = dispatch(Action::SendPrompt("first".into()), &mut app);
         user_echo(&mut app, "first");
         assert_eq!(user_block_count(&app, id, "first"), 1);
 
-        // p2 submitted while running → immediate server send.
+        // p2 is submitted while running, so it goes to the server immediately
         let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
         let pid_second = match &effects[0] {
             Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
@@ -879,7 +849,7 @@
             "FIFO-handoff user-echo must be swallowed, not rendered as a duplicate"
         );
 
-        // p1's PromptResponse → finish_turn + the deferred shim renders p2 once.
+        // p1's PromptResponse runs finish_turn and the deferred shim renders p2 once
         dispatch(
             Action::TaskComplete(TaskResult::PromptResponse {
                 agent_id: id,
@@ -901,17 +871,14 @@
         );
     }
 
-    /// Regression (viewer scrollback): when a queued prompt drains via the
-    /// FIFO-handoff race on a VIEWER (a client watching another client's turn),
-    /// this client never runs the deferred turn-start shim for it — a viewer's
-    /// turn-end is `prompt_complete`, which does not apply the stashed adoption
-    /// (only the driver's `PromptResponse` does). Arming `expect_user_echo` at
-    /// stash time would then swallow the leader's authoritative user-echo and the
-    /// drained prompt's user block would vanish from the viewer's scrollback
-    /// entirely. The stash branch must arm the echo-skip ONLY when this client
-    /// drives the current turn (`!attached_as_viewer`); a viewer must let the
-    /// server echo render the block. Counterpart to the driver-side
-    /// `fifo_handoff_user_echo_not_duplicated` above.
+    /// Regression (viewer scrollback): a queued prompt can drain via the FIFO-handoff race on a VIEWER (a client watching another client's turn).
+    /// The viewer never runs the deferred turn-start shim: its turn-end is `prompt_complete`, which does not apply the stashed adoption.
+    /// Only the driver's `PromptResponse` applies it.
+    /// Setting `expect_user_echo` at stash time would then swallow the leader's authoritative user-echo.
+    /// The drained prompt's user block would vanish from the viewer's scrollback entirely.
+    /// The stash branch must set the echo-skip ONLY when this client drives the current turn (`!attached_as_viewer`).
+    /// A viewer must let the server echo render the block.
+    /// This is the counterpart to the driver-side `fifo_handoff_user_echo_not_duplicated` above.
     #[test]
     fn viewer_drained_prompt_renders_user_block_from_echo() {
         // Live user-echo as the leader emits it: a text block, no `promptId`.
@@ -950,25 +917,23 @@
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
 
-        // This client is a VIEWER: it watches another client's running turn
-        // (`p1`) and has NOT originated the queued prompt `p2`.
+        // This client is a VIEWER: it watches another client's running turn (`p1`) and has NOT originated the queued prompt `p2`
         {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.attached_as_viewer = true;
             agent.session.current_prompt_id = Some("p1".to_string());
         }
 
-        // Viewer receives the shared queue: `p1` running, `p2` queued. The
-        // broadcast carries `p2`'s text ("text p2") into the shared queue.
+        // Viewer receives the shared queue: `p1` running, `p2` queued
+        // The broadcast carries `p2`'s text ("text p2") into the shared queue
         assert!(handle_queue_changed(
             &queue_changed_running("sess-1", &["p2"], Some("p1")),
             &mut app
         ));
 
-        // `p1` finishes and the leader promotes `p2`: running=p2, p2 removed
-        // from the queue. The viewer's `current_prompt_id` is still `p1` (its
-        // `prompt_complete` for p1 has not been processed yet) → FIFO-handoff
-        // STASH branch, where the old code unconditionally armed the echo-skip.
+        // `p1` finishes and the leader promotes `p2`: running=p2, p2 removed from the queue
+        // The viewer's `current_prompt_id` is still `p1`: its `prompt_complete` for p1 has not been processed yet
+        // That hits the FIFO-handoff STASH branch, where the old code unconditionally set the echo-skip
         assert!(handle_queue_changed(
             &queue_changed_running("sess-1", &[], Some("p2")),
             &mut app
@@ -978,8 +943,7 @@
         user_echo(&mut app, "text p2");
 
         // The viewer must render p2's user block from that echo exactly once.
-        // Before the fix the stash branch armed `expect_user_echo`, swallowing
-        // the echo, so the count was 0 and the prompt vanished from scrollback.
+        // Before the fix the stash branch set `expect_user_echo`, swallowing the echo, so the count was 0 and the prompt vanished from scrollback
         assert_eq!(
             user_block_count(&app, id, "text p2"),
             1,
@@ -987,16 +951,13 @@
         );
     }
 
-    /// Regression: a client can be `attached_as_viewer`
-    /// on ANOTHER client's turn yet immediate-send (self-originate) a queued
-    /// prompt of its own. When that prompt drains via the FIFO-handoff race, the
-    /// viewer still won't run the deferred shim (it ends the viewed turn via
-    /// `prompt_complete`, which clears the stash), so the echo-skip guard must
-    /// NOT key on origination — keying on `is_self_originated` here armed the
-    /// skip and dropped the block. Keying on `!attached_as_viewer` keeps the echo
-    /// and renders the block. This sets `current_prompt_id` to another client's
-    /// turn AND marks the drained prompt self-originated, the exact combination
-    /// the prior guard mishandled.
+    /// Regression: a client can be `attached_as_viewer` on ANOTHER client's turn yet immediate-send (self-originate) a queued prompt of its own.
+    /// When that prompt drains via the FIFO-handoff race, the viewer still won't run the deferred shim.
+    /// It ends the viewed turn via `prompt_complete`, which clears the stash.
+    /// The echo-skip guard must therefore NOT key on origination: keying on `is_self_originated` here set the skip and dropped the block.
+    /// Keying on `!attached_as_viewer` keeps the echo and renders the block.
+    /// This test sets `current_prompt_id` to another client's turn AND marks the drained prompt self-originated.
+    /// That is the exact combination the prior guard mishandled.
     #[test]
     fn viewer_self_originated_drained_prompt_renders_from_echo() {
         fn user_echo(app: &mut AppView, text: &str) {
@@ -1033,9 +994,8 @@
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
 
-        // VIEWER of another client's turn `p1`, but it DID originate `p2` (typed
-        // it via immediate-send while still viewing). The old guard keyed on
-        // origination and wrongly armed the echo-skip.
+        // VIEWER of another client's turn `p1`, but it DID originate `p2` (typed via immediate-send while still viewing)
+        // The old guard keyed on origination and wrongly set the echo-skip
         {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.attached_as_viewer = true;
@@ -1061,18 +1021,16 @@
         );
     }
 
-    /// Ordering: the `running_prompt_id` broadcast must be
-    /// adopted BEFORE the turn's first `session/update`, otherwise the gate
-    /// drops chunks whose `promptId != current_prompt_id`. This proves that
-    /// once adoption set `current_prompt_id`, a chunk carrying that `promptId`
-    /// renders into scrollback.
+    /// Ordering: the `running_prompt_id` broadcast must be adopted BEFORE the turn's first `session/update`.
+    /// Otherwise the gate drops chunks whose `promptId != current_prompt_id`.
+    /// This proves that once adoption set `current_prompt_id`, a chunk carrying that `promptId` renders into scrollback.
     #[test]
     fn adopted_running_prompt_lets_subsequent_chunk_through_gate() {
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
         app.push_optimistic_prompt_echo("sess-1", "p2", "hello", "prompt");
 
-        // Broadcast adopts p2 (idle → shim sets current_prompt_id = p2).
+        // Broadcast adopts p2 (idle, so the shim sets current_prompt_id to p2)
         handle_queue_changed(&queue_changed_running("sess-1", &[], Some("p2")), &mut app);
         assert_eq!(
             app.agents[&id].session.current_prompt_id.as_deref(),
@@ -1101,14 +1059,11 @@
         );
     }
 
-    /// Multi-client mid-turn load (leader mode): a client that opens a session
-    /// while ANOTHER client is driving an in-flight turn subscribes AFTER the
-    /// turn-start `queue/changed`, so it never adopts via `handle_queue_changed`
-    /// and its `current_prompt_id` stays `None`. The server conveys the running
-    /// prompt id in the `SessionLoaded` response meta; the loader must adopt it
-    /// (set `current_prompt_id` + enter `TurnRunning`) WITHOUT re-rendering the
-    /// user block (replay already rendered it), so subsequent live
-    /// `session/update` deltas for that prompt pass the gate and render live.
+    /// Multi-client mid-turn load (leader mode): a client opens a session while ANOTHER client drives an in-flight turn.
+    /// It subscribes AFTER the turn-start `queue/changed`, so it never adopts via `handle_queue_changed` and its `current_prompt_id` stays `None`.
+    /// The server conveys the running prompt id in the `SessionLoaded` response meta.
+    /// The loader must adopt it (set `current_prompt_id`, enter `TurnRunning`) WITHOUT re-rendering the user block (replay already rendered it).
+    /// Subsequent live `session/update` deltas for that prompt then pass the gate and render live.
     #[test]
     fn session_loaded_with_running_prompt_id_adopts_and_passes_live_gate() {
         use crate::app::dispatch::dispatch;
@@ -1134,7 +1089,7 @@
             &mut app,
         );
 
-        // Adopted the in-flight prompt id + entered the turn-running state.
+        // Adopted the in-flight prompt id and entered the turn-running state
         assert_eq!(
             app.agents[&id].session.current_prompt_id.as_deref(),
             Some("p-run"),
@@ -1144,8 +1099,7 @@
             app.agents[&id].session.state.is_turn_running(),
             "loading mid-turn must enter TurnRunning so the spinner shows"
         );
-        // No user-prompt block pushed: the in-flight turn's user prompt arrived
-        // via the `session/load` replay; adoption must not duplicate it.
+        // No user-prompt block pushed: the in-flight turn's user prompt arrived via the `session/load` replay; adoption must not duplicate it
         let user_blocks = app.agents[&id]
             .scrollback
             .entries_in_range(0..app.agents[&id].scrollback.len())
@@ -1162,8 +1116,7 @@
             "adoption-on-load must not grow the scrollback"
         );
 
-        // A live (non-replay) chunk stamped with the adopted prompt id now
-        // passes the gate and renders (previously dropped → the viewer froze).
+        // A live (non-replay) chunk stamped with the adopted prompt id now passes the gate and renders (previously dropped, so the viewer froze)
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = acp::SessionNotification::new(
             acp::SessionId::new("sess-1"),
@@ -1191,12 +1144,9 @@
         );
     }
 
-    /// The adoption predicate: synthetic non-scheduler turns (auto-wake /
-    /// subagent-completion / notification-drain / goal turns) emit no
-    /// `prompt_complete`, so a re-attach must NOT adopt them (adoption would
-    /// strand the viewer in `TurnRunning`). Scheduler-fired (`/loop`) turns are
-    /// synthetic but client-driven with a real `prompt_complete`, and plain user
-    /// turns are always adoptable.
+    /// The adoption predicate: synthetic non-scheduler turns emit no `prompt_complete`, so a re-attach must NOT adopt them.
+    /// Those are the auto-wake, subagent-completion, notification-drain, and goal turns; adoption would strand the viewer in `TurnRunning`.
+    /// Scheduler-fired (`/loop`) turns are synthetic but client-driven with a real `prompt_complete`, and plain user turns are always adoptable.
     #[test]
     fn should_adopt_running_prompt_skips_synthetic_non_scheduler() {
         assert!(should_adopt_running_prompt("p-user"));
@@ -1214,14 +1164,11 @@
         ));
     }
 
-    /// A `SessionLoaded` conveying a SYNTHETIC non-scheduler `running_prompt_id`
-    /// (auto-wake / subagent-completion) must NOT be adopted: those actor-run
-    /// turns emit no `prompt_complete`, so adopting one would strand the viewer
-    /// in `TurnRunning` forever. The agent stays `Idle`, and the preserve arg is
-    /// gated on the same predicate so the running turn's buffered follow-up chips
-    /// are NOT preserved (adoption — their only flusher — is skipped, so
-    /// preserving would orphan them). The ADOPTABLE-id preserve contrast is
-    /// covered by `reload_preserves_running_turn_follow_ups_and_renders_on_adoption`.
+    /// A `SessionLoaded` conveying a SYNTHETIC non-scheduler `running_prompt_id` (auto-wake, subagent-completion) must NOT be adopted.
+    /// Those actor-run turns emit no `prompt_complete`, so adopting one would strand the viewer in `TurnRunning` forever.
+    /// The agent stays `Idle`, and the preserve arg is gated on the same predicate so the running turn's buffered follow-up chips are NOT preserved.
+    /// Adoption is the only thing that flushes them; it is skipped here, so preserving them would orphan them.
+    /// The ADOPTABLE-id preserve contrast is covered by `reload_preserves_running_turn_follow_ups_and_renders_on_adoption`.
     #[test]
     fn session_loaded_with_synthetic_running_prompt_id_stays_idle() {
         use crate::app::dispatch::dispatch;
@@ -1230,8 +1177,7 @@
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
 
-        // Seed the running turn's buffered follow-up chips keyed by the synthetic
-        // prompt id, as if they had arrived on the ext channel during replay.
+        // Seed the running turn's buffered follow-up chips keyed by the synthetic prompt id, as if they had arrived on the ext channel during replay
         {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.follow_up_pending.insert(
@@ -1274,10 +1220,9 @@
         );
     }
 
-    /// A `SessionLoaded` conveying a SCHEDULER-FIRED (`/loop`) `running_prompt_id`
-    /// IS adopted: cron turns are synthetic but client-driven and DO emit a
-    /// `prompt_complete`, so the viewer can safely enter `TurnRunning` (the
-    /// dashboard shows a running `/loop` session as Working).
+    /// A `SessionLoaded` conveying a SCHEDULER-FIRED (`/loop`) `running_prompt_id` IS adopted.
+    /// Cron turns are synthetic but client-driven and DO emit a `prompt_complete`, so the viewer can safely enter `TurnRunning`.
+    /// The dashboard then shows a running `/loop` session as Working.
     #[test]
     fn session_loaded_with_scheduler_fired_running_prompt_id_adopts() {
         use crate::app::dispatch::dispatch;
@@ -1312,8 +1257,7 @@
         );
     }
 
-    /// The session-load running-turn adopt is a production turn-start
-    /// clear site — adopting an in-flight turn on load drops prior chips.
+    /// Adopting an in-flight turn on session load is a turn-start, so it must drop prior follow-up chips.
     #[test]
     fn session_loaded_adopting_running_turn_clears_follow_up_chips() {
         use crate::app::dispatch::dispatch;
@@ -1344,9 +1288,8 @@
         );
     }
 
-    /// Idle reload (no running prompt) must ALSO drop prior chips and fully
-    /// reset the seen map/generation — follow-ups are streaming-only and never
-    /// persist across a reload, so stale state must not survive.
+    /// Idle reload (no running prompt) must ALSO drop prior chips and fully reset the seen map and generation.
+    /// Follow-ups are streaming-only and never persist across a reload, so stale state must not survive.
     #[test]
     fn session_loaded_idle_clears_follow_up_chips_and_seen() {
         use crate::app::dispatch::dispatch;
@@ -1388,20 +1331,15 @@
         );
     }
 
-    /// Multi-client load-window gap (leader mode): a viewer
-    /// (`attached_as_viewer`) that subscribed mid-turn receives the driver's
-    /// live (non-replay) deltas WHILE its `session/load` replay is still in
-    /// flight — so `current_prompt_id == None` and `loading_replay == true`.
-    /// Before the fix the gate dropped every such delta (the viewer froze at
-    /// its load snapshot). Now the viewer ADOPTS the incoming prompt id and the
-    /// delta renders into scrollback, recovering progress streamed during the
-    /// load window.
+    /// Multi-client load-window gap (leader mode): a viewer (`attached_as_viewer`) that subscribed mid-turn receives the driver's live deltas.
+    /// They arrive WHILE its `session/load` replay is still in flight, so `current_prompt_id == None` and `loading_replay == true`.
+    /// Before the fix the gate dropped every such delta and the viewer froze at its load snapshot.
+    /// Now the viewer ADOPTS the incoming prompt id and the delta renders into scrollback, recovering progress streamed during the load window.
     #[test]
     fn viewer_adopts_live_delta_during_load_window_instead_of_dropping() {
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
-        // Model a viewer mid-load: opened via `session/load`, replay in flight,
-        // no turn of its own.
+        // Model a viewer mid-load: opened via `session/load`, replay in flight, no turn of its own
         {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.attached_as_viewer = true;
@@ -1409,9 +1347,7 @@
             agent.session.current_prompt_id = None;
         }
 
-        // A live (non-replay) chunk from the driver's user-initiated turn,
-        // stamped with a normal (non-synthetic) promptId the viewer has never
-        // seen.
+        // A live (non-replay) chunk from the driver's user-initiated turn, stamped with a normal (non-synthetic) promptId the viewer has never seen
         assert!(
             !is_server_initiated_prompt("p-driver"),
             "test fixture must use a non-synthetic prompt id"
@@ -1448,28 +1384,23 @@
             "in-window driver delta",
             "viewer must render the live delta received during its load window"
         );
-        // Redraw is suppressed while `loading_replay` is true (the content is in
-        // scrollback and the post-`SessionLoaded` redraw paints it).
+        // Redraw is suppressed while `loading_replay` is true (the content is in scrollback and the post-`SessionLoaded` redraw paints it)
         assert!(
             !affected,
             "redraw is suppressed during loading_replay even though the delta applied"
         );
     }
 
-    /// Driver-rewind safety: the viewer relaxation must NOT regress the
-    /// locally-created driver's stale-chunk drop. A non-viewer
-    /// (`attached_as_viewer == false`) whose own turn just finished/cancelled
-    /// (`current_prompt_id == None`) must still DROP a late delta carrying the
-    /// aborted turn's promptId — otherwise rewound content would resurface.
+    /// Driver-rewind safety: relaxing the gate for viewers must NOT regress the locally-created driver's stale-chunk drop.
+    /// A non-viewer (`attached_as_viewer == false`) whose own turn just finished or was cancelled has `current_prompt_id == None`.
+    /// It must still DROP a late delta carrying the aborted turn's promptId; otherwise rewound content would resurface.
     #[test]
     fn driver_post_rewind_still_drops_stale_delta() {
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
-        // A locally-created driver (NOT a viewer) that just finished its turn:
-        // finish_turn cleared current_prompt_id back to None. The aborted turn
-        // was driven by THIS client, so its prompt id is self-originated — that
-        // is what makes the gate treat the late chunk as ours (drop) rather
-        // than as another client's turn (adopt).
+        // A locally-created driver (NOT a viewer) that just finished its turn: finish_turn cleared current_prompt_id back to None
+        // The aborted turn was driven by THIS client, so its prompt id is self-originated
+        // That is what makes the gate treat the late chunk as ours (drop) rather than as another client's turn (adopt)
         {
             let agent = app.agents.get_mut(&id).unwrap();
             assert!(
@@ -1514,14 +1445,11 @@
         );
     }
 
-    /// Multi-client mirroring after this pane has driven a turn (the sticky-flag
-    /// bug). A pane that already sent a prompt has `attached_as_viewer == false`
-    /// and a self-originated prompt id. When ANOTHER pane then drives a normal
-    /// turn, the live deltas carry a foreign (non-server-initiated) prompt id
-    /// this pane never originated. With the old one-way latch the gate dropped
-    /// them and the pane rendered nothing; now the gate re-derives viewer status
-    /// from prompt-id ownership, so the foreign turn is adopted + rendered and
-    /// the flag flips back to true.
+    /// Multi-client mirroring after this pane has driven a turn (the sticky-flag bug).
+    /// A pane that already sent a prompt has `attached_as_viewer == false` and a self-originated prompt id.
+    /// When ANOTHER pane then drives a normal turn, the live deltas carry a foreign (non-server-initiated) prompt id this pane never originated.
+    /// With the old one-way latch the gate dropped them and the pane rendered nothing.
+    /// Now the gate re-derives viewer status from prompt-id ownership, so the foreign turn is adopted and rendered and the flag flips back to true.
     #[test]
     fn pane_that_drove_a_turn_still_mirrors_another_clients_turn() {
         let mut app = make_app_with_agent("sess-1");
@@ -1535,8 +1463,7 @@
             agent.session.current_prompt_id = None;
         }
 
-        // Another pane now drives a normal turn; its live delta arrives here
-        // with a foreign, non-synthetic prompt id.
+        // Another pane now drives a normal turn; its live delta arrives here with a foreign, non-synthetic prompt id
         assert!(
             !is_server_initiated_prompt("p-other"),
             "test fixture must use a non-synthetic prompt id"
@@ -1563,8 +1490,7 @@
         );
     }
 
-    /// The entry `kind` survives serialization, and on adoption a `bash` entry drives the bash
-    /// turn-start shim (`bash_turn = true`, no user block).
+    /// The entry `kind` survives serialization, and on adoption a `bash` entry drives the bash turn-start shim (`bash_turn = true`, no user block).
     #[test]
     fn bash_kind_round_trips_and_adoption_sets_bash_turn() {
         // Shell and pager share the xai-prompt-queue type; pin kind through a serde cycle.
@@ -1589,8 +1515,7 @@
         let mirror: crate::app::prompt_queue::QueueChanged = serde_json::from_str(&json).unwrap();
         assert_eq!(mirror.entries[0].kind, "bash");
 
-        // Adoption: seed the shared queue with the bash entry, then the leader
-        // reports it running → bash turn-start shim fires.
+        // Adoption: seed the shared queue with the bash entry, then the leader reports it running and the bash turn-start shim fires
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
         app.push_optimistic_prompt_echo("sess-1", "b1", "ls -la", "bash");
@@ -1606,7 +1531,7 @@
         assert_eq!(agent.scrollback.len(), scroll_before);
     }
 
-    /// The gate buffers an instant promoted turn's stream and the adoption flushes it.
+    /// The gate buffers a promoted turn's stream while the previous turn is still current; the adoption flushes it.
     #[test]
     fn fifo_handoff_buffers_instant_bash_turn_and_flushes_on_adoption() {
         let mut app = app_with_running_p1_and_stashed_b1();
@@ -1656,7 +1581,7 @@
         assert!(app.agents[&id].session.state.is_idle());
     }
 
-    /// The stash survives one `running=None`; a second tears stash + buffer down.
+    /// The stash survives one `running=None`; a second tears down the stash and buffer.
     #[test]
     fn turn_end_retention_is_one_shot() {
         let mut app = app_with_running_p1_and_stashed_b1();
@@ -1690,7 +1615,7 @@
         assert!(app.agents[&id].session.current_prompt_id.is_none());
     }
 
-    /// The stashed turn's own PromptResponse spends its only exit: discard, not restore.
+    /// The stashed turn's own PromptResponse is its only exit, and it discards the stash rather than restoring it.
     #[test]
     fn stashed_turns_own_response_discards_stash_and_buffer() {
         let mut app = app_with_running_p1_and_stashed_b1();
@@ -1770,7 +1695,7 @@
         assert!(app.agents[&id].pending_adoption_updates.is_empty());
     }
 
-    /// Retention must not depend on the buffer being non-empty (channel reorder).
+    /// Retention must not depend on the buffer being non-empty; the channel can reorder events.
     #[test]
     fn turn_end_broadcast_overtaking_updates_keeps_stash() {
         let mut app = app_with_running_p1_and_stashed_b1();
@@ -1875,7 +1800,7 @@
         );
     }
 
-    /// A viewer's `prompt_complete` finalize discards stash + buffer.
+    /// A viewer's `prompt_complete` finalize discards the stash and buffer.
     #[test]
     fn viewer_finalize_discards_adoption_buffer() {
         let mut app = app_with_running_p1_and_stashed_b1();
@@ -1974,10 +1899,9 @@
         );
     }
 
-    /// `adopt_running_prompt` must not leave `start_turn`'s user-echo skip
-    /// armed: the adopted turn pushed no local user block, so the armed skip
-    /// would survive and silently eat the NEXT turn's `UserMessageChunk`
-    /// broadcast (the driver's next message missing from the viewer).
+    /// `adopt_running_prompt` must not leave `start_turn`'s user-echo skip set: the adopted turn pushed no local user block.
+    /// A leftover skip would survive and silently eat the NEXT turn's `UserMessageChunk` broadcast.
+    /// The driver's next message would then be missing from the viewer.
     #[test]
     fn adopt_running_prompt_does_not_eat_next_turns_user_echo() {
         let mut app = make_app_with_agent("sess-adopt");
@@ -2018,22 +1942,21 @@
         );
     }
 
-    /// A FAILED reconnect reload restores the stashed tracker; if a local send
-    /// just before the outage armed the user-echo skip (echo chunk not yet
-    /// received), the restored skip must be cleared at finalize — otherwise it
-    /// silently swallows the NEXT turn's `UserMessageChunk`.
+    /// A FAILED reconnect reload restores the stashed tracker.
+    /// A local send just before the outage may have set the user-echo skip (echo chunk not yet received).
+    /// The restored skip must be cleared at finalize; otherwise it silently swallows the NEXT turn's `UserMessageChunk`.
     #[test]
     fn failed_reload_clears_armed_user_echo_skip() {
         let mut app = make_app_with_agent("sess-echo");
         let id = AgentId(0);
         {
             let agent = app.agents.get_mut(&id).unwrap();
-            // Local send just before the outage: user block pushed + echo armed.
+            // Local send just before the outage: user block pushed, echo skip set
             agent
                 .scrollback
                 .push_block(RenderBlock::user_prompt("pre-outage prompt"));
             agent.session.tracker.expect_user_echo();
-            // Reconnect opens the reload window (stashes the armed tracker)...
+            // Reconnect opens the reload window (stashes the tracker with the skip set)...
             agent.begin_session_reload(1);
             // ...and the reload FAILS, restoring the stash.
             assert!(agent.finish_session_reload(1, false));
@@ -2072,10 +1995,8 @@
         );
     }
 
-    /// The bind helper resets per-session cursor/highwater only when the
-    /// bound id actually changes: `SessionLoaded` re-binds the SAME id after
-    /// every load, so an unconditional reset would wipe the cursor the load's
-    /// replay just established.
+    /// The bind helper resets the per-session cursor/highwater only when the bound id actually changes.
+    /// `SessionLoaded` re-binds the SAME id after every load, so an unconditional reset would wipe the cursor the load's replay just established.
     #[test]
     fn bind_session_id_resets_cursor_only_on_id_change() {
         let mut agent = make_agent(Some("sess-a"));
@@ -2135,10 +2056,9 @@
     #[test]
     fn viewer_adopting_live_delta_enters_turn_running_and_timer_is_monotonic() {
         // A viewer (attached_as_viewer) watching the driver's turn starts Idle.
-        // Adopting the first live delta must flip it to TurnRunning and stamp
-        // `turn_started_at` so the turn-in-progress chrome (status line, elapsed
-        // timer, cancel/interject footer hints — all gated on TurnRunning)
-        // renders. A second chunk must NOT reset `turn_started_at`.
+        // Adopting the first live delta must flip it to TurnRunning and stamp `turn_started_at`
+        // That renders the turn-in-progress chrome (status line, elapsed timer, cancel/interject footer hints, all gated on TurnRunning)
+        // A second chunk must NOT reset `turn_started_at`
         let mut app = make_app_with_agent("sess-view");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -2193,9 +2113,8 @@
 
     #[test]
     fn viewer_replay_delta_does_not_enter_turn_running() {
-        // A replayed historical-load delta (also attached_as_viewer) must NOT
-        // flash TurnRunning — only LIVE deltas put a viewer into the running
-        // state. The promptId is still adopted so later chunks match.
+        // A replayed historical-load delta (also attached_as_viewer) must NOT flash TurnRunning; only LIVE deltas put a viewer in the running state
+        // The promptId is still adopted so later chunks match
         let mut app = make_app_with_agent("sess-view");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -2218,20 +2137,13 @@
 
     #[test]
     fn viewer_mid_turn_reattach_shows_running_chrome_after_replay_window() {
-        // Reproduces the MID-TURN reattach ordering that left a viewer stuck
-        // Idle (no "Responding…"/cancel chrome) even though the driver's turn
-        // was live:
-        //   (1) the viewer subscribes on its load request, so it receives a
-        //       LIVE delta DURING its replay window (loading_replay = true). It
-        //       adopts the driver's promptId, but the TurnRunning transition is
-        //       (correctly) suppressed while replaying.
-        //   (2) SessionLoaded clears loading_replay — modeled here WITHOUT a
-        //       runningPromptId conveyance (the worst case).
-        //   (3) subsequent LIVE deltas carry the SAME (already-adopted) promptId,
-        //       so they MATCH current_prompt_id and skip the adopt block.
-        // Before the fix, step (3) never flipped the viewer to TurnRunning (the
-        // TurnRunning entry lived inside the mismatch-only adopt block), so the
-        // chrome never appeared. It must now.
+        // Reproduces the MID-TURN reattach ordering that left a viewer stuck Idle (no "Responding…" or cancel chrome) during the driver's live turn:
+        //   (1) the viewer subscribes on its load request, so it receives a LIVE delta DURING its replay window (loading_replay = true)
+        //       It adopts the driver's promptId, but the TurnRunning transition is (correctly) suppressed while replaying
+        //   (2) SessionLoaded clears loading_replay, modeled here WITHOUT a runningPromptId conveyance (the worst case)
+        //   (3) subsequent LIVE deltas carry the SAME (already-adopted) promptId, so they MATCH current_prompt_id and skip the adopt block
+        // Before the fix, step (3) never flipped the viewer to TurnRunning: the TurnRunning entry lived inside the mismatch-only adopt block
+        // The chrome never appeared. It must now.
         let mut app = make_app_with_agent("sess-view");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -2265,9 +2177,8 @@
             .session
             .loading_replay = false;
 
-        // (3) a post-load live delta MATCHING the already-adopted promptId — this
-        //     skips the mismatch-only adopt block, so the fix must flip the
-        //     viewer to TurnRunning here.
+        // (3) a post-load live delta MATCHING the already-adopted promptId
+        //     It skips the mismatch-only adopt block, so the fix must flip the viewer to TurnRunning here
         let _ = handle(
             make_agent_chunk_message_with_prompt("sess-view", "responding 2", "pid-driver", false),
             &mut app,
@@ -2292,15 +2203,12 @@
 
     #[test]
     fn viewer_does_not_enter_turn_running_for_server_initiated_turn() {
-        // A server-initiated / auto-wake turn (synthetic prompt id, e.g. a
-        // background subagent or task completion: `task-completed-…`) runs inside
-        // the actor and emits NO `x.ai/session/prompt_complete`. If a viewer
-        // entered TurnRunning for it, nothing would ever finish the turn and the
-        // viewer would be stuck "Responding…" forever — exactly the bug where one
-        // dashboard showed "Worked for" while the other was stuck responding.
-        // The driver also declines to show chrome for these (its server-initiated
-        // adopt path never calls start_turn), so the viewer must mirror that:
-        // adopt the id (so content renders) but stay Idle (no running chrome).
+        // A server-initiated auto-wake turn runs inside the actor and emits NO `x.ai/session/prompt_complete`
+        // Its prompt id is synthetic, e.g. `task-completed-…` from a background subagent or task completion.
+        // If a viewer entered TurnRunning for it, nothing would ever finish the turn and the viewer would be stuck "Responding…" forever
+        // That was the bug where one dashboard showed "Worked for" while the other was stuck responding
+        // The driver also declines to show chrome for these (its server-initiated adopt path never calls start_turn)
+        // The viewer must mirror that: adopt the id (so content renders) but stay Idle (no running chrome)
         let mut app = make_app_with_agent("sess-view");
         app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
 
@@ -2330,11 +2238,9 @@
 
     #[test]
     fn viewer_enters_turn_running_for_scheduler_fired_cron_turn() {
-        // A `/loop` (scheduled-task) turn has a synthetic `scheduler-fired-…`
-        // prompt id, but UNLIKE auto-wake turns it is client-driven via
-        // `MvpAgent::prompt()` and DOES emit `x.ai/session/prompt_complete`. So a
-        // viewer MUST enter TurnRunning for it — otherwise the dashboard's
-        // locally-tracked row for a running `/loop` session never shows Working.
+        // A `/loop` (scheduled-task) turn has a synthetic `scheduler-fired-…` prompt id
+        // UNLIKE auto-wake turns it is client-driven via `MvpAgent::prompt()` and DOES emit `x.ai/session/prompt_complete`
+        // So a viewer MUST enter TurnRunning for it; otherwise the dashboard's locally-tracked row for a running `/loop` session never shows Working
         let mut app = make_app_with_agent("sess-view");
         app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
 
@@ -2362,7 +2268,7 @@
             assert!(agent.turn_started_at.is_some());
         }
 
-        // The cron's prompt_complete must still finish it — no permanent spinner.
+        // The cron's prompt_complete must still finish it: no permanent spinner
         let _ = handle_ext_notification(&prompt_complete_ext("sess-view"), &mut app);
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
@@ -2374,8 +2280,7 @@
 
     #[test]
     fn viewer_prompt_complete_finishes_turn() {
-        // A viewer in TurnRunning receives x.ai/session/prompt_complete for its
-        // session -> finish_turn: state Idle, current_prompt_id cleared.
+        // A viewer in TurnRunning receives x.ai/session/prompt_complete for its session and runs finish_turn: state Idle, current_prompt_id cleared
         let mut app = make_app_with_agent("sess-view");
         app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
         let _ = handle(
@@ -2404,12 +2309,9 @@
 
     #[test]
     fn viewer_prompt_complete_pushes_turn_completed_marker() {
-        // Regression (leader/dashboard mode): the "Worked for X" marker
-        // is generated from the driver's PromptResponse RPC, which a viewer
-        // never receives. Before this fix the driver pane showed
-        // "Worked for …" while the viewer pane (same session) showed
-        // nothing. The viewer must surface the equivalent marker on the
-        // broadcast prompt_complete.
+        // Regression (leader/dashboard mode): the "Worked for X" marker comes from the driver's PromptResponse RPC, which a viewer never receives
+        // Before this fix the driver pane showed "Worked for …" while the viewer pane (same session) showed nothing
+        // The viewer must push the equivalent marker on the broadcast prompt_complete
         let mut app = make_app_with_agent("sess-view");
         app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
         let _ = handle(
@@ -2436,10 +2338,8 @@
 
     #[test]
     fn viewer_turn_completed_elapsed_matches_authoritative_turn_start() {
-        // The viewer back-dates its turn anchor from the authoritative
-        // `turnStartMs` (not the local first-delta time), so its elapsed — and
-        // therefore the "Worked for X" marker — matches the driver's
-        // instead of reading near-zero.
+        // The viewer back-dates its turn anchor from the authoritative `turnStartMs` (not the local first-delta time)
+        // Its elapsed, and therefore the "Worked for X" marker, matches the driver's instead of reading near-zero
         let mut app = make_app_with_agent("sess-view");
         app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
 
@@ -2520,10 +2420,35 @@
     }
 
     #[test]
+    fn viewer_prompt_complete_error_kind_renders_truncation_copy() {
+        let mut app = make_app_with_agent("sess-view");
+        app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
+        let _ = handle(
+            make_agent_chunk_message_with_prompt("sess-view", "chunk", "pid-driver", false),
+            &mut app,
+        );
+
+        let _ = handle_ext_notification(
+            &prompt_complete_ext_failed_with_error_kind(
+                "sess-view",
+                "turn ended early",
+                "max_tokens_truncation",
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        match last_session_event(&agent.scrollback) {
+            Some(SessionEvent::TurnFailed { error, .. }) => {
+                assert_eq!(error, "Response truncated: turn ended early")
+            }
+            other => panic!("expected TurnFailed marker, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn viewer_prompt_complete_rate_limit_pushes_no_marker() {
-        // Rate limits surface a dedicated UX on the driver and aren't actionable
-        // from a viewer — the viewer still finishes its turn but pushes no
-        // "Turn failed" line.
+        // Rate limits get a dedicated UX on the driver and aren't actionable from a viewer
+        // The viewer still finishes its turn but pushes no "Turn failed" line
         let mut app = make_app_with_agent("sess-view");
         app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
         let _ = handle(
@@ -2548,8 +2473,7 @@
 
     #[test]
     fn viewer_stop_hooks_after_marker_attach_to_it() {
-        // Viewer order: the durable TurnCompleted pushes the marker first;
-        // the batch arriving right after merges into it.
+        // Viewer order: the durable TurnCompleted pushes the marker first; the batch arriving right after merges into it
         let mut app = make_app_with_agent("sess-view-hooks");
         app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
         let _ = handle(
@@ -2583,8 +2507,7 @@
             "no standalone stop block on the live viewer path"
         );
 
-        // A second, differently-named batch of the same turn (stop_failure +
-        // stop on error turns) merges too…
+        // A second, differently-named batch of the same turn (stop_failure and stop on error turns) merges too…
         let _ = handle_ext_notification(
             &xai_hook_execution_notif("sess-view-hooks", "stop_failure", false),
             &mut app,
@@ -2597,8 +2520,7 @@
         );
         assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
 
-        // …but a same-name repeat (e.g. the session-end `stop` batch) does
-        // not belong to this marker and stays standalone.
+        // …but a same-name repeat (e.g. the session-end `stop` batch) does not belong to this marker and stays standalone.
         let _ = handle_ext_notification(
             &xai_hook_execution_notif("sess-view-hooks", "stop", false),
             &mut app,
@@ -2612,8 +2534,8 @@
         );
     }
 
-    /// No regression: a running prompt whose terminal did NOT arrive in replay is
-    /// still adopted on load (the set is precise — it blocks only ended turns).
+    /// No regression: a running prompt whose terminal did NOT arrive in replay is still adopted on load.
+    /// The replay terminal set blocks only ended turns.
     #[test]
     fn session_loaded_adopts_when_prompt_not_terminal_in_replay() {
         use crate::app::dispatch::dispatch;
@@ -2677,8 +2599,7 @@
         );
     }
 
-    /// A broadcast dropping a painted-pending row retires its block; rows
-    /// draining to running keep theirs.
+    /// A broadcast that drops a row whose send-now block was already painted retires that block; rows draining to running keep theirs.
     #[test]
     fn queue_changed_removal_retires_painted_block() {
         let mut app = make_app_with_agent("sess-1");

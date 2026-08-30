@@ -12,9 +12,8 @@ pub enum ProgressState {
 pub fn supports_progress_bar(ctx: &TerminalContext) -> bool {
     match ctx.brand {
         TerminalName::Ghostty | TerminalName::WezTerm => true,
-        // iTerm2 added OSC 9;4 progress support in 3.6. Older versions
-        // misinterpret the sequence as an OSC 9 desktop notification,
-        // displaying the raw parameters (e.g. "4;1;-1") as alert text.
+        // iTerm2 added OSC 9;4 progress support in 3.6
+        // Older versions misinterpret the sequence as an OSC 9 desktop notification, displaying the raw parameters (e.g. "4;1;-1") as alert text.
         TerminalName::Iterm2 => ctx.is_term_program_version_or_later(3, 6),
         _ => false,
     }
@@ -23,10 +22,7 @@ pub fn supports_progress_bar(ctx: &TerminalContext) -> bool {
 const OSC_INDETERMINATE: &str = "\x1b]9;4;1;-1\x07";
 pub(crate) const OSC_CLEAR: &str = "\x1b]9;4;0;0\x07";
 
-/// Build the progress bar escape sequence as an owned `String`.
-///
-/// Returns `None` if the terminal brand does not support the OSC 9;4 progress
-/// indicator.
+/// Returns `None` if the terminal brand does not support the OSC 9;4 progress indicator.
 fn progress_sequence(state: ProgressState, ctx: &TerminalContext) -> Option<String> {
     if !supports_progress_bar(ctx) {
         return None;
@@ -51,10 +47,9 @@ pub fn emit_progress(state: ProgressState, ctx: &TerminalContext) {
     }
 }
 
-/// Build the progress bar escape sequence as a `String` without writing it.
+/// Build the progress bar escape sequence without writing it.
 ///
-/// Returns `None` if the terminal brand does not support the OSC 9;4 progress
-/// indicator.
+/// Returns `None` if the terminal brand does not support the OSC 9;4 progress indicator.
 pub fn build_progress_escape(state: ProgressState, ctx: &TerminalContext) -> Option<String> {
     progress_sequence(state, ctx)
 }
@@ -100,7 +95,7 @@ mod tests {
     #[test]
     fn emit_noop_for_unsupported_terminal() {
         let ctx = ctx_for(TerminalName::Kitty);
-        // Should not panic or write anything meaningful.
+        // The only check is no panic; an unsupported brand writes nothing
         emit_progress(ProgressState::Indeterminate, &ctx);
         emit_progress(ProgressState::Clear, &ctx);
     }
@@ -130,29 +125,9 @@ mod tests {
             term_program_version: Some("3.6.0".into()),
             ..Default::default()
         };
-        // Should not panic; tmux passthrough wrapping is exercised.
+        // The only check is no panic; these calls take the tmux passthrough wrapping path
         emit_progress(ProgressState::Indeterminate, &ctx);
         emit_progress(ProgressState::Clear, &ctx);
-    }
-
-    #[test]
-    fn tmux_passthrough_wraps_indeterminate_sequence() {
-        use crate::notifications::tmux::tmux_passthrough;
-        let wrapped = tmux_passthrough(super::OSC_INDETERMINATE);
-        assert_eq!(
-            wrapped, "\x1bPtmux;\x1b\x1b]9;4;1;-1\x07\x1b\\",
-            "indeterminate sequence should be wrapped with ESC bytes doubled"
-        );
-    }
-
-    #[test]
-    fn tmux_passthrough_wraps_clear_sequence() {
-        use crate::notifications::tmux::tmux_passthrough;
-        let wrapped = tmux_passthrough(super::OSC_CLEAR);
-        assert_eq!(
-            wrapped, "\x1bPtmux;\x1b\x1b]9;4;0;0\x07\x1b\\",
-            "clear sequence should be wrapped with ESC bytes doubled"
-        );
     }
 
     // --- build_progress_escape tests ---

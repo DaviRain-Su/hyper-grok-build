@@ -2,18 +2,14 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 19b. **VS Code family: Ctrl+L (form feed) is the send-now chord** with the
-/// same cancel-and-send semantics as the default Ctrl+Enter binding: the
-/// running turn is cancelled silently and the composer text runs as its own
-/// next turn (with the interjection preamble).
-/// Harness strips `TERM_PROGRAM` then applies env — pass `vscode` so
-/// defaults bind the chord to Ctrl+L.
+/// **VS Code family: Ctrl+L (form feed) is the send-now chord**, cancelling and sending like the default Ctrl+Enter binding.
+/// The running turn is cancelled silently and the composer text runs as its own next turn (with the interjection preamble).
+/// The harness strips `TERM_PROGRAM` then applies env; pass `vscode` so defaults bind the chord to Ctrl+L.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn interjection_reaches_model_ctrl_l_in_vscode_family() {
     let content = ContentController::start().await.expect("start content");
-    // Gate turn 1's terminal event so the typed text + chord provably land
-    // mid-turn regardless of suite load.
+    // Gate turn 1's terminal event so the typed text and chord provably land mid-turn regardless of suite load
     let mut turn_one = content.expect_agent_turn_blocked(
         "running turn before VS Code send-now",
         slow_turn_text("TURNONE"),

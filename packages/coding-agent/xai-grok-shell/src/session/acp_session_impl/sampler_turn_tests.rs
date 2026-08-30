@@ -1,13 +1,57 @@
 use xai_grok_sampling_types::{SearchDateBound, ToolOverrides, WebSearchOptions, XSearchOptions};
 
 use super::{
-    CLASSIFIER_REQUEST_TOKEN_RESERVE, classifier_request_fits_context, resolve_configured_cutoff,
+    CLASSIFIER_REQUEST_TOKEN_RESERVE, LengthSalvageAction, LengthSalvageStreak,
+    MAX_OUTPUT_TOKEN_LIMIT_RETRIES, classifier_request_fits_context, resolve_configured_cutoff,
 };
 
 fn x_cut(to: &str) -> XSearchOptions {
     XSearchOptions {
         date_bound: Some(SearchDateBound::new(None, Some(to.into())).unwrap()),
     }
+}
+
+/// A prompt whose every sample ends Length-with-tools salvages up to the
+/// cap (reminder only on the first) and then fails the turn.
+#[test]
+fn length_salvage_streak_proceeds_to_the_cap_then_exhausts() {
+    let mut streak = LengthSalvageStreak::default();
+    for n in 1..=MAX_OUTPUT_TOKEN_LIMIT_RETRIES {
+        match streak.on_sample(true) {
+            LengthSalvageAction::Proceed { inject_reminder } => {
+                assert_eq!(
+                    inject_reminder,
+                    n == 1,
+                    "reminder only on the first salvage"
+                );
+            }
+            other => panic!("salvage {n} within the cap must proceed, got {other:?}"),
+        }
+    }
+    assert!(matches!(
+        streak.on_sample(true),
+        LengthSalvageAction::Exhausted
+    ));
+}
+
+/// A non-Length (or tool-less) sample resets the streak: a later salvage
+/// starts a fresh streak and re-injects the reminder.
+#[test]
+fn length_salvage_streak_resets_on_non_length_sample() {
+    let mut streak = LengthSalvageStreak::default();
+    for _ in 0..MAX_OUTPUT_TOKEN_LIMIT_RETRIES {
+        let _ = streak.on_sample(true);
+    }
+    assert!(matches!(
+        streak.on_sample(false),
+        LengthSalvageAction::NotSalvage
+    ));
+    assert!(matches!(
+        streak.on_sample(true),
+        LengthSalvageAction::Proceed {
+            inject_reminder: true
+        }
+    ));
 }
 
 #[test]
@@ -234,6 +278,10 @@ mod subagent_sampling_gate_tests {
                 assert!(
                     ran.is_ok(),
                     "the main session must reach the sampler even while the gate is drained"
+                );
+                assert!(
+                    main.turn_stream_drained.lock().is_empty(),
+                    "a result with no queued terminal event must release request ownership before returning"
                 );
             })
             .await;

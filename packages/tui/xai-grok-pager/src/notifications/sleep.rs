@@ -1,26 +1,21 @@
-//! Platform-specific sleep prevention.
-//!
 //! Prevents the machine from idle-sleeping while an agent turn is in progress.
 //! macOS uses IOKit power assertions; Linux spawns `systemd-inhibit`.
 //!
-//! Threading: lives on `AppView` (single-threaded, `!Send`).
-//! Uses `Cell`/`RefCell` instead of atomics/mutexes.
+//! Threading: this lives on `AppView`, which is single-threaded and `!Send`, so fields use `Cell` and `RefCell` rather than atomics or mutexes.
 
 use std::cell::Cell;
 
 /// Prevents idle sleep while an agent turn is running.
 ///
-/// Calls are idempotent: repeated `inhibit()` or `release()` calls are no-ops
-/// when already in the requested state. On `Drop`, any held assertion is released.
+/// Calls are idempotent: repeated `inhibit()` or `release()` calls are no-ops when already in the requested state.
+/// On `Drop`, any held assertion is released.
 pub struct SleepInhibitor {
     #[cfg(target_os = "macos")]
     assertion_id: Cell<Option<u32>>,
     #[cfg(target_os = "linux")]
     child: std::cell::RefCell<Option<std::process::Child>>,
     active: Cell<bool>,
-    /// Set on first `platform_inhibit` failure to avoid repeated spawn
-    /// attempts on platforms where the inhibitor is unavailable (e.g.
-    /// containers without systemd-inhibit).
+    /// Set on the first `platform_inhibit` failure so a platform without an inhibitor (e.g. a container without systemd-inhibit) is not retried.
     platform_unavailable: Cell<bool>,
     enabled: bool,
 }
@@ -38,8 +33,8 @@ impl SleepInhibitor {
         }
     }
 
-    /// Prevent idle sleep. No-op if already inhibiting, disabled, or
-    /// platform support was already determined to be unavailable.
+    /// Prevent idle sleep.
+    /// No-op if already inhibiting, disabled, or platform support was already determined to be unavailable.
     pub fn inhibit(&self) {
         if !self.enabled || self.active.get() || self.platform_unavailable.get() {
             return;
@@ -111,12 +106,10 @@ impl SleepInhibitor {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
         xai_tty_utils::detach_std_command(&mut cmd);
-        // The spawned process is the lock holder: `systemd-inhibit` keeps
-        // the idle-inhibit fd itself and runs `sleep infinity` as its child
-        // — it is the same pid `release()` SIGTERMs on a clean turn end.
-        // Bind that pid to us so a crashed/killed grok (SIGKILL,
-        // `panic=abort` SIGABRT — no Drop runs) can't leave an immortal
-        // inhibitor holding the lock and pid slots on shared hosts.
+        // The spawned process is the lock holder: `systemd-inhibit` keeps the idle-inhibit fd itself and runs `sleep infinity` as its child
+        // That is the same pid `release()` SIGTERMs on a clean turn end
+        // Bind that pid to us so a crashed or killed grok (SIGKILL, `panic=abort` SIGABRT, no Drop runs) cannot leave it running forever
+        // A leaked `systemd-inhibit` holds the idle lock and pid slots on shared hosts
         xai_tty_utils::kill_on_parent_death_std(&mut cmd);
         #[allow(clippy::disallowed_methods)] // bound by kill-on-parent-death; released each turn
         let result = cmd.spawn();
@@ -190,8 +183,7 @@ mod tests {
         assert!(!inhibitor.active.get());
     }
 
-    /// On unsupported platforms (not macOS/Linux), platform_inhibit returns
-    /// false and `platform_unavailable` latches to prevent retry spam.
+    /// On unsupported platforms (not macOS or Linux), platform_inhibit returns false and `platform_unavailable` latches to prevent retry spam.
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     #[test]
     fn platform_unavailable_prevents_retries() {
@@ -210,7 +202,7 @@ mod tests {
         let inhibitor = SleepInhibitor::new(true);
         inhibitor.inhibit();
         let was_active = inhibitor.active.get();
-        // Second call should not change state (and not spawn a second child/assertion).
+        // The second `inhibit` leaves the state alone and does not spawn a second child or assertion
         inhibitor.inhibit();
         assert_eq!(inhibitor.active.get(), was_active);
         inhibitor.release();
@@ -250,7 +242,7 @@ mod tests {
         let inhibitor = SleepInhibitor::new(true);
         inhibitor.inhibit();
         drop(inhibitor);
-        // No assertion — just verify no panic/leak.
+        // No assertion; the test only checks that drop neither panics nor leaks
     }
 
     #[cfg(target_os = "linux")]
@@ -263,7 +255,7 @@ mod tests {
             inhibitor.release();
             assert!(inhibitor.child.borrow().is_none());
         }
-        // If systemd-inhibit isn't available, active stays false — that's fine.
+        // If systemd-inhibit isn't available, active stays false and that's fine
     }
 
     #[cfg(target_os = "linux")]
@@ -272,7 +264,6 @@ mod tests {
         let inhibitor = SleepInhibitor::new(true);
         inhibitor.inhibit();
         if inhibitor.active.get() {
-            // Grab the pid before release.
             let pid = inhibitor.child.borrow().as_ref().map(|c| c.id());
             assert!(pid.is_some());
             inhibitor.release();

@@ -74,8 +74,7 @@ async fn minimal_switch_mid_turn_keeps_streaming() {
                 harness.screen_contents()
             )
         });
-    // Re-check after idle: the live region no longer masks a frozen partial
-    // commit, so this fails if the switch marker closed the stream early.
+    // Re-check after idle: the live region can no longer mask a commit that froze partway, so this fails if the switch marker closed the stream early
     assert!(
         harness.full_text().contains("streaming29"),
         "streamed tail missing from committed transcript after idle\nfull:\n{}",

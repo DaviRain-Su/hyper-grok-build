@@ -28,6 +28,7 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 indexmap = { workspace = true }
+xai-dirs = { workspace = true }
 reqwest = { workspace = true }
 xai-grok-extra-ca = { workspace = true }
 reqwest-middleware = { workspace = true }

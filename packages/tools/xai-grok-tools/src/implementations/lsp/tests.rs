@@ -2267,3 +2267,71 @@ async fn e2e_real_roslyn_survives_editing() {
     monitor.abort();
     mgr.lock().await.shutdown().await;
 }
+
+fn read_json(path: &Path) -> serde_json::Value {
+    let text =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}\n{text}", path.display()))
+}
+
+/// The handshake that stops Roslyn from creating a FileSystemWatcher per
+/// NuGet-cache directory: we advertise the capability, we accept the
+/// registration (including an out-of-workspace glob), and we do not turn it
+/// into an OS watch. An edit is forwarded as `workspace/didChangeWatchedFiles`
+/// so the server still hears about files we ourselves change.
+#[tokio::test]
+async fn advertises_and_accepts_file_watch_registration_without_error() {
+    let (script_dir, script_path) = write_file_watch_server();
+    let config = mock_server_config(&script_path);
+    let workspace = tempfile::tempdir().unwrap();
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let mut client = LspClient::start(
+        "watch-mock".to_string(),
+        1,
+        config,
+        workspace.path(),
+        notify,
+    )
+    .await
+    .expect("handshake failed");
+
+    let caps_path = script_dir.path().join("initialize_caps.json");
+    wait_until("initialize capabilities dump", || caps_path.exists()).await;
+    let caps = read_json(&caps_path);
+    let watch = &caps["workspace"]["didChangeWatchedFiles"];
+    assert_eq!(
+        watch["dynamicRegistration"], true,
+        "client must claim didChangeWatchedFiles so Roslyn does not use FileSystemWatcher: {watch}"
+    );
+    assert_eq!(watch["relativePatternSupport"], true, "{watch}");
+
+    let reply_path = script_dir.path().join("register_reply.json");
+    wait_until("registerCapability reply", || reply_path.exists()).await;
+    let reply = read_json(&reply_path);
+    assert!(
+        reply.get("error").is_none(),
+        "registerCapability must succeed so the server keeps using the client: {reply}"
+    );
+    assert_eq!(client.accepted_file_watch_registrations(), 1);
+
+    let file = workspace.path().join("app.ts");
+    client.notify_file_change(&file, "const x = 1;\n", "typescript");
+    client.notify_watched_path_event(&file, async_lsp::lsp_types::FileChangeType::CHANGED);
+    let watched_path = script_dir.path().join("watched.json");
+    wait_until("didChangeWatchedFiles from our edit", || {
+        watched_path.exists()
+    })
+    .await;
+    let watched = read_json(&watched_path);
+    let uri = watched["changes"][0]["uri"].as_str().unwrap_or("");
+    assert!(
+        uri.ends_with("app.ts"),
+        "edit should be forwarded as a watched-file change, got {watched}"
+    );
+    assert_eq!(
+        watched["changes"][0]["type"], 2,
+        "search_replace of an existing file is FileChangeType::Changed: {watched}"
+    );
+
+    client.shutdown().await;
+}

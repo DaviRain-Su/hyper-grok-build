@@ -3,8 +3,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-// From the earliest arm site (a signal, before loop unwind): the agent
-// join bound (SESSION_FLUSH_GRACE + slack, 12s) plus flushes and headroom.
+// The default covers the worst case, `arm` called from a signal before the loop unwinds:
+// joining the agent takes up to SESSION_FLUSH_GRACE plus slack (12s), and the rest is flushes and headroom
 const DEFAULT_EXIT_TIMEOUT: Duration = Duration::from_secs(20);
 const EXIT_TIMEOUT_ENV: &str = "GROK_EXIT_TIMEOUT_SECS";
 const HARD_EXIT_GRACE: Duration = Duration::from_secs(5);
@@ -12,8 +12,8 @@ const TEST_HOLD_TEARDOWN_ENV: &str = "GROK_TEST_HOLD_TEARDOWN_SECS";
 
 static ARMED: AtomicBool = AtomicBool::new(false);
 
-/// Arm the exit timeout. The first caller to spawn fixes the exit code;
-/// a failed spawn un-latches so a later quit path can retry.
+/// The first caller to spawn the timer fixes the exit code.
+/// A failed spawn clears `ARMED` so a later quit path can retry.
 pub(crate) fn arm(exit_code: i32) {
     if cfg!(test) {
         return;
@@ -36,9 +36,8 @@ pub(crate) fn arm(exit_code: i32) {
     }
 }
 
-/// After the grace, exit without touching any user-space lock. If the
-/// backup thread cannot spawn, exit here: the guarantee outranks the
-/// polite teardown the caller was about to attempt.
+/// After the grace, exit without touching any user-space lock.
+/// If the backup thread cannot spawn, exit here: exiting matters more than the graceful teardown the caller was about to attempt.
 fn spawn_hard_exit(exit_code: i32) {
     let spawned = std::thread::Builder::new()
         .name("quit-hard-exit".into())

@@ -164,7 +164,7 @@ struct KnownMarketplaceEntry {
 /// `false` entry is an installed-but-disabled plugin whose state we
 /// mirror), so never-installed catalog plugins are not discovered.
 pub fn resolve_known_marketplaces() -> Vec<ResolvedMarketplace> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = xai_dirs::home_dir() else {
         return vec![];
     };
     resolve_known_marketplaces_in(&home.join(".claude"))

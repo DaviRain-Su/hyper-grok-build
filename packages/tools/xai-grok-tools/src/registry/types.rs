@@ -1206,6 +1206,13 @@ impl ToolRegistryBuilder {
         resources.insert(crate::types::resources::EnabledNativeToolNames(
             native_tool_names,
         ));
+        resources.insert(crate::types::resources::NativeToolClientNames(
+            tools
+                .iter()
+                .filter(|tool| !tool.client_name.contains("__"))
+                .map(|tool| (tool.registry_id.clone(), tool.client_name.clone()))
+                .collect(),
+        ));
         let proposed: Vec<ProposedTool> = tools
             .iter()
             .map(|t| ProposedTool {
@@ -1361,6 +1368,14 @@ impl FinalizedToolset {
     /// e.g. to label a background task with its real creator tool name.
     pub fn tool_name_for_kind(&self, kind: ToolKind) -> Option<String> {
         self.renderer.tool_for_kind(kind).map(str::to_owned)
+    }
+    /// Client-facing name for a canonical registry ID, honoring name overrides.
+    pub fn tool_name_for_registry_id(&self, registry_id: &str) -> Option<String> {
+        self.tools
+            .read()
+            .iter()
+            .find(|tool| tool.registry_id == registry_id)
+            .map(|tool| tool.client_name.clone())
     }
     /// Map of client-facing tool name → snake_case [`ToolKind`] key.
     pub fn tool_kinds(&self) -> HashMap<String, String> {

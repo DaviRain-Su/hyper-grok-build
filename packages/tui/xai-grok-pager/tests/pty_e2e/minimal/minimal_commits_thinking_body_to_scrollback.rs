@@ -3,17 +3,14 @@
 use crate::common::*;
 use xai_grok_pager_pty_harness::{InferenceEndpoint, InferenceRequestMatcher};
 
-/// Reasoning text streamed by the mock. Must never appear in the answer text
-/// so screen assertions can tell the two apart.
+/// Reasoning text streamed by the mock. Must never appear in the answer text so screen assertions can tell the two apart.
 const REASONING_SENTINEL: &str = "REASONINGSENTINEL";
 
-/// `[ui] show_thinking_blocks` is set explicitly (not left to the default)
-/// so the test doesn't depend on the rollout default.
+/// `[ui] show_thinking_blocks` is set explicitly so the test doesn't depend on the rollout default.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_commits_thinking_body_to_scrollback() {
-    // The model must run on the Responses backend — reasoning summary deltas
-    // are a Responses-API stream shape (the scripted events below).
+    // The model must run on the Responses backend; only the Responses API streams reasoning summary deltas (the scripted events below)
     let content = ContentController::start_with_models(vec![
         MockModel::new("test-model").with_api_backend("responses"),
     ])
@@ -30,11 +27,10 @@ async fn minimal_commits_thinking_body_to_scrollback() {
             "test-model",
         )),
     );
-    // Fallback mode for any further auxiliary traffic.
+    // Any further auxiliary traffic falls back to this response
     content.set_response(answer.clone());
 
-    // Thinking blocks explicitly ON (ingestion is gated on this toggle; the
-    // sandbox `$HOME` starts with no config at all).
+    // Thinking blocks explicitly ON (ingestion is gated on this toggle; the sandbox `$HOME` starts with no config at all)
     std::fs::create_dir_all(content.home().join(".grok")).expect("mk .grok");
     std::fs::write(
         content.home().join(".grok/config.toml"),

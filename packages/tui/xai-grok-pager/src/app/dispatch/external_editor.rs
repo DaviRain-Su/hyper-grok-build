@@ -1,5 +1,3 @@
-//! Pure dispatch preparation for external prompt editing.
-
 use crate::app::actions::Effect;
 use crate::app::agent_view::ExternalPromptEditorAccess;
 use crate::app::app_view::{ActiveView, AppView, VoiceTarget};

@@ -1,7 +1,7 @@
 //! Build a `memory.tar.gz` archive containing session logs and MEMORY.md files.
 //!
-//! The archive is uploaded to GCS at session finalize time. The reconstruct
-//! pipeline injects these into the Docker image for full replay fidelity.
+//! The archive is uploaded to GCS at session finalize time.
+//! The reconstruct pipeline injects these files into the Docker image so a replayed session sees the same memory.
 
 use anyhow::{Context, Result};
 

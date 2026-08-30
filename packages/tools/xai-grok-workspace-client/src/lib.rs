@@ -5,16 +5,13 @@
     unreachable_code,
     dead_code
 )]
-//! Typed client for hub-proxied `workspace.*` RPC methods — the single
-//! transport for the `workspace_rpc` channel, shared by `WorkspaceOps`
-//! proxy mode and by consumers that cannot depend on
-//! `xai-grok-workspace`. Wire types live in
-//! `xai_grok_workspace_types::rpc`; this crate adds the connected-state
-//! latch, the generic [`WorkspaceClient::rpc`] core, and error mapping.
+//! Typed client for hub-proxied `workspace.*` RPC methods, the single transport for the `workspace_rpc` channel.
+//! `WorkspaceOps` proxy mode and consumers that cannot depend on `xai-grok-workspace` both use it.
+//! Wire types live in `xai_grok_workspace_types::rpc`.
+//! This crate adds the connected-state latch, the generic [`WorkspaceClient::rpc`] core, and error mapping.
 //!
-//! No deadline is imposed by default ([`WorkspaceClient::with_deadline`]
-//! opts in), preserving `WorkspaceOps::rpc_raw` semantics where callers
-//! own their timeouts.
+//! No deadline is imposed by default ([`WorkspaceClient::with_deadline`] opts in).
+//! That preserves the `WorkspaceOps::rpc_raw` behaviour where callers own their timeouts.
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,8 +62,7 @@ use xai_grok_workspace_types::rpc::{RpcEnvelope, RpcError, WORKSPACE_RPC_TOOL_ID
 use xai_tool_runtime::{ToolCallContext, ToolStreamItem, TypedToolOutput};
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceClientError {
-    /// A previous call observed a fatal transport error and no
-    /// reconnect has been signalled since.
+    /// A previous call observed a fatal transport error and no reconnect has been signalled since.
     #[error("hub connection lost (previously disconnected)")]
     NotConnected,
     #[error("rpc failed: {0}")]
@@ -85,11 +81,9 @@ pub enum WorkspaceClientError {
     #[error("workspace rpc error: {0}")]
     Rpc(RpcError),
 }
-/// Consume a `ToolStream<TypedToolOutput>` to its terminal item,
-/// discarding progress frames.
+/// Consume a `ToolStream<TypedToolOutput>` to its terminal item, discarding progress frames.
 ///
-/// Returns the terminal result, or a `ToolError::NetworkError` if the
-/// stream ended without producing a terminal item.
+/// Returns the terminal result, or a `ToolError::NetworkError` if the stream ended without producing a terminal item.
 pub async fn consume_stream_terminal(
     stream: &mut xai_tool_runtime::ToolStream<TypedToolOutput>,
 ) -> Result<TypedToolOutput, xai_tool_runtime::ToolError> {
@@ -106,22 +100,18 @@ pub async fn consume_stream_terminal(
         }
     }
 }
-/// Feature-gate check over a reported workspace-server version: it parses as
-/// semver and is `>= baseline`. Absent or unparseable versions return `false`
-/// — an unproven version is older than any gated feature.
+/// True when the reported workspace-server version parses as semver and is `>= baseline`.
+/// Absent or unparseable versions return `false`, so a server with an unknown version is treated as lacking the gated feature.
 pub fn server_version_at_least(version: Option<&str>, baseline: &semver::Version) -> bool {
     version
         .and_then(|v| semver::Version::parse(v).ok())
         .is_some_and(|v| v >= *baseline)
 }
-/// Check whether a [`ToolError`](xai_tool_runtime::ToolError) indicates
-/// a fatal transport failure that should mark the hub as disconnected.
+/// Check whether a [`ToolError`](xai_tool_runtime::ToolError) indicates a fatal transport failure that should mark the hub as disconnected.
 ///
 /// Returns `true` for:
-/// - `NetworkError` — direct transport failure (socket dropped, stream
-///   ended without terminal item, etc.)
-/// - `Custom` with `details.code == "protocol_error"` — half-closed
-///   WebSocket producing malformed frames
+/// - `NetworkError`: a direct transport failure (socket dropped, stream ended without a terminal item, etc.)
+/// - `Custom` with `details.code == "protocol_error"`: a half-closed WebSocket producing malformed frames
 pub fn is_transport_fatal(err: &xai_tool_runtime::ToolError) -> bool {
     match err.kind {
         xai_tool_runtime::ToolErrorKind::NetworkError => true,
@@ -134,8 +124,8 @@ pub fn is_transport_fatal(err: &xai_tool_runtime::ToolError) -> bool {
         _ => false,
     }
 }
-/// True when the hub's `workspace_unavailable` details carry `retryable: false`, the contract
-/// that blind retries cannot succeed until the workspace is revived.
+/// True when the hub's `workspace_unavailable` details carry `retryable: false`.
+/// That flag means retries cannot succeed until the workspace is revived.
 fn is_non_retryable_workspace_unavailable(err: &xai_tool_runtime::ToolError) -> bool {
     if !matches!(err.kind, xai_tool_runtime::ToolErrorKind::Custom) {
         return false;
@@ -150,11 +140,9 @@ fn is_non_retryable_workspace_unavailable(err: &xai_tool_runtime::ToolError) -> 
 }
 /// Typed client over a bound [`ToolHarness`] for `workspace.*` RPCs.
 ///
-/// Clones share the harness and the connected latch, which fast-fails
-/// calls after a fatal transport error until
-/// [`mark_connected`](Self::mark_connected) resets it (e.g. from an SDK
-/// `on_reconnect` callback sharing the flag via
-/// [`with_connected_flag`](Self::with_connected_flag)).
+/// Clones share the harness and the connected latch, which fast-fails calls after a fatal transport error.
+/// [`mark_connected`](Self::mark_connected) resets the latch.
+/// An SDK `on_reconnect` callback can do that by holding the same flag, passed in via [`with_connected_flag`](Self::with_connected_flag).
 #[derive(Clone)]
 pub struct WorkspaceClient {
     harness: ToolHarness,
@@ -177,8 +165,7 @@ impl WorkspaceClient {
             deadline: None,
         }
     }
-    /// Shares a pre-created connected flag, so an SDK `on_reconnect`
-    /// callback holding the same `Arc` can reset it.
+    /// Shares a pre-created connected flag, so an SDK `on_reconnect` callback holding the same `Arc` can reset it.
     pub fn with_connected_flag(harness: ToolHarness, connected: Arc<AtomicBool>) -> Self {
         Self {
             harness,
@@ -194,9 +181,8 @@ impl WorkspaceClient {
     pub fn harness(&self) -> &ToolHarness {
         &self.harness
     }
-    /// Server binary version from the hub bind report, without an RPC
-    /// round-trip. `None` before the first bind or against servers that
-    /// predate the field.
+    /// Server binary version from the hub bind report, read without an RPC round-trip.
+    /// Returns `None` before the first bind, or against servers that predate the field.
     pub fn server_binary_version(&self) -> Option<String> {
         self.harness
             .last_bind_report()
@@ -209,12 +195,11 @@ impl WorkspaceClient {
     pub fn mark_disconnected(&self) {
         self.connected.store(false, Ordering::Relaxed);
     }
-    /// Reset after an SDK reconnect.
+    /// Resets the connected latch after an SDK reconnect.
     pub fn mark_connected(&self) {
         self.connected.store(true, Ordering::Relaxed);
     }
-    /// Untyped RPC call: `{"method": .., "params": ..}` through the
-    /// `workspace_rpc` hub tool, returning the raw envelope value.
+    /// Untyped RPC call: `{"method": .., "params": ..}` through the `workspace_rpc` hub tool, returning the raw envelope value.
     pub async fn rpc_raw(
         &self,
         method: &str,
@@ -257,8 +242,7 @@ impl WorkspaceClient {
         })?;
         Ok(typed.value)
     }
-    /// Typed RPC call: derives the method and response type from the
-    /// request type's [`WorkspaceRpc`] impl and decodes the envelope.
+    /// Typed RPC call: derives the method and response type from the request type's [`WorkspaceRpc`] impl and decodes the envelope.
     pub async fn rpc<R: WorkspaceRpc>(&self, req: &R) -> Result<R::Response, WorkspaceClientError> {
         let params = serde_json::to_value(req).map_err(|e| WorkspaceClientError::Decode {
             method: R::METHOD.to_owned(),
@@ -272,9 +256,7 @@ impl WorkspaceClient {
             })?;
         envelope.into_result().map_err(WorkspaceClientError::Rpc)
     }
-    /// `workspace.info`, decoded into the typed shape
-    /// (`WorkspaceInfoReq::Response` is the raw `Value` for
-    /// `WorkspaceOps` compat).
+    /// `workspace.info`, decoded into the typed shape (`WorkspaceInfoReq::Response` is the raw `Value` for `WorkspaceOps` compatibility).
     pub async fn info(&self) -> Result<WorkspaceInfo, WorkspaceClientError> {
         let raw = self.rpc(&WorkspaceInfoReq {}).await?;
         serde_json::from_value(raw).map_err(|e| WorkspaceClientError::Decode {
@@ -379,7 +361,7 @@ impl WorkspaceClient {
     pub async fn git_metadata(&self) -> Result<Value, WorkspaceClientError> {
         self.rpc(&GitMetadataReq {}).await
     }
-    /// `workspace.git_collect_changes` — collect repository changes for serialization.
+    /// `workspace.git_collect_changes`: collects repository changes for serialization.
     pub async fn git_collect_changes(
         &self,
         req: &GitCollectChangesReq,

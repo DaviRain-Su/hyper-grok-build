@@ -2,21 +2,17 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 17. **Ctrl+C-cancel mid-stream recovers cleanly.**
-///
-/// Cancelling a streaming turn must (a) surface the "Turn cancelled" marker
-/// exactly once — the turn end now arrives via BOTH the PromptResponse RPC
-/// and the `prompt_complete` broadcast (which arms the lost-response
-/// reconcile), and a double-finish would render two markers — and (b) leave
-/// the pane usable: no `TurnCancelling` latch, the next typed prompt runs.
+/// Cancelling a streaming turn must show the "Turn cancelled" marker exactly once.
+/// The turn end arrives via BOTH the PromptResponse RPC and the `prompt_complete` broadcast, which also covers a lost response.
+/// Finishing the turn on both paths would render two markers.
+/// The pane must stay usable afterwards: no `TurnCancelling` latch, the next typed prompt runs.
 /// Cancel is via Ctrl+C, which works in every mode.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn ctrl_c_cancel_during_stream_recovers_cleanly() {
     let content = ContentController::start().await.expect("start content");
-    // A long, paced response keeps the turn visibly streaming while Ctrl+C is
-    // pressed (the mock otherwise dumps all SSE events instantly and the
-    // turn completes before the cancel lands).
+    // A long, paced response keeps the turn visibly streaming while Ctrl+C is pressed
+    // The mock otherwise dumps all SSE events instantly and the turn completes before the cancel lands
     let long_response = format!(
         "{MOCK_RESPONSE_SENTINEL} {}",
         "streaming filler words for the cancellation window. ".repeat(120)
@@ -48,9 +44,8 @@ async fn ctrl_c_cancel_during_stream_recovers_cleanly() {
         .wait_for_text("Turn cancelled by user", Duration::from_secs(15))
         .expect("turn cancelled marker");
 
-    // Settle, then assert the marker rendered exactly once — a double marker
-    // means the broadcast reconcile double-finished the turn alongside the
-    // PromptResponse path.
+    // Settle, then count the marker on screen
+    // A second marker means the broadcast path finished the turn again after the PromptResponse path already had
     harness.update(Duration::from_millis(1000));
     let screen = harness.screen_contents();
     assert_eq!(
@@ -59,8 +54,7 @@ async fn ctrl_c_cancel_during_stream_recovers_cleanly() {
         "'Turn cancelled' must appear exactly once\nscreen:\n{screen}"
     );
 
-    // Recovery: the pane must accept and run a new prompt (no
-    // TurnCancelling latch, which previously required a restart here).
+    // Recovery: the pane must accept and run a new prompt (no TurnCancelling latch, which previously required a restart here)
     content.set_chunk_delay(None);
     content.set_response("RECOVERYSENTINEL post-cancel turn ran.");
     harness
@@ -78,11 +72,9 @@ async fn ctrl_c_cancel_during_stream_recovers_cleanly() {
 
     harness.quit().expect("clean quit");
 
-    // The new cancel-path observability must have recorded the cancel
-    // end-to-end in the (isolated) unified log: the agent received the
-    // `session/cancel` notification and processed it against the running
-    // prompt. Absence of these markers was exactly what made the original
-    // incident undiagnosable.
+    // The unified log (isolated per test) must record the cancel end to end
+    // The agent received the `session/cancel` notification and processed it against the running prompt
+    // These markers were missing during the original incident, which made it undiagnosable
     let unified_log = content
         .home()
         .join(".grok")

@@ -1,14 +1,9 @@
-//! Modal dialogs and the [`ActiveModal`] enum.
+//! [`ActiveModal`] wraps concrete modal instances for storage on `AgentView`.
+//! Picker variants (`CommandPalette`, `ArgPicker`, `SessionPicker`, `DocPicker`, `DocViewer`) use [`ModalWindow`](super::modal_window) for chrome.
+//! Their entries render through [`render_picker_content`](super::picker::render_picker_content).
+//! `EditConfirm` is a bar-style overlay (not a popup).
 //!
-//! [`ActiveModal`] wraps concrete modal instances for storage on
-//! `AgentView`. Picker-based variants (`CommandPalette`, `ArgPicker`,
-//! `SessionPicker`, `DocPicker`, `DocViewer`) use the shared
-//! [`ModalWindow`](super::modal_window) component for chrome and
-//! [`render_picker_content`](super::picker::render_picker_content) for
-//! entry rendering. `EditConfirm` is a bar-style overlay (not a popup).
-//!
-//! `ModalConfirmation<R>` is a small dialog that blocks all input until
-//! the user presses one of the listed keys.
+//! `ModalConfirmation<R>` is a small dialog that blocks all input until the user presses one of the listed keys.
 use crate::docs::{DocEntry, default_howto_entries};
 use crate::theme::Theme;
 use crate::views::modal_window::ModalWindowState;
@@ -19,10 +14,10 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 /// A blocking confirmation dialog with typed results.
 ///
-/// `R` is the result type — each dialog use-case defines its own enum.
+/// `R` is the result type; each dialog use-case defines its own enum.
 /// Key-matching is generic; labels are computed per-variant at render time.
 pub struct ModalConfirmation<R> {
-    /// Available options (key → result). Labels are derived from `R` at render time.
+    /// Available options, each mapping a key to a result. Labels are derived from `R` at render time.
     pub options: Vec<ModalOption<R>>,
 }
 /// One option in a modal dialog.
@@ -41,13 +36,13 @@ impl<R> ModalConfirmation<R> {
 /// Result of the edit-confirmation modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditConfirmResult {
-    /// Save changes (back to queue, or save & send if drain-blocked).
+    /// Save changes (back to queue, or save and send if drain-blocked).
     Save,
     /// Discard changes (revert to original; sends original if drain-blocked).
     Discard,
     /// Delete the prompt entirely from the queue.
     Delete,
-    /// Cancel — dismiss the dialog, stay in editing mode.
+    /// Cancel: dismiss the dialog, stay in editing mode.
     Cancel,
 }
 impl EditConfirmResult {
@@ -88,12 +83,12 @@ impl ModalConfirmation<EditConfirmResult> {
     }
 }
 /// Result of the reset-settings confirmation modal.
-/// `y` → Reset, `n`/`Esc`/`F2`/`Ctrl+,` → Cancel.
+/// `y` chooses Reset; `n`, `Esc`, `F2`, and `Ctrl+,` choose Cancel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResetSettingsResult {
     /// Restore the setting to its registered default.
     Reset,
-    /// Cancel — return to the Settings modal unchanged.
+    /// Cancel: return to the Settings modal unchanged.
     Cancel,
 }
 impl ResetSettingsResult {
@@ -105,8 +100,7 @@ impl ResetSettingsResult {
         }
     }
 }
-/// Shortcut IDs for the reset-confirm footer buttons (1-2, avoiding
-/// the extensions modal's 100+ range).
+/// Shortcut IDs for the reset-confirm footer buttons (1-2, avoiding the extensions modal's 100+ range).
 pub const RESET_CONFIRM_YES_ID: usize = 1;
 pub const RESET_CONFIRM_NO_ID: usize = 2;
 impl ModalConfirmation<ResetSettingsResult> {
@@ -155,9 +149,8 @@ pub struct CancelTurnViewState {
 }
 /// Returns a ready-to-open DocPicker modal for the how-to guides list.
 ///
-/// `previous_palette` is the saved command-palette state; when provided,
-/// pressing Esc in the doc picker restores that palette instead of
-/// closing the modal outright.
+/// `previous_palette` is the saved command-palette state.
+/// When provided, pressing Esc in the doc picker restores that palette instead of closing the modal outright.
 pub fn howto_list_modal(previous_palette: Option<PaletteSnapshot>) -> ActiveModal {
     ActiveModal::DocPicker {
         entries: default_howto_entries(),
@@ -168,8 +161,7 @@ pub fn howto_list_modal(previous_palette: Option<PaletteSnapshot>) -> ActiveModa
 }
 /// The currently active modal dialog, if any.
 ///
-/// Each variant wraps a `ModalConfirmation<R>` with its concrete result
-/// type plus any context needed for resolution (e.g., pending focus target).
+/// Each variant wraps a `ModalConfirmation<R>` with its concrete result type plus any context needed for resolution (e.g., pending focus target).
 pub enum ActiveModal {
     /// Confirmation for leaving a dirty queued-prompt edit.
     EditConfirm {
@@ -189,19 +181,13 @@ pub enum ActiveModal {
     ArgPicker {
         /// Command name (e.g., "model", "theme").
         command: String,
-        /// Args query passed to `suggest_args` (empty = first phase; for `/model`,
-        /// a trailing-space query enters the reasoning-effort sub-menu).
+        /// Args query passed to `suggest_args`; empty means the first phase.
+        /// For `/model`, a trailing-space query enters the reasoning-effort sub-menu.
         args_query: String,
         /// Filtered items (re-filtered from original_items on query change).
         items: Vec<crate::slash::command::ArgItem>,
         /// Original items from suggest_args() (source for filtering).
         original_items: Vec<crate::slash::command::ArgItem>,
-        /// `/model` only: show the full catalog (locked BYOK rows + hidden
-        /// models) instead of the scoped default. Toggled with Tab.
-        show_all: bool,
-        /// `/model` only: ids currently in `[models].hidden_models` (for
-        /// hide/unhide via ^X and All-view synthesis).
-        hidden_ids: Vec<String>,
         /// Unified picker state.
         state: crate::views::picker::PickerState,
         /// Previous command palette state (if opened from palette). Restored on Esc.
@@ -213,7 +199,7 @@ pub enum ActiveModal {
     SessionPicker {
         /// Unified picker state.
         state: crate::views::picker::PickerState,
-        /// Fetched session entries (None = not yet loaded).
+        /// Fetched session entries (None means not yet loaded).
         entries: Option<Vec<crate::app::app_view::SessionPickerEntry>>,
         /// Whether the session list is being fetched.
         loading: bool,
@@ -229,22 +215,18 @@ pub enum ActiveModal {
         content_loading: bool,
         /// Monotonically increasing sequence number for deep search requests.
         deep_search_seq: u64,
-        /// Incarnation identity for fetch routing. Constructed as a 0
-        /// placeholder; `dispatch_fetch_session_list` (which runs before any
-        /// fetch exists for the modal) allocates the real generation, so 0
-        /// never appears on a production request.
+        /// Incarnation identity for fetch routing.
+        /// Constructed as a 0 placeholder; `dispatch_fetch_session_list`, which runs before any fetch exists, allocates the real generation.
+        /// 0 therefore never appears on a production request.
         generation: u64,
-        /// Invalidates the modal's in-flight card-detail reads when its rows
-        /// or filters change.
+        /// Invalidates the modal's in-flight card-detail reads when its rows or filters change.
         detail_seq: u64,
-        /// The search query `entries` were server-fetched with (`None` =
-        /// unfiltered fetch). See
-        /// [`crate::views::session_picker::effective_filter_query`].
+        /// The search query `entries` were server-fetched with (`None` means an unfiltered fetch).
+        /// See [`crate::views::session_picker::effective_filter_query`].
         entries_query: Option<String>,
         /// Source filter for the modal session picker.
         source_filter: crate::views::session_picker::SourceFilter,
-        /// Session armed for delete via `d` (see
-        /// [`crate::views::session_picker::PendingDelete`]).
+        /// Session armed for delete via `d` (see [`crate::views::session_picker::PendingDelete`]).
         pending_delete: Option<crate::views::session_picker::PendingDelete>,
     },
     /// How-to documentation list modal (wider picker style).
@@ -264,22 +246,19 @@ pub enum ActiveModal {
         scroll: u16,
         /// Shared modal window chrome state.
         window: ModalWindowState,
-        /// Cached pre-rendered markdown lines + the width they were
-        /// rendered at. Invalidated when the content area width changes
-        /// (e.g. terminal resize) so lines are re-parsed at the new width.
+        /// Cached pre-rendered markdown lines and the width they were rendered at.
+        /// Invalidated when the content area width changes (e.g. terminal resize) so lines are re-parsed at the new width.
         cached_lines: Option<(u16, Vec<ratatui::text::Line<'static>>)>,
-        /// Palette snapshot shuttled from DocPicker, passed back when returning
-        /// to the doc list on Esc so the DocPicker can still restore the palette.
+        /// Palette snapshot carried from DocPicker, passed back on Esc so the DocPicker can still restore the palette.
         previous_palette: Option<PaletteSnapshot>,
-        /// When true, Esc closes the modal directly instead of returning
-        /// to the DocPicker list (used for /release-notes).
+        /// When true, Esc closes the modal directly instead of returning to the DocPicker list (used for /release-notes).
         standalone: bool,
     },
     /// All-shortcuts cheatsheet for the current view/state.
     /// Rendered via the unified picker (same look as CommandPalette).
     /// See `crate::views::shortcuts_help` for build/render/input logic.
     ShortcutsHelp {
-        /// Snapshot of the entries (section headers + hints) at open time.
+        /// Snapshot of the entries (section headers and hints) at open time.
         entries: Vec<crate::views::shortcuts_help::ShortcutsHelpEntry>,
         /// Unified picker state (search query, selection, scroll, hit areas).
         state: crate::views::picker::PickerState,
@@ -289,33 +268,28 @@ pub enum ActiveModal {
         filter_active: bool,
         /// Indices into CATEGORY_ORDER that are collapsed. Default: all except 0.
         collapsed_sections: std::collections::HashSet<usize>,
-        /// Rows whose inline help is expanded under the list (pattern A).
+        /// Rows whose inline help is expanded under the list.
         expanded_ids: std::collections::HashSet<crate::views::shortcuts_help::ExpandKey>,
-        /// Browse list vs in-modal detail page (pattern B).
+        /// Browse list vs in-modal detail page.
         mode: crate::views::shortcuts_help::ShortcutsHelpMode,
     },
     /// Memory browser modal (/memory).
     MemoryBrowser {
         state: Box<crate::views::memory_modal::MemoryModalState>,
     },
-    /// Changes review modal (A2): pending hunks with accept/reject.
-    Changes {
-        state: Box<crate::views::changes_modal::ChangesModalState>,
-    },
-    /// Settings modal (F2, /settings, palette). Boxed — large state.
+    /// Settings modal (F2, /settings, palette). Boxed because the state is large.
     Settings {
         state: Box<crate::views::settings_modal::SettingsModalState>,
     },
-    /// Tabbed usage / session-info modal (`/usage`, `/session-info`,
-    /// `/context`, context-bar click). Boxed — holds fetched snapshots.
+    /// Tabbed usage / session-info modal (`/usage`, `/session-info`, `/context`, context-bar click).
+    /// Boxed because it holds fetched snapshots.
     UsageInfo {
         state: Box<crate::views::usage_modal::UsageInfoModalState>,
     },
     /// Reset-settings confirmation, stacked above Settings.
     ///
-    /// The underlying `SettingsModalState` is moved in/out so cancel
-    /// preserves the user's filter/scroll position. The setting key
-    /// lives only here (single source of truth for dispatch).
+    /// The underlying `SettingsModalState` is moved in/out so cancel preserves the user's filter/scroll position.
+    /// The setting key lives only here (single source of truth for dispatch).
     ResetSettingsConfirm {
         modal: ModalConfirmation<ResetSettingsResult>,
         /// Setting key being reset.
@@ -323,8 +297,8 @@ pub enum ActiveModal {
         /// Preserved settings state, restored by both choice branches.
         settings_state: Box<crate::views::settings_modal::SettingsModalState>,
     },
-    /// Modal preview for a `#` remember note. Shows the raw text immediately;
-    /// the LLM-enhanced version arrives asynchronously and can be toggled with Tab.
+    /// Modal preview for a `#` remember note.
+    /// Shows the raw text immediately; the LLM-enhanced version arrives asynchronously and can be toggled with Tab.
     RememberNoteReview {
         raw_content: String,
         enhanced_content: Option<String>,
@@ -334,14 +308,12 @@ pub enum ActiveModal {
         cached_lines: Option<(u16, Vec<ratatui::text::Line<'static>>)>,
         cwd: std::path::PathBuf,
         agent_id: crate::app::agent::AgentId,
-        /// Monotonic nonce to correlate async rewrite results with the modal
-        /// that requested them, preventing stale results from populating a
-        /// different note's review modal.
+        /// Monotonic nonce correlating async rewrite results with the modal that requested them.
+        /// It keeps stale results from populating a different note's review modal.
         rewrite_nonce: u64,
     },
 }
-/// Snapshot of the command palette state, saved when opening an arg picker
-/// and restored on Esc.
+/// Snapshot of the command palette state, saved when opening an arg picker and restored on Esc.
 #[derive(Debug, Clone)]
 pub struct PaletteSnapshot {
     pub entries: Vec<PaletteEntry>,
@@ -376,9 +348,8 @@ pub enum PaletteCommand {
     KeyboardShortcuts,
     /// Open the memory browser modal.
     Memory,
-    /// Open the Extensions modal on a specific tab. Used by palette
-    /// entries that don't have a corresponding slash command (e.g.
-    /// "Marketplace", "Skills") and to keep direct entries consistent.
+    /// Open the Extensions modal on a specific tab.
+    /// Used by palette entries with no corresponding slash command (e.g. "Marketplace", "Skills") and to keep direct entries consistent.
     OpenExtensionsTab(crate::views::extensions_modal::ExtensionsTab),
     /// Open the settings modal.
     OpenSettings,
@@ -394,146 +365,141 @@ pub(crate) fn default_palette_entries(
     let mut entries = vec![
         // ── Session ──
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.session", "Session").into(),
+            label: "Session".into(),
             shortcut: String::new(),
             command: PaletteCommand::SectionHeader("Session".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.new_session", "New Session").into(),
+            label: "New Session".into(),
             shortcut: "Ctrl+N".into(),
             command: PaletteCommand::NewSession,
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.new_session_in_worktree", "New Session in Worktree")
-                .into(),
+            label: "New Session in Worktree".into(),
             shortcut: "Ctrl+P → worktree".into(),
             command: PaletteCommand::NewSessionInWorktree,
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.agent_dashboard", "Agent Dashboard").into(),
+            label: "Agent Dashboard".into(),
             shortcut: "/dashboard".into(),
             command: PaletteCommand::SlashCommand("/dashboard".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.back_to_home", "Back to Home").into(),
+            label: "Back to Home".into(),
             shortcut: "/home".into(),
             command: PaletteCommand::Home,
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.delete_session", "Delete This Session").into(),
+            label: "Delete This Session".into(),
             shortcut: "/delete".into(),
             command: PaletteCommand::SlashCommand("/delete".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.resume_session", "Resume Session").into(),
+            label: "Resume Session".into(),
             shortcut: "/resume".into(),
             command: PaletteCommand::SlashCommand("/resume".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.share_session", "Share Session").into(),
+            label: "Share Session".into(),
             shortcut: "/share".into(),
             command: PaletteCommand::SlashCommand("/share".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.rename_session", "Rename Session").into(),
+            label: "Rename Session".into(),
             shortcut: "/rename ".into(),
             command: PaletteCommand::SlashCommand("/rename ".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.session_info", "Session Info").into(),
+            label: "Session Info".into(),
             shortcut: "/session-info".into(),
             command: PaletteCommand::SlashCommand("/session-info".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.send_feedback", "Send Feedback").into(),
+            label: "Send Feedback".into(),
             shortcut: "/feedback".into(),
             command: PaletteCommand::SlashCommand("/feedback ".into()),
         },
         // ── Context ──
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.context", "Context").into(),
+            label: "Context".into(),
             shortcut: String::new(),
             command: PaletteCommand::SectionHeader("Context".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.compact_history", "Compact History").into(),
+            label: "Compact History".into(),
             shortcut: "/compact".into(),
             command: PaletteCommand::SlashCommand("/compact".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.context_usage", "Context Usage").into(),
+            label: "Context Usage".into(),
             shortcut: "/context".into(),
             command: PaletteCommand::SlashCommand("/context".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.view_plan", "View Plan").into(),
+            label: "View Plan".into(),
             shortcut: "/view-plan".into(),
             command: PaletteCommand::SlashCommand("/view-plan".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.memory", "Memory").into(),
+            label: "Memory".into(),
             shortcut: "/memory".into(),
             command: PaletteCommand::Memory,
         },
         // ── Model & Input ──
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.model_input", "Model & Input").into(),
+            label: "Model & Input".into(),
             shortcut: String::new(),
             command: PaletteCommand::SectionHeader("Model & Input".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.switch_model", "Switch Model").into(),
+            label: "Switch Model".into(),
             shortcut: "/model".into(),
             command: PaletteCommand::SlashCommand("/model ".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.always_approve_mode", "Always Approve Mode").into(),
+            label: "Always Approve Mode".into(),
             shortcut: "/always-approve".into(),
             command: PaletteCommand::SlashCommand("/always-approve".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.multiline_input", "Multiline Input").into(),
+            label: "Multiline Input".into(),
             shortcut: "/multiline".into(),
             command: PaletteCommand::SlashCommand("/multiline".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or(
-                "palette.edit_prompt_external",
-                "Edit Prompt in External Editor",
-            )
-            .into(),
+            label: "Edit Prompt in External Editor".into(),
             shortcut: "Ctrl+G".into(),
             command: PaletteCommand::EditPromptExternal,
         },
         // ── Tools ──
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.tools", "Tools").into(),
+            label: "Tools".into(),
             shortcut: String::new(),
             command: PaletteCommand::SectionHeader("Tools".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.hooks", "Hooks").into(),
+            label: "Hooks".into(),
             shortcut: "/hooks".into(),
             command: PaletteCommand::OpenExtensionsTab(
                 crate::views::extensions_modal::ExtensionsTab::Hooks,
             ),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.plugins", "Plugins").into(),
+            label: "Plugins".into(),
             shortcut: "/plugins".into(),
             command: PaletteCommand::OpenExtensionsTab(
                 crate::views::extensions_modal::ExtensionsTab::Plugins,
             ),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.marketplace", "Marketplace").into(),
+            label: "Marketplace".into(),
             shortcut: "/marketplace".into(),
             command: PaletteCommand::OpenExtensionsTab(
                 crate::views::extensions_modal::ExtensionsTab::Marketplace,
             ),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.skills", "Skills").into(),
+            label: "Skills".into(),
             shortcut: "/skills".into(),
             command: PaletteCommand::OpenExtensionsTab(
                 crate::views::extensions_modal::ExtensionsTab::Skills,
@@ -547,35 +513,35 @@ pub(crate) fn default_palette_entries(
             ),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.mcp_servers", "MCP Servers").into(),
+            label: "MCP Servers".into(),
             shortcut: "/mcps".into(),
             command: PaletteCommand::OpenExtensionsTab(
                 crate::views::extensions_modal::ExtensionsTab::McpServers,
             ),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.manage_agents", "Manage Agents").into(),
+            label: "Manage Agents".into(),
             shortcut: "/config-agents".into(),
             command: PaletteCommand::OpenAgentsModal,
         },
         // ── Other ──
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.other", "Other").into(),
+            label: "Other".into(),
             shortcut: String::new(),
             command: PaletteCommand::SectionHeader("Other".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.switch_theme", "Switch Theme").into(),
+            label: "Switch Theme".into(),
             shortcut: "/theme".into(),
             command: PaletteCommand::SlashCommand("/theme ".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.settings", "Settings").into(),
+            label: "Settings".into(),
             shortcut: "F2".into(),
             command: PaletteCommand::OpenSettings,
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.keyboard_shortcuts", "Keyboard Shortcuts").into(),
+            label: "Keyboard Shortcuts".into(),
             shortcut: if crate::actions::ctrl_dot_unreliable() {
                 "Ctrl+X".into()
             } else {
@@ -584,17 +550,17 @@ pub(crate) fn default_palette_entries(
             command: PaletteCommand::KeyboardShortcuts,
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.howto_guides", "How-to Guides").into(),
+            label: "How-to Guides".into(),
             shortcut: "/docs".into(),
             command: PaletteCommand::HowTo,
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.tutorial", "Tutorial").into(),
+            label: "Tutorial".into(),
             shortcut: "/tutorial".into(),
             command: PaletteCommand::SlashCommand("/tutorial".into()),
         },
         PaletteEntry {
-            label: crate::i18n::tr_or("palette.quit", "Quit").into(),
+            label: "Quit".into(),
             shortcut: "Ctrl+Q".into(),
             command: PaletteCommand::Quit,
         },
@@ -688,46 +654,40 @@ impl ActiveModal {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
-            | ActiveModal::Changes { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
             | ActiveModal::RememberNoteReview { .. } => vec![],
         }
     }
-    pub fn message(&self, drain_blocked: bool) -> std::borrow::Cow<'static, str> {
+    pub fn message(&self, drain_blocked: bool) -> &str {
         match self {
             ActiveModal::EditConfirm { .. } => {
                 if drain_blocked {
-                    rust_i18n::t!("modal.title.save_and_send")
+                    "Save and send?"
                 } else {
-                    rust_i18n::t!("modal.title.save_changes")
+                    "Save changes?"
                 }
             }
-            ActiveModal::CommandPalette { .. } => rust_i18n::t!("modal.title.commands"),
-            ActiveModal::SessionPicker { .. } => rust_i18n::t!("modal.title.resume_session"),
+            ActiveModal::CommandPalette { .. } => "Commands",
+            ActiveModal::SessionPicker { .. } => "Resume session",
             ActiveModal::ArgPicker {
                 command,
                 args_query,
                 ..
             } => match command.as_str() {
-                "model" | "m" if !args_query.is_empty() => {
-                    rust_i18n::t!("modal.title.pick_effort")
-                }
-                "model" | "m" => rust_i18n::t!("modal.title.pick_model"),
-                "theme" | "t" => rust_i18n::t!("modal.title.pick_theme"),
-                _ => rust_i18n::t!("modal.title.pick_option"),
+                "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
+                "model" | "m" => "Pick model",
+                "theme" | "t" => "Pick theme",
+                _ => "Pick option",
             },
-            ActiveModal::DocPicker { .. } => rust_i18n::t!("modal.title.howto_guides"),
-            ActiveModal::DocViewer { title, .. } => title.clone().into(),
-            ActiveModal::ShortcutsHelp { .. } => rust_i18n::t!("modal.title.keyboard_shortcuts"),
-            ActiveModal::MemoryBrowser { .. } => rust_i18n::t!("modal.title.memory"),
-            ActiveModal::Changes { .. } => rust_i18n::t!("changes.title"),
-            ActiveModal::Settings { .. } => rust_i18n::t!("modal.title.settings"),
-            ActiveModal::ResetSettingsConfirm { .. } => {
-                rust_i18n::t!("modal.title.reset_setting")
-            }
-            ActiveModal::RememberNoteReview { .. } => rust_i18n::t!("modal.title.memory_note"),
-            ActiveModal::UsageInfo { .. } => rust_i18n::t!("modal.title.usage"),
+            ActiveModal::DocPicker { .. } => "How-to Guides",
+            ActiveModal::DocViewer { title, .. } => title.as_str(),
+            ActiveModal::ShortcutsHelp { .. } => "Keyboard Shortcuts",
+            ActiveModal::MemoryBrowser { .. } => "Memory",
+            ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
+            ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
+            ActiveModal::RememberNoteReview { .. } => "Memory Note",
+            ActiveModal::UsageInfo { .. } => "Usage",
         }
     }
 }
@@ -744,14 +704,11 @@ pub fn reset_confirm_prompt(modal: &ActiveModal) -> Option<String> {
     };
     let meta = settings_state.registry.find(key)?;
     let default = crate::settings::default_value_for(meta);
-    Some(
-        rust_i18n::t!(
-            "settings_modal.reset_prompt",
-            label = meta.label_l10n(),
-            default = format_default_for_prompt(meta, &default)
-        )
-        .into_owned(),
-    )
+    Some(format!(
+        "Reset '{}' to default ({})?",
+        meta.label,
+        format_default_for_prompt(&meta.kind, &default),
+    ))
 }
 /// Abbreviated title breadcrumb for the reset-confirm dialog, e.g. "Reset 'Compact mode'".
 pub fn reset_confirm_breadcrumb(modal: &ActiveModal) -> Option<String> {
@@ -764,22 +721,22 @@ pub fn reset_confirm_breadcrumb(modal: &ActiveModal) -> Option<String> {
         return None;
     };
     let meta = settings_state.registry.find(key)?;
-    Some(rust_i18n::t!("settings_modal.reset_breadcrumb", label = meta.label_l10n()).into_owned())
+    Some(format!("Reset '{}'", meta.label))
 }
 /// Format a `SettingValue` for the prompt's `(<default>)` display.
 fn format_default_for_prompt(
-    meta: &crate::settings::SettingMeta,
+    kind: &crate::settings::SettingKind,
     value: &crate::settings::SettingValue,
 ) -> String {
     use crate::settings::{SettingKind, SettingValue};
     match value {
-        SettingValue::Bool(true) => rust_i18n::t!("settings_modal.value_on").into_owned(),
-        SettingValue::Bool(false) => rust_i18n::t!("settings_modal.value_off").into_owned(),
+        SettingValue::Bool(true) => "on".to_owned(),
+        SettingValue::Bool(false) => "off".to_owned(),
         SettingValue::Enum(canonical) => {
-            if let SettingKind::Enum { choices, .. } = &meta.kind {
+            if let SettingKind::Enum { choices, .. } = kind {
                 for c in *choices {
                     if c.canonical == *canonical {
-                        return c.display_l10n(meta.key).into_owned();
+                        return c.display.to_owned();
                     }
                 }
             }
@@ -800,7 +757,7 @@ pub struct ModalRenderResult {
     /// Hit areas for each button (for mouse click/hover).
     pub buttons: Vec<ModalButtonHit>,
 }
-/// Render the modal overlay: dim screen + styled bar at bottom.
+/// Render the modal overlay: dim the screen and draw a styled bar at the bottom.
 ///
 /// Layout of the bar:
 /// ```text
@@ -809,7 +766,7 @@ pub struct ModalRenderResult {
 ///
 /// - Message in `text_primary` bold
 /// - Each button: dark bg pill, lighter on hover
-/// - Screen above the bar is dimmed to `gray_dim` fg + `bg_base` bg
+/// - Screen above the bar is dimmed to `gray_dim` fg and `bg_base` bg
 ///
 /// `bar_area` is the 1-line rect where the bar renders (shortcuts bar slot).
 /// `dim_area` is everything above the bar (to be dimmed).
@@ -849,7 +806,7 @@ pub fn render_modal_overlay(
         .fg(theme.text_primary)
         .bg(bar_bg)
         .add_modifier(Modifier::BOLD);
-    let msg_span = Span::styled(msg.clone(), msg_style);
+    let msg_span = Span::styled(msg, msg_style);
     buf.set_span(bar_area.x, bar_area.y, &msg_span, bar_area.width);
     let mut x = bar_area.x + msg.width() as u16 + 2;
     let btn_bg = theme.bg_dark;
@@ -1007,8 +964,8 @@ pub fn render_cancel_turn_panel(
         crate::render::color::blend_area(buf, area, Some((theme.bg_light, 0.66)), None);
     }
 }
-/// Apply scroll-key dispatch for a DocViewer modal. Returns `true` if the key
-/// was handled (caller should return `InputOutcome::Changed`).
+/// Apply scroll-key dispatch for a DocViewer modal.
+/// Returns `true` if the key was handled (caller should return `InputOutcome::Changed`).
 pub fn apply_doc_scroll(code: crossterm::event::KeyCode, scroll: &mut u16) -> bool {
     use crossterm::event::KeyCode;
     match code {
@@ -1039,7 +996,7 @@ pub fn apply_doc_scroll(code: crossterm::event::KeyCode, scroll: &mut u16) -> bo
         _ => false,
     }
 }
-/// Apply a signed line delta to a DocViewer scroll offset (positive = down).
+/// Apply a signed line delta to a DocViewer scroll offset (positive scrolls down).
 pub fn apply_doc_scroll_delta(scroll: &mut u16, lines: i32) {
     if lines == 0 {
         return;
@@ -1050,8 +1007,8 @@ pub fn apply_doc_scroll_delta(scroll: &mut u16, lines: i32) {
         *scroll = scroll.saturating_sub(lines.unsigned_abs() as u16);
     }
 }
-/// Apply mouse-wheel events to a DocViewer scroll offset. Returns `true` if
-/// the event was a scroll and the offset was updated.
+/// Apply mouse-wheel events to a DocViewer scroll offset.
+/// Returns `true` if the event was a scroll and the offset was updated.
 pub fn apply_doc_mouse_scroll(kind: crossterm::event::MouseEventKind, scroll: &mut u16) -> bool {
     use crossterm::event::MouseEventKind;
     match kind {
@@ -1122,17 +1079,17 @@ pub fn render_doc_picker_overlay(
     let non_sel = vec![false; filtered.len()];
     let mut picker_shortcuts: Vec<Shortcut<'_>> = vec![
         Shortcut {
-            label: rust_i18n::t!("footer.nav"),
+            label: "\u{2191}/\u{2193} nav",
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: rust_i18n::t!("footer.enter_select"),
+            label: "Enter select",
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: rust_i18n::t!("footer.esc_close"),
+            label: "Esc close",
             clickable: false,
             id: 0,
         },
@@ -1152,9 +1109,8 @@ pub fn render_doc_picker_overlay(
         footer_lines: footer_lines_with_tip_gap(area, &base_sizing, &picker_shortcuts),
         ..base_sizing
     };
-    let howto_title = rust_i18n::t!("modal.title.howto_guides");
     let modal_config = ModalWindowConfig {
-        title: howto_title.as_ref(),
+        title: "How-to Guides",
         tabs: None,
         shortcuts: &picker_shortcuts,
         sizing,
@@ -1216,7 +1172,7 @@ pub fn render_doc_picker_overlay(
         false,
     );
 }
-/// Render a DocViewer overlay: modal window chrome + cached markdown content.
+/// Render a DocViewer overlay: modal window chrome and cached markdown content.
 #[allow(clippy::too_many_arguments)]
 pub fn render_doc_viewer_overlay(
     buf: &mut ratatui::buffer::Buffer,
@@ -1231,12 +1187,12 @@ pub fn render_doc_viewer_overlay(
 ) {
     let doc_shortcuts = [
         super::modal_window::Shortcut {
-            label: rust_i18n::t!("footer.scroll"),
+            label: "\u{2191}/\u{2193} scroll",
             clickable: false,
             id: 0,
         },
         super::modal_window::Shortcut {
-            label: rust_i18n::t!("footer.esc_back"),
+            label: "Esc back",
             clickable: false,
             id: 0,
         },
@@ -1254,8 +1210,7 @@ pub fn render_doc_viewer_overlay(
         &doc_shortcuts,
     );
 }
-/// [`render_doc_viewer_overlay`] with caller-supplied footer shortcuts (the
-/// tutorial adds a next-topic hint).
+/// [`render_doc_viewer_overlay`] with caller-supplied footer shortcuts (the tutorial adds a next-topic hint).
 #[allow(clippy::too_many_arguments)]
 pub fn render_doc_viewer_overlay_with_shortcuts(
     buf: &mut ratatui::buffer::Buffer,

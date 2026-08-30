@@ -15,8 +15,9 @@ async fn cancel_then_resend_prompt_appears_once() {
     const NEW_PROMPT: &str = "brand new question instead";
 
     let content = ContentController::start().await.expect("start content");
-    // Turn 1 is OLD (30s pacing keeps the no-output window); turn 2 is NEW's reply.
-    let _rewound_turn =
+    // Turn 1 is OLD (the 30s chunk delay keeps it from streaming any output); turn 2 is NEW's reply
+    // mut: wait_received before Ctrl+C so the resend cannot steal the GONE script.
+    let mut rewound_turn =
         content.expect_agent_turn("rewound turn before first token", "GONE never streams.");
     let _resent_turn =
         content.expect_agent_turn("new prompt turn", "RESENT_REPLY to the new prompt.");
@@ -43,9 +44,21 @@ async fn cancel_then_resend_prompt_appears_once() {
     harness
         .wait_for_text("Waiting for response", Duration::from_secs(25))
         .expect("turn running pre-first-token");
+    // "Waiting for response" can paint before the HTTP request is claimed on
+    // the mock. If Ctrl+C aborts that race, the resend steals the GONE script
+    // and RESENT_REPLY is never served (CI flake: screen shows GONE instead).
+    tokio::time::timeout(Duration::from_secs(25), rewound_turn.wait_received())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "rewound turn never claimed by mock before cancel: {}\nrequests:\n{}",
+                rewound_turn.diagnostic(),
+                content.server().request_log_summary(),
+            )
+        });
 
     harness.inject_keys(keys::CTRL_C).expect("Ctrl+C rewind");
-    // Yank then send immediately — no settle window.
+    // Yank, then send right away without waiting for the UI to settle
     harness
         .wait_until(
             "OLD yanked back into the composer",
@@ -66,7 +79,6 @@ async fn cancel_then_resend_prompt_appears_once() {
         .wait_for_text("RESENT_REPLY", Duration::from_secs(90))
         .expect("NEW turn reply");
 
-    // NEW once in scrollback; OLD gone.
     harness
         .wait_until(
             "NEW rendered exactly once and OLD gone",
@@ -99,7 +111,7 @@ async fn cancel_then_resend_prompt_appears_once() {
             !raw.contains(UNFINISHED_TASKS_REMINDER),
             "NEW must not carry the unfinished-tasks trailer: {body}"
         );
-        // Chat Completions carries `messages`; the Responses shape `input`.
+        // Chat Completions carries `messages`; the Responses shape carries `input`
         let items = body["messages"]
             .as_array()
             .or_else(|| body["input"].as_array());

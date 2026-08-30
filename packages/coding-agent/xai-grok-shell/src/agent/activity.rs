@@ -28,6 +28,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use xai_grok_telemetry::session_end::{self, Phase};
+
 use crate::session::pending_interaction::PendingInteractions;
 use crate::session::{SessionCommand, SessionHandle, ShutdownKind};
 
@@ -150,6 +152,7 @@ impl AgentActivity {
     /// drop aborts remaining tasks. Actors that miss the grace are logged and
     /// abandoned.
     pub async fn flush_all_sessions(&self, grace: Duration) {
+        let _span = session_end::span(Phase::SessionFlush);
         let deadline = tokio::time::Instant::now() + grace;
         // Every distinct channel signaled so far (id kept for logging).
         let mut signaled: Vec<(String, tokio::sync::mpsc::UnboundedSender<SessionCommand>)> =

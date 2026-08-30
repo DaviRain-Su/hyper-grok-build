@@ -2,13 +2,11 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Regression, macOS-only, REAL host pasteboard — the exact reported
-/// surface: under Otty (`TERM_PROGRAM=otty`, the only terminal known to
-/// deliver macOS IME commits as bracketed paste), with an image on the
-/// clipboard, an IME commit must not attach that image to the agent prompt.
+/// Regression test on the REAL macOS host pasteboard, exactly as reported.
+/// Only Otty (`TERM_PROGRAM=otty`) is known to deliver macOS IME commits as bracketed paste, so the test runs under it.
+/// With an image on the clipboard, an IME commit must not attach that image to the agent prompt.
 ///
-/// Skips (loudly) when the session has no usable clipboard — a CI runner
-/// without a pasteboard shouldn't fail on environment.
+/// With no usable clipboard the test prints a SKIP line and returns, so a CI runner without a pasteboard does not fail on environment.
 ///
 /// WARNING: this test OVERWRITES the machine-global clipboard with an image.
 /// A prior TEXT clipboard is restored on exit; a prior IMAGE cannot be.
@@ -23,8 +21,7 @@ async fn bracketed_ime_paste_skips_clipboard_image_macos() {
 
     const IME_PAYLOAD: &str = "中文";
 
-    // Guard FIRST: the roundtrip check overwrites the clipboard, and a guard
-    // taken after it would restore the nonce instead of the user's clipboard.
+    // Guard FIRST: the roundtrip check overwrites the clipboard, and a guard taken after it would restore the nonce instead of the user's clipboard
     let _restore = HostClipboardTextGuard::save();
     if !clipboard_roundtrip_works() {
         eprintln!(
@@ -40,7 +37,7 @@ async fn bracketed_ime_paste_skips_clipboard_image_macos() {
 
     let content = ContentController::start().await.expect("start content");
     let binary = pager_binary().expect("resolve pager binary");
-    // The payload-origin gate only runs under Otty (TERM_PROGRAM=otty).
+    // The check for where a pasted payload came from only runs under Otty (TERM_PROGRAM=otty)
     let mut harness = PtyHarness::spawn_with_content_env_ops(
         &binary,
         DEFAULT_ROWS,

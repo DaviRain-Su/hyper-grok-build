@@ -1,17 +1,12 @@
-//! Resume identity validation: ensures that a resumed subagent matches the
-//! source's identity fields (type, persona).
+//! Resume identity validation: ensures that a resumed subagent matches the source's identity fields (type, persona).
 //!
-//! Model is not an identity gate on resume: the shell always inherits/pins the
-//! source model, and any caller-provided model override is soft-ignored.
+//! Model is not an identity gate on resume.
+//! The shell always inherits and pins the source model, and any caller-provided model override is silently ignored.
 //!
 //! Extracted from `xai-grok-shell/src/agent/subagent/` resume validation block.
 
 use crate::types::ResumeSourceData;
 
-/// Error type for resume validation failures.
-///
-/// Each variant describes a specific identity mismatch between the resume
-/// request and the source subagent's recorded identity fields.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ResumeValidationError {
     /// The requested subagent_type differs from the source's type.
@@ -37,14 +32,12 @@ pub enum ResumeValidationError {
 
 /// Validate that a resume request's identity fields match the source subagent.
 ///
-/// Resume contract: the resumed child inherits the source's raw transcript,
-/// tool state, and model. System prompt and prompt context are freshly
-/// rendered from the current agent definition. Reject type/persona overrides
-/// that conflict with the inherited identity fields. Model overrides are not
-/// validated here — callers soft-ignore them and pin the source model.
+/// Resume contract: the resumed child inherits the source's raw transcript, tool state, and model.
+/// System prompt and prompt context are freshly rendered from the current agent definition.
+/// Reject type/persona overrides that conflict with the inherited identity fields.
+/// Model overrides are not validated here; callers silently ignore them and pin the source model.
 ///
-/// Returns `Ok(())` if identity fields match, or `Err(ResumeValidationError)`
-/// describing the first mismatch found.
+/// Returns `Ok(())` if identity fields match, or `Err(ResumeValidationError)` describing the first mismatch found.
 pub fn validate_resume_identity(
     requested_type: &str,
     requested_persona: Option<&str>,
@@ -117,7 +110,7 @@ mod tests {
 
     #[test]
     fn no_persona_requested_source_has_persona() {
-        // Not requesting a persona is always valid (no override = inherit)
+        // Not requesting a persona is always valid (no override means inherit)
         let source = make_source("general-purpose", Some("implementer"), None);
         let result = validate_resume_identity("general-purpose", None, &source);
         assert!(result.is_ok());
@@ -174,7 +167,6 @@ mod tests {
     fn type_mismatch_checked_before_persona() {
         let source = make_source("general-purpose", Some("impl"), None);
         let result = validate_resume_identity("explore", Some("reviewer"), &source);
-        // Should be TypeMismatch, not PersonaMismatch
         assert!(matches!(
             result,
             Err(ResumeValidationError::TypeMismatch { .. })

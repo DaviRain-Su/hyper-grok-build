@@ -1,5 +1,3 @@
-//! SystemMessageBlock - displays system messages.
-
 use ratatui::text::{Line, Span};
 
 use crate::appearance::AppearanceConfig;
@@ -8,15 +6,12 @@ use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockLine, BlockOutput, Selectable};
 use crate::theme::Theme;
 
-/// Block displaying a system message.
 #[derive(Debug, Clone)]
 pub struct SystemMessageBlock {
-    /// The message text.
     pub text: String,
 }
 
 impl SystemMessageBlock {
-    /// Create a new system message block.
     pub fn new(text: impl Into<String>) -> Self {
         Self { text: text.into() }
     }
@@ -70,7 +65,7 @@ impl BlockContent for SystemMessageBlock {
     }
 
     fn accent(&self, _ctx: &BlockContext) -> Option<AccentStyle> {
-        None // System messages have no accent
+        None
     }
 
     fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {

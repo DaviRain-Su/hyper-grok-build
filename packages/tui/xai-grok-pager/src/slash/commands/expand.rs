@@ -1,41 +1,26 @@
-//! `/expand` -- re-print the last collapsed block, fully expanded (minimal mode).
+//! `/expand`: re-print the last collapsed block, fully expanded (minimal mode).
 //!
-//! In the scrollback-native minimal mode (`grok --minimal`) finalized blocks are
-//! printed once into the terminal's native scrollback, with reasoning collapsed
-//! and large tool output truncated (design decision K9). Committed terminal text
-//! can't be mutated, so "expanding" one is an honest re-print of the same block
-//! in full below the conversation (K10). `/expand` is the slash-command twin of
-//! the `Ctrl+E` chord; both walk backwards through the most-recently committed
-//! folded blocks.
+//! In minimal mode (`grok --minimal`) finalized blocks are printed once into the terminal's native scrollback.
+//! They print with reasoning collapsed and large tool output truncated.
+//! Committed terminal text can't be mutated, so "expanding" a block re-prints it in full below the conversation.
+//! `/expand` and the `Ctrl+E` chord do the same thing; both walk backwards through the most-recently committed folded blocks.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 use crate::slash::{ModeSupport, Remedy};
 
 /// Re-print the last collapsed/truncated block, fully expanded (minimal mode).
 pub struct ExpandCommand;
 
 impl SlashCommand for ExpandCommand {
-    fn name(&self) -> &str {
-        "expand"
-    }
-
-    fn description(&self) -> &str {
-        "Re-print the last collapsed block, fully expanded (minimal mode)"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    fn usage(&self) -> &str {
-        "/expand"
-    }
-
-    fn mode_support(&self) -> ModeSupport {
-        ModeSupport::MinimalOnly(Remedy::UseInstead(
+    slash_meta! {
+        name: "expand",
+        description: "Re-print the last collapsed block, fully expanded (minimal mode)",
+        usage: "/expand",
+        session_scoped: true,
+        mode_support: ModeSupport::MinimalOnly(Remedy::UseInstead(
             "press Tab to focus the scrollback, then → on the block",
-        ))
+        )),
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {

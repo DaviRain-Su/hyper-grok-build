@@ -9,9 +9,9 @@ use crate::render::SafeBuf;
 use crate::theme::Theme;
 use crate::views::goal_detail::truncate_to_width;
 
-/// Prefer one row above the prompt, right-aligned to it. With no prompt
-/// (login / gate), paint the last row of `area` — stacked welcome layouts
-/// put the version badge there, so the toast may overlay it briefly.
+/// Prefer one row above the prompt, right-aligned to it.
+/// With no prompt (login / gate), paint the last row of `area`.
+/// Stacked welcome layouts put the version badge there, so the toast may overlay it briefly.
 pub(crate) fn paint_welcome_toast(
     buf: &mut Buffer,
     area: Rect,

@@ -987,3 +987,61 @@ serve({
 "#,
     )
 }
+
+/// A server that behaves like Roslyn on file watching: if the client advertised
+/// `didChangeWatchedFiles`, it registers a NuGet-cache glob (the registration
+/// that would otherwise become tens of thousands of inotify watches) and
+/// records whether the client accepted it. It also records any
+/// `workspace/didChangeWatchedFiles` the client later sends.
+pub(super) fn write_file_watch_server() -> (tempfile::TempDir, PathBuf) {
+    write_python_server(
+        "file_watch_lsp.py",
+        r#"
+import os
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+def dump(name, obj):
+    with open(os.path.join(HERE, name), "w") as f:
+        json.dump(obj, f)
+
+while True:
+    msg = read_message()
+    if msg is None:
+        break
+    method = msg.get("method")
+    if method == "initialize":
+        dump("initialize_caps.json", msg["params"]["capabilities"])
+        reply(msg, {"capabilities": {"textDocumentSync": 1}})
+    elif method == "initialized":
+        ask("client/registerCapability", {
+            "registrations": [{
+                "id": "nuget-dlls",
+                "method": "workspace/didChangeWatchedFiles",
+                "registerOptions": {
+                    "watchers": [
+                        {
+                            "globPattern": {
+                                "baseUri": "file:///tmp/fake-nuget/packages",
+                                "pattern": "**/*.dll"
+                            }
+                        },
+                        {
+                            "globPattern": "**/*.{ts,tsx,js}"
+                        }
+                    ]
+                }
+            }]
+        }, 100)
+    elif method == "workspace/didChangeWatchedFiles":
+        dump("watched.json", msg["params"])
+    elif method in ("textDocument/didOpen", "textDocument/didChange", "textDocument/didSave"):
+        pass
+    elif method == "shutdown":
+        reply(msg, None)
+    elif method == "exit":
+        break
+    elif method is None and "id" in msg:
+        dump("register_reply.json", msg)
+"#,
+    )
+}

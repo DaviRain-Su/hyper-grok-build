@@ -1,7 +1,7 @@
-//! `/privacy` -- open the "Coding data, retention, and training" setting.
+//! `/privacy`: open the "Coding data, retention, and training" setting.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
 const CODING_DATA_SHARING_KEY: &str = "coding_data_sharing";
 
@@ -9,21 +9,14 @@ const CODING_DATA_SHARING_KEY: &str = "coding_data_sharing";
 pub struct PrivacyCommand;
 
 impl SlashCommand for PrivacyCommand {
-    fn name(&self) -> &str {
-        "privacy"
-    }
-
-    fn description(&self) -> &str {
+    slash_meta! {
+        name: "privacy",
         // Reads as the row it opens: "Coding data, retention, and training".
-        "Open coding data, retention, and training settings"
+        description: "Open coding data, retention, and training settings",
+        usage: "/privacy",
     }
 
-    fn usage(&self) -> &str {
-        "/privacy"
-    }
-
-    /// Trailing text is ignored, not rejected: `/privacy opt-in` from muscle
-    /// memory should land on the page, not error.
+    /// Trailing text is ignored, not rejected: `/privacy opt-in` from muscle memory should land on the page, not error.
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
         CommandResult::Action(Action::OpenSettingsFocus {
             key: CODING_DATA_SHARING_KEY,
@@ -63,8 +56,7 @@ mod tests {
         )
     }
 
-    /// Minimal suppresses the privacy banner, so `/privacy` is the only
-    /// route to the page there — no mode may fall back to something else.
+    /// Minimal suppresses the privacy banner, so `/privacy` is the only route to the page there; no mode may fall back to something else.
     #[test]
     fn privacy_opens_settings_row_in_every_screen_mode() {
         use crate::app::ScreenMode;
@@ -81,8 +73,7 @@ mod tests {
         }
     }
 
-    /// The arguments this used to accept must not linger as hidden aliases
-    /// that change a privacy preference straight from the prompt.
+    /// The arguments this used to accept must not linger as hidden aliases that change a privacy preference straight from the prompt.
     #[test]
     fn arguments_are_ignored_not_honored() {
         use crate::app::ScreenMode;

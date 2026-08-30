@@ -2,6 +2,10 @@
 //! the TodoGate, date reminders, post-cancel interrupt framing, and
 //! between-turn completion reminders.
 use super::*;
+pub(super) fn wrap_in_reminder_tag(content: &str, tag: &str) -> ConversationItem {
+    let content = content.replace(&format!("</{tag}>"), &format!("<\\/{tag}>"));
+    ConversationItem::system_reminder(format!("<{tag}>\n{content}\n</{tag}>"))
+}
 /// Owned snapshot returned by [`SessionActor::collect_todo_gate_input`].
 ///
 /// The borrowed `TodoGateInput<'_>` consumed by [`evaluate_todo_gate`]
@@ -561,11 +565,22 @@ impl SessionActor {
     pub(super) fn reminder_wrapper_tag(&self) -> &'static str {
         xai_grok_tools::reminders::DEFAULT_REMINDER_TAG
     }
+    pub(super) fn wrap_hook_context(
+        &self,
+        context: &xai_grok_hooks::dispatcher::AdditionalContext,
+    ) -> ConversationItem {
+        wrap_in_reminder_tag(
+            &format!(
+                "Context from PreToolUse hook '{}':\n{}",
+                context.hook_name, context.text
+            ),
+            self.reminder_wrapper_tag(),
+        )
+    }
     /// Push a `<{tag}>`-wrapped user message.
     pub(super) fn push_system_reminder_with_tag(&self, content: &str, tag: &str) {
-        let content = content.replace(&format!("</{tag}>"), &format!("<\\/{tag}>"));
-        let message = ConversationItem::system_reminder(format!("<{tag}>\n{content}\n</{tag}>"));
-        self.chat_state_handle.push_user_message(message);
+        self.chat_state_handle
+            .push_user_message(wrap_in_reminder_tag(content, tag));
     }
     /// Mark completion IDs as reported in the shared
     /// `ReportedTaskCompletions` state so the per-tool-call

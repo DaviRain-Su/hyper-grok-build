@@ -1,4 +1,4 @@
-//! UseToolCallBlock — MCP integration tool dispatch.
+//! UseToolCallBlock: MCP integration tool dispatch.
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span, Text};
@@ -15,7 +15,7 @@ use crate::theme::Theme;
 const MAX_INLINE_LINES: usize = 10;
 const TRUNCATED_INLINE_LINES: usize = 3;
 
-/// Use tool call — dispatching to an MCP integration tool.
+/// Use tool call: dispatching to an MCP integration tool.
 #[derive(Debug, Clone)]
 pub struct UseToolCallBlock {
     /// The qualified tool name (e.g. "linear__save_issue").
@@ -88,11 +88,9 @@ impl UseToolCallBlock {
         out
     }
 
-    /// Split `tool_name` on the (validated-unambiguous)
-    /// `MCP_TOOL_NAME_DELIMITER` and title-case each segment. Returns
-    /// `(server_title, action_title)` for qualified names, or
-    /// `("", titleized_tool_name)` for unqualified ones (which fall
-    /// through to a single-span render in `header_line`).
+    /// Split `tool_name` on `MCP_TOOL_NAME_DELIMITER` (validated to be unambiguous) and title-case each segment.
+    /// Returns `(server_title, action_title)` for qualified names, or `("", titleized_tool_name)` for unqualified ones.
+    /// Unqualified names fall through to a single-span render in `header_line`.
     fn split_name(&self) -> (String, String) {
         match self.tool_name.split_once(MCP_TOOL_NAME_DELIMITER) {
             Some((server, action)) => (mcp_titleize_segment(server), mcp_titleize_segment(action)),

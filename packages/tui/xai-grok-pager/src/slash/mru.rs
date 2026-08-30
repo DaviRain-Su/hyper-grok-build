@@ -1,19 +1,16 @@
 //! Slash command MRU / recency (`$GROK_HOME/slash-mru.json`).
 //!
-//! Flat `command → last_used` map (canonical names). Tiebreaks use recency
-//! decay (7-day half-life, 0.1 floor). Bounded to [`MAX_ENTRIES`].
+//! A flat map from canonical command name to `last_used` timestamp.
+//! Tiebreaks use recency decay (7-day half-life, 0.1 floor); the map is bounded to [`MAX_ENTRIES`] entries.
 //!
-//! Ownership: each [`crate::slash::SlashController`] holds an
-//! `Rc<RefCell<SlashMru>>` (single-threaded UI; no mutex). `AppView` owns one
-//! store and injects it into every controller (agent prompts + dashboard
-//! dispatch) so they stay in sync — no process-global singleton. Default and
-//! test controllers get an isolated in-memory store (no disk I/O).
+//! Ownership: each [`crate::slash::SlashController`] holds an `Rc<RefCell<SlashMru>>` (single-threaded UI; no mutex).
+//! `AppView` owns one store and injects it into every controller (agent prompts and dashboard dispatch) so they stay in sync.
+//! There is no process-global singleton. Default and test controllers get an isolated in-memory store (no disk I/O).
 //!
-//! Persistence: a `touch` only marks the store dirty (never blocks the UI on
-//! disk). When a command is recorded, the controller hands an owned
-//! [`MruSnapshot`] to [`persist_async`], which serializes writes through one
-//! long-lived background thread (atomic temp-file + rename). The `Rc<RefCell>`
-//! itself never crosses a thread boundary; only the `Send` snapshot does.
+//! Persistence: a `touch` only marks the store dirty (never blocks the UI on disk).
+//! When a command is recorded, the controller hands an owned [`MruSnapshot`] to [`persist_async`].
+//! That function serializes writes through one long-lived background thread (atomic temp file and rename).
+//! The `Rc<RefCell>` itself never crosses a thread boundary; only the `Send` snapshot does.
 
 use std::collections::HashMap;
 use std::fs;
@@ -36,7 +33,7 @@ const MAX_ENTRIES: usize = 256;
 struct MruFile {
     #[serde(default)]
     by_command: HashMap<String, u64>,
-    /// Legacy per-prefix schema (read-only migrate).
+    /// Legacy per-prefix schema; only the migration reads it.
     #[serde(default)]
     by_prefix: HashMap<String, HashMap<String, u64>>,
 }
@@ -46,7 +43,7 @@ pub struct SlashMru {
     by_command: HashMap<String, u64>,
     loaded: bool,
     dirty: bool,
-    /// When false (tests), never touch disk.
+    /// When false (tests), the store never touches disk.
     persist_enabled: bool,
 }
 
@@ -95,10 +92,8 @@ impl SlashMru {
             .unwrap_or(0)
     }
 
-    /// Recency-with-decay tiebreak score. Pure recency (one `last_used`
-    /// timestamp per command, no use-count) scaled by an exponential decay so a
-    /// long-stale entry can't win ties forever; the floor keeps any prior use
-    /// just above never-used.
+    /// The tiebreak score: the `last_used` timestamp (one per command, no use count) scaled by an exponential decay.
+    /// A long-stale entry cannot win ties forever, and the floor keeps any prior use just above a command never used at all.
     fn recency_score(last_used: u64, now: u64) -> u64 {
         if last_used == 0 {
             return 0;
@@ -125,10 +120,8 @@ impl SlashMru {
                     error = %e,
                     "slash MRU: read failed; using empty store, persistence disabled for session"
                 );
-                // Mark loaded so we don't re-attempt the read on every
-                // `rank_score` (once per candidate per keystroke on the UI
-                // thread), and disable persistence so we never clobber a file
-                // we couldn't read.
+                // Mark loaded so we do not retry the read on every `rank_score` call (once per candidate per keystroke on the UI thread)
+                // Disable persistence so we never clobber a file we could not read
                 self.loaded = true;
                 self.persist_enabled = false;
             }
@@ -136,7 +129,7 @@ impl SlashMru {
                 Ok(file) => {
                     self.by_command = file.by_command;
                     if self.by_command.is_empty() && !file.by_prefix.is_empty() {
-                        // Collapse legacy per-prefix buckets: max timestamp per command.
+                        // Collapse legacy per-prefix buckets: keep the max timestamp per command
                         for bucket in file.by_prefix.values() {
                             for (cmd, ts) in bucket {
                                 let e = self.by_command.entry(cmd.clone()).or_insert(0);
@@ -169,7 +162,7 @@ impl SlashMru {
         self.by_command = entries.into_iter().collect();
     }
 
-    /// Record use of a canonical command name (ignores typed prefix; flat model).
+    /// Record use of a canonical command name; the typed prefix is ignored because the map is flat.
     pub fn touch(&mut self, _typed_prefix: &str, command_name: &str) {
         let Some(cmd) = Self::normalize_command(command_name) else {
             return;
@@ -196,9 +189,9 @@ impl SlashMru {
         Self::recency_score(ts, Self::now_secs())
     }
 
-    /// Take an owned, `Send` snapshot to persist when dirty; clears the dirty
-    /// flag. Returns `None` when persistence is disabled (tests) or nothing
-    /// changed. The snapshot is written off the UI thread by [`persist_async`].
+    /// Take an owned, `Send` snapshot to persist when dirty; clears the dirty flag.
+    /// Returns `None` when persistence is disabled (tests) or nothing changed.
+    /// The snapshot is written off the UI thread by [`persist_async`].
     pub fn take_persist_snapshot(&mut self) -> Option<MruSnapshot> {
         if !self.persist_enabled || !self.dirty {
             return None;
@@ -215,8 +208,8 @@ impl SlashMru {
         })
     }
 
-    /// Re-flag unpersisted changes after a failed write so the next
-    /// [`Self::take_persist_snapshot`] retries. No-op when persistence is off.
+    /// Re-flag unpersisted changes after a failed write so the next [`Self::take_persist_snapshot`] retries.
+    /// This is a no-op when persistence is off.
     pub fn mark_dirty(&mut self) {
         if self.persist_enabled {
             self.dirty = true;
@@ -233,8 +226,8 @@ impl SlashMru {
     }
 }
 
-/// An owned, `Send` snapshot of the MRU ready to write to disk. Produced on
-/// the UI thread by [`SlashMru::take_persist_snapshot`]; written off-thread.
+/// An owned, `Send` snapshot of the MRU ready to write to disk.
+/// [`SlashMru::take_persist_snapshot`] produces it on the UI thread; [`persist_async`] writes it off-thread.
 #[derive(Debug)]
 pub struct MruSnapshot {
     path: PathBuf,
@@ -242,8 +235,8 @@ pub struct MruSnapshot {
 }
 
 impl MruSnapshot {
-    /// Atomic write (temp file + `fsync` + rename). Returns `true` on success.
-    /// Safe on a worker thread.
+    /// Atomic write: temp file, `fsync`, then rename. Returns `true` on success.
+    /// Safe to call from a worker thread.
     fn write(&self) -> bool {
         if let Some(parent) = self.path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -267,25 +260,17 @@ impl MruSnapshot {
     }
 }
 
-/// Persist a snapshot off the UI thread. Writes are serialized through a single
-/// long-lived background thread (created on first use), so concurrent accepts
-/// can never reorder or tear the on-disk file. The send is non-blocking; the
-/// `Rc<RefCell<SlashMru>>` never leaves the UI thread (only the `Send` snapshot
-/// does).
+/// Persist a snapshot off the UI thread.
+/// Writes are serialized through a long-lived background thread (created on first use), so concurrent accepts can never reorder or tear the file.
+/// The send is non-blocking; the `Rc<RefCell<SlashMru>>` never leaves the UI thread, only the `Send` snapshot does.
 ///
-/// Returns `true` if the snapshot was handed to the writer thread or written
-/// synchronously; `false` only when no write could be attempted (so the caller
-/// can keep the store dirty and retry on the next record). If the writer thread
-/// can't be spawned, or its channel has hung up, this falls back to a
-/// best-effort synchronous write rather than silently dropping the update.
+/// Returns `true` if the snapshot was handed to the writer thread or written synchronously.
+/// Returns `false` only when no write could be attempted, so the caller can keep the store dirty and retry on the next record.
+/// If the writer thread cannot be spawned, or its channel has hung up, this falls back to a best-effort synchronous write.
 ///
-/// The off-thread write is itself best-effort: a transient disk failure is
-/// self-healing because each snapshot is the full command map (not a delta), so
-/// the next `record_command_use` re-persists everything.
+/// The off-thread write is best-effort: each snapshot is the full command map, so the next record re-persists everything after a disk failure.
 ///
-/// The writer channel is the only process-global piece — write-only I/O
-/// plumbing, not shared ranking state — so it carries none of the
-/// singleton/test-seam baggage that an injected store avoids.
+/// The writer channel is the only process-global piece; it holds write-only I/O state and no ranking state, so tests with injected stores are unaffected.
 pub fn persist_async(snapshot: MruSnapshot) -> bool {
     static WRITER: OnceLock<Option<Sender<MruSnapshot>>> = OnceLock::new();
     let tx = WRITER.get_or_init(|| {
@@ -307,11 +292,10 @@ pub fn persist_async(snapshot: MruSnapshot) -> bool {
     match tx {
         Some(tx) => match tx.send(snapshot) {
             Ok(()) => true,
-            // Writer thread gone: best-effort synchronous write of the snapshot
-            // returned in the send error rather than dropping it.
+            // The writer thread is gone; write the snapshot returned in the send error synchronously rather than dropping it
             Err(e) => e.0.write(),
         },
-        // Writer thread never started: best-effort synchronous write.
+        // The writer thread never started; fall back to a synchronous write
         None => snapshot.write(),
     }
 }
@@ -356,7 +340,6 @@ mod tests {
         let mut mru = SlashMru::new_in_memory();
         mru.touch("p", "plan");
         assert!(!mru.dirty);
-        // In-memory stores never produce a persist snapshot (no disk I/O).
         assert!(mru.take_persist_snapshot().is_none());
     }
 
@@ -374,8 +357,7 @@ mod tests {
 
     #[test]
     fn mark_dirty_requeues_after_failed_write() {
-        // A snapshot was taken (dirty cleared) but the write could not be
-        // handed off; mark_dirty re-queues it so the next call retries.
+        // A snapshot was taken (dirty cleared) but the write could not be handed off; mark_dirty re-queues it so the next call retries
         let mut mru = SlashMru::new();
         mru.loaded = true;
         mru.touch("p", "plan");

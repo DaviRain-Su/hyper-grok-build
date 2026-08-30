@@ -28,6 +28,13 @@ pub(crate) trait AuthBackend {
     fn scope_key(&self, config: &GrokComConfig) -> String;
     /// Older scope keys this backend minted, and so may adopt from and tidy, most recent first.
     fn inherited_scopes(&self) -> &'static [&'static str];
+    /// Whether this backend minted the credential, which the scope key alone cannot establish.
+    fn owns(&self, auth: &GrokAuth) -> bool;
+    /// Whether this backend's session token may be sent to `url`.
+    /// A model entry carries its own base URL, so without this a poisoned or hand-edited entry aims the bearer anywhere.
+    fn may_receive_session(&self, url: &str) -> bool;
+    /// The host to name when telling the user whose session they hold.
+    fn login_host(&self, config: &GrokComConfig) -> String;
     /// Whether xAI issued this backend's credentials and may therefore receive them.
     /// Gates every request that carries the bearer to an xAI host, and every xAI-only policy.
     fn is_xai_authority(&self) -> bool;
@@ -42,3 +49,20 @@ pub(crate) trait AuthBackend {
     ) -> Arc<dyn TokenRefresher>;
 }
 pub(crate) type ActiveAuthBackend = grok::GrokAuthBackend;
+/// Reports a URL the way a user says it, without the scheme.
+pub(crate) fn host_of(url: &str) -> String {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
+        .to_owned()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn host_of_drops_the_scheme_and_leaves_the_rest_alone() {
+        assert_eq!(host_of("https://example.test"), "example.test");
+        assert_eq!(host_of("http://localhost:8080"), "localhost:8080");
+        assert_eq!(host_of("grok.com"), "grok.com");
+    }
+}

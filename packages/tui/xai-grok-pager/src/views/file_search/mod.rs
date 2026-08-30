@@ -2,11 +2,11 @@
 //!
 //! # Architecture
 //!
-//! - [`context`] — parses `@query` tokens from text + cursor position
-//! - [`state`] — owns the fuzzy matcher daemon, results, and dropdown state
-//! - [`dropdown`] — dropdown list rendering (ListPane wrapper, Phase 1)
-//! - [`line_viewer`] — centered popup file viewer (Phase 3, not yet implemented)
-//! - [`preview`] — file preview alongside dropdown (Phase 4, not yet implemented)
+//! - [`context`]: parses `@query` tokens from the text and cursor position
+//! - [`state`]: owns the fuzzy matcher daemon, results, and dropdown state
+//! - [`dropdown`]: renders the dropdown list (a ListPane wrapper)
+//! - [`line_viewer`]: centered popup file viewer
+//! - [`preview`]: file preview alongside the dropdown (not yet implemented)
 
 pub mod context;
 pub mod dropdown;
@@ -23,9 +23,7 @@ use crate::theme::Theme;
 
 /// Build a styled `@path` or `@path:N-M` display line.
 ///
-/// Style: `@` and `:` in `theme.gray`, path in `theme.path`, numbers in `theme.gray_bright`.
-/// Set `at_prefix` to include the leading `@` (prompt chip) or omit it (viewer title).
-/// Used by both the prompt element chip and the line viewer title bar.
+/// Set `at_prefix` to include the leading `@` (the prompt element chip does) or omit it (the line viewer title bar does).
 pub fn styled_file_ref<'a>(
     path: &str,
     line_range: Option<&str>,

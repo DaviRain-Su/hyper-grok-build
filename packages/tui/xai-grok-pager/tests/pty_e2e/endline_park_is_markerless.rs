@@ -1,8 +1,7 @@
-//! PTY, fully flag-file driven: the model backgrounds a flag-gated command,
-//! the test extracts the runtime task id and enqueues a blocking
-//! `get_command_or_subagent_output` on it (park), then types mid-park
-//! (cancel-and-send). Asserts exactly ONE "Worked for" marker — the new
-//! turn's — with no park row and no "Turn cancelled by user" marker.
+//! PTY, fully flag-file driven: the model backgrounds a flag-gated command.
+//! The test extracts the runtime task id and enqueues a blocking `get_command_or_subagent_output` on it (the park).
+//! It then types mid-park (cancel-and-send).
+//! Asserts exactly ONE "Worked for" marker (the new turn's), with no park row and no "Turn cancelled by user" marker.
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -30,8 +29,7 @@ async fn endline_park_is_markerless() {
     let _background_turn =
         expect_tool_turn(&content, "call_endline_bg", "run_terminal_command", bg_args);
 
-    // Tool call 2: a flag-gated foreground hold keeps the turn open until the
-    // test has extracted the task id and enqueued the wait script.
+    // Tool call 2: a flag-gated foreground hold keeps the turn open until the test has extracted the task id and enqueued the wait script
     let id_hold_args = json!({
         "command": gated_loop(&id_ready_flag),
         "description": "hold for id extraction"
@@ -66,9 +64,8 @@ async fn endline_park_is_markerless() {
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit prompt");
 
-    // The runtime task id rides in the tool result of the follow-up request
-    // (the same request the id-hold script answers), inside a
-    // <task-id>…</task-id> envelope.
+    // The runtime task id arrives in the tool result of the follow-up request, wrapped in <task-id>…</task-id>
+    // That follow-up is the same request the id-hold script answers
     let task_id = poll_for(Duration::from_secs(60), || {
         content
             .request_bodies()
@@ -96,7 +93,7 @@ async fn endline_park_is_markerless() {
         wait_args,
     );
 
-    // Everything downstream is scripted — let the id-extraction hold finish.
+    // Everything downstream is scripted, so let the id-extraction hold finish
     std::fs::write(&id_ready_flag, b"ready").expect("release id-extraction hold");
 
     harness
@@ -137,7 +134,7 @@ async fn endline_park_is_markerless() {
             )
         });
 
-    // Scroll to the transcript head so the whole journey is on one screen.
+    // Scroll to the transcript head so the whole transcript is on one screen
     harness.inject_keys(b"\t").expect("focus scrollback (tab)");
     harness.update(Duration::from_millis(300));
     harness.inject_keys(b"g").expect("goto transcript top");

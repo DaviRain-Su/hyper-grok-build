@@ -322,6 +322,8 @@ pub async fn handle(
                 worktree_type_default,
                 req.worktree_type.unwrap_or(worktree_type_default.into()),
             );
+            let mut grove_worktree = None;
+            apply_grove_worktree_flag(agent, &mut grove_worktree);
             let registry_client = agent.session_registry_client();
             let agent_id = xai_grok_telemetry::id::agent_id();
 
@@ -334,6 +336,7 @@ pub async fn handle(
                     registry_client.as_ref(),
                     Some(agent.auth_manager.clone()),
                     &agent_id,
+                    grove_worktree,
                 )
                 .await,
             )
@@ -586,6 +589,58 @@ mod tests {
             slot,
             Some(false),
             "ACP wrapper must fail closed when remote settings are unavailable"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn apply_grove_worktree_gate_resume_parity_with_create() {
+        use crate::util::config::ENV_WORKTREE_TYPE;
+
+        unsafe { std::env::remove_var(ENV_WORKTREE_TYPE) };
+        let local_grove: toml::Value = toml::from_str("[cli]\ngrove_worktree = true").unwrap();
+        let empty: toml::Value = toml::from_str("[cli]\nauto_update = true").unwrap();
+        let remote_unset = crate::util::config::RemoteSettings {
+            grove_worktree: None,
+            ..Default::default()
+        };
+        let remote_kill = crate::util::config::RemoteSettings {
+            grove_worktree: Some(false),
+            ..Default::default()
+        };
+
+        let mut slot = None;
+        apply_grove_worktree_gate(&mut slot, &local_grove, Some(&remote_unset));
+        assert_eq!(
+            slot,
+            Some(true),
+            "remote Some(unset) + local grove must enable, same as create"
+        );
+
+        unsafe { std::env::set_var(ENV_WORKTREE_TYPE, "grove") };
+        let mut slot = None;
+        apply_grove_worktree_gate(&mut slot, &empty, Some(&remote_unset));
+        assert_eq!(
+            slot,
+            Some(true),
+            "remote Some(unset) + env grove must enable, same as create"
+        );
+
+        let mut slot = None;
+        apply_grove_worktree_gate(&mut slot, &empty, Some(&remote_kill));
+        assert_eq!(
+            slot,
+            Some(false),
+            "remote kill must disable even when env asked for grove"
+        );
+
+        let mut slot = None;
+        apply_grove_worktree_gate(&mut slot, &empty, None);
+        unsafe { std::env::remove_var(ENV_WORKTREE_TYPE) };
+        assert_eq!(
+            slot,
+            Some(false),
+            "true unavailability (remote = None) must fail-close even if env asked for grove"
         );
     }
 

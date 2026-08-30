@@ -1,8 +1,4 @@
-//! Concrete slash command implementations.
-//!
-//! Each command lives in its own submodule. This module re-exports
-//! command structs and provides `builtin_commands()` for registry
-//! construction.
+//! Each command lives in its own submodule. This module re-exports command structs and provides `builtin_commands()` for registry construction.
 pub mod always_approve;
 pub mod announcements;
 pub mod auto;
@@ -516,8 +512,8 @@ mod tests {
             other => panic!("expected QueueCommand, got {other:?}"),
         }
     }
-    /// Bare `/model <name>` → `SetDefaultModel` (switch + persist).
-    /// `/model <name> <effort>` → `SwitchModel` (session-scoped).
+    /// Bare `/model <name>` returns `SetDefaultModel`, which switches and persists.
+    /// `/model <name> <effort>` returns `SwitchModel`, which is session-scoped.
     #[test]
     fn model_resolves_by_display_name() {
         let models = sample_models();
@@ -922,8 +918,8 @@ mod tests {
         reg.set_voice_visible(false);
         assert!(reg.get("voice").is_none());
     }
-    /// Every pager builtin trigger key must appear in the shell's
-    /// `PAGER_COMMAND_KEYS`. Add new names there when adding a pager builtin.
+    /// Every pager builtin trigger key must appear in the shell's `PAGER_COMMAND_KEYS`.
+    /// Add new names there when adding a pager builtin.
     #[test]
     fn pager_builtin_triggers_are_reserved_in_shell() {
         let reserved: std::collections::HashSet<&str> = xai_grok_shell::session::PAGER_COMMAND_KEYS

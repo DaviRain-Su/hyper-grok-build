@@ -43,24 +43,19 @@ impl AgentView {
             | crate::views::rewind::RewindPhase::Error { .. } => None,
         }
     }
-    /// Refresh the scrollback's "awaiting user input" marks so the renderer
-    /// can swap the running-spinner bullet for a pulsing-circle bullet on
-    /// tool entries that are blocked on a permission prompt or
-    /// `ask_user_question`.
+    /// Refresh the scrollback's "awaiting user input" marks.
+    /// The renderer uses them to swap the running-spinner bullet for a pulsing-circle bullet.
+    /// A tool entry gets the mark while it is blocked on a permission prompt or `ask_user_question`.
     ///
-    /// Recomputed every frame because the queue/question state is fully
-    /// owned by `AgentView` and changes asynchronously; doing a fresh
-    /// clear+rebuild keeps the mark and the view of record from drifting
-    /// out of sync (e.g. on Cancelled requests we never observe a
-    /// matching "pop" event).
+    /// Recomputed every frame because the queue/question state is fully owned by `AgentView` and changes asynchronously.
+    /// Clearing everything and rebuilding keeps the marks from drifting out of sync with that state.
+    /// On Cancelled requests we never observe a matching "pop" event.
     ///
-    /// Cheap: O(entries) for the clear plus O(permission_queue +
-    /// question_view) lookups via the tracker, both tiny in practice.
+    /// Cheap: O(entries) for the clear plus O(permission_queue + question_view) lookups via the tracker, both tiny in practice.
     ///
-    /// Called once per frame from `AgentView::draw` in the full TUI; minimal
-    /// mode bypasses that draw path, so its commit pass
-    /// ([`crate::minimal::commit::commit_active`]) calls this itself to keep a
-    /// tool blocked on a permission/question out of the committed frontier.
+    /// Called once per frame from `AgentView::draw` in the full TUI.
+    /// Minimal mode bypasses that draw path, so its commit pass ([`crate::minimal::commit::commit_active`]) calls this itself.
+    /// That keeps a tool blocked on a permission/question out of the committed frontier.
     pub(crate) fn sync_pending_user_input_marks(&mut self) {
         self.scrollback.clear_all_pending_user_input();
         for perm in &self.permission_queue {
@@ -105,9 +100,8 @@ impl AgentView {
             other => Self::rewind_input_to_outcome(other),
         }
     }
-    /// Map a terminal `RewindInput` (one that doesn't itself move the cursor)
-    /// to the corresponding `InputOutcome`. Shared by the key and mouse paths
-    /// so the two can't drift.
+    /// Map a terminal `RewindInput` (one that doesn't itself move the cursor) to the corresponding `InputOutcome`.
+    /// Shared by the key and mouse paths so the two can't drift.
     fn rewind_input_to_outcome(input: crate::views::rewind::RewindInput) -> InputOutcome {
         use crate::views::rewind::RewindInput;
         match input {
@@ -127,9 +121,8 @@ impl AgentView {
             | RewindInput::Consumed => InputOutcome::Changed,
         }
     }
-    /// Mouse on the rewind overlay: hover moves the cursor; left-click moves
-    /// then activates (Enter). Picker hover/click refresh dim via
-    /// `sync_rewind_anchor_to_picker`, same as keyboard j/k.
+    /// Mouse on the rewind overlay: hover moves the cursor; left-click moves then activates (Enter).
+    /// Picker hover/click refresh dim via `sync_rewind_anchor_to_picker`, same as keyboard j/k.
     pub(super) fn handle_rewind_mouse(&mut self, mouse: &MouseEvent) -> InputOutcome {
         use crate::views::rewind::{rewind_activate, rewind_row_at, set_rewind_cursor};
         let area = self.pane_areas.prompt;

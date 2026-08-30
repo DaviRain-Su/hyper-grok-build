@@ -1,12 +1,8 @@
-//! `/quit` (alias `/exit`) -- quit the application.
-
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
 /// Bare text that means quit outside slash resolution (`/quit` / `/exit`).
-///
-/// Shared by agent-prompt send and dashboard dispatch so vim/shell muscle
-/// memory (`:wq`, `:q`, `exit`, …) stays one list.
+/// The agent prompt's send path and the dashboard dispatch both use this, so vim/shell muscle memory (`:wq`, `:q`, `exit`, …) stays one list.
 pub(crate) fn is_exit_alias(text: &str) -> bool {
     matches!(
         text.trim().to_ascii_lowercase().as_str(),
@@ -14,24 +10,14 @@ pub(crate) fn is_exit_alias(text: &str) -> bool {
     )
 }
 
-/// Quit the pager application.
 pub struct ExitCommand;
 
 impl SlashCommand for ExitCommand {
-    fn name(&self) -> &str {
-        "quit"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["exit"]
-    }
-
-    fn description(&self) -> &str {
-        "Quit the application"
-    }
-
-    fn usage(&self) -> &str {
-        "/quit"
+    slash_meta! {
+        name: "quit",
+        aliases: ["exit"],
+        description: "Quit the application",
+        usage: "/quit",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {

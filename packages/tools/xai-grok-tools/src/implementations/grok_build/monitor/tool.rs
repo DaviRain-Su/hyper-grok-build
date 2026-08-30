@@ -31,6 +31,8 @@ impl crate::types::tool_metadata::ToolMetadata for MonitorTool {
 
 **Output volume**: Every stdout line is a main-agent wake. Print only `DONE`/`FAILED`/`CANCELLED`. No progress or CHANGE lines. Use `grep --line-buffered` in pipes (plain `grep` buffers and delays events by minutes).
 
+**Responsiveness**: Emit `FAILED` to notify immediately when any required item fails; never wait for unrelated work to finish. Include every tracked failure signal in this immediate failure condition.
+
 Set `persistent: true` for session-length watches (PR monitoring, log tails) -- the monitor runs${%- if tools.by_kind.kill_task_action %} until you call ${{ tools.by_kind.kill_task_action }} or${%- endif %} until the session ends. Otherwise it stops at `timeout_ms` (default 10h)."#
     }
 

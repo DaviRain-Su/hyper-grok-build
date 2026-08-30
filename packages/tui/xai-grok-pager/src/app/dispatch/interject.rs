@@ -7,17 +7,15 @@ use crate::app::agent::AgentId;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 
-/// Send a mid-turn interjection. Pushes a standard user prompt block locally
-/// for instant feedback, records the text in prompt history, clears the
-/// prompt, and fires the `x.ai/interject` ext method carrying a client-minted
-/// id.
+/// Send a mid-turn interjection.
+/// Pushes a standard user prompt block locally for instant feedback, records the text in prompt history, and clears the prompt.
+/// Fires the `x.ai/interject` ext method carrying a client-minted id.
 ///
-/// The shell broadcasts `x.ai/session/interjection` to every attached pane so
-/// other clients viewing the same session render it too (multi-client /
-/// dashboard mode). Our own broadcast echoes back carrying the same id; the id
-/// is recorded in `self_interjection_ids` so `handle_interjection` drops the
-/// echo instead of rendering a duplicate. Other panes lack the id and render
-/// it. (Optimistic-echo + reconcile-by-id, mirroring the shared prompt queue.)
+/// The shell broadcasts `x.ai/session/interjection` to every attached pane so other clients viewing the same session render it too.
+/// (Multi-client / dashboard mode.)
+/// Our own broadcast echoes back carrying the same id.
+/// The id is recorded in `self_interjection_ids` so `handle_interjection` drops the echo instead of rendering a duplicate.
+/// Other panes lack the id and render it. (An optimistic echo reconciled by id, mirroring the shared prompt queue.)
 pub(super) fn dispatch_interject(
     app: &mut AppView,
     text: String,
@@ -29,28 +27,26 @@ pub(super) fn dispatch_interject(
     dispatch_interject_on(app, id, text, images)
 }
 
-/// Same as [`dispatch_interject`], but targets `agent_id` instead of the
-/// focused pane. Used when a `/btw` answer lands on a non-active session.
+/// Same as [`dispatch_interject`], but targets `agent_id` instead of the focused pane.
+/// Used when a `/btw` answer lands on a non-active session.
 pub(super) fn dispatch_interject_on(
     app: &mut AppView,
     id: AgentId,
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
-    // Voice is app-wide and bound to the focused composer. A /btw answer
-    // on another session must not commit interim text or kill dictation
-    // on the pane the user is actually talking into.
+    // Voice is app-wide and bound to the focused composer
+    // A /btw answer on another session must not commit interim text or kill dictation on the pane the user is actually talking into
     if matches!(app.active_view, ActiveView::Agent(active) if active == id) {
-        // Hard-reset only — `text` may not be from the composer.
+        // Hard-reset only; `text` may not be from the composer
         let _ = voice_stop_on_submit(app);
     }
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
 
-    // Submitting an interjection retires any edit-contextual ephemeral tip —
-    // even when there is no active session, matching the prompt/bash/
-    // feedback/remember paths.
+    // Submitting an interjection retires any edit-contextual ephemeral tip, even when there is no active session
+    // Matches the prompt/bash/feedback/remember paths
     agent.ephemeral_tip.clear_on_submit();
     agent.release_hook_block_hold();
 
@@ -61,24 +57,20 @@ pub(super) fn dispatch_interject_on(
 
     agent.record_prompt_in_history(&text);
 
-    // Push a standard user prompt block locally for instant feedback, and
-    // record its id so the broadcast echo (`x.ai/session/interjection`) is
-    // deduped instead of rendering a second copy on this pane.
+    // Push a standard user prompt block locally for instant feedback
+    // Record its id so the broadcast echo (`x.ai/session/interjection`) is deduped instead of rendering a second copy on this pane
     let interjection_id = uuid::Uuid::new_v4().to_string();
     agent.self_interjection_ids.insert(interjection_id.clone());
     agent
         .scrollback
         .push_block(RenderBlock::interjection_prompt(&text));
 
-    // The composer is NOT touched here: the producer that consumed composer
-    // text (the InterjectPrompt registry arm) clears it at the call site;
-    // every other producer (Send now, edit-interject, plan review comments)
-    // carries non-composer text and must keep the user's draft/stash.
+    // The composer is NOT touched here: the producer that consumed composer text (the InterjectPrompt registry arm) clears it at the call site
+    // Every other producer (Send now, edit-interject, plan review comments) carries non-composer text and must keep the user's draft/stash
     agent.show_toast("Interjection sent");
 
-    // Image-bearing interjection: build text + image content blocks via the
-    // same helper as the queued-prompt drain path (orphan-placeholder
-    // recovery, allowlist, size cap). Text-only stays on the legacy wire.
+    // Image-bearing interjection: build text and image content blocks via the same helper as the queued-prompt drain path
+    // The helper covers orphan-placeholder recovery, the allowlist, and the size cap. Text-only stays on the legacy wire.
     let blocks = if images.is_empty() {
         None
     } else {
@@ -98,15 +90,14 @@ pub(super) fn dispatch_interject_on(
     }]
 }
 
-/// Cancel-and-send: send `text` (+ images) as a fresh `sendNow` prompt so the
-/// shell cancels the running turn and runs it next. The user block paints at
-/// dispatch (the arm hides the queue echo; the adoption reuses the block).
+/// Cancel-and-send: send `text` (and images) as a fresh `sendNow` prompt so the shell cancels the running turn and runs it next.
+/// The user block paints at dispatch (the arm hides the queue echo; the adoption reuses the block).
 pub(super) fn dispatch_send_prompt_now(
     app: &mut AppView,
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
-    // Hard-reset only — `text` may be a queue row, not the composer.
+    // Hard-reset only; `text` may be a queue row, not the composer
     let _ = voice_stop_on_submit(app);
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -117,9 +108,8 @@ pub(super) fn dispatch_send_prompt_now(
     };
     agent.release_hook_block_hold();
 
-    // Mid-outage guard (mirrors the plain prompt path): the producers already
-    // consumed the payload (composer text / queue row), so requeue it locally
-    // instead of firing into a dead channel and losing the message.
+    // Mid-outage guard (mirrors the plain prompt path): the producers already consumed the payload (composer text / queue row)
+    // Requeue it locally instead of firing into a dead channel and losing the message
     if reconnect_pending {
         let queue_id = agent.session.next_queue_id;
         agent.session.next_queue_id += 1;
@@ -151,8 +141,7 @@ pub(super) fn dispatch_send_prompt_now(
     let prompt_id = uuid::Uuid::new_v4().to_string();
     // Self-originated: the ACP gate must treat this prompt's deltas as ours.
     agent.note_self_originated_prompt(&prompt_id);
-    // Expect the shell's send-now cancel so the turn-end rails suppress its
-    // marker.
+    // Expect the shell's send-now cancel so the turn-end handling suppresses its marker
     super::queue::arm_send_now_and_paint_dispatched(agent, &prompt_id, &text);
 
     let blocks = crate::prompt_images::build_content_blocks_with_workspace(
@@ -187,12 +176,10 @@ mod tests {
     use crate::app::dispatch::tests::test_app_with_agent;
     use agent_client_protocol as acp;
 
-    /// Composer-clear ownership: dispatch NEVER touches the composer. The
-    /// only composer-text producer (the InterjectPrompt registry arm) clears
-    /// it at the call site; every other producer (Send now, edit-interject,
-    /// plan review comments) carries non-composer text whose draft/stash
-    /// must survive dispatch — even when it happens to equal the interjected
-    /// text (provenance is not inferred by value equality).
+    /// Composer-clear ownership: dispatch NEVER touches the composer.
+    /// The only composer-text producer (the InterjectPrompt registry arm) clears it at the call site.
+    /// Every other producer (Send now, edit-interject, plan review comments) carries non-composer text whose draft/stash must survive dispatch.
+    /// That holds even when the draft happens to equal the interjected text (provenance is not inferred by value equality).
     #[test]
     fn interject_dispatch_never_touches_the_composer() {
         let mut app = test_app_with_agent();
@@ -229,8 +216,7 @@ mod tests {
         ));
         assert_eq!(app.agents.get(&id).unwrap().prompt.text(), "stashed draft");
 
-        // Even a composer that equals the interjected text is preserved —
-        // the InterjectPrompt arm already cleared it for the composer path.
+        // Even a composer that equals the interjected text is preserved; the InterjectPrompt arm already cleared it for the composer path
         app.agents.get_mut(&id).unwrap().prompt.set_text("send me");
         let _ = dispatch(
             Action::Interject {
@@ -268,8 +254,7 @@ mod tests {
         );
     }
 
-    /// A no-session interject still retires the tip: the clear now runs before
-    /// the "No active session" early return, matching the other submit paths.
+    /// A no-session interject still retires the tip: the clear runs before the "No active session" early return, matching the other submit paths.
     #[test]
     fn interject_without_session_still_clears_ephemeral_tip() {
         let mut app = test_app_with_agent();
@@ -307,9 +292,8 @@ mod tests {
         );
     }
 
-    /// Image-bearing interject builds structured blocks (Text first with the
-    /// placeholder intact, then one Image block); no-image stays legacy
-    /// (`blocks: None`) so the wire shape is byte-identical.
+    /// Image-bearing interject builds structured blocks (Text first with the placeholder intact, then one Image block).
+    /// No-image stays legacy (`blocks: None`) so the wire shape is byte-identical.
     #[test]
     fn interject_with_images_builds_blocks_text_first() {
         let mut app = test_app_with_agent();

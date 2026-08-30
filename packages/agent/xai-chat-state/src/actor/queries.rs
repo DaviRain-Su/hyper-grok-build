@@ -68,10 +68,10 @@ impl ChatStateActor {
         self.state.conversation.truncate(truncate_at);
         self.state.prompt_texts.truncate(target_prompt_index);
         self.state.prompt_index = target_prompt_index;
-        self.state.total_tokens =
-            super::state::estimate_conversation_tokens(&self.state.conversation);
+        let base_estimate = super::state::estimate_conversation_tokens(&self.state.conversation);
+        self.state.total_tokens = self.reseed_total_tokens(base_estimate);
         self.state.estimated_tokens_since_model = 0;
-        self.state.estimate_at_last_response = self.state.total_tokens;
+        self.state.estimate_at_last_response = base_estimate;
 
         self.persistence.replace_history(&self.state.conversation);
 

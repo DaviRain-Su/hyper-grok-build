@@ -1,17 +1,12 @@
-//! Shared subprocess plumbing: spawn a child, optionally feed it stdin, wait up
-//! to a wall-clock budget, and reap the whole process group on a breach.
+//! Spawn a child process, optionally feed it stdin, wait up to a wall-clock budget, and reap the whole process group on a breach.
 //!
-//! Used by both the optional [`crate::MmdcEngine`] (which shells out to
-//! `mmdc`/headless-Chromium) and the pager's out-of-process render child (a
-//! short-lived re-exec of the pager that renders one diagram in isolation). The
-//! timeout is a *real* process kill, not a soft signal: a panic under
-//! `panic = "abort"` or a runaway render in the child is contained because the
-//! parent kills and reaps it.
+//! Used by both the optional [`crate::MmdcEngine`] (which shells out to `mmdc` and headless Chromium) and the pager's out-of-process render child.
+//! That child is a short-lived re-exec of the pager that renders one diagram in isolation.
+//! The timeout is a *real* process kill, not a soft signal.
+//! A panic under `panic = "abort"` or a runaway render in the child is contained because the parent kills and reaps it.
 //!
-//! The caller builds the [`Command`] (stdio, env, and the sanctioned
-//! TTY/console detach via `xai_tty_utils::detach_std_command`); this module only
-//! owns the spawn → feed-stdin → wait → reap lifecycle so neither call site
-//! re-implements process-group teardown.
+//! The caller builds the [`Command`] (stdio, env, and the TTY/console detach via `xai_tty_utils::detach_std_command`).
+//! This module owns spawn, feed stdin, wait, and reap, so neither call site re-implements process-group teardown.
 
 use std::process::{Child, Command};
 use std::time::Duration;
@@ -21,7 +16,7 @@ use wait_timeout::ChildExt;
 /// Why a child subprocess run did not complete successfully.
 #[derive(thiserror::Error, Debug)]
 pub enum SubprocessError {
-    /// The child could not be spawned (binary missing, fork failure, …).
+    /// The child could not be spawned (binary missing, fork failure, ...).
     #[error("could not spawn child process: {0}")]
     Spawn(std::io::Error),
     /// The child exceeded its wall-clock budget and was killed and reaped.
@@ -35,21 +30,18 @@ pub enum SubprocessError {
     Wait(std::io::Error),
 }
 
-/// Spawn `cmd`, optionally write `stdin_payload` to its stdin, wait up to
-/// `timeout`, and reap the process group on a breach.
+/// Spawn `cmd`, optionally write `stdin_payload` to its stdin, wait up to `timeout`, and reap the process group on a breach.
 ///
-/// The caller must have configured `cmd` (stdio, env, detach). To pass
-/// `stdin_payload`, the caller must set `cmd.stdin(Stdio::piped())`; the payload
-/// is written from a scoped thread so a full pipe buffer can never deadlock the
-/// wait. When `stdin_payload` is `None` (or stdin is not piped), no writer runs.
+/// The caller must have configured `cmd` (stdio, env, detach).
+/// To pass `stdin_payload`, the caller must set `cmd.stdin(Stdio::piped())`.
+/// The payload is written from a scoped thread so a full pipe buffer can never deadlock the wait.
+/// When `stdin_payload` is `None` (or stdin is not piped), no writer runs.
 ///
-/// Returns `Ok(())` only on a zero-exit run; otherwise the matching
-/// [`SubprocessError`]. On timeout or a failed wait the child is killed and
-/// reaped: on Unix the whole process group is SIGKILLed, so grandchildren (e.g.
-/// an [`crate::MmdcEngine`]'s headless Chromium) are reaped too; on Windows only
-/// the direct child is killed — sufficient for the pager's render child (no
-/// grandchildren), but a Windows `MmdcEngine` could leak Chromium grandchildren
-/// (a Job Object is the follow-up there).
+/// Returns `Ok(())` only on a zero-exit run; otherwise the matching [`SubprocessError`].
+/// On timeout or a failed wait the child is killed and reaped.
+/// On Unix the whole process group is SIGKILLed, so grandchildren (e.g. an [`crate::MmdcEngine`]'s headless Chromium) are reaped too.
+/// On Windows only the direct child is killed, which is enough for the pager's render child (no grandchildren).
+/// A Windows `MmdcEngine` could leak Chromium grandchildren; a Job Object is the follow-up there.
 pub fn run_with_timeout(
     mut cmd: Command,
     stdin_payload: Option<&[u8]>,
@@ -57,14 +49,12 @@ pub fn run_with_timeout(
 ) -> Result<(), SubprocessError> {
     let mut child = spawn_with_etxtbsy_retry(&mut cmd).map_err(SubprocessError::Spawn)?;
 
-    // Feed stdin from a scoped thread so a child that stops reading can't wedge
-    // a `write_all` of a large (up to the source-size cap) payload and deadlock
-    // the wait below. On timeout we kill the child, which EOF/EPIPEs the writer.
+    // Feed stdin from a scoped thread: a child that stops reading would otherwise wedge a `write_all` of a large payload and deadlock the wait below
+    // On timeout we kill the child, so the writer just sees a broken pipe
     let stdin = child.stdin.take();
 
-    // A payload with no piped stdin would be silently dropped (the caller forgot
-    // `cmd.stdin(Stdio::piped())`). Both in-tree callers pipe correctly; flag the
-    // foot-gun loudly in debug and at least log it in release.
+    // A payload with no piped stdin would be silently dropped (the caller forgot `cmd.stdin(Stdio::piped())`)
+    // Both in-tree callers pipe correctly; the debug_assert makes the mistake loud in debug, and release at least logs the warn
     if stdin_payload.is_some() && stdin.is_none() {
         tracing::warn!(
             target: "mermaid",
@@ -90,14 +80,10 @@ pub fn run_with_timeout(
 
 /// Spawn `cmd`, retrying briefly on `ETXTBSY` ("Text file busy").
 ///
-/// On Linux, exec'ing a binary that another thread/process still holds open for
-/// writing fails with `ExecutableFileBusy`. A concurrent `Command::spawn` on
-/// another thread forks and inherits any write fd open at that instant; the fd
-/// is close-on-exec but only closes at the child's own `execve`, leaving a
-/// fork→execve window during which our `execve` of a freshly-written binary can
-/// race. It is transient and clears within milliseconds, so retry a few times
-/// with a short backoff. (No-op on the steady-state path; only the failing
-/// transient case changes behaviour.)
+/// On Linux, exec'ing a binary that another thread or process still holds open for writing fails with `ExecutableFileBusy`.
+/// A concurrent `Command::spawn` on another thread forks and inherits any write fd open at that instant.
+/// The fd is close-on-exec but only closes at that child's own `execve`, so our `execve` of a freshly-written binary can race that window.
+/// The failure is transient and clears within milliseconds, so retry a few times with a short backoff.
 #[allow(clippy::disallowed_methods)] // the caller owns the reap
 fn spawn_with_etxtbsy_retry(cmd: &mut Command) -> std::io::Result<Child> {
     const MAX_ATTEMPTS: u32 = 5;
@@ -117,19 +103,15 @@ fn spawn_with_etxtbsy_retry(cmd: &mut Command) -> std::io::Result<Child> {
     }
 }
 
-/// Wait for `child` up to `timeout`, tearing down its detached process group on
-/// every exit path (success, non-zero exit, timeout, wait failure) so a child
-/// that spawned grandchildren can't orphan them.
+/// Wait for `child` up to `timeout`, tearing down its detached process group on every exit path.
+/// Success, non-zero exit, timeout, and wait failure all reap, so a child that spawned grandchildren can't orphan them.
 fn wait_and_reap(child: &mut Child, timeout: Duration) -> Result<(), SubprocessError> {
     match child.wait_timeout(timeout) {
-        // `wait_timeout` already reaped the direct child on these two branches,
-        // but it was its own detached group leader: SIGKILL the group's pgid so
-        // any grandchildren (e.g. an opt-in MmdcEngine's headless Chromium) are
-        // torn down regardless of exit code. The pgid stays valid while a
-        // grandchild is alive (the case that matters); for the grandchild-less
-        // render child the leader is already gone, so killpg is a harmless no-op
-        // (ESRCH). The full `reap()` is unneeded — the direct child is already
-        // reaped, so `child.kill()`/`wait()` would be redundant.
+        // `wait_timeout` already reaped the direct child on these two branches, but it was its own detached group leader
+        // SIGKILL the group's pgid so any grandchildren (e.g. an opt-in MmdcEngine's headless Chromium) are torn down regardless of exit code.
+        // The pgid stays valid while a grandchild is alive, the case that matters
+        // For the render child, which has no grandchildren, the leader is already gone and killpg is a harmless no-op (ESRCH)
+        // The full `reap()` is unneeded: the direct child is already reaped, so `child.kill()`/`wait()` would be redundant
         Ok(Some(status)) if status.success() => {
             reap_process_group(child);
             Ok(())
@@ -142,8 +124,7 @@ fn wait_and_reap(child: &mut Child, timeout: Duration) -> Result<(), SubprocessE
             reap(child);
             Err(SubprocessError::Timeout)
         }
-        // waitpid failed; the child may still be running, so reap it too — the
-        // same teardown as the timeout branch (don't leak the child tree).
+        // waitpid failed; the child may still be running, so reap it too, the same teardown as the timeout branch (don't leak the child tree)
         Err(e) => {
             reap(child);
             Err(SubprocessError::Wait(e))
@@ -151,25 +132,22 @@ fn wait_and_reap(child: &mut Child, timeout: Duration) -> Result<(), SubprocessE
     }
 }
 
-/// Best-effort teardown of a spawned child: SIGKILL its process group (to reach
-/// any grandchildren, e.g. headless Chromium), then kill and reap the child.
+/// Best-effort teardown of a spawned child: SIGKILL its process group (to reach any grandchildren), then kill and reap the child.
 fn reap(child: &mut Child) {
     reap_process_group(child);
     let _ = child.kill();
     let _ = child.wait();
 }
 
-/// SIGKILL the child's process group so grandchildren are reaped, not just the
-/// direct child.
+/// SIGKILL the child's process group so grandchildren are reaped, not just the direct child.
 ///
-/// `xai_tty_utils::detach_std_command` runs `setsid` (EPERM fallback
-/// `setpgid(0,0)`), so the child is its own group leader and its pgid equals its
-/// pid. We send the signal directly because `xai_tty_utils::ProcessGroup` only
-/// wraps tokio children.
+/// `xai_tty_utils::detach_std_command` runs `setsid` (EPERM fallback `setpgid(0,0)`).
+/// The child is therefore its own group leader and its pgid equals its pid.
+/// We send the signal directly because `xai_tty_utils::ProcessGroup` only wraps tokio children.
 #[cfg(unix)]
 fn reap_process_group(child: &Child) {
     let pid = child.id() as libc::pid_t;
-    // SAFETY: killpg with a valid pid + standard signal has no memory effects.
+    // SAFETY: killpg with a valid pid and a standard signal has no memory effects
     unsafe {
         libc::killpg(pid, libc::SIGKILL);
     }
@@ -177,8 +155,7 @@ fn reap_process_group(child: &Child) {
 
 #[cfg(not(unix))]
 fn reap_process_group(_child: &Child) {
-    // Group teardown via Job Objects is tokio-only here; the caller's
-    // `child.kill()` still terminates the direct child process.
+    // Group teardown via Job Objects is tokio-only here; the caller's `child.kill()` still terminates the direct child process
 }
 
 #[cfg(test)]
@@ -228,11 +205,9 @@ mod tests {
         );
     }
 
-    /// A large stdin payload (bigger than any OS pipe buffer) must be delivered
-    /// through `run_with_timeout`'s own scoped writer without deadlocking the
-    /// wait — the whole reason the writer is a scoped thread. We point `cat` at a
-    /// file (its stdout) so we can prove every byte was consumed, and assert the
-    /// call returns `Ok(())` promptly rather than hitting the timeout.
+    /// A large stdin payload (bigger than any OS pipe buffer) must be delivered through `run_with_timeout`'s own writer without deadlocking the wait.
+    /// That is the whole reason the writer is a scoped thread.
+    /// We point `cat`'s stdout at a file to prove every byte was consumed, and assert the call returns `Ok(())` promptly rather than at the timeout.
     #[cfg(unix)]
     #[test]
     fn large_stdin_payload_is_delivered_without_deadlock() {
@@ -257,8 +232,7 @@ mod tests {
             start.elapsed() < Duration::from_secs(5),
             "must return after the drain, not after the full timeout",
         );
-        // `cat` copies all of stdin to the file → proves the whole payload was
-        // both delivered and consumed via the real scoped writer.
+        // `cat` copies all of stdin to the file, proving the whole payload was both delivered and consumed via the real scoped writer
         let drained = std::fs::metadata(&sink).expect("sink metadata").len();
         assert_eq!(
             drained,
@@ -267,7 +241,7 @@ mod tests {
         );
     }
 
-    /// `reap` actually terminates the spawned process group.
+    /// `reap` terminates the spawned process group.
     #[cfg(unix)]
     #[test]
     fn reap_terminates_the_process() {
@@ -280,7 +254,7 @@ mod tests {
 
         reap(&mut child);
 
-        // After SIGKILL + wait, the pid no longer names a live process.
+        // After SIGKILL and wait, the pid no longer names a live process
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
@@ -296,12 +270,9 @@ mod tests {
         assert!(matches!(r, Err(SubprocessError::Spawn(_))), "got {r:?}");
     }
 
-    /// The dropped-stdin-payload guard fires when a caller passes a payload but
-    /// forgets `cmd.stdin(Stdio::piped())`: the `debug_assert!` turns that silent
-    /// foot-gun into a hard failure. Gated on `debug_assertions` because that is
-    /// exactly when the assert is active (release keeps only the `warn`). `true`
-    /// exits at once; `detached` sets stdin to null (not piped), so the payload
-    /// would be dropped and the guard must catch it.
+    /// A caller can pass a payload but forget `cmd.stdin(Stdio::piped())`; the `debug_assert!` turns that silent drop into a hard failure.
+    /// The test is gated on `debug_assertions` because that is exactly when the assert is active (release keeps only the `warn`).
+    /// `true` exits at once; `detached` sets stdin to null (not piped), so the payload would be dropped and the guard must catch it.
     #[cfg(all(unix, debug_assertions))]
     #[test]
     #[should_panic(expected = "stdin_payload supplied but cmd.stdin is not piped")]

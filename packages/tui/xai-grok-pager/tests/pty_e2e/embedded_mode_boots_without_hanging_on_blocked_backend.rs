@@ -4,11 +4,9 @@ use super::common::*;
 
 /// 1a. **Embedded mode (`--no-leader`) boots without hanging on a blocked backend.**
 ///
-/// Enterprise deployments set `[cli] use_leader = false` and point at their own
-/// backend, often with the grok.com proxy blocked. A TCP listener that accepts
-/// but never replies stands in for that endpoint, so every startup HTTP call
-/// stalls until the client's own bounded timeout fires. The welcome screen must
-/// render anyway; a hang here means some boot path went unbounded.
+/// Enterprise deployments set `[cli] use_leader = false` and point at their own backend, often with the grok.com proxy blocked.
+/// A TCP listener that accepts but never replies stands in for that endpoint, so every startup HTTP call stalls until the client's own timeout fires.
+/// The welcome screen must render anyway; a hang here means some boot path went unbounded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn embedded_mode_boots_without_hanging_on_blocked_backend() {
@@ -51,9 +49,8 @@ async fn embedded_mode_boots_without_hanging_on_blocked_backend() {
     )
     .expect("spawn pager");
 
-    // 30s exceeds the sum of the bounded startup fetches (auth + settings +
-    // catalog, ~5s each), so a timeout here means an unbounded wait, not a
-    // slow one.
+    // 30s exceeds the sum of the bounded startup fetches (auth, settings, and catalog, ~5s each)
+    // A timeout here means an unbounded wait, not a slow one
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, Duration::from_secs(30))
         .expect("embedded welcome must render despite the blocked backend (boot went unbounded)");

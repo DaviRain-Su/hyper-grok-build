@@ -107,14 +107,12 @@ pub(super) fn maybe_show_x11_primary_paste_hint(
     }
     show_clipboard_toast(target, X11_PRIMARY_PASTE_HINT, app);
 }
-/// Whether a completed clipboard probe should fall through to the `grok wrap`
-/// host-image request. A clean `FullMiss` always qualifies; a remote read
-/// *error* (`AttachmentRead`) also qualifies because inside `grok wrap` the
-/// authoritative pasteboard is the local host's, not the (absent) remote one, so
-/// the error is recoverable over the wrap OSC path. Every other failure
-/// (`TextRead`, `TargetInsertion`, `AlreadyReported`) is a real dead end and
-/// must keep toasting. The request itself still self-gates on
-/// `osc52_sink_active()`, so this is inert outside `grok wrap`.
+/// Whether a completed clipboard probe should fall through to the `grok wrap` host-image request.
+/// A clean `FullMiss` always qualifies; a remote read *error* (`AttachmentRead`) qualifies too.
+/// Inside `grok wrap` the authoritative pasteboard is the local host's, not the (absent) remote one.
+/// That error is therefore recoverable over the wrap OSC path.
+/// Every other failure (`TextRead`, `TargetInsertion`, `AlreadyReported`) is a real dead end and must keep toasting.
+/// The request itself still self-gates on `osc52_sink_active()`, so this is inert outside `grok wrap`.
 pub(super) fn wrap_host_image_request_eligible(completion: ClipboardPasteCompletion) -> bool {
     matches!(
         completion,
@@ -239,7 +237,6 @@ pub(crate) fn deliver_doctor_message(app: &mut AppView, preferred: AgentId, mess
         action: None,
     });
 }
-/// Handle a completed async task result.
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
     if result.ends_startup() {
         app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Ok);

@@ -1,6 +1,5 @@
-//! Host routing for session picker fetch results: resolve the host a result
-//! was issued for to its live picker storage, together with the freshness
-//! values (generation + per-kind seqs) the result must match to apply.
+//! Host routing for session picker fetch results: resolve the host a result was issued for to its live picker storage.
+//! The target carries the freshness values (generation and per-kind seqs) the result must match to apply.
 
 use crate::app::app_view::{AppView, SessionPickerEntry};
 use crate::app::dispatch::ctx::get_active_agent_mut;
@@ -14,9 +13,8 @@ use crate::views::session_picker_surface::SessionPickerHost;
 
 type SearchHit = xai_grok_shell::extensions::session_search::SearchSessionHit;
 
-/// Routing identity a picker fetch carried and its result echoed back: the
-/// requesting host, that host's incarnation generation at dispatch time, and
-/// the per-kind freshness seq snapshot.
+/// A picker fetch carries this and its result echoes it back.
+/// It names the requesting host and snapshots the generation and per-kind seq the host's picker had when the fetch dispatched.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::app::dispatch) struct PickerRequest {
     pub host: SessionPickerHost,
@@ -24,20 +22,17 @@ pub(in crate::app::dispatch) struct PickerRequest {
     pub seq: u64,
 }
 
-/// Which of the routed surface's freshness counters a result kind is gated
-/// on.
+/// Which of the target picker's seq counters a result kind is checked against.
 pub(in crate::app::dispatch) enum PickerSeqKind {
     List,
     DeepSearch,
     Detail,
 }
 
-/// The accept rule shared by every picker result handler: resolve the
-/// requesting host to its live picker (drop when it has none), then require
-/// generation equality and the per-kind seq to still be current. Returns the
-/// routed target on accept; logs and returns `None` on any failed leg.
-/// Kind-specific extra guards (External filter, foreign source, welcome view
-/// liveness) stay at the call sites.
+/// The accept rule shared by every picker result handler.
+/// Resolve the requesting host to its live picker (drop when it has none), then require generation equality and the per-kind seq to still be current.
+/// Returns the routed target on accept; logs and returns `None` on any failed check.
+/// Kind-specific extra guards (External filter, foreign source, welcome view liveness) stay at the call sites.
 pub(in crate::app::dispatch) fn accept_picker_result<'a>(
     app: &'a mut AppView,
     request: PickerRequest,
@@ -79,12 +74,10 @@ pub(in crate::app::dispatch) fn accept_picker_result<'a>(
     Some(target)
 }
 
-/// Mutable view of one host's picker storage plus the freshness values a
-/// result must match. Generation and the list/deep-search seqs are by-value
-/// copies: result handlers only read them (producers bump the real counters
-/// before the handler borrows the storage). `detail_seq` alone is a mutable
-/// borrow, because accepted list results and applied foreign scans advance
-/// the routed surface's detail seq at apply time.
+/// Mutable view of one host's picker storage plus the freshness values a result must match.
+/// Generation and the list/deep-search seqs are by-value copies.
+/// Result handlers only read them (producers bump the real counters before the handler borrows the storage).
+/// `detail_seq` alone is a mutable borrow: accepted list results and applied foreign scans advance it at apply time.
 pub(in crate::app::dispatch) struct PickerTarget<'a> {
     pub entries: &'a mut Option<Vec<SessionPickerEntry>>,
     pub loading: &'a mut bool,
@@ -102,17 +95,15 @@ pub(in crate::app::dispatch) struct PickerTarget<'a> {
     pub detail_seq: &'a mut u64,
 }
 
-/// Resolve `host` to its live picker storage. `None` means the host has no
-/// live picker (modal closed, dashboard unmounted) and the caller must drop
-/// the result — there is no fallback surface.
+/// Resolve `host` to its live picker storage.
+/// `None` means the host has no live picker (modal closed, dashboard unmounted) and the caller must drop the result; there is no fallback surface.
 pub(in crate::app::dispatch) fn picker_for_host(
     app: &mut AppView,
     host: SessionPickerHost,
 ) -> Option<PickerTarget<'_>> {
     match host {
         SessionPickerHost::AgentModal => {
-            // The welcome/modal list seq is one shared cell; the modal owns
-            // the other counters.
+            // The welcome/modal list seq is one shared cell; the modal owns the other counters
             let list_seq = app.session_picker_list_seq;
             let agent = get_active_agent_mut(app)?;
             let current_repo = repo_name_from_cwd(&agent.session.cwd.to_string_lossy());
@@ -150,8 +141,7 @@ pub(in crate::app::dispatch) fn picker_for_host(
                 detail_seq,
             })
         }
-        // Welcome storage always exists; incarnation liveness is expressed by
-        // the generation, so the accessor always resolves.
+        // Welcome storage always exists; staleness is caught by the generation check, so the accessor always resolves
         SessionPickerHost::Welcome => {
             let current_repo = repo_name_from_cwd(&app.cwd.to_string_lossy());
             Some(PickerTarget {

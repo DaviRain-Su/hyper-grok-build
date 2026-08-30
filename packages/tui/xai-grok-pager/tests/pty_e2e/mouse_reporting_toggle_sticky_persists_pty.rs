@@ -2,20 +2,17 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// With config+env enablement, scrollback Ctrl+R exercises the opt-in mouse
-/// reporting toggle without a non-dev `tracing_rx` metronome.
+/// With the toggle enabled in config and env, scrollback Ctrl+R exercises the opt-in mouse reporting toggle.
+/// Non-dev builds have no `tracing_rx` metronome, so the toggle's effect must appear without background ticks.
 ///
-/// Success is any visible effect of `dispatch_toggle_mouse_capture` on the
-/// Action/key path:
+/// Success is any visible effect of `dispatch_toggle_mouse_capture` reached through the key-to-Action path:
 /// - sticky off banner (`MOUSE_OFF_*`), and/or
 /// - transient "Mouse reporting on" toast
 ///
-/// Which one appears depends on whether PTY startup left capture on or off;
-/// both prove the toggle runs without background ticks. Full sticky-persist
-/// + re-enable symmetry is covered by unit tests in `dispatch.rs`
-/// (`mouse_reporting_toggle_off_sticky_*`).
+/// Which one appears depends on whether PTY startup left capture on or off; both prove the toggle runs without background ticks.
+/// Unit tests in `dispatch.rs` (`mouse_reporting_toggle_off_sticky_*`) cover the sticky off state persisting and capture turning back on.
 ///
-/// Product primary path is scrollback-focused Ctrl+R (`When::ScrollbackFocused`).
+/// The product's primary path is Ctrl+R with the scrollback focused (`When::ScrollbackFocused`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn mouse_reporting_toggle_sticky_persists_pty() {
@@ -42,11 +39,10 @@ async fn mouse_reporting_toggle_sticky_persists_pty() {
     let toggle_visible =
         |h: &PtyHarness| sticky_visible(h) || h.contains_text("Mouse reporting on");
 
-    // Defocus the prompt so scrollback owns keys — Tab is leave-prompt (Esc is
-    // reserved for the cancel / clear / rewind policy). Tab TOGGLES focus, so never re-press it
-    // blindly (a lagged frame would bounce focus back to the prompt). Idempotent:
-    // return if the scrollback already owns keys, else a SINGLE Tab + wait for
-    // the footer's "Space:prompt" to render (mirrors `drive_to_scrollback_with_turn`).
+    // Defocus the prompt so the scrollback owns keys. Tab leaves the prompt; Esc is reserved for the cancel/clear/rewind policy.
+    // Tab TOGGLES focus, so never re-press it blindly: a lagged frame would bounce focus back to the prompt
+    // The closure returns if the scrollback already owns keys; otherwise it presses Tab once and waits for the footer's "Space:prompt" to render
+    // This mirrors `drive_to_scrollback_with_turn`
     let focus_scrollback = |h: &mut PtyHarness| {
         if h.contains_text("Space:prompt") {
             return;
@@ -55,8 +51,8 @@ async fn mouse_reporting_toggle_sticky_persists_pty() {
         let _ = h.wait_for_text("Space:prompt", Duration::from_secs(10));
     };
 
-    // Fire Ctrl+R up to three times (capture-off at startup → on toast; then
-    // off/sticky), re-confirming scrollback focus before each press.
+    // Fire Ctrl+R up to three times, re-confirming scrollback focus before each press
+    // If startup left capture off, the first press shows the on toast and the next press turns it off sticky
     let mut saw_toggle = false;
     for _ in 0..3 {
         focus_scrollback(&mut harness);
@@ -81,7 +77,7 @@ async fn mouse_reporting_toggle_sticky_persists_pty() {
         harness.screen_contents()
     );
 
-    // If we landed sticky-off, it must survive an idle wait without metronome.
+    // If we landed on the sticky off banner, it must survive an idle wait with no metronome
     if sticky_visible(&harness) {
         inject_keys_paced(&mut harness, keys::J);
         harness.update(Duration::from_secs(2));

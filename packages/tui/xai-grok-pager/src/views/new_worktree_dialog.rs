@@ -1,5 +1,3 @@
-//! Popup dialog for creating a new worktree with an optional label.
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -10,7 +8,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::app_view::NewWorktreeDialogState;
 use crate::theme::Theme;
 
-/// Minimum dialog width (fits title + empty input + hints comfortably).
+/// Minimum dialog width (fits the title, an empty input, and the hints).
 const MIN_DIALOG_WIDTH: u16 = 50;
 const DIALOG_HEIGHT: u16 = 5;
 /// Left/right padding inside the border (`inner_x = dialog.x + 2`).
@@ -19,16 +17,14 @@ const LABEL_PREFIX: &str = "Name (optional): ";
 
 /// Render the new-worktree popup dialog centered on screen.
 ///
-/// The dialog grows with the typed label up to the available width, then
-/// scrolls the input viewport to keep the live cursor visible.
+/// The dialog grows with the typed label up to the available width, then scrolls the input viewport to keep the live cursor visible.
 pub fn render_new_worktree_dialog(area: Rect, buf: &mut Buffer, state: &NewWorktreeDialogState) {
     let theme = Theme::current();
 
     let dialog_width = dialog_width_for(area.width, state.label());
 
     if area.height < DIALOG_HEIGHT || area.width < 20 {
-        // Too small to render — draw a minimal "resize" hint so the user
-        // knows the dialog is still active and can press Esc to dismiss.
+        // Too small to render. Draw a minimal hint so the user knows the dialog is still active and can press Esc to dismiss.
         if area.height >= 1 && area.width >= 16 {
             let hint = Line::from(Span::styled(
                 "[Esc] to close",
@@ -163,7 +159,7 @@ pub fn render_new_worktree_dialog(area: Rect, buf: &mut Buffer, state: &NewWorkt
 /// Dialog width that fits the typed label, clamped to the available area.
 fn dialog_width_for(area_width: u16, label: &str) -> u16 {
     let max_width = area_width.saturating_sub(4);
-    // prefix + label + block cursor + inner pad
+    // The extra 1 is the block cursor cell
     let needed = (LABEL_PREFIX.width() + label.width() + 1 + INNER_PAD as usize) as u16;
     needed.max(MIN_DIALOG_WIDTH).min(max_width)
 }
@@ -193,7 +189,7 @@ mod tests {
     #[test]
     fn empty_dialog_uses_minimum_width() {
         assert_eq!(dialog_width_for(120, ""), MIN_DIALOG_WIDTH);
-        assert_eq!(dialog_width_for(40, ""), 36); // area.width - 4
+        assert_eq!(dialog_width_for(40, ""), 36); // area.width 40 minus the 4-column margin
     }
 
     #[test]
@@ -204,7 +200,7 @@ mod tests {
             width > MIN_DIALOG_WIDTH,
             "expected dialog wider than min for long label, got {width}"
         );
-        // Full label + chrome must fit inside the grown dialog.
+        // The full label and its chrome must fit inside the grown dialog
         let inner = width.saturating_sub(INNER_PAD) as usize;
         let needed = LABEL_PREFIX.width() + label.width() + 1;
         assert!(
@@ -217,7 +213,7 @@ mod tests {
     fn dialog_clamps_to_terminal_width() {
         let label = "x".repeat(100);
         let width = dialog_width_for(60, &label);
-        assert_eq!(width, 56); // 60 - 4
+        assert_eq!(width, 56); // area.width 60 minus the 4-column margin
     }
 
     #[test]
@@ -234,7 +230,7 @@ mod tests {
 
     #[test]
     fn long_name_end_visible_on_narrow_terminal() {
-        // Terminal narrower than the full label — end (cursor side) must show.
+        // The terminal is narrower than the full label, so the end (the cursor side) must show
         let area = Rect::new(0, 0, 40, 12);
         let label = "super-long-worktree-name-that-will-not-fit";
         let text = render_to_text(area, label);

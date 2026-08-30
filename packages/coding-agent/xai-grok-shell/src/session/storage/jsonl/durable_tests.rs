@@ -1,4 +1,5 @@
 use super::*;
+use crate::sampling::ConversationItem;
 use crate::session::info::Info;
 use crate::session::persistence::default_model_id;
 use crate::session::storage::{SessionUpdate, StorageAdapter};
@@ -93,6 +94,60 @@ async fn append_commit_is_reported_when_bookkeeping_fails() {
     );
 }
 
+#[tokio::test]
+async fn durable_append_reports_committed_when_file_barrier_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = info();
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf())
+        .with_file_sync_probe(|| Err(io::Error::other("file barrier failed")));
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        adapter
+            .append_update_durable_commit_aware(&info, &update(&info, "terminal".into()))
+            .await,
+        Err(crate::session::storage::AppendUpdateError::Committed(_))
+    ));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("updates.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn chat_append_commit_is_reported_when_bookkeeping_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = info();
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let summary = dir.path().join("summary.json");
+    std::fs::remove_file(&summary).unwrap();
+    std::fs::create_dir(&summary).unwrap();
+
+    assert!(matches!(
+        adapter
+            .append_chat_message_commit_aware(&info, &ConversationItem::user("committed"))
+            .await,
+        Err(crate::session::storage::AppendChatError::Committed(_))
+    ));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("chat_history.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn directory_barrier_failure_is_retried_even_after_file_exists() {
     let mut attempts = 0;
@@ -128,7 +183,7 @@ fn directory_barrier_failure_is_retried_even_after_file_exists() {
 }
 
 #[test]
-fn file_barrier_error_propagates() {
+fn file_barrier_error_after_write_is_committed_and_keeps_the_line() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("updates.jsonl");
     let error = JsonlStorageAdapter::append_jsonl_line_sync_with(
@@ -139,7 +194,16 @@ fn file_barrier_error_propagates() {
         || Ok(()),
     )
     .unwrap_err();
+    assert!(
+        matches!(error, AppendLineError::Committed(_)),
+        "a file barrier failure after write_all must report the record as committed: {error}"
+    );
     assert_eq!(error.to_string(), "file barrier failed");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "{\"record\":1}\n",
+        "the JSONL record must remain in the file so a later fsync can still make it durable"
+    );
 }
 
 #[test]
@@ -331,6 +395,68 @@ async fn cwd_switch_reappend_after_history_replacement_restores_message_count() 
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn init_session_retries_parent_sync_when_only_the_first_summary_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = info();
+    JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf())
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+
+    let parent_syncs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = parent_syncs.clone();
+    JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf())
+        .with_parent_sync_probe(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    assert_eq!(parent_syncs.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn init_session_does_not_ack_a_first_summary_whose_parent_sync_still_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = info();
+    JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf())
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+
+    let error = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf())
+        .with_parent_sync_probe(|| Err(io::Error::other("directory barrier failed")))
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "directory barrier failed");
+}
+
+#[tokio::test]
+async fn init_session_skips_parent_sync_on_a_populated_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = info();
+    JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf())
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    std::fs::write(dir.path().join("chat_history.jsonl"), b"").unwrap();
+
+    let parent_syncs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = parent_syncs.clone();
+    JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf())
+        .with_parent_sync_probe(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    assert_eq!(parent_syncs.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[cfg(target_os = "macos")]

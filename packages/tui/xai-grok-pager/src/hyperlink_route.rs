@@ -1,20 +1,16 @@
-//! Per-environment hyperlink route policy.
+//! Per-environment hyperlink route policy, mirroring [`crate::clipboard::resolve_clipboard_route`].
 //!
-//! Mirrors [`crate::clipboard::resolve_clipboard_route`]. Combines per-brand
-//! [`HyperlinkCapabilities`] with multiplexer/SSH/Byobu state into a single
-//! decision struct cached once per process.
+//! Combines the brand's [`HyperlinkCapabilities`] with multiplexer/SSH/Byobu state into a single decision struct cached once per process.
 
 use std::sync::OnceLock;
 
 use crate::terminal::{Osc8Support, TerminalContext};
 
-/// Describes the hyperlink strategy for the current environment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HyperlinkRoute {
     /// Whether to emit OSC 8 sequences around link text.
     pub emit_osc8: bool,
-    /// Whether to include the `id=` parameter in OSC 8 sequences
-    /// (enables hover-grouping across wrapped lines).
+    /// Whether to include the `id=` parameter in OSC 8 sequences, so hovering highlights a link wrapped across lines as one unit.
     pub emit_id: bool,
     /// Human-readable reason why OSC 8 is disabled, or `None` if enabled.
     pub skip_reason: Option<&'static str>,
@@ -29,7 +25,6 @@ pub fn hyperlink_route() -> &'static HyperlinkRoute {
     })
 }
 
-/// Resolve the hyperlink route from a terminal context.
 pub fn resolve_hyperlink_route(ctx: &TerminalContext) -> HyperlinkRoute {
     let caps = ctx.hyperlink_capabilities();
     let skip = ctx.hyperlink_skip_reason();
@@ -177,8 +172,7 @@ mod tests {
 
     #[test]
     fn unknown_terminal_skip_reason() {
-        // Unknown brand must report a skip_reason so telemetry/feedback
-        // doesn't log "none" alongside emit_osc8=false.
+        // An unknown brand must report a skip_reason so telemetry/feedback doesn't log "none" alongside emit_osc8=false
         assert_eq!(
             unknown_ctx().hyperlink_skip_reason(),
             Some("unknown_terminal"),
@@ -187,8 +181,7 @@ mod tests {
 
     #[test]
     fn vte_old_inside_old_tmux_blames_vte() {
-        // VTE 0.48 inside tmux 3.2: VTE is the deeper cause, so a tmux
-        // upgrade alone wouldn't fix OSC 8. Diagnostic should point at VTE.
+        // VTE 0.48 inside tmux 3.2: VTE is the deeper cause, so a tmux upgrade alone wouldn't fix OSC 8
         let ctx = TerminalContext {
             brand: TerminalName::Vte,
             multiplexer: MultiplexerKind::Tmux,
@@ -238,7 +231,7 @@ mod tests {
     #[test]
     fn unknown_terminal_no_emit() {
         let route = resolve_hyperlink_route(&unknown_ctx());
-        // Unknown brand -> osc8 == Unknown -> not Native -> no emit
+        // An unknown brand leaves osc8 at Unknown rather than Native, so nothing is emitted
         assert!(!route.emit_osc8);
         assert_eq!(route.skip_reason, Some("unknown_terminal"));
     }

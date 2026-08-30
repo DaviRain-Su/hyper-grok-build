@@ -15,8 +15,6 @@ mod mcp;
 pub use mcp::*;
 mod permission;
 pub use permission::*;
-mod pool;
-pub use pool::*;
 use serde::{Deserialize, Serialize};
 use xai_grok_announcements::RemoteAnnouncement;
 /// A remote `campaigns[]` entry: an `id` gate plus a full-power
@@ -278,6 +276,23 @@ fn de_opt_bool_tolerant<'de, D: serde::Deserializer<'de>>(
         fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
             Ok(None)
         }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            while map
+                .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                .is_some()
+            {}
+            Ok(None)
+        }
     }
     deserializer.deserialize_any(V)
 }
@@ -463,6 +478,10 @@ pub struct RemoteSettings {
     /// turns instead of background subagents.
     #[serde(default)]
     pub scheduler_background_loops: Option<bool>,
+    /// Fleet kill switch for turn-level transient retries; applies at next
+    /// spawn, local config/env win. Malformed values must not fail the parse.
+    #[serde(default, deserialize_with = "de_opt_bool_tolerant")]
+    pub turn_transient_retry: Option<bool>,
     /// Release channel: `"stable"` or `"alpha"`.
     /// Fallback when no local `[cli] channel` or `--alpha`/`--stable` flag is set.
     #[serde(default)]
@@ -1350,6 +1369,38 @@ mod tests {
         let s: RemoteSettings = serde_json::from_str(nested_bad).unwrap();
         assert_eq!(s.leader_mode, Some(true));
         assert_eq!(s.worktree_auto_gc, None);
+    }
+    #[test]
+    fn remote_settings_turn_transient_retry_malformed_value_does_not_poison_siblings() {
+        let s: RemoteSettings =
+            serde_json::from_str(r#"{"turn_transient_retry": "false", "leader_mode": true}"#)
+                .unwrap();
+        assert_eq!(
+            s.turn_transient_retry, None,
+            "malformed value drops to None"
+        );
+        assert_eq!(s.leader_mode, Some(true), "siblings survive");
+    }
+    #[test]
+    fn tolerant_bool_swallows_array_and_object_shapes() {
+        for bad in [
+            r#"{"turn_transient_retry": [1,2], "leader_mode": true}"#,
+            r#"{"turn_transient_retry": {"a": 1}, "leader_mode": true}"#,
+        ] {
+            let s: RemoteSettings = serde_json::from_str(bad).unwrap();
+            assert_eq!(s.turn_transient_retry, None);
+            assert_eq!(s.leader_mode, Some(true), "siblings survive: {bad}");
+        }
+    }
+    #[test]
+    fn remote_settings_turn_transient_retry_round_trip_and_default_absent() {
+        let s: RemoteSettings = serde_json::from_str(r#"{"turn_transient_retry": false}"#).unwrap();
+        assert_eq!(s.turn_transient_retry, Some(false));
+        let round_trip: RemoteSettings =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(round_trip.turn_transient_retry, Some(false));
+        let absent: RemoteSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.turn_transient_retry, None);
     }
     #[test]
     fn remote_settings_vendor_sessions_round_trip_and_default_absent() {

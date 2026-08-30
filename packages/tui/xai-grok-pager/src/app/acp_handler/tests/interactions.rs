@@ -3,7 +3,7 @@
 
     #[test]
     fn interaction_resolved_dismisses_matching_permission() {
-        // A peer answered a shared permission → this pane retracts its copy.
+        // A peer answered a shared permission, so this pane retracts its copy
         let mut app = make_app_with_agent("sess-1");
         let (msg, _rx) = make_permission_message("sess-1");
         handle(msg, &mut app);
@@ -75,9 +75,7 @@
 
     #[test]
     fn permission_for_inactive_agent_queues_on_owning_agent() {
-        // The headline behavior change in handle_permission_request:
-        // permissions for an inactive owning agent now QUEUE (not cancel)
-        // so the user sees them on switching back.
+        // In handle_permission_request, permissions for an inactive owning agent QUEUE (not cancel) so the user sees them on switching back
         let mut app = make_app_with_agent("sess-A");
         insert_agent(&mut app, AgentId(1), Some("sess-B"));
         switch_active_to(&mut app, AgentId(1));
@@ -101,8 +99,7 @@
             !affected,
             "permission queued on a non-active agent must not request a redraw"
         );
-        // Permission is still pending; the response_tx must still be alive
-        // (no auto-cancel was sent).
+        // Permission is still pending; the response_tx must still be alive (no auto-cancel was sent)
         assert!(
             rx.try_recv().is_err(),
             "permission must NOT have been answered yet (queued, not cancelled)"
@@ -111,10 +108,8 @@
 
     #[test]
     fn exec_vehicle_permission_enqueues_a_persisting_default_scope() {
-        // Regression guard for the enqueue invariant: an exec-vehicle bash
-        // prompt that offers the scoped "Always allow:" row must open on a
-        // default scope that persists a grant — the full command, not a bare
-        // `python3` prefix (which the ←/→ arrows could not repair).
+        // An exec-vehicle bash prompt that offers the scoped "Always allow:" row must open on a default scope that persists a grant
+        // That scope is the full command, not a bare `python3` prefix (which the ←/→ arrows could not repair)
         use std::sync::Arc;
         use xai_grok_workspace::permission::bash_command_splitting::BashCommandHighlights;
 
@@ -176,9 +171,9 @@
 
     #[test]
     fn ask_user_question_routes_to_background_session_not_active_view() {
-        // Repro of the dashboard bug: a session started but not entered asks a
-        // question. Active view is agent A (sess-A); the question is for the
-        // BACKGROUND agent B (sess-B). It must land on B, not fail or land on A.
+        // Repro of the dashboard bug: a session started but not entered asks a question
+        // Active view is agent A (sess-A); the question is for the BACKGROUND agent B (sess-B)
+        // It must land on B, not fail or land on A
         let mut app = make_app_with_agent("sess-A");
         insert_agent(&mut app, AgentId(1), Some("sess-B"));
         assert_eq!(app.active_view, ActiveView::Agent(AgentId(0)));
@@ -325,12 +320,10 @@
         assert!(rx2.try_recv().is_err());
     }
 
-    /// The reverse layering of the test below: the elicitation opened FIRST
-    /// (so it holds the true session draft), a question arrived on top, and
-    /// then the elicitation is peer-resolved while the question still owns
-    /// the composer. The draft must be handed to the question's stash — not
-    /// written through the live composer, where the question's own close
-    /// would restore its empty stash over it.
+    /// The reverse layering of the test below: the elicitation opened FIRST, so it holds the true session draft.
+    /// A question arrived on top, and then a peer resolves the elicitation while the question still owns the composer.
+    /// The draft must be handed to the question's stash.
+    /// If written through the live composer, the question's own close would restore its empty stash over it.
     #[test]
     fn peer_resolved_elicitation_hands_draft_to_open_question() {
         use crate::views::question_view::QuestionViewState;
@@ -396,8 +389,7 @@
 
         let mut app = make_app_with_agent("sess-A");
         {
-            // A question card already displaced the user's draft: the real
-            // text lives in its stash and the live composer is blank.
+            // A question card already displaced the user's draft: the real text lives in its stash and the live composer is blank
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.prompt.set_text("my precious draft");
             let stashed = agent.prompt.stash();
@@ -605,10 +597,9 @@
 
     #[test]
     fn ask_user_question_unknown_session_parks_without_error() {
-        // No local view for the session, and the active agent HAS a session_id
-        // (so the race-window fallback does not fire). The reverse-request must
-        // be left UNANSWERED (dropped) — NOT failed with an error, which would
-        // render the tool red. Leader replay-on-attach handles it later.
+        // No local view for the session, and the active agent HAS a session_id (so the race-window fallback does not fire)
+        // The reverse-request must be left UNANSWERED (dropped), NOT failed with an error, which would render the tool red
+        // The leader's replay on attach handles it later
         let mut app = make_app_with_agent("sess-A");
 
         let (tx, mut rx) = tokio::sync::oneshot::channel();
@@ -631,8 +622,7 @@
             app.agents.get(&AgentId(0)).unwrap().question_view.is_none(),
             "must not attach the question to an unrelated active agent"
         );
-        // A dropped oneshot sender yields `Closed`; `Empty` would mean still
-        // held open, `Ok` would mean a (failing) response was sent.
+        // A dropped oneshot sender yields `Closed`; `Empty` would mean still held open, `Ok` would mean a (failing) response was sent
         match rx.try_recv() {
             Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {}
             Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
@@ -644,8 +634,7 @@
 
     #[test]
     fn permission_for_inactive_yolo_agent_auto_approves() {
-        // YOLO mode is honored on the OWNING agent, not the active one,
-        // so background turns aren't blocked waiting for a switch.
+        // YOLO mode is honored on the OWNING agent, not the active one, so background turns aren't blocked waiting for a switch
         let mut app = make_app_with_agent("sess-A");
         app.agents.get_mut(&AgentId(0)).unwrap().session.yolo_mode = true;
         insert_agent(&mut app, AgentId(1), Some("sess-B"));
@@ -678,9 +667,8 @@
 
     #[test]
     fn permission_for_unknown_session_id_is_cancelled() {
-        // No agent owns the session and the active agent already has a
-        // session_id (so the race-window fallback does not fire). The
-        // permission must be cancelled rather than queued anywhere.
+        // No agent owns the session and the active agent already has a session_id (so the race-window fallback does not fire)
+        // The permission must be cancelled rather than queued anywhere
         let mut app = make_app_with_agent("sess-A");
         insert_agent(&mut app, AgentId(1), Some("sess-B"));
         // make_app_with_agent already activated AgentId(0); no switch needed.
@@ -743,7 +731,7 @@
         );
         assert!(agent.line_viewer.is_none(), "viewer should be closed");
 
-        // Response must NOT have been sent (still waiting for user).
+        // Still waiting for the user
         assert!(
             rx.try_recv().is_err(),
             "response must not be sent on viewer close"
@@ -753,8 +741,7 @@
     #[test]
     fn reopen_viewer_restores_approval_buttons() {
         let mut app = make_app_with_agent("sess-A");
-        // Seed a CreatePlan tool so the source is Inline (plan content
-        // is carried in the ext_method params, not read from disk).
+        // Seed a CreatePlan tool so the source is Inline (plan content is carried in the ext_method params, not read from disk)
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             seed_pending_tool(agent, "tc-reopen", "CreatePlan");
@@ -780,7 +767,7 @@
         agent.cancel_line_viewer();
         assert!(agent.line_viewer.is_none());
 
-        // Reopen plan preview — inline content is in plan_approval_view.plan_content.
+        // Reopen plan preview; inline content is in plan_approval_view.plan_content
         agent.show_plan_preview();
 
         assert!(agent.line_viewer.is_some(), "viewer should reopen");
@@ -854,8 +841,7 @@
         assert_eq!(parsed["outcome"], "approved");
     }
 
-    /// Delivers a status snapshot the way the agent does, and reports whether
-    /// the client repainted.
+    /// Delivers a status snapshot the way the agent does, and reports whether the client repainted.
     fn notify_status(app: &mut crate::app::app_view::AppView, cwd: &str) -> bool {
         let notif = SessionNotification {
             session_id: acp::SessionId::new("sess-1"),
@@ -869,9 +855,8 @@
         handle_session_notification(&ext, app)
     }
 
-    /// Storing the snapshot paints nothing when no row is configured, and the
-    /// agent pushes one at every turn end: reporting a change here would
-    /// repaint the whole fleet once per turn for a row nobody draws.
+    /// Storing the snapshot paints nothing when no row is configured, and the agent pushes one at every turn end.
+    /// Reporting a change here would repaint the whole fleet once per turn for a row nobody draws.
     #[test]
     fn a_status_snapshot_does_not_repaint_a_client_with_no_status_line() {
         let mut app = make_app_with_agent("sess-1");
@@ -888,9 +873,8 @@
         assert!(app.status_line.display().is_none(), "and nothing is drawn");
     }
 
-    /// The other half. An enabled row settles once it has drawn, and an idle
-    /// session asks for no ticks, so the snapshot's own repaint is the only
-    /// thing that moves the row until the next turn.
+    /// The other half: an enabled row settles once it has drawn, and an idle session asks for no ticks.
+    /// The snapshot's own repaint is thus the only thing that moves the row until the next turn.
     #[test]
     fn a_status_snapshot_repaints_a_row_that_had_already_settled() {
         let mut app = make_app_with_agent("sess-1");
@@ -912,8 +896,7 @@
             "an idle settled row asks for no ticks, so only the snapshot can move it"
         );
 
-        // Inside the refresh floor the snapshot defers rather than repaints, so
-        // what it must leave behind is a row still asking to be recomputed.
+        // Inside the refresh floor the snapshot defers rather than repaints, so what it must leave behind is a row still asking to be recomputed
         notify_status(&mut app, "/tmp/second");
         assert_ne!(
             app.status_line_tick_demand(),

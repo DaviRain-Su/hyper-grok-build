@@ -1,7 +1,6 @@
 //! Generic startup warnings displayed on the welcome screen.
 //!
-//! Any subsystem (terminal diagnostics, auth, config migration, etc.) can
-//! produce [`StartupWarning`]s.
+//! Any subsystem (terminal diagnostics, auth, config migration, etc.) can produce [`StartupWarning`]s.
 
 #[cfg(test)]
 pub(crate) const DOCTOR_ACTION: &str = "Run /doctor for details and fixes.";
@@ -45,9 +44,8 @@ impl ActionableStartupWarning {
 
 /// A non-fatal startup warning from any subsystem.
 ///
-/// This is a **display contract only** -- the subsystem formats the message
-/// and optional action hint. Actionable diagnostic notices link to `/doctor`,
-/// which owns detailed evidence and remediation.
+/// This is a **display contract only**: the subsystem formats the message and optional action hint.
+/// Actionable diagnostic notices link to `/doctor`, which owns detailed evidence and remediation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupWarning {
     /// Severity controls rendering color (yellow for warnings, dim for info).
@@ -58,7 +56,6 @@ pub struct StartupWarning {
     pub action: Option<String>,
 }
 
-/// Severity level for startup warnings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarningSeverity {
     /// Rendered in warning color (yellow). Something is misconfigured.
@@ -67,19 +64,13 @@ pub enum WarningSeverity {
     Info,
 }
 
-/// Pick the warning the single-slot welcome banner shows: the first
-/// `Warning`-severity entry, else the last entry.
+/// Pick the warning the single-slot welcome banner shows: the first `Warning`-severity entry, else the last entry.
 ///
-/// `startup_warnings` is appended to at runtime while the user sits on the
-/// welcome screen (session-start failures, Claude import results), so a plain
-/// `first()` lets an early entry mask that later feedback — e.g. an import
-/// Info result at index 0 hides a session-start Warning pushed behind it.
-/// Severity decides first (a real Warning always beats an Info; among
-/// Warnings, assemble order stays authoritative); a Warning-less list falls
-/// back to the **last** entry because later Info pushes are direct
-/// user-action feedback that must not be masked by an older Info. Every
-/// banner surface (height calc + render) must pick through here so they
-/// cannot disagree.
+/// `startup_warnings` grows at runtime while the user sits on the welcome screen (session-start failures, Claude import results).
+/// A plain `first()` would let an old Info at index 0 hide a Warning pushed behind it.
+/// Severity decides first; among Warnings, assemble order wins.
+/// A Warning-less list falls back to the **last** entry because the newest Info is direct feedback on what the user just did.
+/// Every banner surface (height calc and render) picks through here so they cannot disagree.
 pub fn banner_warning(warnings: &[StartupWarning]) -> Option<&StartupWarning> {
     warnings
         .iter()
@@ -112,9 +103,8 @@ mod tests {
 
     #[test]
     fn banner_warning_runtime_pushed_warning_displaces_info() {
-        // An Info entry holds index 0 (e.g. a Claude import result). A
-        // Warning pushed later (e.g. "Not inside a git repository") must
-        // still win the single banner slot.
+        // An Info entry holds index 0 (e.g. a Claude import result).
+        // A Warning pushed later (e.g. "Not inside a git repository") must still win the single banner slot.
         let list = [
             entry(WarningSeverity::Info, "info note"),
             entry(WarningSeverity::Warning, "real problem"),
@@ -124,8 +114,7 @@ mod tests {
 
     #[test]
     fn banner_warning_runtime_pushed_info_displaces_earlier_info() {
-        // Warning-less list: a later Info push is direct user-action
-        // feedback (e.g. a Claude import result) and wins over an older Info.
+        // Warning-less list: a later Info push is direct feedback on a user action (e.g. a Claude import result) and wins over an older Info.
         let list = [
             entry(WarningSeverity::Info, "info note"),
             entry(WarningSeverity::Info, "import result"),

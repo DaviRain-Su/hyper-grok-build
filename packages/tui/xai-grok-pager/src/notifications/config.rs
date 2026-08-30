@@ -9,15 +9,13 @@ pub struct NotificationConfig {
     pub events: Vec<NotificationEventKind>,
     pub sleep_prevention: bool,
     pub progress_bar: bool,
-    /// Show an automatic "where was I" session recap when you return to the
-    /// terminal after being away. Only applies when the shell has rolled out
-    /// session recap (`sessionRecap` on ACP initialize / remote settings). Manual
-    /// `/recap` is gated by the shell flag alone, not this toggle.
+    /// Show an automatic "where was I" session recap when you return to the terminal after being away.
+    /// Only applies when the shell has rolled out session recap (`sessionRecap` on ACP initialize or remote settings).
+    /// Manual `/recap` is gated by the shell flag alone, not this toggle.
     pub session_recap: bool,
-    /// Minimum seconds the terminal must be unfocused ("stepped away") before
-    /// the client requests an automatic recap. A short debounce against quick
-    /// tab blips; the authoritative timing ("≥3 min since the last completed
-    /// turn") is enforced agent-side.
+    /// Minimum seconds the terminal must be unfocused ("stepped away") before the client requests an automatic recap.
+    /// This is a short debounce against quick tab blips.
+    /// The authoritative timing (at least 3 minutes since the last completed turn) is enforced agent-side.
     pub session_recap_threshold_secs: u64,
     pub title: TitleConfig,
     pub hooks: Vec<NotificationHook>,
@@ -143,9 +141,8 @@ fn default_hook_timeout() -> u64 {
 impl NotificationConfig {
     /// Generate a commented TOML template for the `[ui.notifications]` section.
     ///
-    /// Mirrors the pattern used by `RawAppearanceConfig::to_toml_with_comments()`
-    /// for `pager.toml`. The output is suitable for inclusion in documentation
-    /// or as a starter config snippet.
+    /// Mirrors `RawAppearanceConfig::to_toml_with_comments()` for `pager.toml`.
+    /// The output is suitable for documentation or as a starter config snippet.
     pub fn to_toml_with_comments() -> String {
         "\
 [ui.notifications]
@@ -258,7 +255,7 @@ mod tests {
 
         assert_eq!(parsed.method, NotificationMethod::Bel);
         assert_eq!(parsed.idle_threshold_secs, 60);
-        // Rest should be defaults
+        // The remaining fields keep their defaults
         assert_eq!(parsed.condition, NotificationCondition::Unfocused);
         assert!(parsed.sleep_prevention);
         assert!(parsed.progress_bar);
@@ -367,8 +364,7 @@ mod tests {
     fn to_toml_with_comments_hook_section_is_valid_toml() {
         let template = NotificationConfig::to_toml_with_comments();
         // Uncomment only TOML structural lines (table headers and key = value).
-        // Doc-comment lines (plain English) are left as comments so they
-        // don't produce parse errors.
+        // Plain-English comment lines are left as comments so they don't produce parse errors
         let uncommented: String = template
             .lines()
             .map(|line| {

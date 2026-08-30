@@ -504,10 +504,9 @@ fn plan_approval_takes_the_bar_wherever_it_takes_the_keys() {
     );
 }
 
-/// The open plan preview is the state a plan approval spends most of its life
-/// in. The line viewer ranks above Question/CancelTurn (not Permission) and
-/// paints its own hints over the bar's row; what the bar must not do is speak
-/// for the card behind the viewer.
+/// The open plan preview is the state a plan approval spends most of its life in.
+/// The line viewer ranks above Question/CancelTurn (not Permission) and paints its own hints over the bar's row.
+/// What the bar must not do is speak for the card behind the viewer.
 #[test]
 fn a_question_under_the_open_plan_viewer_does_not_take_the_bar() {
     let mut agent = make_agent();
@@ -548,8 +547,7 @@ fn permission_interrupts_open_plan_viewer() {
     assert_eq!(agent.focused_card(), Some(BlockingCard::Permission));
 }
 
-/// A file preview from the prompt is the same shape as the plan preview: it
-/// takes the keys ahead of a card that opened behind it.
+/// A file preview from the prompt is the same shape as the plan preview: it takes the keys ahead of a card that opened behind it.
 #[test]
 fn a_card_under_any_open_line_viewer_does_not_take_the_bar() {
     let mut agent = make_agent();
@@ -566,10 +564,8 @@ fn a_card_under_any_open_line_viewer_does_not_take_the_bar() {
     );
 }
 
-/// Opening a card stashes the composer and blanks it without leaving
-/// `EditingQueued`, so the dirty-edit lock would read the blank as an unsaved
-/// edit and refuse the park — leaving `Esc`, the card's only keyboard exit,
-/// answering with a toast instead.
+/// Opening a card stashes the composer and blanks it without leaving `EditingQueued`, so the dirty-edit lock reads the blank as an unsaved edit.
+/// Refusing the park would leave `Esc`, the card's only keyboard exit, answering with a toast.
 #[test]
 fn esc_parks_even_under_a_latent_queued_edit() {
     for open in [
@@ -703,13 +699,11 @@ fn esc_on_the_cancel_turn_panel_does_not_cancel_the_turn() {
     assert!(agent.session.state.is_turn_running());
 }
 
-/// Inside the dashboard overlay the ladder's last rung is the dashboard, and
-/// anything parked behind a bare scrollback is on it — a card that parks
-/// rather than backing out (a later question, or a permission prompt, which
-/// has no back-out rung at all), and a plan approval, alone or on top of a
-/// parked card. None of them hold the keyboard there, so none can consume
-/// `Esc`, and the swallow that protects the turn would otherwise leave the
-/// key inert until the user tabbed back in.
+/// Inside the dashboard overlay the ladder's last rung is the dashboard, and anything parked behind a bare scrollback is on it.
+/// That covers a card that parks rather than backing out (a later question, or a permission prompt, which has no back-out rung at all).
+/// It also covers a plan approval, alone or on top of a parked card.
+/// None of them hold the keyboard there, so none can consume `Esc`.
+/// The swallow that protects the turn would otherwise leave the key inert until the user tabbed back in.
 #[test]
 fn anything_parked_in_the_overlay_keeps_an_esc_route_to_the_dashboard() {
     for (label, setup) in [
@@ -740,9 +734,8 @@ fn anything_parked_in_the_overlay_keeps_an_esc_route_to_the_dashboard() {
     }
 }
 
-/// The new rung is for surfaces the keyboard has left behind — it must not
-/// turn a plain scrollback `Esc` into a detach, which still belongs to the
-/// turn-cancel / rewind policy.
+/// The new rung is for views the keyboard has left behind.
+/// It must not turn a plain scrollback `Esc` into a detach, which still belongs to the turn-cancel / rewind policy.
 #[test]
 fn a_bare_overlay_scrollback_esc_still_belongs_to_the_esc_policy() {
     let mut agent = make_agent();
@@ -784,9 +777,8 @@ fn esc_on_a_later_question_parks_before_it_leaves_the_overlay() {
     );
 }
 
-/// The scrollback's focus hint names where `Tab` goes, so it has to be asked
-/// through the same ranking as the keys themselves: with a plan approval
-/// pending over a parked card, `Tab` lands in the approval, not the card.
+/// The scrollback's focus hint names where `Tab` goes, so it has to be asked through the same ranking as the keys themselves.
+/// With a plan approval pending over a parked card, `Tab` lands in the approval, not the card.
 #[test]
 fn the_route_back_never_names_a_card_the_plan_approval_outranks() {
     let mut agent = make_agent();
@@ -819,9 +811,8 @@ fn the_route_back_never_names_a_card_the_plan_approval_outranks() {
     assert!(hint_labels(&agent).contains(&"question".to_string()));
 }
 
-/// With the preview closed, the plan approval's own bar is what renders, and
-/// it must name `Tab` the way the preview's bar does — the key does the same
-/// thing in both states, so it cannot answer to two names.
+/// With the preview closed, the plan approval's own bar is what renders, and it must name `Tab` the way the preview's bar does.
+/// The key does the same thing in both states, so it cannot answer to two names.
 #[test]
 fn the_plan_preview_names_tab_the_way_its_viewer_does() {
     let mut agent = make_agent();
@@ -847,11 +838,9 @@ fn the_plan_preview_names_tab_the_way_its_viewer_does() {
     assert!(labels.contains(&"copy plan".to_string()));
 }
 
-/// Blanking a free-text answer unmarks it, however the user leaves the text
-/// field. The nav-button mouse path used to keep its own copy of the commit
-/// that skipped the unmark, which left a stale selection behind — and the
-/// `Esc` ladder reads that selection, so the next `Esc` would say `unselect`
-/// with nothing selected instead of parking.
+/// Blanking a free-text answer unmarks it, however the user leaves the text field.
+/// The nav-button mouse path used to keep its own copy of the commit that skipped the unmark, which left a stale selection behind.
+/// The `Esc` ladder reads that selection, so the next `Esc` would say `unselect` with nothing selected instead of parking.
 #[test]
 fn blanking_a_free_text_answer_unmarks_it_from_the_nav_buttons_too() {
     use crate::views::question_view::QuestionFocus;
@@ -860,8 +849,7 @@ fn blanking_a_free_text_answer_unmarks_it_from_the_nav_buttons_too() {
     open_two_questions(&mut agent);
     agent.question_nav_buttons = vec![('l', ratatui::layout::Rect::new(0, 0, 3, 1))];
 
-    // Mark a free-text answer, then blank the composer and leave by clicking
-    // the nav bar's "next question" button.
+    // Mark a free-text answer, then blank the composer and leave by clicking the nav bar's "next question" button
     let qv = agent.question_view.as_mut().expect("card open");
     qv.focus = QuestionFocus::InputMode;
     qv.per_question_freeform[0] = "typed then deleted".into();
@@ -885,9 +873,9 @@ fn blanking_a_free_text_answer_unmarks_it_from_the_nav_buttons_too() {
         !qv.per_question_freeform_selected[0],
         "a blank answer is not an answer, so its mark goes with it"
     );
-    // The text itself is a draft, not an answer: `swap_question_freeform`
-    // carries the composer across questions so coming back restores what was
-    // typed. Only the mark decides what is submitted, and what `Esc` reads.
+    // The text itself is a draft, not an answer
+    // `swap_question_freeform` carries the composer across questions, so coming back restores what was typed
+    // Only the mark decides what is submitted, and what `Esc` reads
 
     agent.question_view.as_mut().expect("card open").active_tab = 0;
     assert_eq!(
@@ -898,9 +886,8 @@ fn blanking_a_free_text_answer_unmarks_it_from_the_nav_buttons_too() {
 }
 
 // ── vim mode ──────────────────────────────────────────────────────────────
-// The Tab/Esc contract is mode-independent: card intercepts run ahead of the
-// scrollback's vim letter bindings. These go through `handle_input` so the
-// full router (not just the card handlers) is under test.
+// The Tab/Esc contract is mode-independent: card intercepts run ahead of the scrollback's vim letter bindings
+// These go through `handle_input` so the full router (not just the card handlers) is under test
 
 fn press(agent: &mut AgentView, code: KeyCode, modifiers: KeyModifiers) {
     let registry = ActionRegistry::defaults();
@@ -926,8 +913,7 @@ fn question_tab(agent: &AgentView) -> usize {
         .active_tab
 }
 
-/// With vim mode on, the focused card still owns j/k/Tab/Esc — the same
-/// walk-and-park contract as the default mode.
+/// With vim mode on, the focused card still owns j/k/Tab/Esc, the same walk-and-park contract as the default mode.
 #[test]
 fn vim_mode_focused_card_keeps_the_tab_contract() {
     let mut agent = make_agent();
@@ -942,7 +928,7 @@ fn vim_mode_focused_card_keeps_the_tab_contract() {
         "j walks the answer rows while the card holds the keyboard"
     );
     press(&mut agent, KeyCode::Tab, KeyModifiers::NONE);
-    // Two options + freeform row → Tab from option 1 lands on freeform (2).
+    // Two options and a freeform row, so Tab from option 1 lands on the freeform row (2)
     assert_eq!(question_cursor(&agent), 2, "Tab still walks answers");
     assert_eq!(
         agent.active_pane,
@@ -950,8 +936,7 @@ fn vim_mode_focused_card_keeps_the_tab_contract() {
         "Tab never parks the card"
     );
 
-    // Leave freeform with an arrow (a letter would enter InputMode), then
-    // `l` must still switch questions under vim mode.
+    // Leave freeform with an arrow (a letter would enter InputMode), then `l` must still switch questions under vim mode
     press(&mut agent, KeyCode::Up, KeyModifiers::NONE);
     assert_eq!(question_cursor(&agent), 1);
     press(&mut agent, KeyCode::Char('l'), KeyModifiers::NONE);
@@ -974,8 +959,7 @@ fn vim_mode_focused_card_keeps_the_tab_contract() {
     );
 }
 
-/// Once parked, vim letter keys belong to the scrollback — they must not
-/// keep walking the card behind the pane.
+/// Once parked, vim letter keys belong to the scrollback; they must not keep walking the card behind the pane.
 #[test]
 fn vim_mode_parked_card_does_not_eat_scrollback_jk() {
     let mut agent = make_agent();
@@ -1020,8 +1004,7 @@ fn vim_mode_parked_card_does_not_eat_scrollback_jk() {
     );
 }
 
-/// Permission options walk the same way under vim mode, including the Esc
-/// park that must never answer the request.
+/// Permission options walk the same way under vim mode, including the Esc park that must never answer the request.
 #[test]
 fn vim_mode_permission_tab_and_esc_match_default() {
     let mut agent = make_agent();
@@ -1044,7 +1027,7 @@ fn vim_mode_permission_tab_and_esc_match_default() {
     assert_eq!(agent.permission_queue.len(), 1);
     let parked_cursor = permission_cursor(&agent);
 
-    // Parked j is scrollback nav — it must not walk or answer the options.
+    // Parked j is scrollback nav; it must not walk or answer the options
     press(&mut agent, KeyCode::Char('j'), KeyModifiers::NONE);
     assert_eq!(agent.permission_queue.len(), 1);
     assert_eq!(permission_cursor(&agent), parked_cursor);

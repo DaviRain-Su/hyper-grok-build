@@ -55,8 +55,7 @@
 
     #[test]
     fn killing_a_stuck_orphan_records_the_shell_reported_status() {
-        // The kill call carries the shell's terminal status: "cancelled" is the
-        // default when nothing was live, "completed" a real terminal report.
+        // The kill call carries the shell's terminal status: "cancelled" is the default when nothing was live, "completed" is a real terminal report
         for status in ["cancelled", "completed"] {
             let mut app = make_app_with_agent("sess-1");
             app.agents
@@ -445,8 +444,7 @@
             ));
         }
 
-        // A persisted active goal update can arrive ahead of a lower-ID spawn;
-        // it advances the xAI highwater without adding a scrollback block.
+        // A persisted active goal update can arrive ahead of a lower-ID spawn; it advances the xAI highwater without adding a scrollback block
         assert!(handle(
             notification(
                 serde_json::json!({
@@ -771,8 +769,7 @@
             &mut app,
         );
 
-        // A live child message chunk resolves "Responding" and stamps both
-        // the block and the info.
+        // A live child message chunk resolves "Responding" and stamps both the block and the info
         let _ = handle(
             make_agent_chunk_with_event(child_sid, "child text", "p-child", None),
             &mut app,
@@ -937,7 +934,7 @@
 
             let changed = match event {
                 LateEvent::AcpChunk => {
-                    // Simulate the racing child rail still looking live.
+                    // Simulate the race: the child view still looks live after the finish
                     app.agents
                         .get_mut(&AgentId(0))
                         .unwrap()
@@ -1261,8 +1258,7 @@
         with_replay_disk_home(|home| {
             let child_sid = "child-open-resume-finish";
 
-            // A resumed child spawns live; its inherited transcript has not
-            // flushed to disk yet.
+            // A resumed child spawns live; its inherited transcript has not flushed to disk yet
             let mut app = make_app_with_agent("sess-parent");
             let mut spawned = test_subagent_spawned("sess-parent", child_sid);
             let XaiSessionUpdate::SubagentSpawned { resumed_from, .. } = &mut spawned else {
@@ -1278,14 +1274,12 @@
                 &mut app,
             );
 
-            // Open it fullscreen before any transcript exists: the read finds
-            // nothing, so the view stays prompt-only.
+            // Open it fullscreen before any transcript exists: the read finds nothing, so the view stays prompt-only
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.open_subagent_fullscreen(child_sid.to_string());
             assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 0);
 
-            // The inherited transcript flushes, then the child finishes while
-            // still open, having streamed no live block.
+            // The inherited transcript flushes, then the child finishes while still open, having streamed no live block
             write_child_updates_jsonl(home, child_sid, &(child_tool_line(child_sid) + "\n"));
             let _ = handle(
                 make_ext_session_notification_with_method(
@@ -1305,9 +1299,8 @@
         });
     }
 
-    /// Each scenario owns one parent plus a child driven through the real
-    /// notification handler, and the child's on-disk transcript under the
-    /// shared replay test home.
+    /// Each scenario owns one parent plus a child driven through the real notification handler.
+    /// It also owns the child's on-disk transcript under the shared replay test home.
     mod eviction_and_rebuild {
         use super::*;
         use crate::app::subagent::ChildTranscript;
@@ -1324,8 +1317,7 @@
         }
 
         impl Scenario {
-            /// Live-spawn `child_sid`, first writing `updates` to the child's
-            /// `updates.jsonl` (`None` = nothing persisted).
+            /// Live-spawn `child_sid`, first writing `updates` to the child's `updates.jsonl` (`None` persists nothing).
             fn spawn(child_sid: &'static str, updates: Option<String>) -> Self {
                 let home = replay_disk_test_home();
                 crate::app::subagent::set_replay_grok_home_for_tests(Some(home.to_path_buf()));
@@ -1453,8 +1445,7 @@
                     .join("updates.jsonl")
             }
 
-            /// Replace `updates.jsonl` with a directory so a rebuild read
-            /// fails (`Err`, not the missing-file `Empty`).
+            /// Replace `updates.jsonl` with a directory so a rebuild read fails (`Err`, not the missing-file `Empty`).
             fn break_transcript(&self) {
                 let path = self.updates_path();
                 std::fs::remove_file(&path).unwrap();
@@ -1563,8 +1554,7 @@
 
         #[test]
         fn an_on_disk_prompt_echo_dedups_against_the_injected_prompt_on_open() {
-            // Same echo-dedup on open whether the view is freshly spawned or was
-            // first evicted back to the task-prompt baseline.
+            // Same echo-dedup on open whether the view is freshly spawned or was first evicted back to the task-prompt baseline
             enum Entry {
                 FreshSpawn,
                 Evicted,
@@ -1620,10 +1610,8 @@
 
         #[test]
         fn a_nonemitting_rebuild_of_an_evicted_view_retries_until_disk_lands() {
-            // An evicted view holds nothing to restore, so a non-emitting read
-            // stays NeedsReplay and retries once real content lands. A read error
-            // applies no footer; an Empty read (flush not landed yet) still stamps
-            // the finished footer on the bare view.
+            // An evicted view holds nothing to restore, so a non-emitting read stays NeedsReplay and retries once real content lands
+            // A read error applies no footer; an Empty read (flush not landed yet) still stamps the finished footer on the bare view
             enum Outcome {
                 ReadError,
                 Empty,
@@ -1693,7 +1681,7 @@
             let child_sid = "child-bg-no-rebuild";
             let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
             s.set_background();
-            // Populated view whose transcript was never read back from disk.
+            // The view is populated but its transcript was never read back from disk
             s.open();
             assert_eq!(s.tool_calls(), 1);
             s.close();
@@ -1712,9 +1700,8 @@
 
         #[test]
         fn a_nonemitting_rebuild_restores_the_populated_view() {
-            // Content the replay never read back is restored when the rebuild
-            // reads nothing: a read error stays retriable, an Empty read pins
-            // the only copy MemoryOnly.
+            // Content the replay never read back is restored when the rebuild reads nothing
+            // A read error stays retriable; an Empty read pins the only copy MemoryOnly
             enum Outcome {
                 ReadError,
                 Empty,
@@ -1779,7 +1766,7 @@
                 ),
             ] {
                 let mut s = Scenario::spawn(child_sid, updates);
-                // Live-streamed content that exists only in memory.
+                // This block models live-streamed content that exists only in memory
                 s.push_child_block(RenderBlock::system("streamed output".to_string()));
                 assert_eq!(s.transcript(), ChildTranscript::NeedsReplay);
 
@@ -1840,7 +1827,7 @@
 
     #[test]
     fn subagent_spawn_injects_meta_prompt_by_content_without_reading_disk() {
-        // (meta.json task prompt, whether spawn injects it and arms echo dedup)
+        // (meta.json task prompt, whether spawn injects it and sets echo dedup)
         let cases: &[(Option<&str>, bool)] = &[
             (Some("explore handlers only"), true),
             (Some("   "), false),
@@ -1941,8 +1928,7 @@
                 "an Empty hinted miss stays NeedsReplay"
             );
 
-            // The retry on open stays hinted-only for a live child, so the
-            // foreign-cwd transcript is still not read.
+            // The retry on open stays hinted-only for a live child, so the foreign-cwd transcript is still not read
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.open_subagent_fullscreen(child_sid.to_string());
             assert_eq!(
@@ -2162,13 +2148,11 @@
 
     #[test]
     fn a_notification_reaches_its_target_agent_even_when_another_is_active() {
-        // AutoCompactCompleted on the xAI ext path resets the context bar
-        // numerator via refresh_context_used. That side effect must run on
-        // the matched agent regardless of which view is currently active.
+        // AutoCompactCompleted on the xAI ext path resets the context bar numerator via refresh_context_used
+        // That side effect must run on the matched agent regardless of which view is currently active
         let mut app = make_app_with_agent("sess-A");
         insert_agent(&mut app, AgentId(1), Some("sess-B"));
-        // Seed A with a stale context-used reading so we can prove the
-        // notification reset it.
+        // Seed A with a stale context-used reading so we can prove the notification reset it
         {
             let agent_a = app.agents.get_mut(&AgentId(0)).unwrap();
             agent_a.apply_context_used(90_000, 131_072);

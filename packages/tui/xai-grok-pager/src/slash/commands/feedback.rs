@@ -1,37 +1,24 @@
 //! `/feedback`: send session feedback.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
-/// Full TUI: always opens the report card (`/feedback <text>` prefills it).
-/// Minimal: bare opens the pane; `/feedback <text>` still submits immediately.
+/// In the full TUI, `/feedback` always opens the report card (`/feedback <text>` prefills it).
+/// In minimal mode, a bare `/feedback` opens the pane; `/feedback <text>` still submits immediately.
 pub struct FeedbackCommand;
 
 impl SlashCommand for FeedbackCommand {
-    fn name(&self) -> &str {
-        "feedback"
-    }
-
-    fn description(&self) -> &str {
-        "Send feedback about the current session"
-    }
-
-    fn usage(&self) -> &str {
-        "/feedback [text]"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("[feedback text]")
+    slash_meta! {
+        name: "feedback",
+        description: "Send feedback about the current session",
+        usage: "/feedback [text]",
+        takes_args: true,
+        arg_placeholder: "[feedback text]",
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let trimmed = args.trim();
-        // Composer images ride the action, but dispatch attaches them (the
-        // command layer never sees the prompt), so they start empty here.
+        // Dispatch attaches composer images to the action; the command layer never sees the prompt, so images start empty here
         let result = if ctx.screen_mode.is_minimal() {
             if trimmed.is_empty() {
                 CommandResult::Action(Action::OpenFeedbackPane {

@@ -2,9 +2,9 @@
 
 use super::*;
 
-/// Plan mode must not gate voice: typing `/voice` + Enter through the real
-/// input path (prompt keys → slash registry → dispatch) starts recording
-/// with `plan_mode_active` set, exactly like normal mode.
+/// Plan mode must not gate voice.
+/// Typing `/voice` and Enter through the real input path (prompt keys, then the slash registry, then dispatch) starts recording.
+/// With `plan_mode_active` set it behaves exactly like normal mode.
 #[test]
 fn voice_slash_submit_starts_recording_in_plan_mode() {
     use crate::app::app_view::InputOutcome;
@@ -15,8 +15,7 @@ fn voice_slash_submit_starts_recording_in_plan_mode() {
     let mut app = test_app_with_agent();
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     app.voice_cmd_tx = Some(tx);
-    // Production reveal path: flips the flag AND the per-surface `/voice`
-    // registry visibility together.
+    // The production reveal path flips the flag AND the `/voice` visibility in each slash registry together
     app.apply_voice_mode_enabled(true);
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     agent.plan_mode_active = true;
@@ -44,8 +43,8 @@ fn voice_slash_submit_starts_recording_in_plan_mode() {
 
 #[test]
 fn voice_on_welcome_noop_when_startup_gated() {
-    // Auth/folder-trust unresolved: voice must not create a session (that would
-    // bypass the startup gate) — it stays a silent no-op on welcome.
+    // Auth or folder trust unresolved: voice must not create a session (that would bypass the startup gate)
+    // It stays a silent no-op on welcome
     let mut app = test_app();
     app.auth_state = AuthState::Pending { error: None };
     app.voice_mode_enabled = true;
@@ -174,8 +173,8 @@ fn voice_final_preserves_trailing_newline() {
     );
 }
 
-/// A Ctrl+Space release ends only a session an Ctrl+Space hold started. A recording from
-/// `/voice` / Ctrl+Space (toggle) is left running — its release isn't ours.
+/// A Ctrl+Space release ends only a session a Ctrl+Space hold started.
+/// A recording from `/voice` or a Ctrl+Space toggle is left running; its release isn't ours.
 #[test]
 fn voice_ctrl_space_release_leaves_toggle_recording_running() {
     if !xai_grok_voice::AUDIO_SUPPORTED {
@@ -204,9 +203,8 @@ fn voice_ctrl_space_release_leaves_toggle_recording_running() {
     );
 }
 
-/// A free-tier user hitting the voice keybinding gets the SuperGrok upsell
-/// instead of a doomed voice session — the keybinding bypasses the slash
-/// registry, so this dispatcher is the enforcement point.
+/// A free-tier user hitting the voice keybinding gets the SuperGrok upsell instead of a doomed voice session.
+/// The keybinding bypasses the slash registry, so this dispatcher is the enforcement point.
 #[test]
 fn voice_keybinding_on_restricted_tier_opens_upsell() {
     if !xai_grok_voice::AUDIO_SUPPORTED {
@@ -214,7 +212,7 @@ fn voice_keybinding_on_restricted_tier_opens_upsell() {
     }
     let mut app = test_app_with_agent();
     app.voice_mode_enabled = true;
-    // Personal login without a subscription tier ⇒ free tier ⇒ voice restricted.
+    // A personal login without a subscription tier is free tier, so voice is restricted
     app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
     assert!(app.is_voice_tier_restricted());
 
@@ -247,7 +245,7 @@ fn voice_keybinding_on_paid_tier_not_gated() {
 
     dispatch(Action::EnableVoiceMode, &mut app);
 
-    // No upsell modal — the paid user proceeds down the normal voice path.
+    // No upsell modal; the paid user proceeds down the normal voice path
     assert!(
         app.agents.get(&AgentId(0)).unwrap().question_view.is_none(),
         "paid-tier voice must not be intercepted by the tier gate"
@@ -317,7 +315,7 @@ fn voice_error_hint_lands_in_bound_agent_scrollback() {
         "scrollback should carry short message + long hint, got {text:?}"
     );
 
-    // No hint while still bound → toast only, no scrollback growth.
+    // No hint while still bound: toast only, no scrollback growth
     app.voice_state = VoiceState::Recording {
         hold: false,
         target: VoiceTarget::Agent(id),
@@ -366,10 +364,9 @@ fn voice_error_hint_dropped_for_dashboard_dispatch() {
 
 #[test]
 fn voice_interim_ignored_after_stop() {
-    // Late interim events that arrive after recording stopped must not
-    // repopulate the overlay ("Interim shown after stop").
+    // Late interim events that arrive after recording stopped must not repopulate the overlay
     let mut app = test_app_with_agent();
-    app.voice_state = VoiceState::Idle; // not recording → interim is None
+    app.voice_state = VoiceState::Idle; // Not recording, so interim is None
     let redraw = crate::voice::handle_voice_event(
         &mut app,
         xai_grok_voice::VoiceEvent::InterimTranscript {
@@ -385,8 +382,7 @@ fn voice_interim_ignored_after_stop() {
 
 #[test]
 fn voice_interim_kept_on_stop_then_cleared_by_final() {
-    // An explicit stop keeps the last interim on screen (no flicker) until
-    // the trailing final commits it; the final then clears the interim.
+    // An explicit stop keeps the last interim on screen (no flicker) until the trailing final commits it; the final then clears the interim
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.voice_state = VoiceState::Recording {
@@ -415,8 +411,7 @@ fn voice_interim_kept_on_stop_then_cleared_by_final() {
 
 #[test]
 fn voice_toggle_starts_and_stops() {
-    // Starting routes through the `/voice` gate, which requires compiled-in
-    // audio capture; skip on builds without a `cpal` backend.
+    // Starting routes through the `/voice` gate, which requires compiled-in audio capture; skip on builds without a `cpal` backend
     if !xai_grok_voice::AUDIO_SUPPORTED {
         return;
     }
@@ -443,8 +438,7 @@ fn voice_toggle_starts_and_stops() {
 
 #[test]
 fn voice_toggle_silent_no_op_when_flag_disabled() {
-    // With the voice gate off (kill switch / env force-off), the voice key is
-    // a silent no-op — no recording, and no toast.
+    // With the voice gate off (kill switch or env force-off), the voice key is a silent no-op: no recording, and no toast
     let mut app = test_app_with_agent();
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     app.voice_mode_enabled = false;
@@ -463,7 +457,7 @@ fn voice_toggle_silent_no_op_when_flag_disabled() {
 
 #[test]
 fn voice_toggle_starts_without_voice_mode_prereq() {
-    // Ctrl+Space is a direct start — it no longer requires `/voice` first.
+    // Ctrl+Space is a direct start; it no longer requires `/voice` first
     // Skip when audio capture isn't compiled in (see sibling test).
     if !xai_grok_voice::AUDIO_SUPPORTED {
         return;
@@ -487,8 +481,7 @@ fn voice_toggle_starts_without_voice_mode_prereq() {
 
 #[test]
 fn voice_mode_enable_starts_recording_and_stays_on() {
-    // `/voice` gates on compiled-in audio capture; skip when the build has
-    // no `cpal` backend (e.g. Bazel/headless), where enabling is a no-op.
+    // `/voice` gates on compiled-in audio capture; skip when the build has no `cpal` backend (e.g. Bazel or headless), where enabling is a no-op.
     if !xai_grok_voice::AUDIO_SUPPORTED {
         return;
     }
@@ -497,8 +490,7 @@ fn voice_mode_enable_starts_recording_and_stays_on() {
     app.voice_mode_enabled = true;
     app.voice_cmd_tx = Some(tx);
 
-    // `EnableVoiceMode` (the Ctrl+Space hold-press start) begins recording when the
-    // pipeline is already up.
+    // `EnableVoiceMode` (the Ctrl+Space hold-press start) begins recording when the pipeline is already up
     dispatch(Action::EnableVoiceMode, &mut app);
     assert!(app.voice_ui_active);
     assert!(app.voice_listening(), "start begins recording");
@@ -511,8 +503,7 @@ fn voice_mode_enable_starts_recording_and_stays_on() {
         Ok(xai_grok_voice::VoiceCommand::PttPress)
     ));
 
-    // `EnableVoiceMode` is start-only (not a toggle): running it again while
-    // already recording is idempotent — no stop, no second PttPress.
+    // `EnableVoiceMode` is start-only (not a toggle): running it again while already recording is idempotent, no stop, no second PttPress
     dispatch(Action::EnableVoiceMode, &mut app);
     assert!(app.voice_ui_active, "start never turns voice mode off");
     assert!(app.voice_listening());
@@ -530,7 +521,7 @@ fn voice_mode_on_requests_lazy_pipeline_when_missing() {
     }
     let mut app = test_app_with_agent();
     app.voice_mode_enabled = true;
-    // No voice_cmd_tx — first /voice should ask the event loop to spawn.
+    // No voice_cmd_tx: the first /voice asks the event loop to spawn
     dispatch(Action::EnableVoiceMode, &mut app);
     assert!(app.voice_ui_active);
     assert!(
@@ -541,9 +532,8 @@ fn voice_mode_on_requests_lazy_pipeline_when_missing() {
 
 #[test]
 fn voice_toggle_while_spawn_pending_keeps_start_armed() {
-    // A second Ctrl+Space while the pipeline is still spawning re-affirms
-    // the queued start rather than cancelling it (there's no visible recording
-    // yet to toggle off).
+    // A second Ctrl+Space while the pipeline is still spawning re-affirms the queued start rather than cancelling it
+    // There's no visible recording yet to toggle off
     if !xai_grok_voice::AUDIO_SUPPORTED {
         return;
     }
@@ -564,9 +554,9 @@ fn voice_toggle_while_spawn_pending_keeps_start_armed() {
 
 #[test]
 fn voice_toggle_preserves_pending_ctrl_space_hold_cancel() {
-    // A Ctrl+Space quick-tap queues a hold-owned cold-start; a Ctrl+Space toggle
-    // arriving before the pipeline spawns must re-affirm it without clearing
-    // hold-ownership, so the matching Ctrl+Space release still cancels the tap.
+    // A Ctrl+Space quick-tap queues a hold-owned cold-start
+    // A Ctrl+Space toggle arriving before the pipeline spawns must re-affirm it without clearing hold-ownership
+    // The matching Ctrl+Space release then still cancels the tap
     if !xai_grok_voice::AUDIO_SUPPORTED {
         return;
     }
@@ -617,13 +607,12 @@ fn voice_toggle_can_always_stop_even_with_flag_disabled() {
 
 #[test]
 fn voice_stop_stops_and_drops_pending_cold_start() {
-    // The Ctrl+Space hold release stops capture and cancels a queued cold-start, so
-    // a release that arrives while the pipeline is still spawning can't leave
-    // a hot mic running after the key is up.
+    // The Ctrl+Space hold release stops capture and cancels a queued cold-start
+    // A release that arrives while the pipeline is still spawning can't leave a hot mic running after the key is up
     let mut app = test_app_with_agent();
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     app.voice_cmd_tx = Some(tx);
-    // A live recording started by an Ctrl+Space hold-press.
+    // A live recording started by a Ctrl+Space hold-press
     app.voice_state = VoiceState::Recording {
         hold: true,
         target: VoiceTarget::Agent(AgentId(0)),
@@ -640,8 +629,7 @@ fn voice_stop_stops_and_drops_pending_cold_start() {
     ));
 }
 
-/// A stray Ctrl+Space release must NOT cancel a cold-start queued by `/voice` /
-/// Ctrl+Space (`hold` is false for those).
+/// A stray Ctrl+Space release must NOT cancel a cold-start queued by `/voice` or a Ctrl+Space toggle (`hold` is false for those).
 #[test]
 fn voice_stop_leaves_non_hold_cold_start_armed() {
     let mut app = test_app_with_agent();
@@ -660,11 +648,10 @@ fn voice_stop_leaves_non_hold_cold_start_armed() {
     );
 }
 
-/// Changing the STT language shuts down a running pipeline (it holds the
-/// VoiceConfig it was spawned with) so the next capture cold-starts one
-/// with the new language, and persists the preference. A mid-recording change
-/// also ends the in-flight session so the mic indicator clears at once rather
-/// than lingering until the dead pipeline's channel-close is misreported.
+/// Changing the STT language shuts down a running pipeline (it holds the VoiceConfig it was spawned with) and persists the preference.
+/// The next capture then cold-starts a pipeline with the new language.
+/// A mid-recording change also ends the in-flight session so the mic indicator clears at once.
+/// Otherwise it would linger until the dead pipeline's channel-close is misreported.
 #[test]
 fn voice_stt_language_change_recycles_pipeline() {
     let mut app = test_app_with_agent();
@@ -701,9 +688,8 @@ fn voice_stt_language_change_recycles_pipeline() {
     ));
 }
 
-/// With the UI key unset and a `[voice].language` in effect, selecting the
-/// UI default (English) must still commit — and roll back to the language
-/// actually in effect, not the unset-UI default.
+/// With the UI key unset and a `[voice].language` in effect, selecting the UI default (English) must still commit.
+/// The rollback value is the language actually in effect, not the unset-UI default.
 #[test]
 fn voice_stt_language_english_commits_over_voice_config_language() {
     let mut app = test_app_with_agent();
@@ -723,9 +709,8 @@ fn voice_stt_language_english_commits_over_voice_config_language() {
     ));
 }
 
-/// Re-selecting the persisted language is a no-op: no persist, and the
-/// running pipeline is left alone. An unset UI key never no-ops — the first
-/// explicit selection always commits (pins the choice to `[ui]`).
+/// Re-selecting the persisted language is a no-op: no persist, and the running pipeline is left alone.
+/// An unset UI key never no-ops; the first explicit selection always commits (pins the choice to `[ui]`).
 #[test]
 fn voice_stt_language_noop_keeps_pipeline() {
     let mut app = test_app_with_agent();
@@ -740,8 +725,8 @@ fn voice_stt_language_noop_keeps_pipeline() {
     assert!(app.voice_cmd_tx.is_some(), "pipeline must survive a no-op");
     assert!(rx.try_recv().is_err());
 
-    // Unset UI key + matching live value still commits (pins the choice) — but
-    // the language is unchanged, so the pipeline must NOT be recycled.
+    // An unset UI key with a matching live value still commits (pins the choice)
+    // The language is unchanged, so the pipeline must NOT be recycled
     app.current_ui.voice_stt_language = None;
     let effects = dispatch(Action::SetVoiceSttLanguage("es".to_string()), &mut app);
     assert!(!effects.is_empty(), "explicit pick must persist when unset");
@@ -755,9 +740,8 @@ fn voice_stt_language_noop_keeps_pipeline() {
         "no Shutdown when language is unchanged"
     );
 
-    // A non-canonical stored value (hand-edited/invalid on disk) re-commits
-    // so the clean canonical is rewritten — still no language change, so the
-    // pipeline survives.
+    // A non-canonical stored value (hand-edited or invalid on disk) re-commits so the clean canonical is rewritten
+    // Still no language change, so the pipeline survives
     app.current_ui.voice_stt_language = Some("ES!".to_string());
     let effects = dispatch(Action::SetVoiceSttLanguage("es".to_string()), &mut app);
     assert!(
@@ -775,8 +759,7 @@ fn voice_stt_language_noop_keeps_pipeline() {
     );
 }
 
-/// `auto` is stored as the preference (not a resolved locale code) so the
-/// voice crate re-resolves it from the locale on each STT connect.
+/// `auto` is stored as the preference (not a resolved locale code) so the voice crate re-resolves it from the locale on each STT connect.
 #[test]
 fn voice_stt_language_auto_stored_unresolved() {
     let mut app = test_app_with_agent();

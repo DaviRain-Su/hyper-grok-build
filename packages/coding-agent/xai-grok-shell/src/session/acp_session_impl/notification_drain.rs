@@ -120,7 +120,7 @@ impl SessionActor {
 
     pub(super) async fn maybe_start_running_task(
         self: Arc<Self>,
-        completion_tx: mpsc::UnboundedSender<super::tasks_cancel::TurnCompletionMsg>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
         // Fast path under the lock: nothing to promote.
         let may_combine;
@@ -464,7 +464,7 @@ impl SessionActor {
     /// single lock acquisition to avoid interleaving.
     pub(super) async fn maybe_drain_notifications(
         self: Arc<Self>,
-        completion_tx: mpsc::UnboundedSender<super::tasks_cancel::TurnCompletionMsg>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
         // Mid-turn tick: parent may still be Responding so the idle
         // hook never runs. Throttled so InjectNotification does not scan disk

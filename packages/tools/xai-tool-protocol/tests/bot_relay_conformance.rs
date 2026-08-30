@@ -9,7 +9,12 @@ use xai_tool_protocol::{
     BotBindConversationParams, BotCommandParams, BotEmptyResult, BotEventChannel, BotEventEnvelope,
     BotRelayError, BotRelayErrorCode, BotRosterResult, BotStatusResult, BotSubscribeParams,
     BotTranscriptOffboxParams, BotTranscriptOffboxResult, BotVncDescriptorResult,
-    COMMAND_REJECTED_AGENT_ID_MISMATCH, HubChannel, HubResyncRequiredEvent, HubTurnFinishedEvent,
+    COMMAND_REJECTED_AGENT_ID_MISMATCH, COMMAND_REJECTED_ARGS_INVALID,
+    COMMAND_REJECTED_ARGS_TOO_LARGE, COMMAND_REJECTED_ATTACHMENT_NOT_FOUND,
+    COMMAND_REJECTED_ATTACHMENT_NOT_READY, COMMAND_REJECTED_ATTACHMENT_TOO_LARGE,
+    COMMAND_REJECTED_ATTACHMENT_WRONG_SOURCE, COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE,
+    COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD, HubChannel, HubResyncRequiredEvent,
+    HubTurnFinishedEvent,
 };
 
 const ERROR_IDENTITY_UNAVAILABLE: &str =
@@ -25,6 +30,23 @@ const ERROR_COMMAND_REJECTED: &str =
     include_str!("../fixtures/bot_relay/error_command_rejected.json");
 const ERROR_COMMAND_REJECTED_AGENT_ID_MISMATCH: &str =
     include_str!("../fixtures/bot_relay/error_command_rejected_agent_id_mismatch.json");
+const ERROR_COMMAND_REJECTED_ARGS_TOO_LARGE: &str =
+    include_str!("../fixtures/bot_relay/error_command_rejected_args_too_large.json");
+const ERROR_COMMAND_REJECTED_ARGS_INVALID: &str =
+    include_str!("../fixtures/bot_relay/error_command_rejected_args_invalid.json");
+const ERROR_COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE: &str = include_str!(
+    "../fixtures/bot_relay/error_command_rejected_attachments_not_supported_in_live.json"
+);
+const ERROR_COMMAND_REJECTED_ATTACHMENT_NOT_FOUND: &str =
+    include_str!("../fixtures/bot_relay/error_command_rejected_attachment_not_found.json");
+const ERROR_COMMAND_REJECTED_ATTACHMENT_WRONG_SOURCE: &str =
+    include_str!("../fixtures/bot_relay/error_command_rejected_attachment_wrong_source.json");
+const ERROR_COMMAND_REJECTED_ATTACHMENT_TOO_LARGE: &str =
+    include_str!("../fixtures/bot_relay/error_command_rejected_attachment_too_large.json");
+const ERROR_COMMAND_REJECTED_ATTACHMENT_NOT_READY: &str =
+    include_str!("../fixtures/bot_relay/error_command_rejected_attachment_not_ready.json");
+const ERROR_COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD: &str =
+    include_str!("../fixtures/bot_relay/error_command_rejected_gateway_unknown_method.json");
 const ERROR_COMPUTER_UNAVAILABLE: &str =
     include_str!("../fixtures/bot_relay/error_computer_unavailable.json");
 const ERROR_UPSTREAM_ERROR: &str = include_str!("../fixtures/bot_relay/error_upstream_error.json");
@@ -236,6 +258,90 @@ fn handwritten_agent_id_mismatch_reason() {
 }
 
 #[test]
+fn handwritten_args_too_large_reason() {
+    let err = assert_error(
+        ERROR_COMMAND_REJECTED_ARGS_TOO_LARGE,
+        "command_rejected",
+        false,
+        json!({}),
+        Some(COMMAND_REJECTED_ARGS_TOO_LARGE),
+        BotRelayErrorCode::CommandRejected,
+    );
+    assert_eq!(err.detail.upstream, None);
+}
+
+#[test]
+fn handwritten_args_invalid_reason() {
+    let err = assert_error(
+        ERROR_COMMAND_REJECTED_ARGS_INVALID,
+        "command_rejected",
+        false,
+        json!({}),
+        Some(COMMAND_REJECTED_ARGS_INVALID),
+        BotRelayErrorCode::CommandRejected,
+    );
+    assert_eq!(err.detail.upstream, None);
+}
+
+#[test]
+fn handwritten_attachments_not_supported_in_live_reason() {
+    let err = assert_error(
+        ERROR_COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE,
+        "command_rejected",
+        false,
+        json!({}),
+        Some(COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE),
+        BotRelayErrorCode::CommandRejected,
+    );
+    assert_eq!(err.detail.upstream, None);
+}
+
+#[test]
+fn handwritten_attach_upload_reject_reasons() {
+    for (raw, reason) in [
+        (
+            ERROR_COMMAND_REJECTED_ATTACHMENT_NOT_FOUND,
+            COMMAND_REJECTED_ATTACHMENT_NOT_FOUND,
+        ),
+        (
+            ERROR_COMMAND_REJECTED_ATTACHMENT_WRONG_SOURCE,
+            COMMAND_REJECTED_ATTACHMENT_WRONG_SOURCE,
+        ),
+        (
+            ERROR_COMMAND_REJECTED_ATTACHMENT_TOO_LARGE,
+            COMMAND_REJECTED_ATTACHMENT_TOO_LARGE,
+        ),
+        (
+            ERROR_COMMAND_REJECTED_ATTACHMENT_NOT_READY,
+            COMMAND_REJECTED_ATTACHMENT_NOT_READY,
+        ),
+    ] {
+        let err = assert_error(
+            raw,
+            "command_rejected",
+            false,
+            json!({}),
+            Some(reason),
+            BotRelayErrorCode::CommandRejected,
+        );
+        assert_eq!(err.detail.upstream, None);
+    }
+}
+
+#[test]
+fn handwritten_gateway_unknown_method_reason() {
+    let err = assert_error(
+        ERROR_COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD,
+        "command_rejected",
+        false,
+        json!({}),
+        Some(COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD),
+        BotRelayErrorCode::CommandRejected,
+    );
+    assert_eq!(err.detail.upstream, None);
+}
+
+#[test]
 fn unknown_error_code_degrades_to_upstream_error() {
     let (wire, err) = replay_error(ERROR_UNKNOWN_CODE);
     assert_eq!(wire["code"], "some_future_code");
@@ -249,6 +355,9 @@ fn unknown_error_code_degrades_to_upstream_error() {
     assert_eq!(err.reason, None);
 }
 
+// Wire schema: `preview` is a required string and may be non-empty.
+// The hub emitter always sends ""; this fixture proves the field is not
+// constrained to empty.
 #[test]
 fn hub_turn_finished_envelope() {
     let (wire, env) = replay_envelope(EVENT_HUB_TURN_FINISHED);

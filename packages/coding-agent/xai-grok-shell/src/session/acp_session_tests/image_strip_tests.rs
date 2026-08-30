@@ -87,6 +87,14 @@ async fn wait_for_conversation(
     }
 }
 
+fn own_request(actor: &SessionActor, request_id: &RequestId) {
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    actor
+        .turn_stream_drained
+        .lock()
+        .insert(request_id.clone(), Some(tx));
+}
+
 fn completed_event(request_id: &RequestId) -> SamplingEvent {
     SamplingEvent::Completed {
         request_id: request_id.clone(),
@@ -143,6 +151,7 @@ async fn heuristic_images_stripped_does_not_rewrite_history() {
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
             let rid = RequestId::from("req-heuristic");
+            own_request(&actor, &rid);
 
             actor
                 .handle_sampling_event(images_stripped(
@@ -183,6 +192,7 @@ async fn server_rejected_strip_persists_only_after_completed() {
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
             let rid = RequestId::from("req-rejected");
+            own_request(&actor, &rid);
 
             actor
                 .handle_sampling_event(images_stripped(
@@ -231,6 +241,538 @@ async fn server_rejected_strip_persists_only_after_completed() {
         .await;
 }
 
+/// A drain timeout retains request-scoped strip state across turn boundaries.
+/// The late completion must still persist its own buffered strip without
+/// consuming or mutating the newer request's ownership.
+#[tokio::test(flavor = "current_thread")]
+async fn timed_out_strip_survives_new_turn_until_late_completed() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor =
+                Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+            seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
+
+            let timed_out = RequestId::from("req-timeout-strip");
+            own_request(&actor, &timed_out);
+            actor
+                .handle_sampling_event(images_stripped(
+                    &timed_out,
+                    &[PERSIST_GATE_IMAGE_URI],
+                    StripReason::ServerRejected,
+                ))
+                .await;
+            actor
+                .turn_stream_drained
+                .lock()
+                .get_mut(&timed_out)
+                .expect("timed-out request remains owned")
+                .take();
+
+            // The next turn keeps only timeout-owned durable work, then clears
+            // ordinary stream ownership before registering its own request.
+            actor.retain_timed_out_image_strips_for_new_turn();
+            actor.turn_stream_drained.lock().clear();
+            // A second turn boundary must not erase a strip already marked as
+            // timeout-owned while its terminal event is still in flight.
+            actor.retain_timed_out_image_strips_for_new_turn();
+            let newer = RequestId::from("req-newer-turn");
+            own_request(&actor, &newer);
+
+            assert!(
+                actor.pending_image_strip.lock().contains_key(&timed_out),
+                "new-turn cleanup must retain the timed-out request's strip"
+            );
+            {
+                let mut capture = actor.streaming_turn_capture.lock();
+                capture.begin_turn(Some("newer-prompt".to_string()), 2);
+                capture.start_request_stream(timed_out.as_str(), 1);
+                capture.append(true, "retained partial reasoning");
+            }
+            actor
+                .handle_sampling_event(completed_event(&timed_out))
+                .await;
+
+            let conv = wait_for_conversation(&actor, |conv| {
+                !conversation_has_image(conv, PERSIST_GATE_IMAGE_URI)
+            })
+            .await;
+            assert!(
+                !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
+                "late Completed must persist the timed-out request's strip: {conv:?}"
+            );
+            assert!(
+                actor.turn_stream_drained.lock().contains_key(&newer),
+                "late Completed must not consume the newer request's ownership"
+            );
+            assert_eq!(
+                actor.streaming_turn_capture.lock().reasoning_text,
+                "retained partial reasoning",
+                "strip-only completion must not clear capture after stream ownership was revoked"
+            );
+            assert!(
+                actor.pending_image_strip.lock().is_empty(),
+                "late Completed must consume only its request-scoped pending strip"
+            );
+        })
+        .await;
+}
+
+/// Rewind can commit after `Completed` detaches persistence but before the
+/// LocalSet schedules it. The detached task must acquire rewrite ownership
+/// before claiming URLs, so a waiting successful rewind clears queued work
+/// while preserving the restored image and emitting no stale note.
+#[tokio::test(flavor = "current_thread")]
+async fn rewind_cancels_detached_image_strip_before_it_runs() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, mut gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor =
+                Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+            seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
+
+            let timed_out = RequestId::from("req-rewind-detached-strip");
+            own_request(&actor, &timed_out);
+            actor
+                .handle_sampling_event(images_stripped(
+                    &timed_out,
+                    &[PERSIST_GATE_IMAGE_URI],
+                    StripReason::ServerRejected,
+                ))
+                .await;
+            actor
+                .turn_stream_drained
+                .lock()
+                .get_mut(&timed_out)
+                .expect("timed-out request remains owned")
+                .take();
+            actor.retain_timed_out_image_strips_for_new_turn();
+            actor.turn_stream_drained.lock().clear();
+
+            let mut snapshot = actor
+                .chat_state_handle
+                .snapshot()
+                .await
+                .expect("snapshot available");
+            snapshot.prompt_index = 2;
+            snapshot.prompt_texts = vec!["image turn".into(), "later turn".into()];
+            let ConversationItem::User(image_turn) = &mut snapshot.conversation[0] else {
+                panic!("seeded image must be a user turn");
+            };
+            image_turn.prompt_index = Some(0);
+            snapshot
+                .conversation
+                .push(ConversationItem::assistant("image answer"));
+            let mut later_turn = match ConversationItem::user("later turn") {
+                ConversationItem::User(user) => user,
+                _ => unreachable!(),
+            };
+            later_turn.prompt_index = Some(1);
+            snapshot
+                .conversation
+                .push(ConversationItem::User(later_turn));
+            snapshot
+                .conversation
+                .push(ConversationItem::assistant("later answer"));
+            actor.chat_state_handle.restore_snapshot(snapshot);
+            let _ = actor.chat_state_handle.get_conversation().await;
+
+            let strip_blocker = actor.image_strip_rewrite_barrier.lock_strip().await;
+            actor
+                .handle_sampling_event(completed_event(&timed_out))
+                .await;
+            assert!(
+                actor
+                    .pending_image_strip
+                    .lock()
+                    .get(&timed_out)
+                    .is_some_and(|strip| !strip.applying && !strip.urls.is_empty()),
+                "Completed must not claim URLs before detached persistence owns the gate"
+            );
+
+            let rewind_actor = Arc::clone(&actor);
+            let rewind = tokio::task::spawn_local(async move {
+                rewind_actor
+                    .handle_rewind(RewindRequest {
+                        target_prompt_index: 1,
+                        force: true,
+                        mode: RewindMode::ConversationOnly,
+                    })
+                    .await
+            });
+            tokio::task::yield_now().await;
+            assert!(
+                actor
+                    .pending_image_strip
+                    .lock()
+                    .get(&timed_out)
+                    .is_some_and(|strip| !strip.applying && !strip.urls.is_empty()),
+                "rewind preflight must leave queued ownership untouched while waiting for the gate"
+            );
+            drop(strip_blocker);
+
+            let rewind = rewind
+                .await
+                .expect("rewind task completes")
+                .expect("rewind succeeds");
+            assert!(rewind.success, "rewind should commit: {rewind:?}");
+            settle().await;
+
+            let conv = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
+                "rewind invalidation must keep the restored image: {conv:?}"
+            );
+            assert!(actor.pending_image_strip.lock().is_empty());
+            assert!(
+                !drain_gateway_debug(&mut gateway_rx).contains("removed from the conversation"),
+                "cancelled detached persistence must not emit a stale durable-removal note"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rejected_rewind_preserves_queued_image_strip() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor =
+                Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+            seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
+
+            let request_id = RequestId::from("req-rejected-rewind-strip");
+            own_request(&actor, &request_id);
+            actor
+                .handle_sampling_event(images_stripped(
+                    &request_id,
+                    &[PERSIST_GATE_IMAGE_URI],
+                    StripReason::ServerRejected,
+                ))
+                .await;
+
+            let strip_blocker = actor.image_strip_rewrite_barrier.lock_strip().await;
+            let rewind_actor = Arc::clone(&actor);
+            let rewind = tokio::task::spawn_local(async move {
+                rewind_actor
+                    .handle_rewind(RewindRequest {
+                        target_prompt_index: usize::MAX,
+                        force: true,
+                        mode: RewindMode::ConversationOnly,
+                    })
+                    .await
+            });
+            tokio::task::yield_now().await;
+
+            actor
+                .handle_sampling_event(completed_event(&request_id))
+                .await;
+            assert!(
+                actor
+                    .pending_image_strip
+                    .lock()
+                    .get(&request_id)
+                    .is_some_and(|strip| !strip.applying && !strip.urls.is_empty()),
+                "rejected rewind preflight must not revoke queued strip ownership"
+            );
+            drop(strip_blocker);
+
+            let rewind = rewind
+                .await
+                .expect("rewind task completes")
+                .expect("rewind returns a response");
+            assert!(
+                !rewind.success,
+                "invalid rewind must be rejected: {rewind:?}"
+            );
+
+            let conv = wait_for_conversation(&actor, |conv| {
+                !conversation_has_image(conv, PERSIST_GATE_IMAGE_URI)
+            })
+            .await;
+            assert!(
+                !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
+                "strip must resume after rejected rewind: {conv:?}"
+            );
+            assert!(actor.pending_image_strip.lock().is_empty());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_compaction_replay_preserves_queued_image_strip() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos();
+            actor.session_info.id = acp::SessionId::new(format!("strip-replay-fail-{unique}"));
+            let actor = Arc::new(actor);
+            seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
+
+            let mut snapshot = actor
+                .chat_state_handle
+                .snapshot()
+                .await
+                .expect("snapshot available");
+            snapshot.prompt_index = 2;
+            snapshot.prompt_texts = vec!["image turn".into(), "later turn".into()];
+            snapshot.last_compaction_prompt_index = Some(1);
+            actor.chat_state_handle.restore_snapshot(snapshot);
+
+            let session_dir = crate::session::persistence::session_dir(&actor.session_info);
+            std::fs::create_dir_all(&session_dir).expect("create session dir");
+            let checkpoint = crate::session::storage::SessionUpdate::Xai(Box::new(
+                crate::extensions::notification::SessionNotification {
+                    session_id: actor.session_info.id.clone(),
+                    update: XaiSessionUpdate::CompactionCheckpoint(Box::new(
+                        crate::extensions::notification::CompactionCheckpointInfo {
+                            checkpoint_id: "missing".into(),
+                            prompt_index_at_compaction: 1,
+                            checkpoint_file: "compaction_checkpoints/missing.json".into(),
+                            auto_continue: None,
+                            schema_version: 1,
+                            created_at: "2026-01-01T00:00:00Z".into(),
+                        },
+                    )),
+                    meta: None,
+                },
+            ));
+            let envelope = crate::session::storage::SessionUpdateEnvelope::from_update(&checkpoint)
+                .expect("serialize checkpoint update");
+            std::fs::write(
+                session_dir.join("updates.jsonl"),
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&envelope).expect("serialize envelope")
+                ),
+            )
+            .expect("write updates fixture");
+
+            let request_id = RequestId::from("req-failed-replay-strip");
+            own_request(&actor, &request_id);
+            actor
+                .handle_sampling_event(images_stripped(
+                    &request_id,
+                    &[PERSIST_GATE_IMAGE_URI],
+                    StripReason::ServerRejected,
+                ))
+                .await;
+
+            let strip_blocker = actor.image_strip_rewrite_barrier.lock_strip().await;
+            actor
+                .handle_sampling_event(completed_event(&request_id))
+                .await;
+            let rewind_actor = Arc::clone(&actor);
+            let rewind = tokio::task::spawn_local(async move {
+                rewind_actor
+                    .handle_rewind(RewindRequest {
+                        target_prompt_index: 1,
+                        force: true,
+                        mode: RewindMode::ConversationOnly,
+                    })
+                    .await
+            });
+            tokio::task::yield_now().await;
+            assert!(
+                actor
+                    .pending_image_strip
+                    .lock()
+                    .get(&request_id)
+                    .is_some_and(|strip| !strip.applying && !strip.urls.is_empty()),
+                "failed replay preflight must not revoke queued strip ownership"
+            );
+            drop(strip_blocker);
+
+            let rewind = rewind
+                .await
+                .expect("rewind task completes")
+                .expect("rewind returns a response");
+            assert!(!rewind.success, "missing checkpoint must reject rewind");
+
+            let conv = wait_for_conversation(&actor, |conv| {
+                !conversation_has_image(conv, PERSIST_GATE_IMAGE_URI)
+            })
+            .await;
+            let _ = std::fs::remove_dir_all(&session_dir);
+            assert!(
+                !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
+                "strip must resume after replay failure: {conv:?}"
+            );
+            assert!(actor.pending_image_strip.lock().is_empty());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_strip_bound_preserves_detached_and_new_url_entries() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor =
+                Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+            seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
+
+            let applying_id = RequestId::from("req-applying-at-bound");
+            own_request(&actor, &applying_id);
+            actor
+                .handle_sampling_event(images_stripped(
+                    &applying_id,
+                    &[PERSIST_GATE_IMAGE_URI],
+                    StripReason::ServerRejected,
+                ))
+                .await;
+
+            let strip_blocker = actor.image_strip_rewrite_barrier.lock_strip().await;
+            actor
+                .handle_sampling_event(completed_event(&applying_id))
+                .await;
+            {
+                let mut pending = actor.pending_image_strip.lock();
+                for index in 0..16 {
+                    pending.insert(
+                        RequestId::from(format!("timed-out-{index}")),
+                        PendingImageStrip {
+                            urls: Vec::new(),
+                            timed_out: true,
+                            applying: false,
+                        },
+                    );
+                }
+            }
+            let queued_id = RequestId::from("req-url-at-bound");
+            own_request(&actor, &queued_id);
+            actor
+                .handle_sampling_event(images_stripped(
+                    &queued_id,
+                    &[PERSIST_GATE_IMAGE_URI],
+                    StripReason::ServerRejected,
+                ))
+                .await;
+            {
+                let pending = actor.pending_image_strip.lock();
+                assert!(
+                    pending
+                        .get(&applying_id)
+                        .is_some_and(|strip| !strip.applying && !strip.urls.is_empty()),
+                    "bound enforcement must retain detached work waiting for the rewrite gate"
+                );
+                assert!(
+                    pending
+                        .get(&queued_id)
+                        .is_some_and(|strip| !strip.urls.is_empty()),
+                    "bound enforcement must prioritize queued URL-bearing work over placeholders"
+                );
+                assert_eq!(16, pending.len());
+            }
+            drop(strip_blocker);
+
+            let conv = wait_for_conversation(&actor, |conv| {
+                !conversation_has_image(conv, PERSIST_GATE_IMAGE_URI)
+            })
+            .await;
+            assert!(
+                !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
+                "retained detached write must finish after acquiring the gate: {conv:?}"
+            );
+            assert!(!actor.pending_image_strip.lock().contains_key(&applying_id));
+        })
+        .await;
+}
+
+/// A timeout can happen before the ordered event drainer reaches
+/// `ImagesStripped`. The timeout placeholder must admit that late event and
+/// its following `Completed`, while still keeping all other late events stale.
+#[tokio::test(flavor = "current_thread")]
+async fn timed_out_strip_survives_when_images_stripped_is_still_queued() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor =
+                Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+            seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
+
+            {
+                let mut pending = actor.pending_image_strip.lock();
+                for index in 0..16 {
+                    pending.insert(
+                        RequestId::from(format!("url-pressure-{index}")),
+                        PendingImageStrip {
+                            urls: vec![PERSIST_GATE_IMAGE_URI.into()],
+                            timed_out: false,
+                            applying: false,
+                        },
+                    );
+                }
+            }
+            let timed_out = RequestId::from("req-timeout-before-strip-event");
+            own_request(&actor, &timed_out);
+            actor.mark_stream_drain_timed_out(&timed_out);
+            {
+                let pending = actor.pending_image_strip.lock();
+                assert_eq!(16, pending.len());
+                assert!(
+                    pending
+                        .get(&timed_out)
+                        .is_some_and(|strip| strip.timed_out && strip.urls.is_empty()),
+                    "the just-timed-out placeholder must displace older URL work under pressure"
+                );
+            }
+            actor.cancel_active_sampling_requests();
+            assert!(
+                actor
+                    .pending_image_strip
+                    .lock()
+                    .get(&timed_out)
+                    .is_some_and(|strip| strip.timed_out && strip.urls.is_empty()),
+                "timeout must retain a placeholder before cancellation clears stream ownership"
+            );
+
+            actor
+                .handle_sampling_event(images_stripped(
+                    &timed_out,
+                    &[PERSIST_GATE_IMAGE_URI],
+                    StripReason::ServerRejected,
+                ))
+                .await;
+            actor
+                .handle_sampling_event(completed_event(&timed_out))
+                .await;
+
+            let conv = wait_for_conversation(&actor, |conv| {
+                !conversation_has_image(conv, PERSIST_GATE_IMAGE_URI)
+            })
+            .await;
+            assert!(
+                !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
+                "queued strip and completion must resolve timeout-owned work: {conv:?}"
+            );
+            assert!(actor.pending_image_strip.lock().is_empty());
+        })
+        .await;
+}
+
 /// A strip that does not reach `Applied` must still tell the user the
 /// answer was produced without the image; it just must not claim the
 /// stored conversation changed.
@@ -247,6 +789,7 @@ async fn non_applied_strip_outcome_still_notifies_the_user() {
             // Nothing seeded: the buffered URL matches no stored image, so
             // the apply resolves as `NoMatch` rather than `Applied`.
             let rid = RequestId::from("req-no-match");
+            own_request(&actor, &rid);
 
             actor
                 .handle_sampling_event(images_stripped(
@@ -285,6 +828,7 @@ async fn server_rejected_strip_dropped_when_retry_fails() {
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
             let rid = RequestId::from("req-rejected-then-fatal");
+            own_request(&actor, &rid);
 
             actor
                 .handle_sampling_event(images_stripped(
@@ -333,6 +877,7 @@ async fn multi_image_blame_is_judged_on_unique_urls() {
 
             // Two distinct URLs: ambiguous, never persists.
             let rid = RequestId::from("req-ambiguous");
+            own_request(&actor, &rid);
             actor
                 .handle_sampling_event(images_stripped(
                     &rid,
@@ -353,6 +898,7 @@ async fn multi_image_blame_is_judged_on_unique_urls() {
             // persists, removing both stored occurrences.
             seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
             let rid = RequestId::from("req-duplicate");
+            own_request(&actor, &rid);
             actor
                 .handle_sampling_event(images_stripped(
                     &rid,

@@ -1,7 +1,5 @@
-//! Synchronous state dispatch: [`Action`](crate::app::actions::Action) → state mutations + [`Effect`](crate::app::actions::Effect)s.
-//!
-//! This is the core business logic of the application.  It takes an action,
-//! mutates application state, and returns a list of async effects to execute.
+//! Synchronous state dispatch.
+//! It takes an [`Action`](crate::app::actions::Action), mutates application state, and returns [`Effect`](crate::app::actions::Effect)s.
 //!
 //! **Invariants:**
 //! - This module never touches the terminal, network, or filesystem.
@@ -9,8 +7,7 @@
 //! - Async work is described as [`Effect`](crate::app::actions::Effect) values, not executed.
 //! - This makes dispatch fully testable without tokio or a terminal.
 //!
-//! Imports in this tree use at most one `super::` hop (absolute `crate::` paths
-//! otherwise); tests/ shares a fixture prelude via `use super::*;`.
+//! Imports in this tree use at most one `super::` hop (absolute `crate::` paths otherwise); tests/ shares a fixture prelude via `use super::*;`.
 
 mod auth;
 mod billing;
@@ -67,8 +64,7 @@ pub(crate) use settings::ui::refresh_open_settings_modals;
 pub(crate) use status::commit_minimal_update_notice;
 pub(crate) use turn::{reconcile_overdue_cancels, reconcile_overdue_turn_ends};
 
-// Test-only consumers (cfg(test) mods elsewhere in the crate); a plain
-// re-export trips -D unused-imports in the lib build.
+// Test-only consumers (cfg(test) mods elsewhere in the crate); a plain re-export trips -D unused-imports in the lib build
 #[cfg(test)]
 pub(crate) use ctx::{SwitchCause, switch_to_agent};
 #[cfg(test)]

@@ -162,12 +162,12 @@ impl ConfigFileWatcher {
         // Canonicalize `$HOME` ONCE up front. `notify`
         // backends may deliver canonicalized event paths (e.g. macOS
         // FSEvents resolves symlinks, returning `/private/var/...`
-        // where `dirs::home_dir()` returned `/var/...`), so a raw byte
+        // where `xai_dirs::home_dir()` returned `/var/...`), so a raw byte
         // compare against an un-canonicalized `$HOME` would mis-route
         // `~/.claude.json` to the per-cwd path. The per-event side is
         // canonicalized in `parent_is_dir`.
         let user_home_buf: Option<PathBuf> =
-            dirs::home_dir().map(|h| dunce::canonicalize(&h).unwrap_or(h));
+            xai_dirs::home_dir().map(|h| dunce::canonicalize(&h).unwrap_or(h));
 
         let mut debouncer = new_filtered_debouncer(debounce, move |res: DebounceEventResult| {
             let Ok(events) = res else { return };
@@ -330,7 +330,7 @@ impl ConfigFileWatcher {
 
 /// Component-aware "is `parent` the directory `dir`?" that tolerates
 /// symlink / canonicalization differences between a `notify`-delivered
-/// event path and a `dirs::home_dir()`-style reference. `dir` is
+/// event path and a `xai_dirs::home_dir()`-style reference. `dir` is
 /// expected to be already canonicalized (see `ConfigFileWatcher::start`).
 fn parent_is_dir(parent: Option<&Path>, dir: &Path) -> bool {
     let Some(parent) = parent else {

@@ -1,13 +1,10 @@
-//! `grok plugin` CLI subcommand — manage plugins and marketplace sources.
+//! `grok plugin` CLI subcommand: manage plugins and marketplace sources.
 //!
-//! Follows the `memory_cmd.rs` / `sessions_cmd.rs` / `worktree_cmd` pattern:
-//! clap args and handler logic co-located in a dedicated module. The pager's
-//! `main.rs` dispatches here with a one-liner.
+//! Follows the `memory_cmd.rs`, `sessions_cmd.rs`, and `worktree_cmd` pattern: clap args and handler logic co-located in a dedicated module.
+//! The pager's `main.rs` dispatches here with a one-liner.
 //!
-//! Business logic lives in `xai_grok_shell::plugin` (shared orchestration)
-//! and lower crates (`xai-grok-agent`, `xai-grok-plugin-marketplace`). This
-//! module is a thin CLI wrapper: parse args, call ops, format output, emit
-//! telemetry.
+//! Business logic lives in `xai_grok_shell::plugin` and lower crates (`xai-grok-agent`, `xai-grok-plugin-marketplace`).
+//! This module is a thin CLI wrapper: parse args, call ops, format output, emit telemetry.
 
 use std::path::{Path, PathBuf};
 
@@ -23,9 +20,9 @@ use xai_grok_shell::plugin::{self, RepoUpdateOutcome, UninstallError};
 
 // ── JSON output types ───────────────────────────────────────────────
 
-/// Typed entry for `grok plugin list --json`. The `status` field acts as a
-/// discriminator: `"installed"` entries have repo/path fields, `"available"`
-/// entries have description/component fields.
+/// Typed entry for `grok plugin list --json`.
+/// The `status` field is the discriminator.
+/// `"installed"` entries have repo and path fields, `"available"` entries have description and component fields.
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum PluginEntry {
@@ -1267,8 +1264,7 @@ fn marketplace_add(
     let cwd = std::env::current_dir().unwrap_or_default();
     let input = plugin::classify_marketplace_add_input(url, &cwd);
 
-    // Fail fast on missing local paths: without this, a path input would be
-    // stored as a git URL and only error after network clone attempts.
+    // Fail fast on missing local paths: otherwise a path input is stored as a git URL and only errors after network clone attempts
     if let MarketplaceAddInput::LocalPath(path) = &input
         && !path.is_dir()
     {
@@ -1283,8 +1279,7 @@ fn marketplace_add(
         MarketplaceAddInput::LocalPath(p) => p.display().to_string(),
     };
 
-    // Local paths never match the git-URL allowlist, so a restricted
-    // strictKnownMarketplaces policy blocks them — intentionally fail-closed.
+    // Local paths never match the git-URL allowlist, so a restricted strictKnownMarketplaces policy blocks them; intentionally fail-closed
     let allowlist =
         &xai_grok_workspace::permission::resolution::managed_settings().marketplace_allowlist;
     if allowlist.is_restricted() && !allowlist.is_url_allowed(&identity) {
@@ -1320,7 +1315,7 @@ fn marketplace_add(
         MarketplaceAddInput::GitUrl(u) => plugin::name_from_url(u),
         MarketplaceAddInput::LocalPath(p) => plugin::name_from_path(p),
     };
-    let config_path = xai_grok_config::grok_home().join("config.toml");
+    let config_path = xai_grok_config::grok_home().join(xai_grok_config::USER_CONFIG_FILENAME);
 
     let content = std::fs::read_to_string(&config_path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = content
@@ -1357,8 +1352,7 @@ fn marketplace_add(
     Ok(())
 }
 
-/// Resolve `remove` input to a source: exact name match first, then the same
-/// URL/path matching `marketplace add` uses.
+/// Resolve `remove` input to a source: exact name match first, then the same URL or path matching `marketplace add` uses.
 fn find_removal_source<'a>(
     sources: &'a [xai_grok_plugin_marketplace::MarketplaceSource],
     input: &str,
@@ -1383,8 +1377,7 @@ fn find_removal_source<'a>(
     let expanded = plugin::normalize_git_url(input);
     let norm = input.trim_end_matches(".git");
     let exp_norm = expanded.trim_end_matches(".git");
-    // Loaded local sources carry expanded paths, so expand `~`/relative inputs
-    // the same way `marketplace add` does before comparing.
+    // Loaded local sources carry expanded paths, so expand `~` and relative inputs the same way `marketplace add` does before comparing
     let local_input = match plugin::classify_marketplace_add_input(input, cwd) {
         xai_grok_shell::plugin::MarketplaceAddInput::LocalPath(p) => Some(p),
         _ => None,
@@ -1430,7 +1423,7 @@ fn marketplace_remove(
 
     let uninstalled = plugin::uninstall_marketplace_source_plugins(&identity);
 
-    let config_path = xai_grok_config::grok_home().join("config.toml");
+    let config_path = xai_grok_config::grok_home().join(xai_grok_config::USER_CONFIG_FILENAME);
     let mut removed_from_config = false;
     if let Ok(content) = std::fs::read_to_string(&config_path)
         && let Some(new) = plugin::remove_toml_marketplace_block(&content, &identity)
@@ -1442,7 +1435,7 @@ fn marketplace_remove(
         }
     }
 
-    // Fallback: settings.json / known_marketplaces.json.
+    // Fallback: settings.json or known_marketplaces.json
     if !removed_from_config && !plugin::try_remove_source_from_json_files(&identity) {
         eprintln!(
             "Warning: source was found but could not be removed from config files.\n\
@@ -1507,7 +1500,6 @@ fn marketplace_update_with_cache_root(
     if refreshed == 0 && errors.is_empty() {
         if let Some(filter) = name {
             if name_matched {
-                // Source exists but is local, nothing to sync.
                 println!("Source \"{filter}\" is local, nothing to sync.");
             } else {
                 bail!("Marketplace source \"{filter}\" not found.");

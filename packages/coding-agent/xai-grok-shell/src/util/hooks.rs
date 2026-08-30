@@ -52,7 +52,7 @@ pub(crate) fn discover_hook_source_paths(
     compat: &xai_grok_tools::types::compat::CompatConfig,
 ) -> HookSourcePaths {
     let grok = xai_grok_config::user_grok_home();
-    let home = dirs::home_dir();
+    let home = xai_dirs::home_dir();
     let include_claude = include_claude_hooks(compat);
     let include_cursor = include_cursor_hooks(compat);
 

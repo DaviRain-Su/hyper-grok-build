@@ -198,14 +198,11 @@ fn dispatch_cycle_scoped_model(app: &mut AppView, reverse: bool) -> Vec<Effect> 
 }
 /// Dispatch an action: mutate state, return effects to execute.
 ///
-/// The returned `Vec<Effect>` may be empty (pure state mutation) or contain
-/// async work that the event loop should spawn.
+/// The returned `Vec<Effect>` may be empty (pure state mutation) or contain async work that the event loop should spawn.
 ///
-/// The match feeds the `sync_sleep_inhibitor(app)` tail below it; arms that
-/// `return` early bypass that tail deliberately. Do not extract a returning
-/// arm into a handler: as a delegation its `return`s become plain arm values
-/// and start flowing through the tail. The fat inline arms stayed inline for
-/// this reason; audit an arm's `return`s before moving it.
+/// The match feeds the `sync_sleep_inhibitor(app)` tail below it; arms that `return` early bypass that tail deliberately.
+/// Do not extract a returning arm into a handler: as a delegation its `return`s become plain arm values and start flowing through the tail.
+/// The fat inline arms stayed inline for this reason; audit an arm's `return`s before moving it.
 pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
     app.reconcile_foreign_resume_launch();
     let effects = match action {
@@ -1659,8 +1656,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
     sync_sleep_inhibitor(app);
     effects
 }
-/// Drains the agent and its focused subagent: the paste drain reports on the parent while `with_active_agent` would pick the child,
-/// and a stranded flag restores on a later dispatch.
+/// Drains the agent and its focused subagent: the paste drain reports on the parent while `with_active_agent` would pick the child.
+/// A stranded flag restores on a later dispatch.
 fn restore_stash_where_the_draft_was_consumed(app: &mut AppView) {
     let ActiveView::Agent(id) = app.active_view else {
         return;

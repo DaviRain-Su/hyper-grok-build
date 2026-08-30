@@ -1,59 +1,45 @@
 //! Next-prompt suggestion controller (tab autocomplete ghost text).
 //!
-//! After a turn completes, the pager asks the shell (`suggestPrompt`)
-//! to predict the user's likely next prompt. The prediction renders as dim
-//! ghost text in the (empty) prompt input:
+//! After a turn completes, the pager asks the shell (`suggestPrompt`) to predict the user's likely next prompt.
+//! The prediction renders as dim ghost text in the (empty) prompt input:
 //!
-//! - **Tab** or **Right arrow** accepts it (the ghost only shows with the
-//!   cursor at end-of-text, where Right is otherwise a no-op — the fish/zsh
-//!   autosuggestion convention).
-//! - Typing a matching prefix *shrinks* the ghost; typing it out fully
-//!   consumes it; any divergent text hides it (it comes back if the user
-//!   clears the input, matching common agent-CLI autosuggest behavior).
+//! - **Tab** or **Right arrow** accepts it.
+//!   The ghost only shows with the cursor at end-of-text, where Right is otherwise a no-op (the fish/zsh autosuggestion convention).
+//! - Typing a matching prefix *shrinks* the ghost; typing it out fully consumes it; any divergent text hides it.
+//!   It comes back if the user clears the input, matching common agent-CLI autosuggest behavior.
 //! - **Esc** on an empty prompt dismisses it for the rest of the turn.
 //!
-//! Visibility is *derived* from the current prompt text each frame
-//! ([`PromptSuggestionController::ghost_for`]) rather than mutated on each
-//! keystroke — there is no per-keystroke state machine to drift. Stale
-//! responses are discarded via a generation counter, mirroring
-//! `SuggestionController` (shell command suggestions).
+//! Visibility is *derived* from the current prompt text each frame ([`PromptSuggestionController::ghost_for`]) rather than mutated on each keystroke.
+//! There is no per-keystroke state machine to drift.
+//! Stale responses are discarded via a generation counter, mirroring `SuggestionController` (shell command suggestions).
 
 /// Env override for the whole feature: `GROK_PROMPT_SUGGESTIONS=0/1`.
 /// When unset, the persisted `prompt_suggestions` setting applies.
 pub const PROMPT_SUGGESTIONS_ENV: &str = "GROK_PROMPT_SUGGESTIONS";
 
-/// Env override for the model used by the suggestion call:
-/// `GROK_PROMPT_SUGGESTIONS_MODEL=<model-id>`.
+/// Env override for the model used by the suggestion call: `GROK_PROMPT_SUGGESTIONS_MODEL=<model-id>`.
 pub const PROMPT_SUGGESTIONS_MODEL_ENV: &str = "GROK_PROMPT_SUGGESTIONS_MODEL";
 
-/// Preferred model for suggestion calls when the server catalog offers it
-/// (cheap + fast). The session model is never used: when this is absent
-/// from the catalog the request carries no model hint and the shell
-/// resolves (or skips) it — see [`resolve_model`].
+/// Preferred model for suggestion calls when the server catalog offers it (cheap and fast).
+/// The session model is never used.
+/// When this is absent from the catalog the request carries no model hint and the shell resolves (or skips) it; see [`resolve_model`].
 pub const PREFERRED_SUGGESTION_MODEL: &str = "grok-4.6";
 
 /// Controller for the predicted-next-prompt ghost text.
 #[derive(Debug, Default)]
 pub struct PromptSuggestionController {
-    /// Full suggestion text from the model. Empty = no suggestion.
+    /// Full suggestion text from the model. Empty means no suggestion.
     full_text: String,
-    /// Request generation counter; responses carrying a stale generation are
-    /// discarded (a newer turn ended, or the suggestion was invalidated).
+    /// Request generation counter; responses carrying a stale generation are discarded (a newer turn ended, or the suggestion was invalidated).
     generation: u64,
-    /// Set when the user dismissed the current suggestion (Esc). Cleared by
-    /// the next loaded suggestion.
+    /// Set when the user dismissed the current suggestion (Esc). Cleared by the next loaded suggestion.
     dismissed: bool,
-    /// Set once the `shown` telemetry impression for the current suggestion
-    /// has been logged. Visibility is derived per frame ([`Self::ghost_for`]),
-    /// so a suggestion can become visible *after* load (divergent draft
-    /// cleared, gate re-opened) — this latch makes the impression fire
-    /// exactly once per installed suggestion, at first actual visibility.
-    /// Re-armed by [`Self::on_loaded`]; deliberately **not** re-armed by
-    /// [`Self::dismiss`]/[`Self::clear`] (the suggestion is gone).
+    /// Set once the `shown` telemetry impression for the current suggestion has been logged.
+    /// Visibility is derived per frame ([`Self::ghost_for`]), so a suggestion can become visible *after* load.
+    /// This latch makes the impression fire exactly once per installed suggestion, at first visibility (divergent draft cleared, gate re-opened).
+    /// Re-armed by [`Self::on_loaded`]; deliberately **not** re-armed by [`Self::dismiss`]/[`Self::clear`] (the suggestion is gone).
     shown_logged: bool,
-    /// Whether the feature is enabled. Resolved via
-    /// `GROK_PROMPT_SUGGESTIONS` env var, falling back to the persisted
-    /// `prompt_suggestions` setting.
+    /// Whether the feature is enabled. Resolved from `GROK_PROMPT_SUGGESTIONS`, falling back to the persisted `prompt_suggestions` setting.
     pub enabled: bool,
 }
 
@@ -68,15 +54,14 @@ impl PromptSuggestionController {
         }
     }
 
-    /// Begin a new fetch: invalidates any in-flight request and returns the
-    /// generation to thread through the effect pipeline.
+    /// Begin a new fetch: invalidates any in-flight request and returns the generation to thread through the effect pipeline.
     pub fn begin_fetch(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
 
-    /// A suggestion arrived from the shell. Discards stale generations and
-    /// empty payloads. Returns `true` when the suggestion was installed.
+    /// A suggestion arrived from the shell. Discards stale generations and empty payloads.
+    /// Returns `true` when the suggestion was installed.
     pub fn on_loaded(&mut self, suggestion: Option<String>, generation: u64) -> bool {
         if generation != self.generation {
             return false;
@@ -97,10 +82,8 @@ impl PromptSuggestionController {
 
     /// The ghost text to render for the current prompt text, if any.
     ///
-    /// Derived: the suggestion is visible iff the current text is a proper
-    /// prefix of it (including the empty prompt). Typing matching characters
-    /// shrinks the ghost; typing it out fully (or diverging) hides it;
-    /// clearing the input brings the full suggestion back.
+    /// Derived: the suggestion is visible iff the current text is a proper prefix of it (including the empty prompt).
+    /// Typing matching characters shrinks the ghost; typing it out fully (or diverging) hides it; clearing the input brings the full suggestion back.
     pub fn ghost_for(&self, text: &str) -> Option<&str> {
         if !self.enabled || self.dismissed || self.full_text.is_empty() {
             return None;
@@ -109,8 +92,7 @@ impl PromptSuggestionController {
         if rest.is_empty() { None } else { Some(rest) }
     }
 
-    /// Accept the suggestion against the current prompt text. Returns the
-    /// remainder to insert and clears the suggestion.
+    /// Accept the suggestion against the current prompt text. Returns the remainder to insert and clears the suggestion.
     pub fn accept(&mut self, text: &str) -> Option<String> {
         let rest = self.ghost_for(text)?.to_owned();
         self.clear();
@@ -122,30 +104,26 @@ impl PromptSuggestionController {
         self.dismissed = true;
     }
 
-    /// Drop the suggestion and invalidate any in-flight fetch (turn started,
-    /// prompt sent, session switched...).
+    /// Drop the suggestion and invalidate any in-flight fetch (turn started, prompt sent, session switched...).
     pub fn clear(&mut self) {
         self.full_text.clear();
         self.generation = self.generation.wrapping_add(1);
     }
 
-    /// Whether a (non-dismissed) suggestion is loaded, regardless of the
-    /// current prompt text.
+    /// Whether a (non-dismissed) suggestion is loaded, regardless of the current prompt text.
     pub fn has_suggestion(&self) -> bool {
         self.enabled && !self.dismissed && !self.full_text.is_empty()
     }
 
-    /// Latch the `shown` impression for the current suggestion: returns
-    /// `true` exactly once per installed suggestion (the caller logs the
-    /// telemetry event on `true`). Callers check actual visibility first;
-    /// this only guards against double-logging when visibility — which is
-    /// re-derived per frame — recurs or is re-checked on a later path.
+    /// Latch the `shown` impression for the current suggestion: returns `true` exactly once per installed suggestion.
+    /// The caller logs the telemetry event on `true`.
+    /// Callers check actual visibility first.
+    /// This only guards against double-logging when visibility (re-derived per frame) recurs or is re-checked on a later path.
     pub fn mark_shown_logged(&mut self) -> bool {
         !std::mem::replace(&mut self.shown_logged, true)
     }
 
-    /// Whether the `shown` impression for the current suggestion has been
-    /// logged already (read-only companion to [`Self::mark_shown_logged`]).
+    /// Whether the `shown` impression for the current suggestion has been logged already (read-only companion to [`Self::mark_shown_logged`]).
     #[cfg(test)]
     pub(crate) fn shown_logged(&self) -> bool {
         self.shown_logged
@@ -160,10 +138,8 @@ impl PromptSuggestionController {
     }
 }
 
-/// Resolve the enabled state: env override wins, then the persisted
-/// `prompt_suggestions` setting (default on). The env var is read once per
-/// process; the setting is a thread-local cache, so this is cheap enough for
-/// per-frame calls.
+/// Resolve the enabled state: env override wins, then the persisted `prompt_suggestions` setting (default on).
+/// The env var is read once per process; the setting is a thread-local cache, so this is cheap enough for per-frame calls.
 pub fn resolve_enabled() -> bool {
     static ENV_OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     ENV_OVERRIDE
@@ -171,20 +147,17 @@ pub fn resolve_enabled() -> bool {
         .unwrap_or_else(crate::appearance::cache::load_prompt_suggestions)
 }
 
-/// Content-free size metadata for acceptance-rate telemetry: `(chars, words)`
-/// of the full suggestion text. Never log the text itself.
+/// Content-free size metadata for acceptance-rate telemetry: `(chars, words)` of the full suggestion text.
+/// Never log the text itself.
 pub fn suggestion_size(text: &str) -> (usize, usize) {
     (text.chars().count(), text.split_whitespace().count())
 }
 
-/// Resolve the client-side model hint sent with the suggestion request:
-/// env override > `grok-4.6` when the catalog offers it > `None`.
+/// Resolve the client-side model hint sent with the suggestion request: env override > `grok-4.6` when the catalog offers it > `None`.
 ///
-/// The hint is one tier of the shell-side resolution (env > config.toml >
-/// remote settings > this hint > `grok-4.6` default): the shell
-/// catalog-guards the effective model and skips the request entirely when
-/// it is not sampleable — the session model is never used for suggestion
-/// calls.
+/// The hint is one tier of the shell-side resolution (env > config.toml > remote settings > this hint > `grok-4.6` default).
+/// The shell catalog-guards the effective model and skips the request entirely when it is not sampleable.
+/// The session model is never used for suggestion calls.
 pub fn resolve_model(models: &crate::acp::model_state::ModelState) -> Option<String> {
     if let Ok(model) = std::env::var(PROMPT_SUGGESTIONS_MODEL_ENV)
         && !model.trim().is_empty()
@@ -348,8 +321,7 @@ mod tests {
     fn rejected_load_does_not_rearm_shown_latch() {
         let mut c = loaded_controller("run the tests");
         assert!(c.mark_shown_logged());
-        // An empty payload clears the suggestion but must not re-arm the
-        // latch — there is nothing new to show.
+        // An empty payload clears the suggestion but must not re-arm the latch; there is nothing new to show
         let generation = c.begin_fetch();
         assert!(!c.on_loaded(None, generation));
         assert!(c.shown_logged());

@@ -1,36 +1,20 @@
-//! `/announcements` -- show or hide the announcement banner.
-
 use crate::app::actions::Action;
-use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{
+    AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand, slash_meta,
+};
 
 const USAGE: &str = "Usage: /announcements hide | show";
 
-/// Control the announcement banner (hide/show).
 pub struct AnnouncementsCommand;
 
 impl SlashCommand for AnnouncementsCommand {
-    fn name(&self) -> &str {
-        "announcements"
-    }
-
-    fn description(&self) -> &str {
-        "Show or hide announcements"
-    }
-
-    fn usage(&self) -> &str {
-        "/announcements hide | show"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn args_required(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("hide|show")
+    slash_meta! {
+        name: "announcements",
+        description: "Show or hide announcements",
+        usage: "/announcements hide | show",
+        takes_args: true,
+        args_required: true,
+        arg_placeholder: "hide|show",
     }
 
     fn suggest_args(&self, _ctx: &AppCtx, _args_query: &str) -> Option<Vec<ArgItem>> {
@@ -147,8 +131,7 @@ mod tests {
     fn visible_only_with_session_announcements() {
         let models = ModelState::default();
         let cmd = AnnouncementsCommand;
-        // Flag is independent of the per-ID hidden set — true means menu
-        // still offers /announcements after hide (so show remains discoverable).
+        // The flag ignores which announcement IDs are hidden, so the menu still offers /announcements after a hide and show stays discoverable
         assert!(!cmd.visible(&AppCtx {
             models: &models,
             cwd: std::path::Path::new("."),

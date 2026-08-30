@@ -12,12 +12,12 @@ fn command_row() -> StatusLineConfig {
 fn session_reports_its_config_once() {
     let metrics = StatusLineMetrics::new();
 
-    // A section that named no mode is `unset`, not `disabled`.
+    // A config with no `type` key reports `unset`, not `disabled`
     metrics.report_config(&StatusLineConfig::default());
     metrics.report_config(&command_row());
 
     assert_eq!(metrics.kind.get().copied(), Some("unset"));
-    // The flag health is gated on cannot move on the second call either.
+    // The flag that gates health reporting cannot move on the second call either
     assert!(!metrics.draws_a_row.load(Ordering::Relaxed));
 }
 
@@ -28,7 +28,7 @@ fn health_reports_every_run_and_the_slowest_of_them_once() {
     metrics.note_content();
     metrics.record_ok(10);
     metrics.record_ok(20);
-    // Recorded before the shorter run below, so a last-write-wins bug shows.
+    // The slowest run lands before the shorter run below, so a last-write-wins bug shows
     metrics.record_timed_out(10_000);
     metrics.record_failed(30);
     // An abandoned run has no duration to record.

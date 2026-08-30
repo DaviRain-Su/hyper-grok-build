@@ -1,27 +1,8 @@
-//! Manager-resolved permission analytics projected onto product events.
-//!
-//! Closed enums + [`PermissionDecisionPayload`] fields. Unknown manager strings
-//! are rejected by `TryFrom` and omitted by the shell rather than exported.
-
 use serde::Serialize;
 
 use super::{AccessKind, PermissionOutcome};
 use crate::enums::PermissionMode;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Manager-resolved permission analytics (content-free, additive to product events)
-//
-// These closed enums project the workspace manager's authoritative
-// `PermissionEvent` (in `xai-grok-workspace`) onto `PermissionDecisionPayload`.
-// The mappings are the single canonical `TryFrom<&str>` inverse of the manager's
-// string constants; unknown strings are rejected (the caller omits the field and
-// records a fixed local diagnostic — never exports the raw value). None of these
-// carry commands, paths, arguments, or any free text.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Normalized human prompt outcome. Only `Allow`/`Reject` count as a human
-/// response for the primary KPI denominator; the manager's finer raw outcome
-/// strings (`allow_once`, `reject_always_bash`, …) all collapse here.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionPromptOutcome {
@@ -33,7 +14,6 @@ pub enum PermissionPromptOutcome {
 }
 
 impl PermissionPromptOutcome {
-    /// Every normalized category, in declaration order.
     pub const ALL: &'static [Self] = &[
         Self::Allow,
         Self::Reject,
@@ -45,8 +25,6 @@ impl PermissionPromptOutcome {
 
 impl TryFrom<&str> for PermissionPromptOutcome {
     type Error = ();
-    /// Map a manager raw prompt-outcome string to the normalized category.
-    /// Covers every `outcome_str` the manager emits at its prompt path.
     fn try_from(s: &str) -> Result<Self, ()> {
         match s {
             "allow_once"
@@ -69,10 +47,6 @@ impl TryFrom<&str> for PermissionPromptOutcome {
     }
 }
 
-/// Granular prompt outcome, preserving the per-row detail that
-/// [`PermissionPromptOutcome`] collapses — measures "Always allow …" /
-/// "Never allow" adoption separately from allow-once clicks. Additive; the
-/// KPI denominator stays on the normalized enum.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionPromptOutcomeDetail {
@@ -94,8 +68,6 @@ pub enum PermissionPromptOutcomeDetail {
 }
 
 impl PermissionPromptOutcomeDetail {
-    /// Every variant, in declaration order. The shell drift test asserts a
-    /// bijection with the manager's `PromptOutcomeKind::ALL`.
     pub const ALL: &'static [Self] = &[
         Self::AllowOnce,
         Self::AllowAlways,
@@ -117,7 +89,6 @@ impl PermissionPromptOutcomeDetail {
 
 impl TryFrom<&str> for PermissionPromptOutcomeDetail {
     type Error = ();
-    /// Inverse of the manager's `PromptOutcomeKind::wire_str` vocabulary.
     fn try_from(s: &str) -> Result<Self, ()> {
         Ok(match s {
             "allow_once" => Self::AllowOnce,
@@ -140,7 +111,6 @@ impl TryFrom<&str> for PermissionPromptOutcomeDetail {
     }
 }
 
-/// Canonical closed decision-reason (the manager's `decision_reason` trigger).
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionDecisionReason {
@@ -167,12 +137,11 @@ pub enum PermissionDecisionReason {
     NeedsUser,
     BashRequestFloor,
     OpaqueShell,
+    HookAsk,
     RequesterGone,
 }
 
 impl PermissionDecisionReason {
-    /// Every variant, in declaration order. Used by drift tests to assert the
-    /// enum is a bijection with the manager's owned `reasons::ALL` vocabulary.
     pub const ALL: &'static [Self] = &[
         Self::Yolo,
         Self::PolicyAllow,
@@ -197,13 +166,13 @@ impl PermissionDecisionReason {
         Self::NeedsUser,
         Self::BashRequestFloor,
         Self::OpaqueShell,
+        Self::HookAsk,
         Self::RequesterGone,
     ];
 }
 
 impl TryFrom<&str> for PermissionDecisionReason {
     type Error = ();
-    /// Inverse of the manager `reasons::*` constants. Every constant must map.
     fn try_from(s: &str) -> Result<Self, ()> {
         Ok(match s {
             "yolo" => Self::Yolo,
@@ -229,16 +198,13 @@ impl TryFrom<&str> for PermissionDecisionReason {
             "needs_user" => Self::NeedsUser,
             "bash_request_floor" => Self::BashRequestFloor,
             "opaque_shell" => Self::OpaqueShell,
+            "hook_ask" => Self::HookAsk,
             "requester_gone" => Self::RequesterGone,
             _ => return Err(()),
         })
     }
 }
 
-/// Auto-classifier path taken (the manager's `classifier_source`). `NotWired`
-/// means the Auto classifier route was entered but no classifier was installed
-/// (`set_classifier(None)`), so nothing was actually judged — distinct from
-/// `Heuristic`, which is a real heuristic verdict.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionClassifierSource {
@@ -251,9 +217,6 @@ pub enum PermissionClassifierSource {
 }
 
 impl PermissionClassifierSource {
-    /// Every source, in declaration order. Used by the shell drift test to assert
-    /// a bijection with the workspace owner projection `ClassifierSourceKind::ALL`
-    /// (classifier provenances plus the `fast_path`/`not_wired` states).
     pub const ALL: &'static [Self] = &[
         Self::Llm,
         Self::Heuristic,
@@ -279,7 +242,6 @@ impl TryFrom<&str> for PermissionClassifierSource {
     }
 }
 
-/// Auto-classifier verdict (the manager's `classifier_verdict`).
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionClassifierVerdict {
@@ -289,8 +251,6 @@ pub enum PermissionClassifierVerdict {
 }
 
 impl PermissionClassifierVerdict {
-    /// Every verdict, in declaration order. Used by the shell drift test to assert
-    /// a bijection with the workspace `ClassifierVerdict::ALL` vocabulary.
     pub const ALL: &'static [Self] = &[Self::Allow, Self::Block, Self::Unavailable];
 }
 
@@ -306,8 +266,6 @@ impl TryFrom<&str> for PermissionClassifierVerdict {
     }
 }
 
-/// Fixed harness-owned static-analysis finding token. Mirrors the workspace
-/// `ClassifierSecurityFinding` wire tokens; carries no command/path/argument.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionSecurityFinding {
@@ -323,8 +281,6 @@ pub enum PermissionSecurityFinding {
 }
 
 impl PermissionSecurityFinding {
-    /// Every variant, in declaration order. Used by the drift test to assert the
-    /// enum is a bijection with the workspace `ClassifierSecurityFinding` tokens.
     pub const ALL: &'static [Self] = &[
         Self::FailClosedPolicy,
         Self::UnparseableShell,
@@ -356,24 +312,12 @@ impl TryFrom<&str> for PermissionSecurityFinding {
     }
 }
 
-/// Primary Auto-mode KPI classification for one decision. The cohort is a real
-/// classifier Block escalated to a UI prompt with an explicit human response;
-/// see [`auto_denial_kpi`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AutoDenialKpi {
-    /// Human agreed with the classifier (rejected the action).
     Alignment,
-    /// Human overrode the classifier (allowed the action) — an eval candidate,
-    /// not proof the classifier was wrong.
     Disagreement,
 }
 
-/// Whether a decision belongs to the primary Auto denial-limit KPI cohort and,
-/// if so, which side. Cohort: `permission_mode = auto`,
-/// `decision_reason = auto_denial_limit`, `classifier_verdict = block`, and a
-/// human `prompt_outcome` of `allow` (disagreement) or `reject` (alignment).
-/// All other outcomes (cancel, followup, error, timeouts, policy/gate prompts)
-/// return `None` and are excluded from the denominator.
 pub fn auto_denial_kpi(p: &PermissionDecisionPayload) -> Option<AutoDenialKpi> {
     if p.permission_mode != PermissionMode::Auto
         || p.decision_reason != Some(PermissionDecisionReason::AutoDenialLimit)
@@ -406,54 +350,32 @@ pub struct PermissionDecisionPayload {
     pub decision: PermissionOutcome,
     pub wait_ms: u64,
     pub permission_mode: PermissionMode,
-    /// Decision provenance (`config`/`user_reject`/`user_abort`/…), from
-    /// shell's `permission_decision_source`. Additive analytics-visible field, added
-    /// for the external `tool_decision` event (design ‡ footnote).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_type: Option<String>,
-    // ── Manager-resolved analytics (content-free; None when the manager
-    //    returned no event, so the shell omits rather than fabricates). These
-    //    additions are NOT part of the external OTEL projection: `map_tool_decision`
-    //    ignores them, so the external record stays byte-for-byte unchanged. ──
-    /// Whether the manager *attempted* a UI prompt (its `user_prompted`). This is
-    /// not proof the client rendered a prompt; a human response is proven only by
-    /// `prompt_outcome` being `Allow`/`Reject`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manager_prompt_attempted: Option<bool>,
-    /// Normalized human prompt outcome; `None` unless the request was prompted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_outcome: Option<PermissionPromptOutcome>,
-    /// Granular prompt outcome (per-row detail); `None` unless prompted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_outcome_detail: Option<PermissionPromptOutcomeDetail>,
-    /// Whether the `remember_tool_approvals` gate was on for this decision;
-    /// `None` on legacy manager events.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remember_tool_approvals: Option<bool>,
-    /// Canonical decision-reason trigger.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision_reason: Option<PermissionDecisionReason>,
-    /// Auto-classifier path, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub classifier_source: Option<PermissionClassifierSource>,
-    /// Auto-classifier verdict, if the classifier route produced one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub classifier_verdict: Option<PermissionClassifierVerdict>,
-    /// Fixed finding tokens (no descriptions/payload). `Some([])` means the
-    /// classifier route ran with an empty attempted assessment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_findings: Option<Vec<PermissionSecurityFinding>>,
-    /// Milliseconds spent in classification, if a classifier ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub classifier_latency_ms: Option<u64>,
-    /// Consecutive auto denials at decision time, clamped to the manager budget.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_denials_consecutive: Option<u32>,
-    /// Total auto denials at decision time, clamped to the manager budget.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_denials_total: Option<u32>,
 }
@@ -462,11 +384,6 @@ pub struct PermissionDecisionPayload {
 mod permission_analytics_tests {
     use super::*;
 
-    /// Self-consistency for the reason enum: every variant serializes to a
-    /// snake_case string that `TryFrom` maps back to the same variant. The
-    /// cross-crate bijection against the manager's owned `reasons::ALL`
-    /// vocabulary is enforced by the shell drift test (which can depend on the
-    /// workspace crate); this crate cannot, so it guards enum↔wire consistency.
     #[test]
     fn decision_reason_enum_round_trips_every_variant() {
         for &variant in PermissionDecisionReason::ALL {
@@ -481,10 +398,6 @@ mod permission_analytics_tests {
         assert!(PermissionDecisionReason::try_from("not_a_reason").is_err());
     }
 
-    /// Normalization behavior of a few representative raw outcomes (the KPI-
-    /// relevant ones). The exhaustive owner-vocabulary coverage — every wire
-    /// string the manager can emit maps — is enforced by the shell drift test
-    /// against `PromptOutcomeKind::ALL` (this crate cannot depend on the owner).
     #[test]
     fn prompt_outcome_normalizes_representative_outcomes() {
         use PermissionPromptOutcome as O;
@@ -516,8 +429,6 @@ mod permission_analytics_tests {
         assert!(PermissionPromptOutcome::try_from("mystery").is_err());
     }
 
-    /// Enum↔wire round-trip for every detail variant. The cross-crate
-    /// bijection lives in the shell drift test.
     #[test]
     fn prompt_outcome_detail_round_trips_every_variant() {
         for &variant in PermissionPromptOutcomeDetail::ALL {
@@ -532,10 +443,6 @@ mod permission_analytics_tests {
         assert!(PermissionPromptOutcomeDetail::try_from("mystery").is_err());
     }
 
-    /// Enum↔wire self-consistency for the symmetric analytics enums: every
-    /// variant serializes to a snake_case string that `TryFrom` maps back to the
-    /// same variant. The cross-crate bijection against the workspace owner
-    /// vocabularies lives in the shell drift tests.
     #[test]
     fn classifier_source_verdict_finding_enums_round_trip() {
         for &v in PermissionClassifierSource::ALL {
@@ -593,7 +500,6 @@ mod permission_analytics_tests {
         use PermissionClassifierVerdict as V;
         use PermissionDecisionReason as R;
         use PermissionPromptOutcome as O;
-        // In-cohort: human Reject = Alignment, human Allow = Disagreement.
         assert_eq!(
             auto_denial_kpi(&kpi_payload(
                 PermissionMode::Auto,
@@ -612,7 +518,6 @@ mod permission_analytics_tests {
             )),
             Some(Disagreement)
         );
-        // Excluded: cancel, wrong mode, wrong reason, wrong verdict, no outcome.
         for excluded in [
             kpi_payload(
                 PermissionMode::Auto,
@@ -648,7 +553,4 @@ mod permission_analytics_tests {
             assert_eq!(auto_denial_kpi(&excluded), None);
         }
     }
-    // NB: the four-event cohort denominator/rate smoke lives in the shell crate's
-    // `permission_analytics_tests`, where it runs the full production
-    // event→payload projection on real manager `PermissionEvent`s.
 }

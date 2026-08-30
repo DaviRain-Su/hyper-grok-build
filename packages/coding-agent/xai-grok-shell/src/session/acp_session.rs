@@ -79,7 +79,7 @@ use xai_grok_tools::types::output::{
 };
 use xai_grok_workspace::file_system::CodebaseIndexManager;
 use xai_grok_workspace::permission::{
-    AccessKind, ClientType, Decision, PermissionEvent, PermissionHandle,
+    AccessKind, ClientType, Decision, HookAsk, PermissionEvent, PermissionHandle, PermissionRequest,
 };
 use xai_grok_workspace::session::file_state::{FileStateHandle, FileStateTracker};
 const SESSION_LOG: &str = "xai_session";
@@ -122,6 +122,8 @@ use active_agent_message_presentation::*;
 mod image_strip;
 #[path = "acp_session_impl/interjection.rs"]
 mod interjection;
+#[path = "acp_session_impl/sampling_events.rs"]
+mod sampling_events;
 #[path = "acp_session_impl/tool_calls.rs"]
 mod tool_calls;
 #[path = "acp_session_impl/workflow_write_smoke_check.rs"]
@@ -171,9 +173,11 @@ use tool_dispatch::*;
 #[path = "acp_session_impl/mcp_snapshot.rs"]
 mod mcp_snapshot;
 use mcp_snapshot::*;
-#[path = "acp_session_impl/tasks_cancel.rs"]
-mod tasks_cancel;
-use tasks_cancel::*;
+#[path = "acp_session_impl/turn_task.rs"]
+mod turn_task;
+use turn_task::*;
+#[path = "acp_session_impl/cancel.rs"]
+mod cancel;
 #[path = "acp_session_impl/reminders.rs"]
 mod reminders;
 use reminders::*;
@@ -666,6 +670,8 @@ pub(crate) struct PreparedToolCall {
     dispatch_target_name: Option<String>,
     /// Read-only per `ToolKind`; decides whether the call takes the per-file lock.
     is_read_only: bool,
+    rewriting_hook: Option<String>,
+    additional_context: Vec<xai_grok_hooks::dispatcher::AdditionalContext>,
 }
 impl PreparedToolCall {
     /// The tool name hooks see: the resolved dispatch target, else the wire name.
@@ -697,9 +703,54 @@ pub(crate) struct ModelAuthMemo {
     /// "credential chokepoint must clear the memo" contract made automatic.
     pub(crate) catalog_epoch: u64,
 }
+pub(crate) struct PendingImageStrip {
+    pub(crate) urls: Vec<std::sync::Arc<str>>,
+    pub(crate) timed_out: bool,
+    pub(crate) applying: bool,
+}
+pub(crate) struct ImageStripRewriteBarrier {
+    gate: std::sync::Arc<tokio::sync::RwLock<()>>,
+    strips: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+pub(crate) struct ImageStripWriteGuard {
+    _gate_guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    _strip_guard: tokio::sync::OwnedMutexGuard<()>,
+}
+impl ImageStripRewriteBarrier {
+    pub(crate) fn new() -> Self {
+        Self {
+            gate: std::sync::Arc::new(tokio::sync::RwLock::new(())),
+            strips: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+    pub(crate) async fn lock_strip(&self) -> ImageStripWriteGuard {
+        let strip_guard = std::sync::Arc::clone(&self.strips).lock_owned().await;
+        let gate_guard = std::sync::Arc::clone(&self.gate).read_owned().await;
+        ImageStripWriteGuard {
+            _strip_guard: strip_guard,
+            _gate_guard: gate_guard,
+        }
+    }
+    pub(crate) async fn lock_rewind(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        std::sync::Arc::clone(&self.gate).write_owned().await
+    }
+}
 /// Phase 3: Post-flight handling after dispatch (inline in execute_tool_calls for now).
 pub(crate) struct SessionActor {
     pub(crate) session_info: SessionInfo,
+    /// Transient turn-retry kill switch, resolved once at spawn; flips
+    /// apply to new sessions. Off for subagents in the first ship; headless
+    /// is enforced per turn via `attach_non_interactive`.
+    pub(crate) transient_retry_enabled: bool,
+    /// Cumulative transient resubmits this prompt. Prompt-scoped on the
+    /// actor: auto-recovery, stop-hook continuations, and the goal loop
+    /// re-enter the turn loop within one prompt, so a loop-local would
+    /// re-arm the cap (exhaustion itself triggers auto-recovery).
+    pub(crate) transient_retries_prompt_total: std::cell::Cell<u32>,
+    /// Start of the current transient-recovery episode (first failed
+    /// attempt; cleared on a successful sample). Prompt-scoped with the
+    /// counter above.
+    pub(crate) transient_episode_start: std::cell::Cell<Option<tokio::time::Instant>>,
     /// Shared live handle to the current ACP auth method. Normal sessions hold a
     /// clone of `MvpAgent::auth_method_id`, so a mid-session `/login` is picked
     /// up by the per-turn auth gate without re-spawning; subagents instead get a
@@ -784,10 +835,11 @@ pub(crate) struct SessionActor {
     /// `reconstruct_full_config` threads it into the sampler config, and the
     /// sampler itself sends the matching `x-grok-doom-loop-check` header.
     pub(crate) doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
-    /// Telemetry-only per-turn doom-loop recovery tally (attempts, whether a
-    /// budget-spent accept happened, tightest trigger label). Accumulated by
-    /// the event drainer, taken at turn end for the per-turn analytics event.
-    pub(crate) doom_loop_turn_tally: parking_lot::Mutex<crate::session::signals::DoomLoopTurnTally>,
+    /// Telemetry-only per-turn detector/recovery tally (deduplicated labels,
+    /// attempts, budget-spent accept, tightest recovery trigger). Accumulated
+    /// by the event drainer and taken at turn end for analytics events.
+    pub(crate) doom_loop_turn_tally:
+        parking_lot::Mutex<crate::session::doom_loop_telemetry::DoomLoopTurnTally>,
     /// File state tracker for rewind functionality
     pub(crate) file_state_tracker: Arc<FileStateTracker>,
     /// Last prompt text before the most recent rewind.
@@ -1204,18 +1256,27 @@ pub(crate) struct SessionActor {
     /// message and splitting the assistant text around the tool call on every
     /// attached client (the eventId order is what clients render in).
     ///
-    /// To keep all of a turn's `eventId`s in stream order, `run_turn_via_sampler`
-    /// installs a sender here before submitting and awaits the receiver after the
-    /// response arrives; the drainer fires it the moment it processes the
-    /// terminal `SamplingEvent::Completed` (every text/thought chunk has been
-    /// `send_update`d by then). `None` between turns.
-    pub(crate) turn_stream_drained: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Each submitted request retains a map entry until its terminal event is
+    /// processed. Map presence grants stream ownership; `Some` additionally
+    /// holds the ordering waiter, while a timeout changes it to `None` without
+    /// invalidating FIFO events already queued for that request. Turn and
+    /// cancellation boundaries revoke abandoned ownership after preserving
+    /// bounded image-strip work.
+    pub(crate) turn_stream_drained: parking_lot::Mutex<
+        std::collections::HashMap<
+            xai_grok_sampler::RequestId,
+            Option<tokio::sync::oneshot::Sender<()>>,
+        >,
+    >,
     /// A server-confirmed image strip awaiting proof that the stripped retry
     /// helped: URLs buffered by request id on `ImagesStripped`, persisted to
     /// stored history only when that request's `Completed` arrives, dropped
     /// on `Failed`. See `acp_session_impl/image_strip.rs`.
-    pub(crate) pending_image_strip:
-        parking_lot::Mutex<Option<(xai_grok_sampler::RequestId, Vec<std::sync::Arc<str>>)>>,
+    pub(crate) pending_image_strip: parking_lot::Mutex<
+        std::collections::HashMap<xai_grok_sampler::RequestId, PendingImageStrip>,
+    >,
+    /// Serializes durable image-strip writes with conversation rewinds.
+    pub(crate) image_strip_rewrite_barrier: ImageStripRewriteBarrier,
     /// Handle to the per-session `xai-grok-sampler` actor.
     ///
     /// Live sessions get a real handle from `spawn_session_actor`;
@@ -1861,6 +1922,9 @@ mod plan_mode_edit_gate_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/plan_mode_midturn_tests.rs"]
 mod plan_mode_midturn_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/pre_tool_use_decision_tests.rs"]
+mod pre_tool_use_decision_tests;
 /// Tests for [`conversation_has_project_instructions`], the idempotence
 /// helper that gates the spawn-time AGENTS.md / CLAUDE.md injector.
 ///
@@ -2009,9 +2073,11 @@ mod tool_meta_stamp_tests {
                 tokio::task::spawn_local(async move {
                     while let Some(cmd) = perm_rx.recv().await {
                         if let PermissionCommand::Request {
-                            tool_call_update,
+                            request:
+                                PermissionRequest {
+                                    tool_call_update, ..
+                                },
                             respond_to,
-                            ..
                         } = cmd
                         {
                             *captured_in_task.lock().await = Some(tool_call_update);
@@ -2157,6 +2223,13 @@ mod status_line_payload_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/tool_layer_images_bridge_tests.rs"]
 mod tool_layer_images_bridge_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn/transient_retry_loop_tests.rs"]
+mod transient_retry_loop_tests;
+/// Turn-level retry on transient sampler failures.
+#[cfg(test)]
+#[path = "acp_session_tests/transient_retry_tests.rs"]
+mod transient_retry_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/turn_end_guard_tests.rs"]
 mod turn_end_guard_tests;

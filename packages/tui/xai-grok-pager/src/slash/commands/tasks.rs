@@ -1,32 +1,20 @@
-//! `/tasks` -- list background tasks, subagents, and scheduled tasks.
-//!
-//! Minimal mode has no interactive `TasksPane`, so `/tasks` is the way
-//! to snapshot what's running in the background. It works in every render mode.
-//! The dispatcher (`dispatch_show_tasks`) reads the three task sources and
-//! commits a read-only list; killing/attaching is out of scope here (use the
-//! tasks pane in the full TUI).
+//! Minimal mode has no interactive `TasksPane`, so `/tasks` is the way to snapshot what's running in the background.
+//! It works in every render mode.
+//! The dispatcher (`dispatch_show_tasks`) reads the three task sources and commits a read-only list.
+//! Killing and attaching are out of scope here (use the tasks pane in the full TUI).
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
 /// List background tasks, subagents, and scheduled tasks.
 pub struct TasksCommand;
 
 impl SlashCommand for TasksCommand {
-    fn name(&self) -> &str {
-        "tasks"
-    }
-
-    fn description(&self) -> &str {
-        "List background tasks, subagents, and scheduled tasks"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    fn usage(&self) -> &str {
-        "/tasks"
+    slash_meta! {
+        name: "tasks",
+        description: "List background tasks, subagents, and scheduled tasks",
+        usage: "/tasks",
+        session_scoped: true,
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {

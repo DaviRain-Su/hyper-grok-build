@@ -249,6 +249,11 @@ pub struct HookInfo {
     /// state up front rather than let a refusal be the first signal.
     #[serde(default)]
     pub pinned: bool,
+    /// Whether `HooksAction::Remove` can succeed for this hook's source:
+    /// true only for user-registered hook directories, so surfaces don't
+    /// offer removal elsewhere.
+    #[serde(default)]
+    pub removable: bool,
 }
 
 /// Response for `x.ai/hooks/list`.
@@ -760,6 +765,7 @@ mod tests {
             source_dir: "/home/user/.grok/hooks".into(),
             disabled: false,
             pinned: false,
+            removable: true,
         };
         let json = serde_json::to_string(&hook).unwrap();
         assert!(json.contains("handlerType"));

@@ -1,8 +1,8 @@
 //! Per-session event log (`events.jsonl`).
 //!
-//! The typed [`Event`] variants, the shared [`EventWriter`] that appends them
-//! as JSON lines, and the per-session [`EventTracker`] holding the turn-local
-//! state those events are derived from.
+//! Each entry is a typed [`Event`].
+//! The shared [`EventWriter`] appends entries to the file as JSON lines.
+//! The per-session [`EventTracker`] keeps the state for the running turn and derives the events from it.
 
 pub mod log;
 pub mod tracker;

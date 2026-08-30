@@ -1,44 +1,37 @@
-//! Free→paid subscription detection and gate imposition/lift.
+//! Free-to-paid subscription detection and gate imposition/lift.
 //!
-//! All gate transitions go through [`AppView::impose_gate`] /
-//! [`AppView::lift_gate`] so the defer-vs-show decision and the lift
-//! bookkeeping (focus, telemetry, JWT-refresh check) live in one place.
+//! All gate transitions go through [`AppView::impose_gate`] / [`AppView::lift_gate`].
+//! That keeps the defer-vs-show decision and the lift bookkeeping (focus, telemetry, JWT-refresh check) in one place.
 //!
 //! Design constraints that are not obvious from the code:
-//! - Gates arriving from cached auth meta, prefetched settings, or settings
-//!   pushes can be stale: the user may have subscribed since the snapshot
-//!   was computed. Painting such a gate directly flashes a paywall at a
-//!   paying user, so it is held in `pending_gate_verification` while a live
-//!   check runs. On check failure or timeout we err on blocking.
-//! - Timer effects have no cancellation, so verifications are stamped with
-//!   `gate_verify_gen`; results and timeouts from superseded deferrals are
-//!   ignored by generation mismatch.
+//! - Gates from cached auth meta, prefetched settings, or settings pushes can be stale: the user may have subscribed since the snapshot was computed.
+//!   Painting such a gate directly flashes a paywall at a paying user, so it is held in `pending_gate_verification` while a live check runs.
+//!   On check failure or timeout we err on blocking.
+//! - Timer effects have no cancellation, so verifications are stamped with `gate_verify_gen`.
+//!   Results and timeouts from superseded deferrals are ignored by generation mismatch.
 
 use super::actions::Effect;
 use super::app_view::{AppView, AuthState};
 
-/// Default watch cadence. Overridable via the remote settings
-/// `grok_build_settings.subscription_watch_interval_secs` field.
+/// Default watch cadence.
+/// Overridable via the remote settings `grok_build_settings.subscription_watch_interval_secs` field.
 pub(crate) const SUBSCRIPTION_WATCH_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(60);
 
-/// Floor for the server-supplied cadence: a fat-fingered remote settings value
-/// must not turn the fleet into a hot-poller. `0` means "disabled" and is
-/// special-cased before this clamp.
+/// Floor for the server-supplied cadence: a fat-fingered remote settings value must not make the whole fleet poll rapidly.
+/// `0` means "disabled" and is special-cased before this clamp.
 pub(crate) const SUBSCRIPTION_WATCH_MIN_INTERVAL_SECS: u64 = 30;
 
-/// Floor for the `GROK_SUBSCRIPTION_WATCH_INTERVAL_SECS` env override
-/// (test seam / power user — deliberately below the server floor).
+/// Floor for the `GROK_SUBSCRIPTION_WATCH_INTERVAL_SECS` env override (for tests and power users; deliberately below the server floor).
 const SUBSCRIPTION_WATCH_ENV_MIN_SECS: u64 = 1;
 
 /// Cap on the spacing between watch/focus-triggered checks.
 pub(crate) const SUBSCRIPTION_CHECK_DEBOUNCE: std::time::Duration =
     std::time::Duration::from_secs(30);
 
-/// How long a deferred gate is held before being shown anyway. This is a
-/// safety net for a hung ACP round-trip only — a completed check (even a
-/// failed one) resolves the deferral immediately. Generous on purpose: the
-/// check can chain a `/user` fetch, a JWT refresh, and a settings re-fetch;
+/// How long a deferred gate is held before being shown anyway.
+/// This is a safety net for a hung ACP round-trip only; a completed check (even a failed one) resolves the deferral immediately.
+/// Generous on purpose: the check can chain a `/user` fetch, a JWT refresh, and a settings re-fetch.
 /// 5s was observed timing out in CI under full-suite contention.
 pub(crate) const GATE_VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -51,8 +44,8 @@ impl AppView {
             && self.team_name.is_none()
     }
 
-    /// `None` tier counts as potentially-free so detection works before the
-    /// first auth meta lands. Not a confirmed-free signal.
+    /// `None` tier counts as potentially free so detection works before the first auth meta lands.
+    /// A `true` result does not confirm the tier is free.
     pub fn may_be_free_tier(&self) -> bool {
         match self.subscription_tier.as_deref() {
             Some(t) => t.trim().eq_ignore_ascii_case("free"),
@@ -60,9 +53,8 @@ impl AppView {
         }
     }
 
-    /// Effective watch cadence; `None` = disabled. Precedence: env override
-    /// (`0` disables), server override (`0` disables, floor-clamped),
-    /// default.
+    /// Effective watch cadence; `None` means disabled.
+    /// Precedence: env override (`0` disables), server override (`0` disables, floor-clamped), default.
     pub fn subscription_watch_interval(&self) -> Option<std::time::Duration> {
         if let Ok(v) = std::env::var("GROK_SUBSCRIPTION_WATCH_INTERVAL_SECS")
             && let Ok(secs) = v.trim().parse::<u64>()
@@ -83,17 +75,15 @@ impl AppView {
         }
     }
 
-    /// Whether the watch (and the refocus check) should run: enabled,
-    /// consumer session, and gated or possibly-free.
+    /// Whether the watch (and the refocus check) should run: enabled, consumer session, and gated or possibly-free.
     pub fn subscription_watch_wanted(&self) -> bool {
         self.subscription_watch_interval().is_some()
             && self.is_consumer_session()
             && (self.gate.is_some() || self.may_be_free_tier())
     }
 
-    /// Half the effective interval, capped at [`SUBSCRIPTION_CHECK_DEBOUNCE`]
-    /// — scaling keeps the debounce from swallowing watch ticks when the
-    /// cadence is tightened.
+    /// The debounce is half the effective interval, capped at [`SUBSCRIPTION_CHECK_DEBOUNCE`].
+    /// Scaling keeps the debounce from swallowing watch ticks when the cadence is tightened.
     fn subscription_check_allowed(&self) -> bool {
         let debounce = self
             .subscription_watch_interval()
@@ -107,11 +97,10 @@ impl AppView {
         self.last_subscription_check_at = Some(std::time::Instant::now());
     }
 
-    /// Single guard-and-fire for the watch tick and the terminal-refocus
-    /// trigger. Empty when unwanted or debounced. The 5s paywall chain
-    /// deliberately bypasses this. `trigger` tags the unified-log entry
-    /// (`"watch"` / `"focus"`) so the check cadence is reconstructable
-    /// from logs.
+    /// The watch tick and the terminal-refocus trigger both fire their check through this one guard.
+    /// Returns no effects when the watch is unwanted or the check is debounced.
+    /// The paywall check loop that reruns every 5s deliberately bypasses this.
+    /// `trigger` tags the unified-log entry (`"watch"` / `"focus"`) so the check cadence is reconstructable from logs.
     #[must_use]
     pub fn fire_subscription_check(&mut self, trigger: &'static str) -> Vec<Effect> {
         if self.subscription_watch_wanted() && self.subscription_check_allowed() {
@@ -134,9 +123,10 @@ impl AppView {
         }
     }
 
-    /// Chokepoint for showing a gate. Already gated → update the copy.
-    /// Consumer session with access → defer for live verification (the gate
-    /// source may be stale). Otherwise → show directly.
+    /// Chokepoint for showing a gate.
+    /// An already-gated view just updates the copy.
+    /// A consumer session with access defers for live verification (the gate source may be stale).
+    /// Anything else shows directly.
     #[must_use]
     pub fn impose_gate(&mut self, gate: xai_grok_shell::auth::GateInfo) -> Vec<Effect> {
         if self.gate.is_some() {
@@ -170,10 +160,9 @@ impl AppView {
         vec![]
     }
 
-    /// Chokepoint for a settings-confirmed gate lift. Clears the visible
-    /// gate and any pending deferral; when either existed, runs the lift
-    /// bookkeeping and returns the JWT-refresh check (the tier claim is
-    /// baked into the JWT, so the shell must re-mint it).
+    /// Chokepoint for lifting a gate once settings confirm the subscription.
+    /// Clears the visible gate and any pending deferral; when either existed, runs the lift bookkeeping and returns the JWT-refresh check.
+    /// The tier claim is baked into the JWT, so the shell must re-mint it.
     #[must_use]
     pub fn lift_gate(&mut self) -> Vec<Effect> {
         let was_blocked = self.gate.is_some() || self.pending_gate_verification.is_some();
@@ -198,10 +187,9 @@ impl AppView {
         vec![Effect::CheckSubscription { verify: None }]
     }
 
-    /// Hold `gate` out of `self.gate` while a generation-stamped live check
-    /// verifies it. Resolution: authoritative meta via `apply_auth_meta`
-    /// (drops the deferral), or promotion on same-generation check failure /
-    /// timeout via [`Self::promote_deferred_gate`].
+    /// Hold `gate` out of `self.gate` while a generation-stamped live check verifies it.
+    /// Resolution: authoritative meta via `apply_auth_meta` drops the deferral.
+    /// A same-generation check failure or timeout promotes it via [`Self::promote_deferred_gate`].
     #[must_use]
     fn defer_gate_for_verification(&mut self, gate: xai_grok_shell::auth::GateInfo) -> Vec<Effect> {
         self.pending_gate_verification = Some(gate);
@@ -225,19 +213,15 @@ impl AppView {
         ]
     }
 
-    /// Show a deferred gate (err on blocking) — no-op unless `generation`
-    /// is the current verification and nothing resolved it meanwhile.
-    /// `reason` tags the unified-log entry (`"check_failed"` /
-    /// `"verify_timeout"`).
+    /// Show a deferred gate (err on blocking); no-op unless `generation` is the current verification and nothing resolved it meanwhile.
+    /// `reason` tags the unified-log entry (`"check_failed"` / `"verify_timeout"`).
     pub(crate) fn promote_deferred_gate(&mut self, generation: u64, reason: &'static str) {
         if generation == self.gate_verify_gen
             && let Some(gate) = self.pending_gate_verification.take()
             && self.gate.is_none()
         {
-            // Warn: the verification did not confirm access, so the user is
-            // now blocked. If this is wrong (paying user paywalled), this
-            // entry plus the preceding check.fired/check.complete lines
-            // show which path failed.
+            // Warn: the verification did not confirm access, so the user is now blocked
+            // If this is wrong (paying user paywalled), this entry plus the preceding check.fired/check.complete lines show which path failed
             crate::unified_log::warn(
                 "subscription.gate.promoted",
                 None,
@@ -294,7 +278,7 @@ mod tests {
         app.subscription_tier = Some("SuperGrok".into());
         assert!(!app.subscription_watch_wanted(), "paid tier is dormant");
 
-        // Gated — watches regardless of the (stale) tier string.
+        // Gated: watches regardless of the (stale) tier string
         app.gate = Some(watch_gate());
         assert!(app.subscription_watch_wanted(), "gated session watches");
         app.gate = None;
@@ -425,7 +409,7 @@ mod tests {
 
     #[test]
     fn impose_gate_direct_for_non_consumer_and_already_gated() {
-        // Team session: no live verification possible — show directly.
+        // Team session: no live verification possible, so the gate shows directly
         let mut app = test_app();
         app.team_name = Some("Acme Corp".into());
         assert!(app.impose_gate(watch_gate()).is_empty());
@@ -450,7 +434,7 @@ mod tests {
         let mut app = test_app();
         let _ = app.impose_gate(watch_gate());
         let first = app.gate_verify_gen;
-        app.pending_gate_verification = None; // simulate resolution
+        app.pending_gate_verification = None; // As if a check resolved the deferral
         let _ = app.impose_gate(watch_gate());
         assert_eq!(app.gate_verify_gen, first + 1, "each deferral re-stamps");
     }

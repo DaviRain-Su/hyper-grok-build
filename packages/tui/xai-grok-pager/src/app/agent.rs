@@ -20,17 +20,17 @@ pub struct AgentId(pub usize);
 /// Whether a queue entry is a regular prompt or a slash command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueEntryKind {
-    /// Regular user prompt — sent via `PromptRequest`.
+    /// Regular user prompt, sent via `PromptRequest`.
     Prompt,
-    /// Slash command (e.g., `/compact`) — dispatched as `ExtRequest` or local action.
+    /// Slash command (e.g., `/compact`), dispatched as `ExtRequest` or local action.
     Command,
-    /// Direct bash command — bypasses agent loop, executed by shell directly.
+    /// Direct bash command; it bypasses the agent loop and the shell executes it directly.
     BashCommand,
-    /// Scheduled (cron) prompt -- injected by the scheduler via ACP notification.
+    /// Scheduled (cron) prompt, injected by the scheduler via ACP notification.
     Cron,
 }
 impl QueueEntryKind {
-    /// Short, stable label for telemetry / profiling logs.
+    /// Short, stable label for telemetry and profiling logs.
     pub fn as_label(&self) -> &'static str {
         match self {
             Self::Prompt => "prompt",
@@ -42,10 +42,9 @@ impl QueueEntryKind {
 }
 /// An entry waiting in the queue to be sent to the agent.
 ///
-/// Each entry gets a monotonically increasing `id` for stable tracking
-/// (e.g., when editing a queued prompt whose positional index shifts as
-/// earlier prompts drain). The user-facing display uses the 1-based
-/// positional index (`#1`, `#2`, …), never the internal `id`.
+/// Each entry gets a monotonically increasing `id` for stable tracking.
+/// E.g. an edited queued prompt keeps its `id` while its position shifts as earlier prompts drain.
+/// The user-facing display uses the 1-based positional index (`#1`, `#2`, …), never the internal `id`.
 #[derive(Debug, Clone)]
 pub struct QueuedPrompt {
     /// Monotonic ID, unique within this agent's session. Never reused.
@@ -54,18 +53,15 @@ pub struct QueuedPrompt {
     pub text: String,
     /// Whether this is a prompt or a slash command.
     pub kind: QueueEntryKind,
-    /// Optional separate payload for the wire. When `Some`, this is sent
-    /// instead of `text`. Used for skill injection where the display
-    /// shows `/commit args` but the wire carries the skill XML content.
+    /// Optional separate payload for the wire. When `Some`, this is sent instead of `text`.
+    /// Skill injection uses it: the display shows `/commit args` but the wire carries the skill XML content.
     pub wire_blocks: Option<Vec<acp::ContentBlock>>,
-    /// Images attached to this prompt. Drained from `PromptWidget` at
-    /// submission time. Preserved across queue text edits.
+    /// Images attached to this prompt, drained from `PromptWidget` at submission time; they survive queue text edits.
     pub images: Vec<crate::prompt_images::PastedImage>,
     /// Whether this prompt should display as a skill invocation (teal accent).
     /// Only meaningful when `wire_blocks` is `Some`.
     pub display_as_skill: bool,
-    /// Recognized slash-token byte ranges into `text`, captured from the
-    /// composer at submit time; empty = no token styling.
+    /// Recognized slash-token byte ranges into `text`, captured from the composer at submit time; empty means no token styling.
     pub skill_token_ranges: Vec<std::ops::Range<usize>>,
     /// Scheduler task ID for cron prompts. Used for per-task dedup.
     pub task_id: Option<String>,
@@ -75,14 +71,13 @@ pub struct QueuedPrompt {
     /// All chip elements captured from the textarea at send time.
     /// Threaded into `InFlightPrompt` so rewind restores collapsed chips.
     pub chip_elements: Vec<ChipElement>,
-    /// Combined-turn display segments (len ≥ 2); drain paints one bubble each.
+    /// Combined-turn display segments (always at least two); drain paints one bubble each.
     pub combined_texts: Vec<String>,
 }
 impl QueuedPrompt {
-    /// Base row with every optional field at its default. Sites needing
-    /// more use struct-update syntax (`QueuedPrompt { wire_blocks: …,
-    /// ..QueuedPrompt::plain(id, text, kind) }`) so adding a field is a
-    /// one-site change.
+    /// Base row with every optional field at its default.
+    /// Sites needing more use struct-update syntax, so adding a field is a one-site change:
+    /// `QueuedPrompt { wire_blocks: …, ..QueuedPrompt::plain(id, text, kind) }`.
     pub fn plain(id: u64, text: impl Into<String>, kind: QueueEntryKind) -> Self {
         Self {
             id,
@@ -100,12 +95,10 @@ impl QueuedPrompt {
     }
     /// Whether the wire payload is exactly the display text.
     ///
-    /// `true` for plain rows (no `wire_blocks`) and for raw skill slash rows
-    /// (`/find-session args` — a single Text block equal to `text`, expanded
-    /// shell-side at delivery), so interjecting `text` loses nothing. `false`
-    /// when the payload was expanded client-side (`/imagine`, `/loop`):
-    /// interjecting those by `text` would drop the expansion, and by payload
-    /// would render the raw instruction.
+    /// `true` for plain rows (no `wire_blocks`) and for raw skill slash rows, so interjecting `text` loses nothing.
+    /// A raw skill slash row (`/find-session args`) carries a single Text block equal to `text`, expanded shell-side at delivery.
+    /// `false` when the payload was expanded client-side (`/imagine`, `/loop`).
+    /// Interjecting those by `text` would drop the expansion, and interjecting by payload would render the raw instruction.
     pub fn wire_matches_display(&self) -> bool {
         match self.wire_blocks.as_deref() {
             None => true,
@@ -116,17 +109,10 @@ impl QueuedPrompt {
 }
 /// A command that is sent to the agent and tracked in the state machine.
 ///
-/// These are distinct from UI-local slash commands (like `/theme`, `/help`)
-/// which execute immediately without going through the queue or agent.
-///
-/// Each variant carries the data needed for execution and display.
-/// Using an enum instead of a String gives us:
-/// - Type safety (can't misspell command names)
-/// - Variant-specific data (e.g., `/model` would carry target model)
-/// - Proper rendering per command type
+/// These are distinct from UI-local slash commands (like `/theme`, `/help`) which execute immediately without going through the queue or agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentCommand {
-    /// `/compact` — compact conversation history.
+    /// `/compact`: compact conversation history.
     Compact,
     /// Creating a git worktree (from the welcome screen `w` action).
     CreateWorktree,
@@ -135,8 +121,7 @@ pub enum AgentCommand {
     /// Restoring code in same directory (non-worktree `--restore-code`).
     RestoreCode,
     /// Forking the current session into a peer (no-worktree path).
-    /// Drives the spinner shown on the placeholder agent while the
-    /// `x.ai/session/fork` request is in flight.
+    /// Drives the spinner shown on the placeholder agent while the `x.ai/session/fork` request is in flight.
     ForkSession,
 }
 impl AgentCommand {
@@ -163,17 +148,14 @@ impl AgentCommand {
 }
 /// Maximum in-memory stdout per background task (10 MB).
 pub const BG_TASK_MAX_STDOUT: usize = 10 * 1024 * 1024;
-/// How long to wait for a kill response before auto-clearing `pending_kill`
-/// so the user can retry. Applied to both bg tasks and subagents.
+/// How long to wait for a kill response before auto-clearing `pending_kill` so the user can retry.
+/// Applied to both bg tasks and subagents.
 pub const PENDING_KILL_TIMEOUT_SECS: u64 = 10;
-/// Prefix baked into monitor commands by backends predating the structured
-/// `monitor_description` field (and by reparented monitors). Shared
-/// convention with the shell's task notifications.
+/// Prefix baked into monitor commands by backends predating the structured `monitor_description` field (and by reparented monitors).
+/// Shared convention with the shell's task notifications.
 pub const MONITOR_PREFIX: &str = "[monitor] ";
-/// Status of a background task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BgTaskStatus {
-    /// Currently running.
     Running,
     /// Completed successfully (exit 0).
     Done,
@@ -199,39 +181,28 @@ pub struct BgTaskState {
     pub signal: Option<String>,
     /// Accumulated stdout (full cumulative buffer from shell, max BG_TASK_MAX_STDOUT).
     ///
-    /// Mutate via [`BgTaskState::set_stdout`] / [`BgTaskState::append_stdout`]
-    /// so `stdout_line_count` and `truncated` stay in sync.
+    /// Mutate via [`BgTaskState::set_stdout`] and [`BgTaskState::append_stdout`] so `stdout_line_count` and `truncated` stay in sync.
     pub stdout: String,
-    /// Cached `stdout.lines().count()`. Kept in sync by [`Self::set_stdout`]
-    /// and [`Self::append_stdout`] so the tasks-pane overlay doesn't have to
-    /// memchr-scan up to `BG_TASK_MAX_STDOUT` bytes per visible task per
-    /// render frame.
+    /// Cached `stdout.lines().count()`, kept in sync by [`Self::set_stdout`] and [`Self::append_stdout`].
+    /// Without it the tasks-pane overlay would memchr-scan up to `BG_TASK_MAX_STDOUT` bytes per visible task per render frame.
     pub stdout_line_count: usize,
-    /// Whether the rolling buffer has dropped data. Either the shell-side
-    /// `BashOutput.truncated` flag was set when the chunk arrived, or the
-    /// TUI itself trimmed the buffer to stay under `BG_TASK_MAX_STDOUT` (in
-    /// `set_stdout` / `append_stdout`). Once `true`, stays `true` — the
-    /// real line count is at least `stdout_line_count`, hence the `(N+)`
-    /// badge.
+    /// Whether the rolling buffer has dropped data.
+    /// It is set by the shell-side `BashOutput.truncated` flag, or when `set_stdout` or `append_stdout` trims the buffer under `BG_TASK_MAX_STDOUT`.
+    /// Once `true` it stays `true`: the real line count is at least `stdout_line_count`, hence the `(N+)` badge.
     pub truncated: bool,
     /// Kill request sent, awaiting task_completed.
     pub pending_kill: bool,
-    /// When the kill request was sent. Used to auto-clear `pending_kill`
-    /// after a timeout so the user can retry if the response is lost.
+    /// When the kill request was sent.
+    /// Used to auto-clear `pending_kill` after a timeout so the user can retry if the response is lost.
     pub kill_requested_at: Option<Instant>,
     /// Scrollback entry ID for the "Task started" block (for finish_running).
     pub scrollback_entry_id: Option<crate::scrollback::entry::EntryId>,
-    /// True when this background task is a monitor (the `monitor` tool). The
-    /// tasks pane renders monitors with a blue "Monitor" tag + neutral text
-    /// (mirroring scheduled `/loop` rows) instead of bash-highlighting the
-    /// command. Set from the `monitor_description` field of the
-    /// `TaskBackgrounded` notification.
+    /// True when this background task is a monitor (the `monitor` tool), set from the `TaskBackgrounded` notification's `monitor_description` field.
+    /// The tasks pane renders monitors with a blue "Monitor" tag and neutral text, like scheduled `/loop` rows, not a bash-highlighted command.
     pub is_monitor: bool,
-    /// True when this task was restored from a `session/load` replay
-    /// (`_meta.isReplay`) rather than started live in this client. Restored
-    /// tasks are historical context: the tasks pane must not auto-open for
-    /// them (on a cold resume they are dead and reconciled away within the
-    /// same load; on a warm reconnect they are ambient, not new activity).
+    /// True when this task was restored from a `session/load` replay (`_meta.isReplay`) rather than started live in this client.
+    /// Restored tasks are historical context: the tasks pane must not auto-open for them.
+    /// On a cold resume they are dead and reconciled away within the same load; on a warm reconnect they are ambient, not new activity.
     pub restored_from_replay: bool,
 }
 impl BgTaskState {
@@ -243,11 +214,9 @@ impl BgTaskState {
     }
     /// Replace `stdout` with `new_stdout`.
     ///
-    /// If `new_stdout` exceeds `BG_TASK_MAX_STDOUT`, keeps the head (snapped
-    /// to the nearest char boundary so UTF-8 stays valid) and sets
-    /// `truncated = true` — TUI-side dropping is treated the same as
-    /// shell-side dropping for badge purposes. Always refreshes
-    /// `stdout_line_count`.
+    /// If `new_stdout` exceeds `BG_TASK_MAX_STDOUT`, keeps the head (snapped to a char boundary so UTF-8 stays valid) and sets `truncated = true`.
+    /// TUI-side dropping is treated the same as shell-side dropping for badge purposes.
+    /// Always refreshes `stdout_line_count`.
     pub fn set_stdout(&mut self, new_stdout: String) {
         if new_stdout.len() <= BG_TASK_MAX_STDOUT {
             self.stdout = new_stdout;
@@ -259,11 +228,9 @@ impl BgTaskState {
         }
         self.stdout_line_count = self.stdout.lines().count();
     }
-    /// Append `chunk` to `stdout`, inserting a `\n` separator first if the
-    /// buffer is non-empty.
+    /// Append `chunk` to `stdout`, inserting a `\n` separator first if the buffer is non-empty.
     ///
-    /// If the resulting buffer exceeds `BG_TASK_MAX_STDOUT`, trims the head
-    /// (snapped to the next char boundary) and sets `truncated = true`.
+    /// If the resulting buffer exceeds `BG_TASK_MAX_STDOUT`, trims the head (snapped to the next char boundary) and sets `truncated = true`.
     /// Always refreshes `stdout_line_count`.
     pub fn append_stdout(&mut self, chunk: &str) {
         if !self.stdout.is_empty() {
@@ -281,11 +248,10 @@ impl BgTaskState {
         }
         self.stdout_line_count = self.stdout.lines().count();
     }
-    /// Terminal state recorded when a `TaskCompleted` arrives for a task with
-    /// no `bg_tasks` entry (its `TaskBackgrounded` hasn't arrived yet — short
-    /// bg shells can exit on the terminal's first poll). Keeps the late
-    /// `TaskBackgrounded` from inserting a fresh Running entry that nothing
-    /// would ever complete; see [`Self::absorb_late_backgrounded`].
+    /// Terminal state recorded when a `TaskCompleted` arrives for a task with no `bg_tasks` entry.
+    /// Its `TaskBackgrounded` hasn't arrived yet: short bg shells can exit on the terminal's first poll.
+    /// Keeps the late `TaskBackgrounded` from inserting a fresh Running entry that nothing would ever complete.
+    /// See [`Self::absorb_late_backgrounded`].
     pub fn tombstone_from_snapshot(
         snapshot: &xai_grok_tools::types::TaskSnapshot,
         status: BgTaskStatus,
@@ -332,9 +298,8 @@ impl BgTaskState {
         }
         tombstone
     }
-    /// Fold a late `TaskBackgrounded` into an already-terminal entry: keep the
-    /// terminal status/exit/timing, backfill only what the completion snapshot
-    /// couldn't know (blank fields, demoted-Execute stdout, scrollback entry).
+    /// Fold a late `TaskBackgrounded` into an already-terminal entry: keep the terminal status, exit, and timing.
+    /// Backfill only what the completion snapshot couldn't know: blank fields, demoted-Execute stdout, the scrollback entry.
     pub fn absorb_late_backgrounded(&mut self, fresh: BgTaskState, entry_id: Option<EntryId>) {
         self.tool_call_id = fresh.tool_call_id;
         if self.command.trim().is_empty() {
@@ -372,10 +337,8 @@ pub struct ScheduledTaskInfo {
 }
 /// Parsed goal status from `GoalUpdated` session notifications.
 ///
-/// The six paused variants encode the *cause* of the pause directly (no
-/// separate `pause_reason` field) so renderers can fan-out on a single
-/// `match`. See [`Self::pause_label`] for the user-facing labels and
-/// [`Self::is_paused`] for a cause-agnostic check.
+/// The six paused variants encode the *cause* of the pause directly (no separate `pause_reason` field) so renderers can fan out on a single `match`.
+/// See [`Self::pause_label`] for the user-facing labels and [`Self::is_paused`] for a cause-agnostic check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalDisplayStatus {
     Active,
@@ -383,16 +346,14 @@ pub enum GoalDisplayStatus {
     UserPaused,
     /// Classifier run cap reached; paused the goal automatically.
     BackOffPaused,
-    /// Verifier flagged the same gaps with no progress before the cap;
-    /// paused the goal automatically. Distinct from `BackOffPaused` only
-    /// in its user-facing label.
+    /// Verifier flagged the same gaps with no progress before the cap; paused the goal automatically.
+    /// Distinct from `BackOffPaused` only in its user-facing label.
     NoProgressPaused,
     /// Infrastructure turn failure paused the goal automatically.
     InfraPaused,
     Failed,
     Interrupted,
-    /// The model determined the goal is blocked in this environment;
-    /// `pause_message` on [`GoalDisplayState`] carries the reason text.
+    /// The model determined the goal is blocked in this environment; `pause_message` on [`GoalDisplayState`] carries the reason text.
     Blocked,
     BudgetLimited,
     Complete,
@@ -400,17 +361,11 @@ pub enum GoalDisplayStatus {
 impl GoalDisplayStatus {
     /// Parse a status string from the `GoalUpdated` notification.
     ///
-    /// Accepts the six paused variants; legacy `"paused"` is treated as
-    /// [`Self::UserPaused`] so a new pager keeps working against an old
-    /// shell.
+    /// Accepts the six paused variants; legacy `"paused"` is treated as [`Self::UserPaused`] so a new pager keeps working against an old shell.
     ///
-    /// Any unknown string — the empty string, a future `*_paused` form,
-    /// or any other status this pager cannot interpret — falls through to
-    /// [`Self::UserPaused`]: an uninterpretable status renders as a
-    /// resumable paused goal (no spinner, no live timer) rather than a
-    /// self-driving `Active` one. Mirrors the shell's
-    /// `GoalStatus::from_wire_str` fail-safe; `Active` is matched
-    /// explicitly (only the canonical `"active"` token).
+    /// Any unknown string, including the empty string and future `*_paused` forms, falls through to [`Self::UserPaused`].
+    /// An uninterpretable status renders as a resumable paused goal (no spinner, no live timer) rather than a self-driving `Active` one.
+    /// Mirrors the shell's `GoalStatus::from_wire_str` fail-safe; `Active` is matched explicitly (only the canonical `"active"` token).
     pub fn parse(s: &str) -> Self {
         match s {
             "active" => Self::Active,
@@ -427,12 +382,10 @@ impl GoalDisplayStatus {
             _ => Self::UserPaused,
         }
     }
-    /// Short user-facing label for the status chip, the modal status row,
-    /// and the modal paused-state hint line. Single source of truth so the
-    /// three displays cannot drift.
+    /// Short user-facing label for the status chip, the modal status row, and the modal paused-state hint line.
+    /// Single source of truth so the three displays cannot drift.
     ///
-    /// Returns the empty string for non-paused variants — they render
-    /// through their own labels (e.g. `"Budget"`, `"Done"`) elsewhere.
+    /// Returns the empty string for non-paused variants; they render through their own labels (e.g. `"Budget"`, `"Done"`) elsewhere.
     pub fn pause_label(&self) -> &'static str {
         match self {
             Self::UserPaused => "Paused",
@@ -447,8 +400,7 @@ impl GoalDisplayStatus {
             | Self::Complete => "",
         }
     }
-    /// True for any paused variant — cause-agnostic check used by the
-    /// modal to decide whether to append the `/goal resume` hint.
+    /// True for any paused variant; the modal uses this cause-agnostic check to decide whether to append the `/goal resume` hint.
     pub fn is_paused(&self) -> bool {
         match self {
             Self::UserPaused
@@ -481,8 +433,7 @@ impl GoalDisplayPhase {
         }
     }
 }
-/// Display state for an active goal, populated from `GoalUpdated`
-/// session notifications emitted by the goal orchestrator.
+/// Display state for an active goal, populated from `GoalUpdated` session notifications emitted by the goal orchestrator.
 #[derive(Debug, Clone)]
 pub struct GoalDisplayState {
     pub goal_id: String,
@@ -504,9 +455,8 @@ pub struct GoalDisplayState {
     pub total_worker_rounds: u32,
     pub total_verify_rounds: u32,
     pub live_subagent_tokens: Option<u64>,
-    /// Per-model marginal-token breakdown `(model_id, tokens)`, sorted by
-    /// tokens descending. Mirror of the `GoalUpdated` wire field; the modal
-    /// renders it under the active-subagent metrics block.
+    /// Per-model marginal-token breakdown `(model_id, tokens)`, sorted by tokens descending.
+    /// Mirror of the `GoalUpdated` wire field; the modal renders it under the active-subagent metrics block.
     pub live_tokens_by_model: Vec<(String, u64)>,
     pub live_context_pct: Option<u8>,
     pub live_turn_count: Option<u32>,
@@ -514,56 +464,42 @@ pub struct GoalDisplayState {
     pub last_event: Option<String>,
     pub last_event_detail: Option<String>,
     pub last_event_timestamp: Option<String>,
-    /// Token baseline at goal creation time. Used with the pager's
-    /// `context_state.used` to compute real-time token usage at render
-    /// frequency, instead of waiting for `GoalUpdated` notifications.
+    /// Token baseline at goal creation time.
+    /// Used with the pager's `context_state.used` to compute token usage at render frequency instead of waiting for `GoalUpdated` notifications.
     pub token_baseline: i64,
     /// Tokens from completed subagents (not in context_state.used).
     pub finished_subagent_tokens: i64,
     /// Retained for wire backwards compat; always empty in the simplified model.
     pub deliverables: Vec<()>,
     pub pause_message: Option<String>,
-    /// Number of classifier runs the shell has performed. `None` when
-    /// no run has happened yet.
+    /// Number of classifier runs the shell has performed. `None` when no run has happened yet.
     pub classifier_runs_attempted: Option<u32>,
-    /// Hard cap on classifier runs for this goal. `None` when not
-    /// configured.
+    /// Hard cap on classifier runs for this goal. `None` when not configured.
     pub classifier_max_runs: Option<u32>,
-    /// Last verdict returned by the classifier, if any. Re-exported
-    /// from the shell wire type — there is no separate pager-local
-    /// enum (cf. `GoalDisplayStatus`) because the verdict is small,
-    /// stable, and only carries two variants.
+    /// Last verdict returned by the classifier, if any. Re-exported from the shell wire type.
+    /// There is no separate pager-local enum (unlike `GoalDisplayStatus`): the verdict is small, stable, and only carries two variants.
     pub last_classifier_verdict: Option<GoalClassifierVerdict>,
     /// Filesystem path to the latest classifier-details artifact.
     pub last_classifier_details_path: Option<String>,
-    /// Whether `last_classifier_details_path` exists on disk, resolved ONCE
-    /// on `GoalUpdated` receipt (not per render frame) so the modal never
-    /// runs a blocking `stat(2)` on the UI hot path. `false` when the path
-    /// is absent or missing.
+    /// Whether `last_classifier_details_path` exists on disk, resolved once on `GoalUpdated` receipt rather than per render frame.
+    /// That keeps a blocking `stat(2)` off the UI hot path. `false` when the path is absent or missing.
     pub last_classifier_details_exists: bool,
-    /// True while a classifier run is in flight. Derived from the
-    /// wire field `verifying_completion: Option<bool>` (mapped to
-    /// `bool` at the boundary so render code never has to
-    /// `.unwrap_or(false)`).
+    /// True while a classifier run is in flight.
+    /// From the wire field `verifying_completion: Option<bool>`, mapped to `bool` at the boundary so render code never has to `.unwrap_or(false)`.
     pub verifying_completion: bool,
-    /// True while the goal planner subagent is running. Derived from
-    /// the wire field `planning: Option<bool>` (mapped to `bool` at the
-    /// boundary, same convention as `verifying_completion`).
+    /// True while the goal planner subagent is running.
+    /// From the wire field `planning: Option<bool>`, mapped to `bool` at the boundary, same convention as `verifying_completion`.
     pub planning: bool,
-    /// Wall-clock instant when this state was last updated from a GoalUpdated
-    /// notification. Used to compute local elapsed delta between notifications
-    /// so the pager can tick elapsed_ms at render frequency.
+    /// Wall-clock instant when this state was last updated from a GoalUpdated notification.
+    /// Used to compute the local elapsed delta between notifications so the pager can tick elapsed_ms at render frequency.
     pub received_at: std::time::Instant,
-    /// Monotonic floor for the displayed elapsed time, carried across
-    /// `GoalUpdated` rebuilds (seeded in `acp_handler` from the prior state).
-    /// Without it the timer ticks backward when a notification's authoritative
-    /// base is below the value the pager already extrapolated to. See
-    /// [`Self::live_elapsed_ms`].
+    /// Monotonic floor for the displayed elapsed time, carried across `GoalUpdated` rebuilds (seeded in `acp_handler` from the prior state).
+    /// Without it the timer ticks backward when a notification's authoritative base is below the value the pager already extrapolated to.
+    /// See [`Self::live_elapsed_ms`].
     pub elapsed_floor_ms: u64,
 }
 impl GoalDisplayState {
-    /// Minimal state for tests that only need a present goal (e.g. occluder
-    /// gating); field values are representative, not load-bearing.
+    /// Minimal state for tests that only need a present goal (e.g. occluder gating); field values are representative, nothing depends on them.
     #[cfg(test)]
     pub(crate) fn test_stub() -> Self {
         Self {
@@ -617,9 +553,8 @@ impl GoalDisplayState {
             self.tokens_used
         }
     }
-    /// Return elapsed_ms adjusted with local wall-clock delta since the last
-    /// GoalUpdated notification. This makes the timer tick smoothly at render
-    /// frequency without requiring the shell to emit notifications every second.
+    /// Return elapsed_ms adjusted with the local wall-clock delta since the last GoalUpdated notification.
+    /// This makes the timer tick smoothly at render frequency without requiring the shell to emit notifications every second.
     pub fn live_elapsed_ms(&self) -> u64 {
         let live = if self.status == GoalDisplayStatus::Active {
             self.elapsed_ms
@@ -632,8 +567,7 @@ impl GoalDisplayState {
 }
 /// What the agent is currently doing.
 ///
-/// Enforces mutual exclusivity: the agent is either idle, running a turn,
-/// or running a command — never two at once.
+/// Enforces mutual exclusivity: the agent is either idle, running a turn, or running a command, never two at once.
 #[derive(Debug, Clone, Default)]
 pub enum AgentState {
     /// Nothing happening. Queue can drain.
@@ -652,7 +586,7 @@ pub enum AgentState {
     CommandCancelling { command: AgentCommand },
 }
 impl AgentState {
-    /// Nothing is happening — safe to drain queue or start commands.
+    /// Nothing is happening; safe to drain the queue or start commands.
     pub fn is_idle(&self) -> bool {
         matches!(self, Self::Idle)
     }
@@ -674,7 +608,7 @@ impl AgentState {
     pub fn is_cancelling(&self) -> bool {
         matches!(self, Self::TurnCancelling | Self::CommandCancelling { .. })
     }
-    /// Agent is busy (turn or command) — queue should not drain.
+    /// Agent is busy (turn or command); the queue should not drain.
     pub fn is_busy(&self) -> bool {
         !self.is_idle()
     }
@@ -688,8 +622,7 @@ impl AgentState {
         }
     }
 }
-/// Context of a hook-blocked prompt requeued at the local queue front — see
-/// [`AgentSession::blocked_prompt`].
+/// Context of a hook-blocked prompt requeued at the local queue front; see [`AgentSession::blocked_prompt`].
 #[derive(Debug, Clone)]
 pub struct BlockedPromptContext {
     /// Local queue row id of the requeued blocked prompt.
@@ -701,14 +634,12 @@ pub struct BlockedPromptContext {
     /// The blocked turn was a combined submission of several queued rows.
     pub was_combined: bool,
 }
-/// A model switch stashed while no session exists, applied once the session
-/// id materialises (`apply_deferred_model_switch`).
+/// A model switch stashed while no session exists, applied once the session id arrives (`apply_deferred_model_switch`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeferredModelSwitch {
     pub model_id: acp::ModelId,
     pub effort: Option<ReasoningEffort>,
-    /// Displayed model at stash time — the rollback target
-    /// (`Effect::SwitchModel.prev_model_id`) if the switch fails.
+    /// Displayed model at stash time, the rollback target (`Effect::SwitchModel.prev_model_id`) if the switch fails.
     pub prev_model_id: Option<acp::ModelId>,
 }
 /// Cap on remembered prompts, shared by every recall list.
@@ -727,9 +658,7 @@ pub fn remember_prompt(list: &mut Vec<String>, text: &str) {
 }
 /// Per-agent business logic (ACP session, models, state).
 ///
-/// External code should use the facade methods (`handle_update`,
-/// `start_turn`, `finish_turn`, `turn_activity`) instead of accessing
-/// the tracker directly.
+/// External code should use the facade methods (`handle_update`, `start_turn`, `finish_turn`, `turn_activity`) rather than the tracker directly.
 pub struct AgentSession {
     pub id: AgentId,
     pub acp_tx: AcpAgentTx,
@@ -739,13 +668,11 @@ pub struct AgentSession {
     pub cwd: PathBuf,
     /// Whether this session is running inside a git worktree.
     pub is_worktree: bool,
-    /// `AgentId` of the parent session if this session was created via
-    /// `/fork`. Display-only (status bar, future agent picker grouping);
-    /// navigation does not consult it -- the session picker is the
-    /// source of truth for navigation history.
+    /// `AgentId` of the parent session if this session was created via `/fork`.
+    /// Display-only (status bar, future agent picker grouping).
+    /// Navigation does not consult it; the session picker is the source of truth for navigation history.
     pub forked_from: Option<AgentId>,
-    /// Prompts waiting to be sent. Drained front-to-back when
-    /// `state` becomes [`AgentState::Idle`].
+    /// Prompts waiting to be sent. Drained front-to-back when `state` becomes [`AgentState::Idle`].
     pub pending_prompts: VecDeque<QueuedPrompt>,
     /// Next monotonic ID for [`QueuedPrompt`].
     pub(crate) next_queue_id: u64,
@@ -754,129 +681,95 @@ pub struct AgentSession {
     pub(crate) yolo_mode: bool,
     /// Whether Auto (LLM classifier) permission mode is active for this session.
     /// Display-only mirror of the applied permission mode, read via `is_auto()`.
-    /// Kept in sync wherever the pager applies the mode; mutually exclusive with
-    /// `yolo_mode` (yolo wins).
+    /// Kept in sync wherever the pager applies the mode; mutually exclusive with `yolo_mode` (yolo wins).
     pub(crate) auto_mode: bool,
-    /// Prompt history for the current session, fetched from ACP
-    /// (`x.ai/prompt_history` scoped via `filter_session_id`). Most-recent-first.
-    /// Fetched on session create/load; prompts sent in this session are
-    /// additionally front-inserted locally on send.
+    /// Prompt history for the current session, fetched from ACP (`x.ai/prompt_history` scoped via `filter_session_id`). Most-recent-first.
+    /// Fetched on session create/load; prompts sent in this session are additionally front-inserted locally on send.
     pub prompt_history: Vec<String>,
     /// True until the session's startup/load `x.ai/prompt_history` fetch completes.
     pub prompt_history_loading: bool,
     /// Session is currently replaying historical updates from `session/load`.
     /// Used to suppress live-style redraw/render work until the load completes.
     pub loading_replay: bool,
-    /// Last `--restore-code` outcome's `degree`, parsed from
-    /// `_meta.codeRestore.degree` (non-worktree path) or `restoreDegree`
-    /// (worktree path). Forward-compat hook: the field is set by both
-    /// dispatch handlers but no rendering path consumes it yet — the
-    /// type-safety anchor for the wire shape lives in
-    /// [`crate::app::effects`]'s parser tests + the deserialise tests in
-    /// `ResumeSessionInWorktreeResponse`. Adding a rendering consumer is
-    /// out of scope for now.
+    /// Last `--restore-code` outcome's `degree`, parsed from `_meta.codeRestore.degree` (non-worktree path) or `restoreDegree` (worktree path).
+    /// Both dispatch handlers set the field but no rendering path consumes it yet.
+    /// The wire shape's type-safety anchor is [`crate::app::effects`]'s parser tests and the deserialise tests in `ResumeSessionInWorktreeResponse`.
     pub restore_degree: Option<xai_grok_workspace::session::git::RestoreDegree>,
-    /// Set when a rate-limit `RetryState::Exhausted` fires, so the subsequent
-    /// `TurnFailed` from the RPC error path can be suppressed (the retry
-    /// handler already displayed a user-friendly message). Cleared on `finish_turn`.
+    /// Set when a rate-limit `RetryState::Exhausted` fires, so the subsequent `TurnFailed` from the RPC error path can be suppressed.
+    /// The retry handler already displayed a user-friendly message. Cleared on `finish_turn`.
     pub rate_limited: bool,
-    /// Set when a `RetryState::Failed` with `error_type == "encrypted_content_mismatch"`
-    /// fires, so the subsequent `TurnFailed` can be suppressed (the retry handler
-    /// already displayed a user-friendly message). Cleared on `finish_turn`.
+    /// Set when a `RetryState::Failed` with `error_type == "encrypted_content_mismatch"` fires, so the subsequent `TurnFailed` can be suppressed.
+    /// The retry handler already displayed a user-friendly message. Cleared on `finish_turn`.
     pub model_incompatible: bool,
-    /// Set when a `RetryState::Failed` carries a 403 credit-limit error, so
-    /// the error message is suppressed in favour of the upsell modal.
+    /// Set when a `RetryState::Failed` carries a 403 credit-limit error, so the error message is suppressed in favour of the upsell modal.
     /// Cleared on `finish_turn`.
     pub credit_limit_blocked: bool,
-    /// Set when a rate-limit `RetryState::Exhausted` carries the
-    /// `subscription:free-usage-exhausted` code, so the PromptResponse
-    /// handler shows the free-usage paywall instead of the generic
-    /// rate-limit message. Always set together with [`Self::rate_limited`].
-    /// Cleared on `finish_turn`.
+    /// Set when a rate-limit `RetryState::Exhausted` carries the `subscription:free-usage-exhausted` code.
+    /// The PromptResponse handler then shows the free-usage paywall instead of the generic rate-limit message.
+    /// Always set together with [`Self::rate_limited`]. Cleared on `finish_turn`.
     pub free_usage_blocked: bool,
     pub(crate) tracker: AcpUpdateTracker,
-    /// ACP-advertised slash commands. Seeded from `InitializeResponse.meta`,
-    /// updated by `AvailableCommandsUpdate`. The prompt-side registry syncs
-    /// when the generation counter changes.
+    /// ACP-advertised slash commands. Seeded from `InitializeResponse.meta`, updated by `AvailableCommandsUpdate`.
+    /// The prompt-side registry syncs when the generation counter changes.
     pub available_commands: Vec<acp::AvailableCommand>,
-    /// Generation counter for `available_commands`. Bumped on every update
-    /// (even if the list is identical). Prompt-side compares its synced
-    /// generation to detect changes.
+    /// Generation counter for `available_commands`. Bumped on every update (even if the list is identical).
+    /// Prompt-side compares its synced generation to detect changes.
     ///
-    /// - Bootstrap (from connection): starts at 1 so prompt-side (starting at 0)
-    ///   triggers an initial sync.
+    /// - Bootstrap (from connection): starts at 1 so prompt-side (starting at 0) triggers an initial sync.
     /// - Test/placeholder: starts at 0 (no initial sync needed).
     pub available_commands_generation: u64,
-    /// Names of tools the agent has registered. `None` until the shell
-    /// advertises a list via `AvailableCommandsUpdate.meta.tools`.
-    /// `Some(_)` enables tool-gating in the slash registry; `None` keeps
-    /// every command visible (avoids bootstrap flicker).
+    /// Names of tools the agent has registered. `None` until the shell advertises a list via `AvailableCommandsUpdate.meta.tools`.
+    /// `Some(_)` enables tool-gating in the slash registry; `None` keeps every command visible (avoids bootstrap flicker).
     pub available_tools: Option<HashSet<String>>,
-    /// Whether a `/model` switch is in flight. Dims the status-bar model name
-    /// and holds the queue drain (`maybe_drain_queue`) so a queued prompt isn't
-    /// sent on the old harness mid-switch. Cleared on
-    /// `SwitchModelComplete`, or by `begin_session_reload` when a reconnect
-    /// drops the in-flight RPC — else a lost completion jams the queue forever.
+    /// Whether a `/model` switch is in flight.
+    /// Dims the status-bar model name and holds the queue drain (`maybe_drain_queue`) so a queued prompt isn't sent on the old harness mid-switch.
+    /// Cleared on `SwitchModelComplete`, or by `begin_session_reload` when a reconnect drops the in-flight RPC.
+    /// Without that, a lost completion jams the queue forever.
     pub model_switch_pending: bool,
-    /// A `UserPromptSubmit` hook blocked the last turn: hold the local
-    /// drip-feed queue (`maybe_drain_queue`) so queued follow-ups never
-    /// auto-run as if the blocked prompt had succeeded. Client-side mirror of
-    /// the shell's server-queue hold (which cannot see this queue). Cleared on
-    /// user re-engagement — a fresh submit, send-now / interjection, a save
-    /// or removal of the blocked row itself — and by `begin_session_reload`,
-    /// so a stale flag cannot jam a restored queue. An edit exit that
-    /// resolves nothing (Esc, pane switch, unrelated row) keeps the hold and
-    /// reopens the blocked-prompt card.
+    /// A `UserPromptSubmit` hook blocked the last turn, so hold the local drip-feed queue (`maybe_drain_queue`).
+    /// Queued follow-ups must never auto-run as if the blocked prompt had succeeded.
+    /// Client-side mirror of the shell's server-queue hold (which cannot see this queue).
+    /// Cleared on user re-engagement: a fresh submit, send-now or interjection, or a save or removal of the blocked row itself.
+    /// Also cleared by `begin_session_reload`, so a stale flag cannot jam a restored queue.
+    /// An edit exit that resolves nothing (Esc, pane switch, unrelated row) keeps the hold and reopens the blocked-prompt card.
     pub hook_block_hold: bool,
-    /// The hook-blocked prompt requeued at the queue front, while
-    /// [`Self::hook_block_hold`] is armed on the client that owns
-    /// the card. Lets the card reopen after an exit that resolved nothing.
+    /// The hook-blocked prompt requeued at the queue front, while [`Self::hook_block_hold`] is set on the client that owns the card.
+    /// Lets the card reopen after an exit that resolved nothing.
     /// Cleared with the hold (`release_hook_block_hold`, session reload).
     pub blocked_prompt: Option<BlockedPromptContext>,
-    /// Model the user chose this session via `/model` / the model picker, or
-    /// the last successfully applied live remote `ModelChanged` (leader-mode
-    /// fan-out). Survives reconnect (`begin_session_reload` does **not** clear
-    /// it). History-replay silent-revert of a prior choice is suppressed on the
-    /// shell side via `ReconnectState::user_selected_model`; the pager still
-    /// applies live remote switches and updates this field to match.
+    /// Model the user chose this session via `/model` or the model picker, or the last applied live remote `ModelChanged` (leader-mode fan-out).
+    /// Survives reconnect (`begin_session_reload` does **not** clear it).
+    /// History-replay silent-revert of a prior choice is suppressed on the shell side via `ReconnectState::user_selected_model`.
+    /// The pager still applies live remote switches and updates this field to match.
     pub user_model_preference: Option<acp::ModelId>,
     /// `/model X [effort]` issued before the session was ready, applied on SessionCreated.
     pub deferred_model_switch: Option<DeferredModelSwitch>,
     /// Central bg task state, keyed by task_id.
     pub bg_tasks: BTreeMap<String, BgTaskState>,
-    /// Correlation map: tool_call_id → task_id.
-    /// Used to route stdout chunks (which arrive keyed by tool_call_id) to the
-    /// correct bg task in `bg_tasks`.
+    /// Correlation map from tool_call_id to task_id.
+    /// Used to route stdout chunks (which arrive keyed by tool_call_id) to the correct bg task in `bg_tasks`.
     pub bg_tool_call_to_task: HashMap<String, String>,
     /// Active scheduled tasks, keyed by task_id.
     pub scheduled_tasks: HashMap<String, ScheduledTaskInfo>,
-    /// Plain-text prompt currently in flight, captured at send time and
-    /// cleared as soon as the server emits any activity (chunk, tool call,
-    /// retry, etc.). Used by `do_cancel_turn` to "rewind" a prompt back to
-    /// the input box if the user cancels before any response arrives.
+    /// Plain-text prompt currently in flight, captured at send time and cleared once the server emits any activity (chunk, tool call, retry, etc.).
+    /// Used by `do_cancel_turn` to "rewind" a prompt back to the input box if the user cancels before any response arrives.
     /// `None` for skill-injected prompts (cannot be reversed) and bash/cron.
     pub in_flight_prompt: Option<InFlightPrompt>,
     /// Prompt held across auto-compact for reauth resubmit after `/login`.
     /// `in_flight_prompt` is cleared on compact start so cancel cannot rewind.
     pub compact_held_prompt: Option<InFlightPrompt>,
-    /// Stable id for the prompt currently in flight. Generated client-side
-    /// at `Effect::SendPrompt` time and threaded through `PromptRequest._meta`
-    /// to the agent, which echoes it back on every `SessionNotification` and
-    /// `PromptResponse` it produces for that prompt.
+    /// Stable id for the prompt currently in flight, generated client-side at `Effect::SendPrompt` time and threaded through `PromptRequest._meta`.
+    /// The agent echoes it back on every `SessionNotification` and `PromptResponse` it produces for that prompt.
     ///
-    /// The acp_handler uses this to discriminate chunks for the active turn
-    /// from chunks belonging to a turn the user already rewound: any update
-    /// whose `meta.promptId` is set and doesn't match this id is silently
-    /// dropped. `None` between turns.
+    /// The acp_handler uses this to discriminate chunks for the active turn from chunks belonging to a turn the user already rewound.
+    /// Any update whose `meta.promptId` is set and doesn't match this id is silently dropped. `None` between turns.
     pub current_prompt_id: Option<String>,
     /// Whether this session was created via the `/new` slash command.
-    /// Checked in the `SessionCreated` handler to decide whether to show
-    /// the `/dashboard` discoverability tip. `false` for sessions created
-    /// by `/resume`, welcome-screen picker, `/fork`, or worktree flows.
+    /// Checked in the `SessionCreated` handler to decide whether to show the `/dashboard` discoverability tip.
+    /// `false` for sessions created by `/resume`, welcome-screen picker, `/fork`, or worktree flows.
     pub created_via_new: bool,
 }
-/// Captured state for a prompt that has been sent but not yet acknowledged
-/// by any server activity. See `AgentSession::in_flight_prompt`.
+/// Captured state for a prompt that has been sent but not yet acknowledged by any server activity. See `AgentSession::in_flight_prompt`.
 #[derive(Debug, Clone)]
 pub struct InFlightPrompt {
     pub text: String,
@@ -885,9 +778,8 @@ pub struct InFlightPrompt {
     pub scrollback_entry: EntryId,
     /// Earlier segment blocks for a combined multi-bubble turn (oldest first).
     pub combined_scrollback_entries: Vec<EntryId>,
-    /// All chip elements (paste blocks, @-file refs, image chips) that were
-    /// active in the textarea at send time. Restored on rewind so collapsed
-    /// chips render correctly instead of raw text.
+    /// All chip elements (paste blocks, @-file refs, image chips) that were active in the textarea at send time.
+    /// Restored on rewind so collapsed chips render correctly instead of raw text.
     pub chip_elements: Vec<ChipElement>,
 }
 /// Snapshot of a textarea chip element for rewind restore.
@@ -903,14 +795,13 @@ impl AgentSession {
     pub fn is_yolo(&self) -> bool {
         self.yolo_mode
     }
-    /// Whether Auto (LLM classifier) mode is active. Prefer this over direct
-    /// field access. Mutually exclusive with `is_yolo()` (yolo wins).
+    /// Whether Auto (LLM classifier) mode is active. Prefer this over direct field access.
+    /// Mutually exclusive with `is_yolo()` (yolo wins).
     pub fn is_auto(&self) -> bool {
         self.auto_mode
     }
-    /// Test-only setter for `yolo_mode` (the field is private; production toggles
-    /// it via the permission-mode facade). Available to sibling crates' test
-    /// builds through the test-only helpers.
+    /// Test-only setter for `yolo_mode` (the field is private; production toggles it via the permission-mode facade).
+    /// Available to sibling crates' test builds through the test-only helpers.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_yolo_mode_for_test(&mut self, on: bool) {
         self.yolo_mode = on;
@@ -955,10 +846,9 @@ impl AgentSession {
         self.compact_held_prompt = None;
         self.current_prompt_id = None;
     }
-    /// Whether any background task is still running (vs. completed/failed).
-    /// Used to defer the automatic away-recap: a running task can wake the
-    /// agent (auto-wake on completion), so we don't pre-generate a recap while
-    /// one is live and could change the session out from under it.
+    /// Whether any background task is still running (not completed or failed).
+    /// Used to defer the automatic away-recap: a running task can wake the agent (auto-wake on completion).
+    /// We don't pre-generate a recap while a task is live and could change the session out from under it.
     pub fn has_running_bg_tasks(&self) -> bool {
         self.bg_tasks
             .values()
@@ -1031,8 +921,7 @@ impl AgentSession {
     pub fn enqueue_prompt(&mut self, text: String) -> u64 {
         self.enqueue_entry(text, QueueEntryKind::Prompt)
     }
-    /// Push a plain prompt carrying the composer's recognized slash-token
-    /// ranges (mid-text skill highlighting in the scrollback echo).
+    /// Push a plain prompt carrying the composer's recognized slash-token ranges (mid-text skill highlighting in the scrollback echo).
     pub fn enqueue_prompt_with_skill_tokens(
         &mut self,
         text: String,
@@ -1042,10 +931,8 @@ impl AgentSession {
     }
     /// Push a prompt onto the **front** of the queue. Returns the assigned ID.
     ///
-    /// Sibling of [`enqueue_prompt`](Self::enqueue_prompt) -- same defaults,
-    /// but `push_front` instead of `push_back`. Used by the `/fork` flow to
-    /// inject the user's directive ahead of any prompts the user typed
-    /// during the placeholder window so the directive runs first.
+    /// Sibling of [`enqueue_prompt`](Self::enqueue_prompt): same defaults, but `push_front` instead of `push_back`.
+    /// Used by the `/fork` flow to inject the user's directive ahead of any prompts typed during the placeholder window, so the directive runs first.
     pub fn enqueue_prompt_front(&mut self, text: String) -> u64 {
         self.enqueue_entry_at(text, QueueEntryKind::Prompt, true, Vec::new())
     }
@@ -1084,13 +971,11 @@ impl AgentSession {
         });
         id
     }
-    /// Push an entry with the given kind onto the back of the queue.
     pub fn enqueue_entry(&mut self, text: String, kind: QueueEntryKind) -> u64 {
         self.enqueue_entry_at(text, kind, false, Vec::new())
     }
-    /// Internal: push an entry with the given kind onto the front (`front == true`)
-    /// or back (`front == false`) of the queue. Single source of truth for the
-    /// `QueuedPrompt` defaults shared by `enqueue_entry` and `enqueue_prompt_front`.
+    /// Internal: push an entry with the given kind onto the front (`front == true`) or back (`front == false`) of the queue.
+    /// Single source of truth for the `QueuedPrompt` defaults shared by `enqueue_entry` and `enqueue_prompt_front`.
     fn enqueue_entry_at(
         &mut self,
         text: String,
@@ -1115,9 +1000,8 @@ impl AgentSession {
     pub fn dequeue_prompt(&mut self) -> Option<QueuedPrompt> {
         self.pending_prompts.pop_front()
     }
-    /// Pop the front entry, merging consecutive plain `Prompt` followers via
-    /// [`xai_prompt_queue::combine_prefix_len`]. `editing_id` is held out of the
-    /// merge (composer draft must not vanish). Front may keep images.
+    /// Pop the front entry, merging consecutive plain `Prompt` followers via [`xai_prompt_queue::combine_prefix_len`].
+    /// `editing_id` is held out of the merge (composer draft must not vanish). Front may keep images.
     pub fn dequeue_combined_prompt(&mut self, editing_id: Option<u64>) -> Option<QueuedPrompt> {
         use xai_prompt_queue::{CombineGate, TEXT_SEPARATOR, combine_prefix_len, join_texts};
         if self.pending_prompts.is_empty() {
@@ -1175,7 +1059,6 @@ impl AgentSession {
         merged.combined_texts = segments;
         Some(merged)
     }
-    /// Number of prompts currently queued.
     pub fn queue_len(&self) -> usize {
         self.pending_prompts.len()
     }
@@ -1525,9 +1408,8 @@ mod tests {
         assert_eq!(s.pending_prompts[1].id, id_p);
         assert_eq!(s.pending_prompts[1].kind, QueueEntryKind::Prompt);
     }
-    /// `wire_matches_display` splits interjectable rows (no payload, or a raw
-    /// skill slash payload equal to the display text) from client-expanded
-    /// payloads (`/imagine`, `/loop`) that must run as their own turn.
+    /// `wire_matches_display` splits interjectable rows from client-expanded payloads (`/imagine`, `/loop`) that must run as their own turn.
+    /// Interjectable rows have no payload, or a raw skill slash payload equal to the display text.
     #[test]
     fn wire_matches_display_classifies_payload_shapes() {
         let text_block = |t: &str| acp::ContentBlock::Text(acp::TextContent::new(t.to_string()));
@@ -1852,9 +1734,9 @@ mod tests {
         assert_eq!(merged.chip_elements[1].range, 9..13);
         assert_eq!(&merged.text[9..13], "cond");
     }
-    /// An image-bearing follower must NOT be folded in — merging two image
-    /// sets would require renumbering `[Image #N]` placeholders, which this
-    /// v1 does not do. The front entry's own image is unaffected.
+    /// An image-bearing follower must not be folded in.
+    /// Merging two image sets would require renumbering `[Image #N]` placeholders, which the merge does not do.
+    /// The front entry's own image is unaffected.
     #[test]
     fn dequeue_combined_prompt_stops_at_image_bearing_follower_keeps_own_image() {
         let mut s = test_session();
@@ -1913,9 +1795,8 @@ mod tests {
             vec!["hi /commit".to_string(), "go /push now".to_string()]
         );
     }
-    /// Folding a late `TaskBackgrounded` into a terminal tombstone keeps the
-    /// terminal state and backfills only what the snapshot couldn't know —
-    /// including a blank command (gateway-bridge completions synthesize one).
+    /// Folding a late `TaskBackgrounded` into a terminal tombstone keeps the terminal state and backfills only what the snapshot couldn't know.
+    /// That includes a blank command (gateway-bridge completions synthesize one).
     #[test]
     fn absorb_late_backgrounded_backfills_without_resurrecting() {
         let snapshot = xai_grok_tools::types::TaskSnapshot {

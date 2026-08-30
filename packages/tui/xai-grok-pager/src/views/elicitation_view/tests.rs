@@ -367,8 +367,7 @@ fn url_check_rejects_unsafe_and_malformed() {
 fn url_check_flags_punycode_hosts() {
     let display = check_elicit_url("https://xn--80ak6aa92e.com/login").unwrap();
     assert!(display.punycode_host);
-    // The url crate normalizes Unicode hosts to Punycode, so spoofable
-    // Unicode domains render in their Punycode form and get flagged.
+    // The url crate normalizes Unicode hosts to Punycode, so spoofable Unicode domains render in their Punycode form and get flagged
     let display = check_elicit_url("https://аррӏе.com/login").unwrap();
     assert!(display.punycode_host, "IDN host must normalize + flag");
 }
@@ -446,8 +445,7 @@ fn url_accept_transitions_to_waiting_and_keeps_id() {
         resp,
         McpElicitExtResponse::Accept { content: None }
     ));
-    // No live responder in this fixture: delivery reports false, and the
-    // caller (the key handler) would dismiss instead of entering waiting.
+    // No live responder in this fixture: delivery reports false, and the caller (the key handler) would dismiss instead of entering waiting
     assert!(!state.send_response(resp));
     state.begin_url_waiting();
     assert!(state.is_url_waiting());

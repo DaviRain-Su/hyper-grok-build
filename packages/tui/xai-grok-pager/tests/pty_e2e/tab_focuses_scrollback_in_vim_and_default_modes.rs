@@ -2,9 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Drive a session to an idle turn, confirm the prompt owns keys, then Tab to
-/// the scrollback and confirm the footer's "Space:prompt" hint appears (the
-/// scrollback now owns keys). Shared by the vim-mode and default-config cases.
+/// Drive a session to an idle turn, confirm the prompt owns keys, then Tab to the scrollback and confirm the footer's "Space:prompt" hint appears.
+/// The hint means the scrollback now owns keys. Shared by the vim-mode and default-config cases.
 async fn assert_tab_focuses_scrollback(content: &ContentController) {
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} tab focus turn."));
     let binary = pager_binary().expect("resolve pager binary");
@@ -29,7 +28,7 @@ async fn assert_tab_focuses_scrollback(content: &ContentController) {
         harness.screen_contents()
     );
 
-    // Tab is the leave-prompt / focus-scrollback key (in BOTH modes; Esc is not).
+    // Tab leaves the prompt and focuses the scrollback (in BOTH modes; Esc does not)
     harness.inject_keys(b"\t").expect("tab to scrollback");
     harness
         .wait_for_text("Space:prompt", Duration::from_secs(5))
@@ -43,9 +42,8 @@ async fn assert_tab_focuses_scrollback(content: &ContentController) {
     harness.quit().expect("clean quit");
 }
 
-/// Tab focuses scrollback with `[ui].vim_mode = true` (scrollback vim nav on),
-/// `[ui].simple_mode = false`. The Esc port left Tab as the focus key
-/// independent of vim mode.
+/// Tab focuses scrollback with `[ui].vim_mode = true` (scrollback vim nav on), `[ui].simple_mode = false`.
+/// Tab stays the focus key independent of vim mode.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn tab_focuses_scrollback_vim_mode() {
@@ -54,8 +52,8 @@ async fn tab_focuses_scrollback_vim_mode() {
     assert_tab_focuses_scrollback(&content).await;
 }
 
-/// Tab focuses scrollback under the default config (no `[ui]` overrides) —
-/// proves the focus key is Tab regardless of the (default-off) vim/simple modes.
+/// Tab focuses scrollback under the default config (no `[ui]` overrides).
+/// This proves the focus key is Tab regardless of the (default-off) vim/simple modes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn tab_focuses_scrollback_default_config() {
@@ -63,10 +61,8 @@ async fn tab_focuses_scrollback_default_config() {
     assert_tab_focuses_scrollback(&content).await;
 }
 
-/// `[ui].simple_mode = true` (non-vim prompt editor) must not change the Esc
-/// policy or the Tab focus key — the policy is independent of `simple_mode`.
-/// Proves on the real binary: idle Esc Esc clears a draft (clear policy), then
-/// Tab (not Esc) focuses the scrollback.
+/// `[ui].simple_mode = true` (non-vim prompt editor) must not change the Esc policy or the Tab focus key; the policy is independent of `simple_mode`.
+/// The test proves on the real binary: idle Esc Esc clears a draft (clear policy), then Tab (not Esc) focuses the scrollback.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn esc_policy_and_tab_focus_work_in_simple_mode() {
@@ -90,8 +86,7 @@ async fn esc_policy_and_tab_focus_work_in_simple_mode() {
         .wait_for_turn_idle(Duration::from_secs(15))
         .expect("turn idle");
 
-    // Esc policy (clear) works the same under simple_mode; the hint wait keeps
-    // the presses distinct (`ESC ESC` in one write collapses to one `Esc`).
+    // Esc policy (clear) works the same under simple_mode; the hint wait keeps the presses distinct (`ESC ESC` in one write collapses to one `Esc`)
     let draft = "SIMPLEMODEDRAFT";
     harness.inject_keys(draft.as_bytes()).expect("type draft");
     harness

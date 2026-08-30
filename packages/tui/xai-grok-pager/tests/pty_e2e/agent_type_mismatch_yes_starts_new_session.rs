@@ -2,9 +2,7 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 6. **Agent type mismatch — "Yes" starts a new session.**
-/// Selecting "Yes" on the modal creates a new session with the target
-/// model active.
+/// Selecting "Yes" on the agent-type-mismatch modal creates a new session with the target model active.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn agent_type_mismatch_yes_starts_new_session() {
@@ -34,7 +32,6 @@ async fn agent_type_mismatch_yes_starts_new_session() {
         .inject_keys(b"/model cursor-model\r")
         .expect("type model switch");
 
-    // Wait for the modal.
     harness
         .wait_for_text("requires starting a new session", Duration::from_secs(15))
         .expect("modal appeared");
@@ -42,8 +39,7 @@ async fn agent_type_mismatch_yes_starts_new_session() {
     // Select "Yes" (first option, already focused by default).
     harness.inject_keys(keys::ENTER).expect("select yes");
 
-    // A new session should be created — look for the session tip or
-    // the fresh prompt (no scrollback from the previous session).
+    // The session tip (or the fresh prompt with no scrollback from the previous session) marks the new session
     harness
         .wait_for_text("Session", Duration::from_secs(15))
         .expect("new session created");

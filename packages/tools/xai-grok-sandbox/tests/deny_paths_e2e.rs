@@ -664,6 +664,11 @@ fn subprocess_hook_write_deny(workspace: &Path, first_run: bool) {
     }
     let hooks_dir = home.join("hooks");
     let hooks_paths = home.join("hooks-paths");
+    let trust_boundary_files: Vec<(&str, PathBuf)> = xai_grok_config::TRUST_BOUNDARY_FILENAMES
+        .iter()
+        .copied()
+        .map(|name| (name, home.join(name)))
+        .collect();
     if first_run {
         if !hooks_dir.is_dir() {
             eprintln!("FAIL: first-run expected real hooks dir to be ensured");
@@ -679,6 +684,13 @@ fn subprocess_hook_write_deny(workspace: &Path, first_run: bool) {
             "hooks nested file (first-run)",
             &hooks_dir.join("planted.json"),
         );
+        for (name, path) in &trust_boundary_files {
+            if !path.is_file() {
+                eprintln!("FAIL: first-run expected real {name} to be ensured");
+                std::process::exit(1);
+            }
+            assert_write_denied(&format!("{name} (first-run)"), path);
+        }
         eprintln!("OK: first-run Grok hook slots denied");
     } else {
         let keep = hooks_dir.join("keep.json");
@@ -691,6 +703,11 @@ fn subprocess_hook_write_deny(workspace: &Path, first_run: bool) {
         }
         assert_write_denied("hooks file", &hooks_dir.join("planted.json"));
         assert_write_denied("hooks-paths", &hooks_paths);
+        for (name, path) in &trust_boundary_files {
+            assert_write_denied(name, path);
+            assert_rename_denied(name, path, &home.join(format!("{name}.exfil")));
+            assert_unlink_denied(name, path);
+        }
         let dynamic = home.join("sessions").join("extra-hooks");
         assert_write_denied("dynamic target", &dynamic.join("x.json"));
         assert_unlink_denied("hooks-paths", &hooks_paths);
@@ -832,7 +849,8 @@ fn fixture_homes(
     let home = unique_temp_dir(&format!("{tag}-home"));
     let grok = unique_temp_dir(&format!("{tag}-grok"));
     let workspace = unique_temp_dir(&format!("{tag}-ws"));
-    fs::write(grok.join("sandbox.toml"), "").expect("empty global sandbox.toml");
+    fs::write(grok.join(xai_grok_config::SANDBOX_CONFIG_FILENAME), "")
+        .expect("empty global sandbox.toml");
     (
         home.clone(),
         grok.clone(),
@@ -866,7 +884,8 @@ fn run_deny_case(
         .join(", ");
     fs::create_dir_all(tmp.join(".grok")).expect("mkdir .grok");
     fs::write(
-        tmp.join(".grok").join("sandbox.toml"),
+        tmp.join(".grok")
+            .join(xai_grok_config::SANDBOX_CONFIG_FILENAME),
         format!("[profiles.{profile}]\nextends = \"workspace\"\ndeny = [{deny_list}]\n"),
     )
     .expect("write sandbox.toml");
@@ -982,7 +1001,7 @@ fn read_deny_marker_spoof_refused() {
     let (home, grok, workspace, _ch, _cg, _cw) = fixture_homes("read-deny-spoof");
     fs::create_dir_all(workspace.join(".grok")).expect("mkdir .grok");
     fs::write(
-            workspace.join(".grok").join("sandbox.toml"),
+            workspace.join(".grok").join(xai_grok_config::SANDBOX_CONFIG_FILENAME),
             "[profiles.netspoof]\nextends = \"devbox\"\nrestrict_network = true\ndeny = [\"secret.pem\"]\n",
         )
         .expect("write sandbox.toml");
@@ -1017,7 +1036,9 @@ fn read_deny_forged_mounts_are_refused() {
     let (home, grok, workspace, _ch, _cg, _cw) = fixture_homes("read-deny-forged");
     fs::create_dir_all(workspace.join(".grok")).expect("mkdir .grok");
     fs::write(
-        workspace.join(".grok").join("sandbox.toml"),
+        workspace
+            .join(".grok")
+            .join(xai_grok_config::SANDBOX_CONFIG_FILENAME),
         "[profiles.forged]\nextends = \"devbox\"\ndeny = [\"secret.pem\"]\n",
     )
     .expect("write sandbox.toml");
@@ -1063,7 +1084,9 @@ fn read_deny_empty_set_verifies_inside_bwrap() {
     let (home, grok, workspace, _ch, _cg, _cw) = fixture_homes("read-deny-empty");
     fs::create_dir_all(workspace.join(".grok")).expect("mkdir .grok");
     fs::write(
-        workspace.join(".grok").join("sandbox.toml"),
+        workspace
+            .join(".grok")
+            .join(xai_grok_config::SANDBOX_CONFIG_FILENAME),
         "[profiles.netempty]\nextends = \"devbox\"\nrestrict_network = true\n",
     )
     .expect("write sandbox.toml");
@@ -1240,6 +1263,15 @@ fn workspace_protects_direct_hook_sources() {
             "expected '{needle}'\nstderr: {stderr}"
         );
     }
+    for name in xai_grok_config::TRUST_BOUNDARY_FILENAMES {
+        for action in ["write", "unlink", "rename"] {
+            let needle = format!("OK: {name} {action} denied");
+            assert!(
+                stderr.contains(&needle),
+                "expected '{needle}'\nstderr: {stderr}"
+            );
+        }
+    }
     #[cfg(target_os = "linux")]
     assert!(
         stderr.contains("OK: nested userns did not rewrite hooks"),
@@ -1318,6 +1350,13 @@ fn workspace_protects_direct_hook_sources_first_run() {
             "expected '{needle}'\nstderr: {stderr}"
         );
     }
+    for name in xai_grok_config::TRUST_BOUNDARY_FILENAMES {
+        let needle = format!("OK: {name} (first-run) write denied");
+        assert!(
+            stderr.contains(&needle),
+            "expected '{needle}'\nstderr: {stderr}"
+        );
+    }
     assert!(
         grok.join("hooks").is_dir(),
         "post-exit: hooks dir must exist as a real directory"
@@ -1331,6 +1370,12 @@ fn workspace_protects_direct_hook_sources_first_run() {
         b"",
         "post-exit: first-run hooks-paths must be empty"
     );
+    for name in xai_grok_config::TRUST_BOUNDARY_FILENAMES {
+        assert!(
+            grok.join(name).is_file(),
+            "post-exit: {name} must exist as a real file"
+        );
+    }
     assert!(
         !home.join(".claude").exists(),
         "post-exit: must not create ~/.claude"

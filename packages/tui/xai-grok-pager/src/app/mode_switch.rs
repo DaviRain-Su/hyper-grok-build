@@ -1,5 +1,5 @@
-//! In-process `/minimal` ⇄ `/fullscreen` switch: terminal transition plus
-//! re-seeding of every mode-derived piece of state startup decides once.
+//! In-process switch between `/minimal` and `/fullscreen`.
+//! It covers the terminal transition plus re-seeding of every mode-derived piece of state that startup decides once.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -12,16 +12,14 @@ use super::{PagerTerminal, ScreenMode};
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::AppView;
 
-// Resolve the regular theme at most once: re-resolving on a later round-trip
-// would clobber an in-session /theme choice held in the cache.
+// Resolve the regular theme at most once: re-resolving on a later round-trip would clobber an in-session /theme choice held in the cache
 static THEME_RESOLVED_FOR_FULL_TUI: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn mark_theme_resolved() {
     THEME_RESOLVED_FOR_FULL_TUI.store(true, Ordering::Release);
 }
 
-/// Re-seed every mode-derived piece of app state (pure state, no terminal
-/// escapes); keep in lockstep with the startup seeding sites.
+/// Re-seed every mode-derived piece of app state (pure state, no terminal escapes); keep in lockstep with the startup seeding sites.
 pub(crate) fn reseed_screen_mode(app: &mut AppView, mode: ScreenMode) {
     super::apply_screen_mode_globals(mode);
 
@@ -52,16 +50,15 @@ fn reseed_agent_screen_mode(agent: &mut AgentView, mode: ScreenMode) {
 /// Result of [`transition_terminal`].
 #[derive(Debug)]
 pub(crate) enum ModeSwitchOutcome {
-    /// Terminal live in the target mode; caller must reseed + full repaint.
+    /// The terminal is live in the target mode; the caller must reseed and fully repaint.
     Switched,
-    /// Rolled back; terminal still in the previous mode, app state untouched.
+    /// Rolled back; the terminal stays in the previous mode and app state is untouched.
     Aborted(String),
-    /// Terminal state unknown; caller must fall back to the exec relaunch.
+    /// Terminal state is unknown; the caller must fall back to the exec relaunch.
     NeedsExecFallback(String),
 }
 
-/// Switch the live terminal between screen modes in place (escapes + viewport
-/// only; app state is the caller's `reseed_screen_mode`).
+/// Switch the live terminal between screen modes in place (escapes and viewport only; app state is the caller's `reseed_screen_mode`).
 pub(crate) fn transition_terminal(
     terminal: &mut PagerTerminal,
     from: ScreenMode,
@@ -96,7 +93,7 @@ pub(crate) fn transition_terminal(
 
     let outcome = perform_screen_transition(terminal, from, to, minimal_live_rows);
 
-    // Only the pre-park race can reach this channel; later input stays in the tty.
+    // Only input that raced in before the reader parked can reach this channel; later input stays in the tty
     while input_rx.try_recv().is_ok() {}
     input_paused.store(false, Ordering::Release);
     outcome
@@ -115,8 +112,7 @@ fn perform_screen_transition(
                 if mouse_was_captured {
                     let _ = execute!(stderr, event::DisableMouseCapture);
                 }
-                // JediTerm/Windows: DisableMouseCapture is winapi-only, so send
-                // the ANSI reset too (same self-heal as init_terminal).
+                // JediTerm/Windows: DisableMouseCapture is winapi-only, so send the ANSI reset too (init_terminal applies the same fix)
                 if crate::terminal::terminal_context().mouse_reporting_leaks_as_raw_text() {
                     use std::io::Write as _;
                     let _ = stderr.write_all(xai_crash_handler::terminal::MOUSE_TRACKING_RESET);
@@ -129,7 +125,7 @@ fn perform_screen_transition(
                     let _ = execute!(stderr, LeaveAlternateScreen);
                 });
             } else {
-                // Clear(All) only — Purge would destroy the user's real scrollback.
+                // Clear(All) only: Purge would destroy the user's real scrollback
                 xai_grok_shell::util::with_locked_stderr(|stderr| {
                     let _ = execute!(
                         stderr,
@@ -138,7 +134,7 @@ fn perform_screen_transition(
                     );
                 });
             }
-            // Teardown paths must track the screen the terminal is ACTUALLY on.
+            // Teardown paths must track the screen the terminal is actually on
             super::set_current_screen_mode(ScreenMode::Minimal);
             let rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(24);
             let viewport_rows = minimal_live_rows.clamp(3, rows.saturating_sub(1).max(3));
@@ -180,8 +176,7 @@ fn perform_screen_transition(
                 let _ = execute!(stderr, event::EnableMouseCapture);
             });
             super::MOUSE_CAPTURE_ENABLED.store(true, Ordering::Release);
-            // Set before the fallible viewport swap: the exec-fallback teardown
-            // must leave the alt screen that is already live.
+            // Set before the fallible viewport swap: the exec-fallback teardown must leave the alt screen that is already live
             super::set_current_screen_mode(ScreenMode::Fullscreen);
             match terminal.set_viewport(ratatui::Viewport::Fullscreen) {
                 Ok(()) => ModeSwitchOutcome::Switched,
@@ -196,9 +191,9 @@ fn perform_screen_transition(
     }
 }
 
-/// Append `block` without landing after a live agent stream: a non-thinking
-/// sibling behind a streaming message trips minimal's print-once commit
-/// (`commit.rs::agent_message_stream_closed`), freezing the partial reply.
+/// Append `block` without landing after a live agent stream.
+/// A non-thinking entry behind a streaming message makes minimal treat the stream as closed (`commit.rs::agent_message_stream_closed`).
+/// The partial reply then commits early and freezes.
 pub(crate) fn push_block_behind_live_stream(
     sb: &mut crate::scrollback::state::ScrollbackState,
     block: crate::scrollback::block::RenderBlock,
@@ -217,8 +212,7 @@ pub(crate) fn push_block_behind_live_stream(
     }
 }
 
-/// Close user-opened surfaces minimal never paints (they would become
-/// invisible input owners); agent-initiated prompts are left alone.
+/// Close user-opened overlays minimal never paints (they would keep owning input while invisible); agent-initiated prompts are left alone.
 pub(crate) fn dismiss_fullscreen_only_surfaces(app: &mut AppView) {
     for agent in app.agents.values_mut() {
         dismiss_agent_surfaces(agent);

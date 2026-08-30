@@ -1765,3 +1765,25 @@ async fn side_question_trims_reasoning_orphaned_by_mid_turn_truncation() {
         })
         .await;
 }
+
+/// Side calls persist text without executing tools, so the shared builder
+/// must pin `Fail` rather than inherit the tool-salvaging default.
+#[tokio::test]
+async fn parent_cached_request_pins_fail_length_policy() {
+    let local = tokio::task::LocalSet::new();
+    let (actor, _gateway_rx) = local.run_until(build_actor()).await;
+    let request = actor.parent_cached_request(super::side_call::AuxCall {
+        items: Vec::new(),
+        tools: Vec::new(),
+        hosted_tools: Vec::new(),
+        model: "test-model".to_string(),
+        reasoning_effort: None,
+        backend: crate::sampling::ApiBackend::Messages,
+        conv_id: "conv".to_string(),
+        req_id: "req".to_string(),
+    });
+    assert_eq!(
+        request.length_policy,
+        xai_grok_sampling_types::LengthPolicy::Fail
+    );
+}

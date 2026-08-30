@@ -8,10 +8,10 @@ use xai_grok_pager_pty_harness::StyledLine;
 /// 60 answer lines over a 50-row terminal overflow the viewport, so the prompt pins to the top.
 const LAST_LINE: &str = "ANSWERLINE060";
 
-/// Only rendered in a pinned header's gap row; the test's pinned-ness proof.
+/// Only rendered in a pinned header's gap row; seeing it proves the header is pinned.
 const UP_INDICATOR: &str = "▲";
 
-/// Unique single-row prompt ([`PROMPT`] "go" collides with footer copy).
+/// Unique single-row prompt ([`PROMPT`] "go" collides with footer text).
 const STICKY_PROMPT: &str = "STICKYCOPY alpha bravo charlie delta";
 
 /// Substring the clipboard must contain after the drag.
@@ -175,7 +175,6 @@ async fn sticky_header_drag_copy_pty() {
         !joined.contains('❯'),
         "clipboard must not contain the prompt arrow chrome; payloads={payloads:?}"
     );
-    // Upper bound: the copy must stop where the drag did.
     assert!(
         !joined.contains("charlie"),
         "the copy must stop at the drag's end column; payloads={payloads:?}"

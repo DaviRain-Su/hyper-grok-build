@@ -1,8 +1,6 @@
-//! Mouse-routing tests for the line viewer's plan preview: the scrollbar
-//! must own a click+drag gesture end-to-end. A press on the track was
-//! previously also treated as a comment-gutter anchor (row-only hit test),
-//! so dragging the thumb selected plan lines for a comment instead of
-//! scrolling (GB-4579: "can't click and drag scrollbar to view plan").
+//! Mouse-routing tests for the line viewer's plan preview: the scrollbar must own a click-and-drag gesture end-to-end.
+//! A press on the track was previously also treated as a comment-gutter anchor (the hit test was row-only).
+//! Dragging the thumb then selected plan lines for a comment instead of scrolling.
 
 use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -18,8 +16,7 @@ const POPUP: Rect = Rect {
     width: 80,
     height: 10,
 };
-/// Scrollbar track column as split off by the list pane render
-/// (`maybe_split_for_scrollbar`): last column of the popup area.
+/// Scrollbar track column as split off by the list pane render (`maybe_split_for_scrollbar`): last column of the popup area.
 const TRACK_X: u16 = 79;
 
 fn mouse(kind: MouseEventKind, col: u16, row: u16) -> Event {
@@ -31,8 +28,7 @@ fn mouse(kind: MouseEventKind, col: u16, row: u16) -> Event {
     })
 }
 
-/// Agent showing a plan-approval preview whose plan overflows the
-/// viewport, with the render-time areas planted so mouse dispatch works.
+/// Agent showing a plan-approval preview whose plan overflows the viewport, with the render-time areas planted so mouse dispatch works.
 fn agent_with_scrollable_plan() -> AgentView {
     let mut agent = make_agent();
     let (tx, _rx) = tokio::sync::oneshot::channel();
@@ -78,9 +74,8 @@ fn agent_with_scrollable_plan() -> AgentView {
     agent
 }
 
-/// Presses on the modal border column next to the track (users read the
-/// thumb + border as one two-column scrollbar) used to fall into the
-/// click-outside-modal path instead of grabbing the thumb.
+/// Presses on the modal border column next to the track used to fall into the click-outside-modal path instead of grabbing the thumb.
+/// Users read the thumb and the border as one two-column scrollbar.
 #[test]
 fn border_column_press_grabs_scrollbar() {
     let mut agent = agent_with_scrollable_plan();
@@ -269,8 +264,7 @@ fn scrollbar_drag_scrolls_plan_instead_of_selecting_lines() {
     assert_eq!(pav.focus, PlanApprovalFocus::Preview);
 }
 
-/// The thumb must keep following the pointer when a drag drifts off the
-/// popup rect (standard scrollbar behavior in every toolkit).
+/// The thumb must keep following the pointer when a drag drifts off the popup rect (standard scrollbar behavior in every toolkit).
 #[test]
 fn scrollbar_drag_outside_popup_keeps_scrolling() {
     let mut agent = agent_with_scrollable_plan();
@@ -307,15 +301,14 @@ fn scrollbar_drag_outside_popup_keeps_scrolling() {
     );
 }
 
-/// A gutter line-selection whose Up was lost must not survive a later
-/// scrollbar gesture: the track press drops the stale anchor, so a stray
-/// release afterwards cannot commit the leftover lines as a comment.
+/// A gutter line-selection whose Up was lost must not survive a later scrollbar gesture.
+/// The track press drops the stale anchor, so a stray release afterwards cannot commit the leftover lines as a comment.
 #[test]
 fn scrollbar_gesture_drops_stale_gutter_anchor() {
     let mut agent = agent_with_scrollable_plan();
     let registry = ActionRegistry::defaults();
 
-    // Anchor + extend a comment line selection, then lose the Up.
+    // Anchor and extend a comment line selection, then lose the Up
     let _ = agent.handle_input(
         &mouse(MouseEventKind::Down(MouseButton::Left), 10, 4),
         &registry,
@@ -333,7 +326,7 @@ fn scrollbar_gesture_drops_stale_gutter_anchor() {
             "precondition: a multi-line gutter drag is live (start {start:?}, end {end:?})"
         );
     }
-    // Scrollbar click + release: the track press must drop the stale anchor.
+    // Scrollbar click and release: the track press must drop the stale anchor
     let _ = agent.handle_input(
         &mouse(MouseEventKind::Down(MouseButton::Left), TRACK_X, 5),
         &registry,
@@ -355,8 +348,7 @@ fn scrollbar_gesture_drops_stale_gutter_anchor() {
         &registry,
     );
 
-    // The track press also discarded the in-progress comment draft
-    // (same rule as clicking back into the modal).
+    // The track press also discarded the in-progress comment draft (same rule as clicking back into the modal)
     let pav = agent.plan_approval_view.as_ref().unwrap();
     assert_eq!(pav.commenting_range, None);
     assert_eq!(pav.focus, PlanApprovalFocus::Preview);
@@ -378,8 +370,7 @@ fn scrollbar_gesture_drops_stale_gutter_anchor() {
     );
 }
 
-/// A second multi-line gutter drag while already Commenting must not
-/// replace the frozen freeform stash with the unsaved comment draft.
+/// A second multi-line gutter drag while already Commenting must not replace the frozen freeform stash with the unsaved comment draft.
 #[test]
 fn gutter_drag_while_commenting_does_not_clobber_freeform_stash() {
     let mut agent = agent_with_scrollable_plan();
@@ -445,8 +436,8 @@ fn gutter_drag_while_commenting_does_not_clobber_freeform_stash() {
     assert_eq!(agent.prompt.text(), "keep my freeform notes");
 }
 
-/// A lost mouse-up after a track press must not make the next plan-line
-/// click skip gutter / click-to-comment (sticky `is_scrollbar_dragging`).
+/// A lost mouse-up after a track press must not leave `is_scrollbar_dragging` sticky.
+/// The next plan-line click must still anchor the gutter and enter click-to-comment.
 #[test]
 fn lost_scrollbar_up_does_not_block_next_line_click() {
     let mut agent = agent_with_scrollable_plan();
@@ -466,7 +457,7 @@ fn lost_scrollbar_up_does_not_block_next_line_click() {
         "precondition: track press latched a thumb drag"
     );
 
-    // No Up — simulate a dropped release, then click a plan line.
+    // No Up: simulate a dropped release, then click a plan line
     let _ = agent.handle_input(
         &mouse(MouseEventKind::Down(MouseButton::Left), 10, 4),
         &registry,

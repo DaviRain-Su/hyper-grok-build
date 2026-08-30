@@ -49,19 +49,16 @@ pub(crate) fn input_wait(
     handled_at.saturating_duration_since(arrived_at.max(loop_entry))
 }
 
-/// Rolls per-event input stalls up into one [`StallWindow`] per reporting
-/// window, keeping only the worst stall (and the activity snapshot captured at
-/// that worst moment) plus the count of events handled.
+/// Rolls per-event input stalls up into one [`StallWindow`] per reporting window.
+/// Keeps only the worst stall (and the activity snapshot captured at that worst moment) plus the count of events handled.
 ///
-/// The window opens lazily on the first `observe`, so an idle loop opens no
-/// window and arms no flush wakeup. Flushing preserves the boundary invariants:
-/// the loop observes first and only then flushes ([`Self::take_if_elapsed`]),
-/// so a boundary stall is folded into the elapsed window rather than starting a
-/// new one — the window is never split and the elapsed flush never starves.
+/// The window opens lazily on the first `observe`, so an idle loop opens no window and sets no flush wakeup.
+/// The loop observes first and only then flushes ([`Self::take_if_elapsed`]).
+/// A boundary stall is folded into the elapsed window rather than starting a new one.
+/// The window is never split, and an elapsed window always gets flushed.
 pub(crate) struct StallRollup {
     window: Duration,
-    // None until the first observe, so an idle loop opens no window and arms no
-    // flush wakeup.
+    // None until the first observe, so an idle loop opens no window and sets no flush wakeup
     window_started_at: Option<Instant>,
     max_stall: Duration,
     max_stall_activity: StallActivity,

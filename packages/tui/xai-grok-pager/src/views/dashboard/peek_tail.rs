@@ -1,22 +1,19 @@
-//! Dense live-tail paint for the dashboard peek middle.
+//! Dense live-tail paint for the middle of the dashboard peek box.
 //!
-//! Reads the agent's leased [`ScrollbackState`] without mutating fold state,
-//! layout cache, follow mode, or view mode. Dashboard lease
-//! (`begin_peek_viewport`) already forced follow + AllTurns for attach restore.
+//! Reads the agent's leased [`ScrollbackState`] without mutating fold state, layout cache, follow mode, or view mode.
+//! The dashboard lease (`begin_peek_viewport`) already forced follow and AllTurns so the viewport can be restored on attach.
 //!
-//! Density vs full [`ScrollbackPane`]: no sticky headers, no vpad, no gap rows,
-//! no horizontal accent/pad chrome. Foldable entries project Collapsed; messages
-//! keep full expanded body.
+//! Compared to the full [`ScrollbackPane`]: no sticky headers, no vertical padding, no gap rows, no horizontal accent or padding chrome.
+//! Foldable entries render Collapsed; messages keep their full expanded body.
 //!
-//! Layout (top → bottom):
+//! Layout, top to bottom:
 //! 1. Last user prompt pinned (1 line), when present and height allows
 //! 2. Top `…` when the current-turn body is truncated from above
 //! 3. Pure tail of content **after** the last user (current turn only)
 //!
-//! Body is **always** current-turn when a last user exists (including the
-//! list-first min-box ~3-row middle). Pin is dropped only when the middle
-//! has no rows left for it. After a fresh user send with no agent lines,
-//! the middle is pin + empty — prior turns are not pulled up.
+//! The body is **always** the current turn when a last user exists (including when the list-first min box leaves only ~3 middle rows).
+//! The pin is dropped only when the middle has no rows left for it.
+//! After a fresh user send with no agent lines yet, the middle is the pin over empty rows; prior turns are not pulled up.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -31,10 +28,10 @@ use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::types::{BlockLine, DisplayMode};
 use crate::theme::Theme;
 
-/// Densified body line count for shrink-to-content (v1: current-turn body).
+/// Densified body line count for shrink-to-content (v1: the current-turn body).
 ///
-/// Content **after** the last user prompt only. Pin / ellipsis are layout
-/// chrome and are budgeted separately in desired peek content.
+/// Counts only content **after** the last user prompt.
+/// The pin and the ellipsis are layout chrome and are budgeted separately in desired peek content.
 /// `width` is the middle content width (same as the paint area width).
 pub fn densified_body_line_count(scrollback: &ScrollbackState, width: u16) -> u16 {
     if width == 0 || scrollback.is_empty() {
@@ -44,16 +41,15 @@ pub fn densified_body_line_count(scrollback: &ScrollbackState, width: u16) -> u1
     densified_lines_from(scrollback, width, after).len() as u16
 }
 
-/// Whether scrollback has a user prompt that dense paint will pin when height
-/// allows (drives the pin row in shrink desired content).
+/// Whether scrollback has a user prompt that dense paint will pin when height allows (drives the pin row in shrink desired content).
 pub fn scrollback_has_last_user(scrollback: &ScrollbackState) -> bool {
     find_last_user_idx(scrollback).is_some()
 }
 
 /// Paint a dense live tail into `area`.
 ///
-/// Does not call `prepare_layout` / `enable_follow` / `set_view_mode` — those
-/// either belong to the viewport lease or would dirty attach-path state.
+/// Does not call `prepare_layout`, `enable_follow`, or `set_view_mode`.
+/// Those either belong to the viewport lease or would dirty state the attach path needs.
 pub fn paint_peek_live_tail(scrollback: &ScrollbackState, area: Rect, buf: &mut Buffer) {
     if area.width < 1 || area.height == 0 || scrollback.is_empty() {
         return;
@@ -66,7 +62,7 @@ pub fn paint_peek_live_tail(scrollback: &ScrollbackState, area: Rect, buf: &mut 
     let height = area.height as usize;
 
     let last_user = find_last_user_idx(scrollback);
-    // Always current-turn when a last user exists; full stream otherwise.
+    // The body is the current turn when a last user exists; the full stream otherwise
     let body_start = last_user.map(|i| i + 1).unwrap_or(0);
     let flat = densified_lines_from(scrollback, content_w, body_start);
 
@@ -93,8 +89,7 @@ pub fn paint_peek_live_tail(scrollback: &ScrollbackState, area: Rect, buf: &mut 
 
     let mut y = area.y;
     if let Some(line) = pin {
-        // Mirrors the scrollback pane's content paint so the same rows read
-        // the same direction in the peek preview.
+        // Mirrors the scrollback pane's content paint so the same rows read the same direction in the peek preview
         buf.set_line_safe_bidi(area.x, y, &line, content_w);
         y = y.saturating_add(1);
     }
@@ -113,8 +108,7 @@ pub fn paint_peek_live_tail(scrollback: &ScrollbackState, area: Rect, buf: &mut 
     }
 }
 
-/// Take a pure tail of `flat` into `budget` rows, reserving one row for a top
-/// `…` when content is omitted above.
+/// Take a pure tail of `flat` into `budget` rows, reserving one row for a top `…` when content is omitted above.
 fn pure_tail_with_ellipsis(flat: Vec<Line<'static>>, budget: usize) -> (bool, Vec<Line<'static>>) {
     if budget == 0 {
         return (false, Vec::new());
@@ -123,7 +117,7 @@ fn pure_tail_with_ellipsis(flat: Vec<Line<'static>>, budget: usize) -> (bool, Ve
         return (false, flat);
     }
     if budget == 1 {
-        // No room for both marker and content — keep the live tail line.
+        // No room for both marker and content; keep the live tail line
         return (false, flat[flat.len() - 1..].to_vec());
     }
     let take = budget - 1;
@@ -353,7 +347,7 @@ mod tests {
 
     #[test]
     fn dense_tail_min_box_middle_is_current_turn_with_pin() {
-        // List-first min box leaves ~3 middle rows after status/reply/blank.
+        // The list-first min box leaves ~3 middle rows after the status, reply, and blank rows
         let mut sb = ScrollbackState::new();
         sb.push(ScrollbackEntry::new(RenderBlock::user_prompt("old")));
         sb.push(ScrollbackEntry::new(RenderBlock::agent_message(

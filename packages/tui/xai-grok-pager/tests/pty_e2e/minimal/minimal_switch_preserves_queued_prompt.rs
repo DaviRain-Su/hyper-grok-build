@@ -2,8 +2,7 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// A prompt queued behind a running turn survives `/minimal` (the queue is
-/// client memory the legacy re-exec dropped).
+/// A prompt queued behind a running turn survives `/minimal` (the queue is client memory the legacy re-exec dropped).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_switch_preserves_queued_prompt() {

@@ -5,18 +5,16 @@ use super::common::*;
 const QUOTE_ALPHA: &str = "QUOTE_ALPHA";
 const QUOTE_OUTRO: &str = "QUOTE_OUTRO_RAW_DONE";
 
-/// PTY: per-entry raw mode (`r`) must stay byte-for-byte source-faithful —
-/// drag-copying a quote line in raw mode keeps the `>` marker (the pretty-mode
-/// bar exclusion must not leak into raw mode).
+/// PTY: per-entry raw mode (`r`) must show the source text byte for byte.
+/// Drag-copying a quote line in raw mode keeps the `>` marker; the rule that excludes the pretty-mode bar from copies must not leak into raw mode.
 ///
-/// `SSH_CONNECTION` forces the OSC 52 clipboard route for readback, same as
-/// `recap_header_not_in_selection_pty`.
+/// `SSH_CONNECTION` forces the OSC 52 clipboard route for readback, same as `recap_header_not_in_selection_pty`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn quote_block_raw_mode_copy_keeps_source_pty() {
     let content = ContentController::start().await.expect("start content");
-    // Bare-letter scrollback bindings (`r` = ToggleRaw) resolve only in vim
-    // mode; with vim off they fall through to prompt typing (lookup_with_mode).
+    // Bare-letter scrollback bindings like `r` (ToggleRaw) resolve only in vim mode
+    // With vim off they fall through to prompt typing (lookup_with_mode)
     seed_ui_config(&content, "vim_mode = true\nsimple_mode = false");
     content.set_response(format!(
         "intro line\n\n> {QUOTE_ALPHA} first\n\n{QUOTE_OUTRO} line"
@@ -64,9 +62,8 @@ async fn quote_block_raw_mode_copy_keeps_source_pty() {
         harness.screen_contents()
     );
 
-    // Focus scrollback, select the agent message by clicking it (the last
-    // entry is the "Worked for" event, so `k` would select that instead),
-    // then toggle raw with `r` (ToggleRaw).
+    // Focus scrollback and select the agent message by clicking it, then toggle raw with `r` (ToggleRaw)
+    // The click matters: the last entry is the "Worked for" event, so `k` would select that instead
     harness.inject_keys(b"\t").expect("focus scrollback");
     harness
         .wait_for_text("Space:prompt", Duration::from_secs(10))
@@ -96,7 +93,7 @@ async fn quote_block_raw_mode_copy_keeps_source_pty() {
                 harness.screen_contents()
             )
         });
-    // Settle the raw-toggle relayout before locating drag coordinates.
+    // Let the relayout from the `r` toggle settle before locating drag coordinates
     harness.update(Duration::from_millis(500));
 
     let screen = harness.screen_contents();

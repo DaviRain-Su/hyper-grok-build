@@ -235,12 +235,7 @@ pub(crate) fn resolve_replay_updates_path(
     hint: ReplayPathHint<'_>,
 ) -> std::io::Result<Option<std::path::PathBuf>> {
     match try_fast_replay_updates_path(session_id, grok_home, hint) {
-        Some(path) if !super::relocation::has_relocation_journal(grok_home, session_id) => {
-            return Ok(Some(path));
-        }
-        Some(_journaled) => {
-            // Journal is authority; hinted source may be stale.
-        }
+        Some(path) => return Ok(Some(path)),
         None if hint.fallback == ReplayLookupFallback::HintedOnly => {
             // Hinted miss: skip RelocationView (UI-thread scan).
             return Ok(None);

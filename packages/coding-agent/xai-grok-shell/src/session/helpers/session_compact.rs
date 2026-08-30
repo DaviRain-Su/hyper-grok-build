@@ -55,12 +55,77 @@ pub(crate) enum CompactFailure {
     Cancelled,
 }
 
-/// Stable error payload for a user-cancelled compact (pager + retry loop).
-pub(crate) const COMPACT_CANCELLED_MSG: &str = "compact cancelled";
+/// Stable cancel payload; the pager matches it to route manual `/compact` to
+/// "Compaction cancelled." instead of a failure.
+pub const COMPACT_CANCELLED_MSG: &str = "compact cancelled";
+
+/// Stamped on every compaction failure payload; the user-facing normalizer
+/// strips it.
+pub(crate) const COMPACT_FAILED_PREFIX: &str = "compact failed: ";
+
+/// Cancel-vs-failure discriminator in the compact RPC error's `data`
+/// (`{"kind": …, "message": …}`). The pager routes on this, never the message
+/// text (upstream bodies can echo the cancel phrase); the protocol's
+/// `RequestCancelled` code is feature-gated unstable and cancel-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactErrorKind {
+    Cancelled,
+    Failed,
+}
+
+impl CompactErrorKind {
+    fn wire(self) -> &'static str {
+        match self {
+            CompactErrorKind::Cancelled => "compact_cancelled",
+            CompactErrorKind::Failed => "compact_failed",
+        }
+    }
+
+    fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "compact_cancelled" => Some(Self::Cancelled),
+            "compact_failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// Byte cap (truncation marker included) on the user-facing compaction error
+/// detail.
+pub(crate) const COMPACT_ERROR_DETAIL_MAX_BYTES: usize = 300;
+
+/// The one normalize sequence for user-facing compaction error details:
+/// single-line, scrub service names, cap. Idempotent, so the wire chokepoint
+/// below can re-run it on pre-normalized text. URLs stay: for custom-endpoint
+/// users the URL is the diagnosis.
+pub(crate) fn normalize_compact_detail(raw: &str) -> String {
+    let single_line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let scrubbed = crate::sampling::error::rewrite_service_names(&single_line);
+    xai_grok_tools::util::truncate_str_with_marker(&scrubbed, COMPACT_ERROR_DETAIL_MAX_BYTES)
+        .into_owned()
+}
+
+/// Typed compact-error `data` payload. `message` is the key
+/// [`crate::sampling::error::error_detail_from_data`] reads first, so
+/// text-only consumers see the plain detail. Normalized here at the wire
+/// boundary — typed-kind pagers render it verbatim, so no producer can ship
+/// raw upstream text. Prefix-stripping stays producer-side.
+pub fn compact_error_data(kind: CompactErrorKind, message: &str) -> serde_json::Value {
+    serde_json::json!({ "kind": kind.wire(), "message": normalize_compact_detail(message) })
+}
+
+/// Read the typed discriminator back. `None` for payloads from shells that
+/// predate it (bare strings) or for foreign shapes.
+pub fn compact_error_kind(err: &acp::Error) -> Option<CompactErrorKind> {
+    CompactErrorKind::from_wire(err.data.as_ref()?.get("kind")?.as_str()?)
+}
 
 impl CompactFailure {
     pub(crate) fn cancelled_error() -> acp::Error {
-        acp::Error::internal_error().data(COMPACT_CANCELLED_MSG)
+        acp::Error::internal_error().data(compact_error_data(
+            CompactErrorKind::Cancelled,
+            COMPACT_CANCELLED_MSG,
+        ))
     }
 }
 
@@ -77,7 +142,7 @@ pub(crate) use xai_grok_sampling_types::is_context_length_error;
 /// 408 (timeout) and 429 (rate limit) are likewise deterministic. Network
 /// transport errors, stream-level blips, and 5xx responses are transient.
 fn classify_sampling_error(err: SamplingError) -> CompactFailure {
-    let acp_err = acp::Error::internal_error().data(format!("compact failed: {err}"));
+    let acp_err = acp::Error::internal_error().data(format!("{COMPACT_FAILED_PREFIX}{err}"));
     let deterministic = match &err {
         SamplingError::Auth { .. }
         | SamplingError::InvalidConfiguration(_)
@@ -119,8 +184,8 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
 /// the same payload).
 fn classify_response_event_error(code: Option<&str>, message: &str) -> CompactFailure {
     let acp_err = acp::Error::internal_error().data(match code {
-        Some(c) => format!("compact failed: {c}: {message}"),
-        None => format!("compact failed: {message}"),
+        Some(c) => format!("{COMPACT_FAILED_PREFIX}{c}: {message}"),
+        None => format!("{COMPACT_FAILED_PREFIX}{message}"),
     });
 
     if matches!(code, Some("invalid_request_error")) || message.contains("invalid_request_error") {
@@ -505,7 +570,7 @@ pub(crate) async fn generate_session_compact(
                     StreamStep::IdleTimeout => {
                         return Err(CompactFailure::Transient(
                             acp::Error::internal_error().data(format!(
-                                "compact failed: stream idle timeout after {idle_timeout:?} ({} chars received)",
+                                "{COMPACT_FAILED_PREFIX}stream idle timeout after {idle_timeout:?} ({} chars received)",
                                 content.chars().count()
                             )),
                         ));
@@ -516,7 +581,7 @@ pub(crate) async fn generate_session_compact(
                 if wall_clock_budget_secs > 0 && timing.elapsed_secs() >= wall_clock_budget_secs {
                     return Err(CompactFailure::Transient(
                         acp::Error::internal_error().data(format!(
-                            "compact failed: exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
+                            "{COMPACT_FAILED_PREFIX}exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
                         )),
                     ));
                 }
@@ -596,7 +661,7 @@ pub(crate) async fn generate_session_compact(
                     StreamStep::IdleTimeout => {
                         return Err(CompactFailure::Transient(
                             acp::Error::internal_error().data(format!(
-                                "compact failed: stream idle timeout after {idle_timeout:?} ({} chars received)",
+                                "{COMPACT_FAILED_PREFIX}stream idle timeout after {idle_timeout:?} ({} chars received)",
                                 content.chars().count()
                             )),
                         ));
@@ -607,7 +672,7 @@ pub(crate) async fn generate_session_compact(
                 if wall_clock_budget_secs > 0 && timing.elapsed_secs() >= wall_clock_budget_secs {
                     return Err(CompactFailure::Transient(
                         acp::Error::internal_error().data(format!(
-                            "compact failed: exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
+                            "{COMPACT_FAILED_PREFIX}exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
                         )),
                     ));
                 }
@@ -728,7 +793,7 @@ pub(crate) async fn generate_session_compact(
                     StreamStep::IdleTimeout => {
                         return Err(CompactFailure::Transient(
                             acp::Error::internal_error().data(format!(
-                                "compact failed: stream idle timeout after {idle_timeout:?} ({} chars received)",
+                                "{COMPACT_FAILED_PREFIX}stream idle timeout after {idle_timeout:?} ({} chars received)",
                                 content.chars().count()
                             )),
                         ));
@@ -739,7 +804,7 @@ pub(crate) async fn generate_session_compact(
                 if wall_clock_budget_secs > 0 && timing.elapsed_secs() >= wall_clock_budget_secs {
                     return Err(CompactFailure::Transient(
                         acp::Error::internal_error().data(format!(
-                            "compact failed: exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
+                            "{COMPACT_FAILED_PREFIX}exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
                         )),
                     ));
                 }
@@ -766,19 +831,8 @@ pub(crate) async fn generate_session_compact(
                                     xai_grok_sampling_types::messages::StopReason::MaxTokens
                                         | xai_grok_sampling_types::messages::StopReason::ModelContextWindowExceeded
                                 );
-                                stop_reason = Some(
-                                    match sr {
-                                        xai_grok_sampling_types::messages::StopReason::EndTurn => "end_turn".to_string(),
-                                        xai_grok_sampling_types::messages::StopReason::MaxTokens => "max_tokens".to_string(),
-                                        xai_grok_sampling_types::messages::StopReason::ToolUse => "tool_use".to_string(),
-                                        xai_grok_sampling_types::messages::StopReason::StopSequence => "stop_sequence".to_string(),
-                                        xai_grok_sampling_types::messages::StopReason::Refusal => "refusal".to_string(),
-                                        xai_grok_sampling_types::messages::StopReason::PauseTurn => "pause_turn".to_string(),
-                                        xai_grok_sampling_types::messages::StopReason::ModelContextWindowExceeded => "model_context_window_exceeded".to_string(),
-                                        // Record the wire value, not a fabricated sentinel.
-                                        xai_grok_sampling_types::messages::StopReason::Unknown(s) => s,
-                                    },
-                                );
+                                // Record the wire value, not a fabricated sentinel.
+                                stop_reason = Some(sr.wire_str());
                             }
                         }
                         _ => {}
@@ -838,7 +892,9 @@ pub(crate) async fn generate_session_compact(
         // gets threaded through. After max_retries the caller still surfaces
         // the error to the user.
         Err(CompactFailure::Transient(
-            acp::Error::internal_error().data("compact failed: model returned empty response"),
+            acp::Error::internal_error().data(format!(
+                "{COMPACT_FAILED_PREFIX}model returned empty response"
+            )),
         ))
     } else {
         Ok(output)

@@ -40,13 +40,10 @@ fn park_plan(
     expectation
 }
 
-/// Minimal's plan-approval contract: the plan body reaches NATIVE SCROLLBACK
-/// **while the approval is parked**, not only once the user answers. Users
-/// reported reading a truncated plan with nothing behind it in the scrollback;
-/// design doc §6.16.
+/// Minimal's plan-approval contract: the plan body reaches NATIVE SCROLLBACK **while the approval is parked**, not only once the user answers.
+/// Users reported reading a truncated plan with nothing behind it in the scrollback.
 ///
-/// Also pins the revision path: a revised plan is a fresh `exit_plan_mode` with
-/// a new `tool_call_id`, and must commit as its own block exactly once.
+/// Also pins the revision path: a revised plan is a fresh `exit_plan_mode` with a new `tool_call_id`, and must commit as its own block exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_parked_plan_commits_to_scrollback() {

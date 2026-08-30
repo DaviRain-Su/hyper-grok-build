@@ -23,8 +23,6 @@ pub use xai_grok_config_types::{
 };
 // Relay-sync + MCP-config value types extracted; re-exported to keep paths stable.
 pub use xai_grok_config_types::{McpConfig, RelaySyncConfig};
-// Worktree-pool config value type extracted; re-exported to keep paths stable.
-pub use xai_grok_config_types::PoolConfig;
 
 /// TUI/CLI settings. Composed from typed section configs defined in `agent::config`.
 #[derive(Debug, Clone, Default)]
@@ -206,22 +204,6 @@ pub(crate) fn load_mcp_servers_with_oauth(
     }
 
     (acp_servers, oauth_configs)
-}
-
-/// Load the worktree pool configuration from config.toml.
-/// Returns the default config if the section is missing.
-pub fn worktree_pool_from_toml(root: &TomlValue) -> PoolConfig {
-    if let TomlValue::Table(table) = root
-        && let Some(pool_val) = table.get("worktree_pool")
-    {
-        // Try to deserialize the section; fall back to defaults on error
-        pool_val
-            .clone()
-            .try_into::<PoolConfig>()
-            .unwrap_or_default()
-    } else {
-        PoolConfig::default()
-    }
 }
 
 /// Load MCP servers with project-scoped overrides from `.grok/config.toml`.
@@ -803,35 +785,22 @@ async fn write_toml_table_if_changed(
             return Err(anyhow::anyhow!("failed to read {}: {e}", path.display()));
         }
     };
-    let mut root: TomlValue = if original.is_empty() {
-        TomlValue::Table(TomlMap::new())
-    } else {
-        match toml::from_str(&original) {
-            Ok(v) => v,
-            Err(parse_err) => {
-                return Err(anyhow::anyhow!(
-                    "refusing to overwrite unparseable {}: {}; fix the syntax before retrying",
-                    path.display(),
-                    parse_err
-                ));
-            }
+    let mut root = match super::persist::parse_existing_config_toml(&original) {
+        Ok(v) => v,
+        Err(parse_err) => {
+            return Err(anyhow::anyhow!(
+                "refusing to overwrite unparseable {}: {}; fix the syntax before retrying",
+                path.display(),
+                parse_err
+            ));
         }
     };
+    let before = toml::to_string_pretty(&root)?;
     let table = root
         .as_table_mut()
         .ok_or_else(|| anyhow::anyhow!("config root is not a table"))?;
     f(table);
     let toml_str = toml::to_string_pretty(&root)?;
-    // Normalize empty original so first enable/disable still writes when needed.
-    let before = if original.is_empty() {
-        toml::to_string_pretty(&TomlValue::Table(TomlMap::new()))?
-    } else {
-        // Re-serialize original for stable comparison (ignore formatting noise).
-        match toml::from_str::<TomlValue>(&original) {
-            Ok(v) => toml::to_string_pretty(&v).unwrap_or(original),
-            Err(_) => original,
-        }
-    };
     if before == toml_str {
         return Ok(false);
     }
@@ -1371,7 +1340,7 @@ pub(crate) fn load_claude_json_mcp_servers(
         return vec![];
     }
 
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = xai_dirs::home_dir() else {
         return vec![];
     };
     let claude_json_path = home.join(".claude.json");
@@ -1386,7 +1355,7 @@ pub(crate) fn load_claude_json_mcp_servers(
 pub(crate) fn load_claude_json_mcp_servers_for_attribution(
     cwd: &std::path::Path,
 ) -> Vec<acp::McpServer> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = xai_dirs::home_dir() else {
         return vec![];
     };
     load_claude_json_mcp_servers_from(&home.join(".claude.json"), cwd)
@@ -1417,7 +1386,7 @@ pub(crate) fn load_claude_json_mcp_servers_as_configs(
 pub(crate) fn load_claude_json_mcp_servers_as_configs_unfiltered(
     cwd: &std::path::Path,
 ) -> IndexMap<String, McpServerConfig> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = xai_dirs::home_dir() else {
         return IndexMap::new();
     };
     let claude_json_path = home.join(".claude.json");
@@ -1512,7 +1481,7 @@ pub(crate) fn load_cursor_mcp_servers(
     }
 
     // Global (lower priority)
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = xai_dirs::home_dir() {
         let global_path = home.join(".cursor").join("mcp.json");
         for server in load_mcp_json_file(&global_path) {
             let name = match &server {
@@ -1555,7 +1524,7 @@ pub(crate) fn load_cursor_mcp_servers_as_configs(
     }
 
     // Global (lower priority — or_insert so project wins)
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = xai_dirs::home_dir() {
         let global_path = home.join(".cursor").join("mcp.json");
         if global_path.is_file()
             && let Some(config) = read_mcp_json(&global_path)
@@ -2545,9 +2514,9 @@ expose_image_base64 = true
 
     #[test]
     fn load_cursor_mcp_servers_as_configs_parses_cursor_mcp_json() {
-        // NOTE: This test cannot override HOME (dirs::home_dir is not
-        // controlled by an env var on all platforms), so we test the
-        // underlying read_mcp_json + McpConfig round-trip instead.
+        // Overriding HOME/USERPROFILE mutates process-global env and races
+        // parallel tests, so this tests the underlying read_mcp_json +
+        // McpConfig round-trip instead of the home-anchored global path.
         let dir = tempfile::tempdir().unwrap();
         let mcp_json_path = dir.path().join("mcp.json");
         std::fs::write(

@@ -2,13 +2,12 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 9. **Same agent_type switch — no modal, normal switch.**
-/// Switching between two models that share the same agent type (or no
-/// agent type) mid-session should succeed normally without any modal.
+/// **Same agent_type switch: no modal, normal switch.**
+/// Switching between two models that share the same agent type (or no agent type) mid-session should succeed normally without any modal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn same_agent_type_switch_no_modal() {
-    // Both models have no agent_type → both use grok-build harness.
+    // Both models have no agent_type, so both use the grok-build harness
     let content = ContentController::start_with_models(vec![
         MockModel::new("model-a"),
         MockModel::new("model-b"),
@@ -39,9 +38,8 @@ async fn same_agent_type_switch_no_modal() {
         .inject_keys(b"/model model-b\r")
         .expect("type model switch");
 
-    // Should switch normally — look for the model name in status bar
-    // (bottom-right). The toast "✓ Default model: model-b" may be
-    // transient, so check for "model-b" anywhere on screen.
+    // The switch proceeds normally; look for the model name in the status bar (bottom-right)
+    // The toast "✓ Default model: model-b" may be transient, so check for "model-b" anywhere on screen
     harness
         .wait_for_text("model-b", Duration::from_secs(15))
         .expect("model-b visible on screen after switch");

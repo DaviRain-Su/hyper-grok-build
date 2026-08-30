@@ -7,7 +7,7 @@ use std::time::Duration;
 use xai_grok_test_support::{MockInferenceServer, MockModelEntry, ScriptedResponse};
 
 #[derive(Clone, Copy)]
-enum SessionKind {
+pub(super) enum SessionKind {
     Main,
     Subagent,
 }
@@ -20,9 +20,10 @@ fn rate_limited_reply(retry_after_secs: u64) -> ScriptedResponse {
     reply
 }
 
-type CapturedRetries = Arc<std::sync::Mutex<Vec<crate::extensions::notification::RetryState>>>;
+pub(super) type CapturedRetries =
+    Arc<std::sync::Mutex<Vec<crate::extensions::notification::RetryState>>>;
 
-fn drain_gateway(
+pub(super) fn drain_gateway(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
 ) -> CapturedRetries {
     use crate::extensions::notification::{SessionNotification, SessionUpdate};
@@ -52,7 +53,7 @@ fn drain_gateway(
     captured
 }
 
-fn drain_persistence(mut rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>) {
+pub(super) fn drain_persistence(mut rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>) {
     tokio::task::spawn_local(async move {
         while let Some(msg) = rx.recv().await {
             if let PersistenceMsg::FlushAndAck { respond_to } = msg {
@@ -62,7 +63,7 @@ fn drain_persistence(mut rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg
     });
 }
 
-fn sampler_surfaces_429() -> xai_grok_sampler::RetryPolicy {
+pub(super) fn sampler_surfaces_429() -> xai_grok_sampler::RetryPolicy {
     xai_grok_sampler::RetryPolicy {
         max_retries: 5,
         rate_limit_retry_threshold: xai_grok_sampler::RATE_LIMIT_RETRY_DISABLED,
@@ -78,10 +79,11 @@ fn sampler_retries_429() -> xai_grok_sampler::RetryPolicy {
     }
 }
 
-async fn actor_under_test(
+pub(super) async fn actor_under_test(
     server: &MockInferenceServer,
     session: SessionKind,
     retry_policy: xai_grok_sampler::RetryPolicy,
+    transient_retry_enabled: bool,
 ) -> (Arc<SessionActor>, CapturedRetries) {
     let sampler_max_retries = retry_policy.max_retries;
     let sampling_cfg = xai_grok_sampler::SamplerConfig {
@@ -106,6 +108,7 @@ async fn actor_under_test(
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
     actor.sampler_handle = sampler_handle;
     actor.startup_hints.is_subagent = matches!(session, SessionKind::Subagent);
+    actor.transient_retry_enabled = transient_retry_enabled;
     // The per-turn config push carries the shell's max_retries; mirror the policy.
     actor.max_retries = sampler_max_retries;
 
@@ -133,7 +136,7 @@ async fn actor_under_test(
     (actor, captured_retries)
 }
 
-async fn conversation_request(actor: &Arc<SessionActor>) -> ConversationRequest {
+pub(super) async fn conversation_request(actor: &Arc<SessionActor>) -> ConversationRequest {
     actor
         .chat_state_handle
         .build_request(
@@ -148,7 +151,7 @@ async fn conversation_request(actor: &Arc<SessionActor>) -> ConversationRequest 
         .expect("chat state actor should be alive")
 }
 
-async fn pump_local_tasks() {
+pub(super) async fn pump_local_tasks() {
     for _ in 0..8 {
         tokio::task::yield_now().await;
     }
@@ -165,7 +168,8 @@ async fn subagent_429_wait_is_owned_and_capped_by_the_pacer() {
             server.enqueue_response("/v1/responses", rate_limited_reply(90));
 
             let (actor, _retries) =
-                actor_under_test(&server, SessionKind::Subagent, sampler_surfaces_429()).await;
+                actor_under_test(&server, SessionKind::Subagent, sampler_surfaces_429(), true)
+                    .await;
             let request = conversation_request(&actor).await;
             let requests_before = server.request_count();
             let mut budget = actor.rate_limit_wait_budget();
@@ -173,7 +177,7 @@ async fn subagent_429_wait_is_owned_and_capped_by_the_pacer() {
             let started = tokio::time::Instant::now();
             let outcome = tokio::time::timeout(
                 Duration::from_secs(300),
-                actor.run_turn_via_sampler(request, &mut budget),
+                actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true)),
             )
             .await
             .expect("turn must finish within timeout");
@@ -214,13 +218,14 @@ async fn paced_wait_notifies_the_client_with_a_retrying_state() {
             server.enqueue_response("/v1/responses", rate_limited_reply(1));
 
             let (actor, retries) =
-                actor_under_test(&server, SessionKind::Subagent, sampler_surfaces_429()).await;
+                actor_under_test(&server, SessionKind::Subagent, sampler_surfaces_429(), true)
+                    .await;
             let request = conversation_request(&actor).await;
             let mut budget = actor.rate_limit_wait_budget();
 
             let outcome = tokio::time::timeout(
                 Duration::from_secs(30),
-                actor.run_turn_via_sampler(request, &mut budget),
+                actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true)),
             )
             .await
             .expect("turn must finish within timeout");
@@ -269,13 +274,14 @@ async fn exhausted_subagent_budget_notifies_exhausted_with_the_attempts_taken() 
             }
 
             let (actor, retries) =
-                actor_under_test(&server, SessionKind::Subagent, sampler_surfaces_429()).await;
+                actor_under_test(&server, SessionKind::Subagent, sampler_surfaces_429(), true)
+                    .await;
             let request = conversation_request(&actor).await;
             let mut budget = actor.rate_limit_wait_budget();
 
             let outcome = tokio::time::timeout(
                 Duration::from_secs(60),
-                actor.run_turn_via_sampler(request, &mut budget),
+                actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true)),
             )
             .await
             .expect("turn must finish within timeout");
@@ -331,14 +337,14 @@ async fn main_session_429_is_owned_by_the_sampler_never_the_pacer() {
                 }
 
                 let (actor, _retries) =
-                    actor_under_test(&server, SessionKind::Main, sampler_retries_429()).await;
+                    actor_under_test(&server, SessionKind::Main, sampler_retries_429(), true).await;
                 let request = conversation_request(&actor).await;
                 let requests_before = server.request_count();
                 let mut budget = actor.rate_limit_wait_budget();
 
                 let outcome = tokio::time::timeout(
                     Duration::from_secs(30),
-                    actor.run_turn_via_sampler(request, &mut budget),
+                    actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true)),
                 )
                 .await
                 .expect("turn must finish within timeout");
@@ -390,7 +396,7 @@ async fn run_burst(n: usize, cap: usize) -> BurstMetrics {
     let mut turns = Vec::with_capacity(n);
     for _ in 0..n {
         let (actor, _retries) =
-            actor_under_test(&server, SessionKind::Subagent, sampler_surfaces_429()).await;
+            actor_under_test(&server, SessionKind::Subagent, sampler_surfaces_429(), true).await;
         let request = conversation_request(&actor).await;
         turns.push((actor, request));
     }
@@ -402,7 +408,7 @@ async fn run_burst(n: usize, cap: usize) -> BurstMetrics {
                 let mut budget = actor.rate_limit_wait_budget();
                 tokio::time::timeout(
                     Duration::from_secs(60),
-                    actor.run_turn_via_sampler(request, &mut budget),
+                    actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true)),
                 )
                 .await
                 .expect("burst turn must finish within timeout")

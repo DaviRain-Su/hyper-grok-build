@@ -2,8 +2,7 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Distinctive tokens for the critical session banner (unlikely to collide
-/// with welcome chrome or mock response text).
+/// Distinctive tokens for the critical session banner (unlikely to collide with welcome chrome or mock response text).
 const CRIT_TITLE: &str = "ZZANNCRITTITLE";
 const CRIT_MSG: &str = "ZZANNCRITMSG";
 const CRIT_B_TITLE: &str = "ZZANNCRITBTITLE";
@@ -21,8 +20,7 @@ const PROMO_LABEL: &str = "ZZPROMOCTA";
 /// The promo CTA renders as a bracketed button.
 const PROMO_BUTTON: &str = "[ZZPROMOCTA]";
 const PROMO_URL: &str = "https://x.ai/zz-promo-cta";
-/// Configured `cta.caption` for the pinned multi-surface fixture; the banner
-/// paints it after the button, the in-session header never does.
+/// Configured `cta.caption` for the pinned multi-surface fixture; the banner paints it after the button, the in-session header never does.
 const PROMO_CAPTION: &str = "or use Ctrl+O";
 /// Second promo message (dismissible), distinct from `PROMO_MSG`.
 const PROMO_B_MSG: &str = "ZZANNPROMOBMSG";
@@ -97,9 +95,9 @@ async fn critical_announcement_title_on_welcome() {
     harness.quit().expect("clean quit");
 }
 
-/// After entering a session, the critical banner is exactly the two-line
-/// layout: `! Title` with a right-aligned `[hide]` button, then the message
-/// (column-aligned with the title) followed by `hide: /announcements hide`.
+/// After entering a session, the critical banner is exactly the two-line layout.
+/// Row one is `! Title` with a right-aligned `[hide]` button.
+/// Row two is the message, column-aligned with the title, followed by `hide: /announcements hide`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn critical_announcement_session_banner_two_lines() {
@@ -138,8 +136,7 @@ async fn critical_announcement_session_banner_two_lines() {
         !screen.contains('‼') && !screen.contains('⚠') && !screen.contains('ℹ'),
         "session banner must not use severity emoji prefixes\nscreen:\n{screen}"
     );
-    // Two-row layout: [hide] shares the title row; the CTA shares the message
-    // row; the message column lines up with the title column (past the `! `).
+    // Two-row layout: [hide] shares the title row; the CTA shares the message row; the message column lines up with the title column (past the `! `)
     let (t_row, t_col) = locate_screen_text(&screen, CRIT_TITLE).expect("locate title on screen");
     let (m_row, m_col) = locate_screen_text(&screen, CRIT_MSG).expect("locate message on screen");
     assert_eq!(
@@ -165,16 +162,16 @@ async fn critical_announcement_session_banner_two_lines() {
     harness.quit().expect("clean quit");
 }
 
-/// Clicking the banner's `[hide]` button collapses it exactly like
-/// `/announcements hide`. Also pins the row-1 reservation: a long message
-/// truncates with an ellipsis while the CTA keeps its full width.
+/// Clicking the banner's `[hide]` button collapses it exactly like `/announcements hide`.
+/// Also pins the row-1 reservation: a long message truncates with an ellipsis while the CTA keeps its full width.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn critical_announcement_hide_button_click_hides_banner() {
     let content = ContentController::start().await.expect("start content");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} hide button click."));
 
-    // 115-col message vs row-1 budget DEFAULT_COLS − 29: the truncation asserts below hold only while DEFAULT_COLS ≤ 143.
+    // The message is 115 cols and the row-1 budget is DEFAULT_COLS − 29
+    // The truncation asserts below hold only while DEFAULT_COLS is at most 143
     let long_msg = format!(
         "{CRIT_MSG} elevated error rates persist across regions check status.x.ai for updates and retry your request later"
     );
@@ -212,7 +209,7 @@ async fn critical_announcement_hide_button_click_hides_banner() {
         "CTA must keep its full reserved width\nline:{msg_line:?}"
     );
 
-    // Click the [hide] button (SGR press + release at its first cell).
+    // Click the [hide] button (SGR press and release at its first cell)
     let (h_row, h_col) = locate_screen_text(&screen, HIDE_BUTTON).expect("locate [hide]");
     let click = format!(
         "{}{}",
@@ -406,9 +403,9 @@ async fn announcements_slash_listed_only_for_critical() {
     }
 }
 
-/// A critical announcement added server-side AFTER a session is live reaches
-/// the open TUI via the shell's periodic settings refresh — no `/new`, no
-/// restart. Uses the shared 1s-poll oauth spawn (no announcements override).
+/// A critical announcement added server-side AFTER a session is live reaches the open TUI via the shell's periodic settings refresh.
+/// No `/new`, no restart.
+/// Uses the shared 1s-poll oauth spawn (no announcements override).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn critical_announcement_reaches_live_session_via_periodic_refresh() {
@@ -424,8 +421,7 @@ async fn critical_announcement_reaches_live_session_via_periodic_refresh() {
         "no banner may exist before the server-side change\nscreen:\n{screen}"
     );
 
-    // Server-side change mid-session (the remote settings flip): the next
-    // `GET /v1/settings` returns a critical announcement.
+    // Server-side change mid-session (the remote settings flip): the next `GET /v1/settings` returns a critical announcement
     content.server().set_settings(json!({
         "allow_access": true,
         "announcements": [{
@@ -436,7 +432,7 @@ async fn critical_announcement_reaches_live_session_via_periodic_refresh() {
         }],
     }));
 
-    // Poll (1s) + push + redraw: the banner appears without /new or restart.
+    // Poll (1s), push, redraw: the banner appears without /new or restart
     harness
         .wait_for_text(CRIT_TITLE, Duration::from_secs(30))
         .expect("pushed critical title in live session");
@@ -463,9 +459,8 @@ async fn critical_announcement_reaches_live_session_via_periodic_refresh() {
     harness.quit().expect("clean quit");
 }
 
-/// Per-ID hide: hiding critical A must not suppress a DIFFERENT critical B
-/// pushed later in the same session — the banner re-arms for new ids. Uses
-/// the shared 1s-poll oauth spawn (no announcements override).
+/// Per-ID hide: hiding critical A must not suppress a DIFFERENT critical B pushed later in the same session; the banner comes back for new ids.
+/// Uses the shared 1s-poll oauth spawn (no announcements override).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn hidden_critical_does_not_suppress_new_critical_id() {
@@ -515,7 +510,7 @@ async fn hidden_critical_does_not_suppress_new_critical_id() {
         "hidden critical A must stay hidden across identical polls\nscreen:\n{screen}"
     );
 
-    // Server-side flip to critical B (new id): the banner must re-arm.
+    // Server-side flip to critical B (new id): the banner must return
     content.server().set_settings(json!({
         "allow_access": true,
         "announcements": [{
@@ -543,11 +538,10 @@ async fn hidden_critical_does_not_suppress_new_critical_id() {
     harness.quit().expect("clean quit");
 }
 
-/// A promo pushed mid-session (poll flip) paints the 1-line promo row —
-/// `[label]` button and both hide affordances on ONE row (the message is NOT
-/// painted on the banner; it lives on the welcome hero) — and opens the
-/// `/announcements` slash gate; a critical published mid-promo takes over the
-/// single banner slot (promo row gone, red critical up).
+/// A promo pushed mid-session (poll flip) paints the 1-line promo row: the `[label]` button and both hide affordances on ONE row.
+/// The message is NOT painted on the banner; it lives on the welcome hero.
+/// The push also opens the `/announcements` slash gate.
+/// A critical published mid-promo takes over the single banner slot (promo row gone, red critical up).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn promo_announcement_banner_slash_gate_and_critical_preemption() {
@@ -579,16 +573,14 @@ async fn promo_announcement_banner_slash_gate_and_critical_preemption() {
         .wait_for_text(HIDE_CTA, Duration::from_secs(5))
         .expect("hide CTA on promo row");
 
-    // One-line layout: the row starts with the [label] button and carries both
-    // right-hand hide affordances (the promo message is not painted here).
+    // One-line layout: the row starts with the [label] button and carries both right-hand hide affordances (the promo message is not painted here)
     let screen = harness.screen_contents();
     assert!(
         !screen.contains(PROMO_MSG),
         "the promo message must NOT paint on the session banner\nscreen:\n{screen}"
     );
-    // The `[label]` button now also renders on the in-session top header (after
-    // the cwd), so target the BANNER row specifically: the only row carrying
-    // both the button and the hide affordances (the header has neither hide).
+    // The `[label]` button also renders on the in-session top header (after the cwd)
+    // Target the BANNER row specifically: the only row carrying both the button and the hide affordances (the header has neither)
     let row_line = screen
         .lines()
         .find(|l| l.contains(PROMO_BUTTON) && l.contains(HIDE_CTA))
@@ -620,11 +612,10 @@ async fn promo_announcement_banner_slash_gate_and_critical_preemption() {
                 harness.screen_contents()
             )
         });
-    // Crossterm may hold a lone ESC briefly to disambiguate CSI sequences; a
-    // fixed 200ms pump races the dismiss paint under remote CI (same class as
-    // minimal_slash_dropdown_dismisses_with_esc). Wait for the sentinel to
-    // leave, clear the residual `/announ` draft, then re-sync the promo row so
-    // the preemption wait starts from a known banner state.
+    // Crossterm may hold a lone ESC briefly to disambiguate CSI sequences
+    // A fixed 200ms pump races the dismiss paint under remote CI (same class as minimal_slash_dropdown_dismisses_with_esc)
+    // Wait for the sentinel to leave, clear the residual `/announ` draft, then re-sync the promo row
+    // The preemption wait then starts from a known banner state
     harness.inject_keys(keys::ESC).expect("esc dropdown");
     harness
         .wait_for_text_absent(SLASH_DESC, Duration::from_secs(10))
@@ -636,8 +627,7 @@ async fn promo_announcement_banner_slash_gate_and_critical_preemption() {
         .wait_for_text(PROMO_BUTTON, Duration::from_secs(10))
         .expect("promo banner still up after slash dismiss");
 
-    // Critical published mid-promo, with the promo STILL in the list: the
-    // single slot flips to the critical banner (precedence, not replacement).
+    // Critical published mid-promo, with the promo STILL in the list: the single slot flips to the critical banner (precedence, not replacement)
     content.server().set_settings(json!({
         "allow_access": true,
         "announcements": [
@@ -665,11 +655,10 @@ async fn promo_announcement_banner_slash_gate_and_critical_preemption() {
     harness.quit().expect("clean quit");
 }
 
-/// Clicking the promo `[label]` button dispatches the open action through the
-/// safe-open path — observed via the `GROK_TEST_OPEN_URL_FILE` seam, never a
-/// real browser — and does NOT hide the row. The raw PTY stream also carries
-/// the CTA URL as OSC 8 (WezTerm pin), the mouse-off/tmux fallback. Then the
-/// promo hide roundtrip: `/announcements hide` clears the row, `show` restores.
+/// Clicking the promo `[label]` button dispatches the open action through the safe-open path and does NOT hide the row.
+/// The URL lands in the `GROK_TEST_OPEN_URL_FILE` file; no real browser opens.
+/// The raw PTY stream also carries the CTA URL as OSC 8 (WezTerm pin), the fallback when the mouse is off or under tmux.
+/// Then the promo hide roundtrip: `/announcements hide` clears the row, `show` restores.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn promo_cta_click_opens_link_and_hide_roundtrip() {
@@ -677,9 +666,8 @@ async fn promo_cta_click_opens_link_and_hide_roundtrip() {
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} promo click."));
     let url_file = content.home().join("opened-urls.txt");
     let url_file_str = url_file.to_str().expect("utf8 url file path").to_owned();
-    // OSC 8 emission is gated on a Native-capable brand (`hyperlink_route`);
-    // pin WezTerm like the file-path hyperlink test so the byte-level OSC 8
-    // assert below is meaningful.
+    // OSC 8 emission is gated on a Native-capable brand (`hyperlink_route`)
+    // Pin WezTerm like the file-path hyperlink test so the byte-level OSC 8 assert below is meaningful
     let extra_env = [
         ("GROK_TEST_OPEN_URL_FILE", url_file_str.as_str()),
         ("TERM_PROGRAM", "WezTerm"),
@@ -694,9 +682,8 @@ async fn promo_cta_click_opens_link_and_hide_roundtrip() {
         .wait_for_text(PROMO_BUTTON, Duration::from_secs(30))
         .expect("promo [label] button in live session");
 
-    // Give the frame a beat to flush, then prove the button cells carry the
-    // CTA URL as OSC 8 (the URL never renders as text, so raw-stream presence
-    // means the hyperlink wrap).
+    // Give the frame a beat to flush, then prove the button cells carry the CTA URL as OSC 8
+    // The URL never renders as text, so raw-stream presence means the hyperlink wrap
     harness.update(Duration::from_millis(400));
     let raw = String::from_utf8_lossy(harness.raw_output()).into_owned();
     assert!(
@@ -709,8 +696,7 @@ async fn promo_cta_click_opens_link_and_hide_roundtrip() {
         osc8_snippets(&raw)
     );
 
-    // SGR click on the BANNER [label] button (the row with the hide affordances),
-    // not the in-session top-header copy of the button.
+    // SGR click on the BANNER [label] button (the row with the hide affordances), not the in-session top-header copy of the button
     let screen = harness.screen_contents();
     let (b_row, banner_line) = screen
         .lines()
@@ -734,8 +720,7 @@ async fn promo_cta_click_opens_link_and_hide_roundtrip() {
         .inject_keys(click.as_bytes())
         .expect("click [label]");
 
-    // Dispatch resolves the promo URL from current state and routes it via
-    // open_url_if_safe; the seam records it instead of launching a browser.
+    // Dispatch resolves the promo URL from current state and routes it via open_url_if_safe; the URL file records it instead of launching a browser
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         harness.update(Duration::from_millis(100));
@@ -780,8 +765,8 @@ async fn promo_cta_click_opens_link_and_hide_roundtrip() {
         }
     }
 
-    // ...and show restores the button (round trip through the persisted hidden
-    // ids). The message stays hero-only, so the banner restores just the button.
+    // ...and show restores the button (round trip through the persisted hidden ids)
+    // The message stays hero-only, so the banner restores just the button
     harness
         .inject_keys(b"/announcements show\r")
         .expect("show command");
@@ -792,10 +777,9 @@ async fn promo_cta_click_opens_link_and_hide_roundtrip() {
     harness.quit().expect("clean quit");
 }
 
-/// `dismissible: false` pins the promo: no hide affordances paint and
-/// `/announcements hide` leaves the banner on screen; a later dismissible promo
-/// re-arms [hide] and hides normally (back-compat pinned in-scenario). The
-/// message is hero-only.
+/// `dismissible: false` pins the promo: no hide affordances paint and `/announcements hide` leaves the banner on screen.
+/// A later dismissible promo brings back [hide] and hides normally, so the old dismissible behavior is pinned in the same scenario.
+/// The message is hero-only.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn non_dismissible_promo_ignores_hide_then_dismissible_hides() {
@@ -832,8 +816,7 @@ async fn non_dismissible_promo_ignores_hide_then_dismissible_hides() {
         "pinned promo must paint no hide affordances\nscreen:\n{screen}"
     );
 
-    // This fixture configures no `cta.caption`: the banner row stays the bare
-    // button (no dim helper text follows it).
+    // This fixture configures no `cta.caption`: the banner row stays the bare button (no dim helper text follows it)
     assert!(
         screen.lines().any(|l| l.trim() == PROMO_BUTTON),
         "a caption-less pinned promo paints a bare [label] banner row\nscreen:\n{screen}"
@@ -850,8 +833,8 @@ async fn non_dismissible_promo_ignores_hide_then_dismissible_hides() {
         harness.screen_contents()
     );
 
-    // Back-compat: a dismissible promo re-arms [hide] and hides normally. Its
-    // message is hero-only too, so [hide] appearing signals the flip.
+    // Back-compat: a dismissible promo brings back [hide] and hides normally
+    // Its message is hero-only too, so [hide] appearing signals the flip
     content.server().set_settings(json!({
         "allow_access": true,
         "announcements": [{
@@ -891,8 +874,7 @@ fn pinned_promo_override_json() -> String {
     )
 }
 
-/// [`spawn_with_announcements`] with extra env pairs appended (e.g. the
-/// `GROK_TEST_OPEN_URL_FILE` seam + a `TERM_PROGRAM` pin for OSC 8).
+/// [`spawn_with_announcements`] with extra env pairs appended (e.g. `GROK_TEST_OPEN_URL_FILE` and a `TERM_PROGRAM` pin for OSC 8).
 fn spawn_with_announcements_and_env(
     content: &ContentController,
     override_json: &str,
@@ -914,12 +896,10 @@ fn spawn_with_announcements_and_env(
     .expect("spawn pager with announcements override + env")
 }
 
-/// Free-tier multi-surface upgrade CTA. A pinned promo surfaces the `[label]`
-/// button with NO `[hide]` affordance on the welcome hero, the in-session top
-/// header (after the cwd path), and the above-prompt banner; `Ctrl+O` opens the
-/// url via the seam. The dashboard surface + the "Ctrl+O toggles YOLO when no
-/// pinned CTA" fallback are covered by the colocated unit tests (dashboard
-/// render/input, agent input arm).
+/// Free-tier multi-surface upgrade CTA.
+/// A pinned promo shows the `[label]` button, with no `[hide]`, on the welcome hero, the in-session top header, and the above-prompt banner.
+/// `Ctrl+O` opens the url via the URL file.
+/// The dashboard button and the "Ctrl+O toggles YOLO when no pinned CTA" fallback are covered by colocated unit tests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn pinned_promo_multi_surface_and_ctrl_o_open() {
@@ -955,8 +935,7 @@ async fn pinned_promo_multi_surface_and_ctrl_o_open() {
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("session response");
 
-    // (3) + (4) The [label] paints on BOTH the top header row (after the cwd)
-    //     and the above-prompt banner, none with [hide].
+    // (3) and (4): the [label] paints on BOTH the top header row (after the cwd) and the above-prompt banner, none with [hide]
     harness
         .wait_for_text(PROMO_BUTTON, Duration::from_secs(10))
         .expect("upgrade CTA in session");
@@ -971,8 +950,7 @@ async fn pinned_promo_multi_surface_and_ctrl_o_open() {
         button_rows >= 2,
         "the [label] must paint on BOTH the header and the banner rows (got {button_rows})\nscreen:\n{screen}"
     );
-    // The configured caption follows the banner button ONLY: the in-session
-    // header always passes a bare button, so exactly one row pairs them.
+    // The configured caption follows the banner button ONLY: the in-session header always passes a bare button, so exactly one row pairs them
     let caption_pair = format!("{PROMO_BUTTON} {PROMO_CAPTION}");
     let caption_rows = screen.lines().filter(|l| l.contains(&caption_pair)).count();
     assert_eq!(
@@ -980,8 +958,8 @@ async fn pinned_promo_multi_surface_and_ctrl_o_open() {
         "the cta.caption must paint after the banner button and never after the header button\nscreen:\n{screen}"
     );
 
-    // (5) Ctrl+O opens the CTA url via the seam (the pinned promo steals the
-    //     chord from YOLO). The banner cells also carry the URL as OSC 8.
+    // (5) Ctrl+O opens the CTA url via the URL file (the pinned promo steals the chord from YOLO)
+    //     The banner cells also carry the URL as OSC 8
     let raw = String::from_utf8_lossy(harness.raw_output()).into_owned();
     assert!(
         raw.contains(PROMO_URL),

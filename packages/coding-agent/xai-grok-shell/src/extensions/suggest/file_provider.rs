@@ -72,7 +72,7 @@ impl FilePathProvider {
             &tok,
             &ctx.text,
             &ctx.cwd,
-            dirs::home_dir().as_deref(),
+            xai_dirs::home_dir().as_deref(),
             |name| std::env::var(name).ok(),
         );
         let (entries, truncated) = list_ranked_entries(&split.list_dir, split.match_prefix).await;

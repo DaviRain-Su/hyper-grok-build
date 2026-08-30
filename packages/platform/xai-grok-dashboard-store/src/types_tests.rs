@@ -139,8 +139,7 @@ fn enum_text_canonicalizes_and_unknown_values_round_trip() {
 fn metadata_validation_enforces_cwd_and_truncates_display_text() {
     let metadata = MemberMetadata {
         cwd: Some("/work/project".to_owned()),
-        // 'é' is two bytes and starts on the cap boundary, so a byte-index
-        // cut would split the char.
+        // 'é' is two bytes and starts on the cap boundary, so a byte-index cut would split the char
         title: Some(format!("{}é tail", "t".repeat(MAX_TITLE_BYTES - 1))),
         model: Some("m".repeat(MAX_MODEL_BYTES + 5)),
         last_turn_summary: Some("s".repeat(MAX_SUMMARY_BYTES + 5)),

@@ -4,25 +4,22 @@ use super::common::*;
 
 // ── Small-screen tip must survive a submit into a slow turn ────────────────
 //
-// Real-usage repro: the tip shows on the welcome→agent promote, the user hits
-// Enter under a second later, and the turn takes several seconds. The submit
-// used to retire the tip (`clear_on_submit` before the fix cleared every
-// tip), reducing it to a sub-second blink. The scripted scenarios miss this
-// because the mock replies instantly; this test paces the mock stream
-// (`set_chunk_delay`) so the turn genuinely outlives the ~3s TTL.
+// Real-usage repro: the tip shows on the welcome-to-agent promote, the user hits Enter under a second later, and the turn takes several seconds
+// The submit used to retire the tip (`clear_on_submit` cleared every tip), reducing it to a sub-second blink
+// The scripted scenarios miss this because the mock replies instantly
+// This test paces the mock stream (`set_chunk_delay`) so the turn genuinely outlives the ~3s TTL
 
 /// Exact tip copy (also asserted char-for-char in the unit tests).
 const TIP_TEXT: &str = "Tight on space? Try /compact-mode";
 
-/// In the 21..=28 tip band (above the 20-row auto-compact threshold).
+/// 24 rows sits in the 21..=28 tip band, above the 20-row auto-compact threshold.
 const BAND_ROWS: u16 = 24;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn small_screen_tip_survives_slow_turn() {
     let content = ContentController::start().await.expect("start content");
-    // ~12 words at 400ms per SSE chunk holds the turn open ~5s — comfortably
-    // past the tip's ~3s TTL, like a real inference turn.
+    // ~12 words at 400ms per SSE chunk holds the turn open ~5s, comfortably past the tip's ~3s TTL, like a real inference turn
     content.set_response(format!(
         "{MOCK_RESPONSE_SENTINEL} one two three four five six seven eight nine ten"
     ));
@@ -40,8 +37,7 @@ async fn small_screen_tip_survives_slow_turn() {
     )
     .expect("spawn");
 
-    // The prompt marker paints at every height; the first char promotes the
-    // welcome prompt to the agent view, where the tip fires.
+    // The prompt marker paints at every height; the first char promotes the welcome prompt to the agent view, where the tip fires
     harness
         .wait_for_text("\u{276f}", WELCOME_TIMEOUT)
         .expect("prompt marker");
@@ -78,7 +74,7 @@ async fn small_screen_tip_survives_slow_turn() {
         "pager rendered 'panicked'\nscreen:\n{settled}"
     );
 
-    // No resurrection: later input never brings the one-shot back.
+    // The tip shows once ever: typing after the expiry must not bring it back
     harness.inject_keys(b"x").expect("type after expiry");
     harness.update(Duration::from_millis(800));
     assert!(

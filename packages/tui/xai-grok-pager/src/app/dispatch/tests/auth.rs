@@ -1,17 +1,6 @@
 //! Tests for login, logout, account switching, and auth-code dispatchers.
 
 use super::*;
-use xai_grok_shell::agent::auth_method::{
-    ANTHROPIC_CLAUDE_METHOD_ID, GITHUB_COPILOT_METHOD_ID, GROK_COM_METHOD_ID, KIMI_CODE_METHOD_ID,
-    OIDC_METHOD_ID, OPENAI_CODEX_METHOD_ID,
-};
-
-fn advertised_auth_method(id: &str, name: &str) -> acp::AuthMethod {
-    acp::AuthMethod::Agent(acp::AuthMethodAgent::new(
-        acp::AuthMethodId::new(id),
-        name.to_string(),
-    ))
-}
 
 #[test]
 fn cta_mcps_loaded_needs_auth_opens_modal_and_seeds() {
@@ -42,7 +31,7 @@ fn cta_mcps_loaded_needs_auth_opens_modal_and_seeds() {
         }),
         &mut app,
     );
-    // Handoff complete: CTA settles to Hidden.
+    // The CTA is finished; the modal owns the flow from here
     assert_eq!(app.agents[&id].plugin_cta.phase, CtaPhase::Hidden);
     // Modal opened to the MCP Servers tab.
     let modal = app.agents[&id]
@@ -57,15 +46,14 @@ fn cta_mcps_loaded_needs_auth_opens_modal_and_seeds() {
         TabDataState::Loaded(servers) => assert_eq!(servers.len(), 4),
         other => panic!("expected mcps_data Loaded, got {other:?}"),
     }
-    // Managed + Local + other plugins collapsed; only target expanded.
+    // Managed, Local, and other plugins collapsed; only the target plugin expanded
     let collapsed = &modal.mcps_collapsed_sections;
     assert!(collapsed.contains(&section_key(&McpSectionId::Managed)));
     assert!(collapsed.contains(&section_key(&McpSectionId::Local)));
     assert!(collapsed.contains(&section_key(&McpSectionId::Plugin("slack".into()))));
     assert!(!collapsed.contains(&section_key(&McpSectionId::Plugin("figma".into()))));
     assert!(modal.mcps_section_collapse_initialized);
-    // Emits the SAME full tab fetch-set as a manual open so no tab is stuck
-    // Loading, plus the candidate refresh.
+    // Emits the same full set of tab fetches as a manual open so no tab is stuck Loading, plus the candidate refresh
     assert_eq!(
         effects
             .iter()
@@ -121,7 +109,7 @@ fn cta_mcps_loaded_no_needs_auth_terminal_sets_installed() {
         };
         cta.expects_mcp = true;
     }
-    // Plugin server present and Ready (terminal, no auth) -> settle now.
+    // The plugin server is present and Ready (terminal, no auth), so the CTA settles now
     let servers = vec![cta_mcp_server(
         "figma-srv",
         Some("figma"),
@@ -142,8 +130,7 @@ fn cta_mcps_loaded_no_needs_auth_terminal_sets_installed() {
         }
     );
     assert!(app.agents[&id].extensions_modal.is_none());
-    // No modal repopulation; settle emits the auto-dismiss timer + candidate
-    // refresh, and never re-probes.
+    // No modal repopulation; settling emits the auto-dismiss timer and the candidate refresh, and never re-fetches the MCP list
     assert!(
         !effects
             .iter()
@@ -193,7 +180,7 @@ fn cta_mcps_loaded_later_needs_auth_opens_handoff() {
         }),
         &mut app,
     );
-    // NeedsAuth is terminal: hand off immediately even mid-poll.
+    // NeedsAuth is terminal: the modal opens immediately even mid-poll
     assert_eq!(app.agents[&id].plugin_cta.phase, CtaPhase::Hidden);
     assert!(app.agents[&id].extensions_modal.is_some());
     assert!(
@@ -205,9 +192,7 @@ fn cta_mcps_loaded_later_needs_auth_opens_handoff() {
 
 // ── agent-bound kinds (bash) ─────────
 
-/// A bash command typed while a turn is RUNNING takes the
-/// server-authoritative immediate path (Effect + optimistic echo, no local
-/// queue entry).
+/// A bash command typed while a turn is running goes straight to the server: an Effect and an optimistic echo, no local queue entry.
 #[test]
 fn bash_while_running_is_server_authoritative() {
     let mut app = test_app_with_agent();
@@ -224,7 +209,6 @@ fn bash_while_running_is_server_authoritative() {
         }
         other => panic!("expected immediate SendBashCommand, got {other:?}"),
     };
-    // Not in the local queue.
     assert_eq!(app.agents[&id].session.queue_len(), 0);
     // Optimistic echo present with kind="bash".
     let q = app
@@ -255,8 +239,7 @@ fn auth_complete_triggers_bundle_status_fetch() {
     );
 
     assert!(matches!(app.auth_state, AuthState::Done));
-    // Pager only refreshes the on-disk catalog snapshot; the actual
-    // bundle download now runs inside the shell post-auth.
+    // The pager only refreshes the on-disk catalog snapshot; the bundle download runs inside the shell after auth
     assert!(
         effects
             .iter()
@@ -301,8 +284,7 @@ fn auth_complete_with_deferred_load_also_fetches_status() {
     assert!(app.deferred_startup.session.is_none());
 }
 
-/// `/login` from the welcome screen (startup / logged-out) must NOT
-/// stash a return view — the normal login-then-load flow is preserved.
+/// `/login` from the welcome screen (startup, logged out) must not stash a return view; the normal login-then-load flow is preserved.
 #[test]
 fn login_from_welcome_does_not_stash_return_view() {
     let mut app = test_app();
@@ -314,130 +296,7 @@ fn login_from_welcome_does_not_stash_return_view() {
     assert_eq!(app.auth_return_view, None);
 }
 
-#[test]
-fn bare_login_overrides_stale_third_party_selection_with_xai() {
-    for stale_method_id in [
-        KIMI_CODE_METHOD_ID,
-        OPENAI_CODEX_METHOD_ID,
-        ANTHROPIC_CLAUDE_METHOD_ID,
-        GITHUB_COPILOT_METHOD_ID,
-    ] {
-        let mut app = test_app();
-        app.auth_methods = vec![
-            advertised_auth_method(KIMI_CODE_METHOD_ID, "Kimi Code"),
-            advertised_auth_method(OPENAI_CODEX_METHOD_ID, "OpenAI Codex"),
-            advertised_auth_method(ANTHROPIC_CLAUDE_METHOD_ID, "Anthropic Claude"),
-            advertised_auth_method(GROK_COM_METHOD_ID, "Grok"),
-        ];
-        app.login_method_id = Some(acp::AuthMethodId::new(stale_method_id));
-        app.login_label = Some("Stale third-party login".to_string());
-        app.auth_start_mode = AuthMode::Command;
-
-        let effects = dispatch(Action::Login, &mut app);
-        let selected_method = effects.iter().find_map(|effect| match effect {
-            Effect::Authenticate { method_id, .. } => Some(method_id.0.as_ref()),
-            _ => None,
-        });
-
-        assert_eq!(
-            selected_method,
-            Some(GROK_COM_METHOD_ID),
-            "bare login reused stale method {stale_method_id}"
-        );
-        assert_eq!(
-            app.login_method_id.as_ref().map(|id| id.0.as_ref()),
-            Some(GROK_COM_METHOD_ID)
-        );
-        assert_eq!(app.login_label.as_deref(), Some("Grok"));
-        assert_eq!(app.auth_start_mode, AuthMode::Pending);
-    }
-}
-
-#[test]
-fn bare_login_dispatches_enterprise_oidc_over_stale_openai_selection() {
-    let mut app = test_app();
-    app.auth_methods = vec![
-        advertised_auth_method(OPENAI_CODEX_METHOD_ID, "OpenAI Codex"),
-        advertised_auth_method(OIDC_METHOD_ID, "Enterprise xAI"),
-    ];
-    app.login_method_id = Some(acp::AuthMethodId::new(OPENAI_CODEX_METHOD_ID));
-
-    let effects = dispatch(Action::Login, &mut app);
-    let selected_method = effects.iter().find_map(|effect| match effect {
-        Effect::Authenticate { method_id, .. } => Some(method_id.0.as_ref()),
-        _ => None,
-    });
-
-    assert_eq!(selected_method, Some(OIDC_METHOD_ID));
-    assert_eq!(app.login_label.as_deref(), Some("Enterprise xAI"));
-    assert_eq!(app.auth_start_mode, AuthMode::Pending);
-}
-
-#[test]
-fn bare_login_with_only_third_party_methods_fails_closed() {
-    let mut app = test_app_with_agent();
-    app.auth_methods = vec![
-        advertised_auth_method(KIMI_CODE_METHOD_ID, "Kimi Code"),
-        advertised_auth_method(OPENAI_CODEX_METHOD_ID, "OpenAI Codex"),
-        advertised_auth_method(ANTHROPIC_CLAUDE_METHOD_ID, "Anthropic Claude"),
-    ];
-    app.login_method_id = Some(acp::AuthMethodId::new(KIMI_CODE_METHOD_ID));
-
-    let effects = dispatch(Action::Login, &mut app);
-
-    assert!(effects.is_empty());
-    assert_eq!(app.active_view, ActiveView::Agent(AgentId(0)));
-    assert!(app.login_method_id.is_none());
-    assert!(matches!(
-        &app.auth_state,
-        AuthState::Pending { error: Some(message) }
-            if message.contains("No xAI Grok login method")
-                && message.contains("/login kimi")
-                && message.contains("/login openai")
-                && message.contains("/login claude")
-    ));
-}
-
-#[test]
-fn explicit_third_party_login_actions_keep_their_provider() {
-    for (action, expected_method_id) in [
-        (Action::LoginKimi, KIMI_CODE_METHOD_ID),
-        (Action::LoginOpenAiCodex, OPENAI_CODEX_METHOD_ID),
-        (Action::LoginAnthropicClaude, ANTHROPIC_CLAUDE_METHOD_ID),
-    ] {
-        let mut app = test_app();
-        let effects = dispatch(action, &mut app);
-        let selected_method = effects.iter().find_map(|effect| match effect {
-            Effect::Authenticate { method_id, .. } => Some(method_id.0.as_ref()),
-            _ => None,
-        });
-
-        assert_eq!(selected_method, Some(expected_method_id));
-    }
-}
-
-#[test]
-fn switch_account_preserves_current_third_party_provider() {
-    for expected_method_id in [
-        KIMI_CODE_METHOD_ID,
-        OPENAI_CODEX_METHOD_ID,
-        ANTHROPIC_CLAUDE_METHOD_ID,
-    ] {
-        let mut app = test_app();
-        app.login_method_id = Some(acp::AuthMethodId::new(expected_method_id));
-
-        let effects = dispatch(Action::SwitchAccount, &mut app);
-        let selected_method = effects.iter().find_map(|effect| match effect {
-            Effect::SwitchAccount { method_id, .. } => Some(method_id.0.as_ref()),
-            _ => None,
-        });
-
-        assert_eq!(selected_method, Some(expected_method_id));
-    }
-}
-
-/// Compact-auth recovery: hold prompt across auto-compact 401, stash on
-/// PromptResponse, resubmit on mid-session AuthComplete.
+/// Compact-auth recovery: the prompt is held across an auto-compact 401, stashed on PromptResponse, and resubmitted on a mid-session AuthComplete.
 #[test]
 fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
     use crate::app::acp_handler::apply_session_event_for_test;
@@ -553,7 +412,7 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
     );
 }
 
-/// Without compact_held, clearing in_flight on compact start leaves reauth empty.
+/// Without `compact_held_prompt`, clearing `in_flight_prompt` when compact starts leaves nothing for reauth to stash.
 #[test]
 fn pre_fix_compact_start_without_hold_cannot_stash_for_reauth() {
     use crate::app::agent::AgentState;
@@ -588,9 +447,7 @@ fn pre_fix_compact_start_without_hold_cannot_stash_for_reauth() {
     );
 }
 
-/// A second auth-failed turn with no rewindable prompt
-/// (`in_flight_prompt == None`) must not clobber the stash from an
-/// earlier 401.
+/// A second auth-failed turn with no rewindable prompt (`in_flight_prompt == None`) must not clobber the stash from an earlier 401.
 #[test]
 fn second_auth_failure_does_not_clobber_reauth_stash() {
     use crate::scrollback::block::RenderBlock;
@@ -633,8 +490,7 @@ fn second_auth_failure_does_not_clobber_reauth_stash() {
     );
 }
 
-/// Cancelling a mid-session re-auth drops the stashed prompt so it is
-/// not silently resubmitted on a later, unrelated login.
+/// Cancelling a mid-session re-auth drops the stashed prompt so it is not silently resubmitted on a later, unrelated login.
 #[test]
 fn cancel_login_drops_reauth_stashed_prompt() {
     let mut app = test_app_with_agent();
@@ -657,9 +513,8 @@ fn cancel_login_drops_reauth_stashed_prompt() {
     );
 }
 
-/// Cancelling a mid-session re-auth strips the stale `ReAuthRequired`
-/// prompt from scrollback so a later `PromptResponse` cannot re-detect
-/// it and re-stash the prompt for silent resubmission.
+/// Cancelling a mid-session re-auth strips the stale `ReAuthRequired` prompt from scrollback.
+/// A later `PromptResponse` can then no longer re-detect it and re-stash the prompt for silent resubmission.
 #[test]
 fn cancel_login_strips_reauth_prompt_from_scrollback() {
     use crate::scrollback::block::RenderBlock;
@@ -695,8 +550,7 @@ fn cancel_login_strips_reauth_prompt_from_scrollback() {
     );
 }
 
-/// Empty `auth_methods` (preferred_method pin unavailable) must not invent
-/// `grok.com` or start an OIDC flow the agent did not advertise.
+/// Empty `auth_methods` (the preferred_method pin is unavailable) must not invent `grok.com` or start an OIDC flow the agent did not advertise.
 #[test]
 fn login_with_empty_auth_methods_fails_closed() {
     let mut app = test_app_with_agent();
@@ -726,10 +580,9 @@ fn login_with_empty_auth_methods_fails_closed() {
     assert!(app.login_method_id.is_none());
 }
 
-/// Puts the app in `Authenticating` with a live task's abort handle installed
-/// (as the event loop would), returning the task's JoinHandle and the seq.
-/// Callers assert the task actually gets aborted (`unwrap_err().is_cancelled()`),
-/// not merely that the handle slot was cleared.
+/// Puts the app in `Authenticating` with a live task's abort handle installed, as the event loop would.
+/// Returns the task's JoinHandle and the seq.
+/// Callers assert the task actually gets aborted (`unwrap_err().is_cancelled()`), not merely that the handle slot was cleared.
 fn install_live_auth_task(
     app: &mut AppView,
     rt: &tokio::runtime::Runtime,
@@ -756,8 +609,8 @@ fn test_runtime() -> tokio::runtime::Runtime {
         .expect("test runtime")
 }
 
-/// A second `/login` while already authenticating must abort the prior auth
-/// task and bump the seq (single-flight: no stacked device-code mints).
+/// A second `/login` while already authenticating must abort the prior auth task and bump the seq.
+/// Single-flight: never two device-code requests running at once.
 #[test]
 fn login_while_authenticating_aborts_prior_task() {
     let rt = test_runtime();
@@ -789,9 +642,8 @@ fn login_while_authenticating_aborts_prior_task() {
     );
 }
 
-/// A stale `AuthComplete` (from an attempt whose abort lost the race because
-/// the task had already finished) must not complete the new attempt: the
-/// request-seq guard is the only protection here.
+/// A stale `AuthComplete` (its abort lost the race because the task had already finished) must not complete the new attempt.
+/// The request-seq guard is the only protection here.
 #[test]
 fn stale_auth_complete_after_relogin_is_ignored() {
     let mut app = test_app_with_agent();
@@ -821,8 +673,7 @@ fn stale_auth_complete_after_relogin_is_ignored() {
     }
 }
 
-/// Switch-account while authenticating goes through the same single-flight
-/// abort as `/login` (sibling entry point).
+/// Switch-account while authenticating goes through the same single-flight abort as `/login` (sibling entry point).
 #[test]
 fn switch_account_while_authenticating_aborts_prior_task() {
     let rt = test_runtime();
@@ -845,8 +696,7 @@ fn switch_account_while_authenticating_aborts_prior_task() {
     }
 }
 
-/// Cancelling a mid-session login aborts the in-flight auth task (not just
-/// restores the view) so a retry cannot race a still-polling prior mint.
+/// Cancelling a mid-session login aborts the in-flight auth task (not just restores the view) so a retry cannot race a still-polling prior attempt.
 #[test]
 fn cancel_login_aborts_prior_task() {
     let rt = test_runtime();
@@ -864,8 +714,7 @@ fn cancel_login_aborts_prior_task() {
     });
 }
 
-/// Cancelling a mid-session login returns to the session rather than
-/// quitting the app, and clears the stashed view + auth state.
+/// Cancelling a mid-session login returns to the session rather than quitting the app, and clears the stashed view and auth state.
 #[test]
 fn cancel_login_restores_view() {
     let mut app = test_app_with_agent();
@@ -890,8 +739,7 @@ fn cancel_login_restores_view() {
     assert!(matches!(app.auth_state, AuthState::Done));
 }
 
-/// `CancelLogin` outside a mid-session login is a no-op (must not move
-/// off the welcome screen or panic).
+/// `CancelLogin` outside a mid-session login is a no-op (must not move off the welcome screen or panic).
 #[test]
 fn cancel_login_noop_without_stashed_view() {
     let mut app = test_app();

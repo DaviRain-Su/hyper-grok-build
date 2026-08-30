@@ -8,15 +8,13 @@
 //! | `paint_with_precomputed` | Styles computed in setup; timed path is paint only |
 //! | `prefix_per_hunk` | Non-product baseline: silent-prime `1..hunk_start` per hunk (small fixture only) |
 //!
-//! Groups: `edit_hl/matrix` (500L+prefix, 10kL no prefix) and `edit_hl/upgrade`
-//! (amortized session paint vs one-shot upgrade vs cold control).
+//! Groups: `edit_hl/matrix` (500L with prefix, 10kL without) and `edit_hl/upgrade` (amortized session paint vs one-shot upgrade vs cold control).
 //!
-//! Caps: 2 MiB / 50k lines — see product docs on the edit block / worker.
-//! Magnitudes: run this bench; do not treat module docs as gates.
+//! Caps: 2 MiB / 50k lines (`EDIT_HL_MAX_BYTES` / `EDIT_HL_MAX_LINES`).
+//! Magnitudes: run this bench; numbers in module docs are not pass/fail thresholds.
 //!
-//! `compute_file_scoped_styles` stops at the last hunk line; these fixtures
-//! spread hunks to near EOF, so `full_file_slice` still measures ≈ the whole
-//! file (the worst case a real upgrade pays).
+//! `compute_file_scoped_styles` stops at the last hunk line.
+//! These fixtures spread hunks to near EOF, so `full_file_slice` still measures roughly the whole file (the worst case a real upgrade pays).
 //!
 //! ```text
 //! cargo bench -p xai-grok-pager --bench edit_highlight
@@ -176,7 +174,7 @@ fn own_ranges(ranges: Vec<(SyntectStyle, &str)>) -> Vec<(SyntectStyle, String)> 
     ranges.into_iter().map(|(s, t)| (s, t.to_owned())).collect()
 }
 
-/// Silent-prime `1..hunk_start` per hunk — expensive multi-hunk baseline, not product.
+/// Highlights `1..hunk_start` per hunk and discards the output to prime parser state; an expensive multi-hunk baseline, not a production path.
 fn highlight_prefix_per_hunk(
     syntect: &Syntect,
     path: &Path,
@@ -281,7 +279,7 @@ fn register_prod_strategies(
     });
 }
 
-/// Strategy matrix: small (with prefix) + session-scale (prod paths only).
+/// Strategy matrix: the small fixture (with prefix) and the session-scale one (prod paths only).
 fn bench_matrix(c: &mut Criterion) {
     let theme = Theme::current();
     let config = DiffRenderConfig::default();
@@ -341,8 +339,7 @@ fn bench_upgrade(c: &mut Criterion) {
     configure_fast(&mut group);
     group.throughput(Throughput::Elements(fx.n_hunks() as u64));
 
-    // Steady-state after upgrade: the shared hunk walker (per-hunk syntect,
-    // same as cold) plus the map overlay for Equal/Insert lines.
+    // Steady-state after upgrade: the shared hunk walker (per-hunk syntect, same as cold) plus the map overlay for Equal/Insert lines
     group.bench_function(BenchmarkId::new("paint_with_precomputed", &fx.label), |b| {
         b.iter(|| {
             black_box(render_diff_hunks_with_styles(
@@ -356,7 +353,7 @@ fn bench_upgrade(c: &mut Criterion) {
         });
     });
 
-    // One-shot job cost: compute + paint in the same timed iteration.
+    // One-shot job cost: compute and paint in the same timed iteration
     group.bench_function(BenchmarkId::new("upgrade_once_per_file", &fx.label), |b| {
         b.iter(|| {
             let map = compute_file_scoped_styles(

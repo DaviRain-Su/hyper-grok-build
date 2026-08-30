@@ -14,7 +14,6 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 fs2 = { workspace = true }
-dirs = "6"
 parking_lot = { workspace = true }
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 ignore = { workspace = true }
@@ -46,6 +45,7 @@ xai-grok-workspace-client = { path = "../xai-grok-workspace-client" }
 xai-grok-workspace-daemon = { path = "../xai-grok-workspace-daemon" }
 xai-grok-workspace-types = { path = "../xai-grok-workspace-types" }
 xai-grok-config = { workspace = true }
+xai-dirs = { workspace = true }
 # Leaf config value types (RemoteSettings, BoolFlag) for the folder-trust decision.
 xai-grok-config-types = { workspace = true }
 toml = { workspace = true, features = ["preserve_order"] }

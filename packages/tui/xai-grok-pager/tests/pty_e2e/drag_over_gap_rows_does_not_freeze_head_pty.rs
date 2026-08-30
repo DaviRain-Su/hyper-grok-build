@@ -7,13 +7,12 @@ const GAP_TOP: &str = "GAPROW_ALPHA";
 
 const GAP_BOTTOM: &str = "GAPROW_OMEGA";
 
-/// PTY: a drag whose LAST motion lands on the dead blank row between two
-/// paragraphs of one message must not freeze the head — the copy spans the
-/// gap into the second paragraph.
+/// PTY: a drag whose LAST motion lands on the dead blank row between two paragraphs of one message must not freeze the head.
+/// The copy spans the gap into the second paragraph.
 ///
-/// Both paragraphs share the message body's selection range; the blank row
-/// between them has no selectable columns, so before dead-zone snapping the
-/// head collapsed to the anchor there (a one-character copy).
+/// Both paragraphs share the message body's selection range.
+/// The blank row between them has no selectable columns.
+/// Before drags snapped out of that dead zone, the head collapsed to the anchor there (a one-character copy).
 /// `SSH_CONNECTION` forces the OSC 52 clipboard route for readback.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]

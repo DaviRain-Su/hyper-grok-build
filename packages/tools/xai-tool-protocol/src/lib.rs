@@ -33,8 +33,13 @@ pub use bot_relay::{
     BotRosterEntry, BotRosterParams, BotRosterResult, BotRunState, BotStatusParams,
     BotStatusResult, BotSubscribeParams, BotSubscribeResult, BotTranscriptOffboxParams,
     BotTranscriptOffboxResult, BotUnsubscribeParams, BotUnsubscribeResult, BotVncDescriptorParams,
-    BotVncDescriptorResult, COMMAND_REJECTED_AGENT_ID_MISMATCH, COMMAND_REJECTED_NOT_YET_ENABLED,
-    HubChannel, HubResyncRequiredEvent, HubTurnFinishedEvent, HubUnknownChannel, UpstreamChannel,
+    BotVncDescriptorResult, COMMAND_REJECTED_AGENT_ID_MISMATCH, COMMAND_REJECTED_ARGS_INVALID,
+    COMMAND_REJECTED_ARGS_TOO_LARGE, COMMAND_REJECTED_ATTACHMENT_NOT_FOUND,
+    COMMAND_REJECTED_ATTACHMENT_NOT_READY, COMMAND_REJECTED_ATTACHMENT_TOO_LARGE,
+    COMMAND_REJECTED_ATTACHMENT_WRONG_SOURCE, COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE,
+    COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD, COMMAND_REJECTED_NOT_SUPPORTED_IN_LIVE,
+    COMMAND_REJECTED_NOT_YET_ENABLED, HubChannel, HubResyncRequiredEvent, HubTurnFinishedEvent,
+    HubUnknownChannel, UpstreamChannel, is_gateway_method_unsupported,
 };
 pub use capabilities::{HookKind, NotificationSchemas, StreamingSpec, ToolCapabilities, ToolScope};
 pub use connection::{ConnectionKind, ToolDefinitionMode};

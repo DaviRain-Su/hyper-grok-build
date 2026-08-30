@@ -5,7 +5,7 @@ use std::time::Instant;
 use crate::permission::{
     bash_command_splitting::{BashCommandHighlights, primary_command_from_script},
     manager::web_fetch_deny_key_from_url,
-    types::{AccessKind, ClientType},
+    types::{AccessKind, ClientType, HOOK_ASK_META_KEY, HookAsk},
 };
 use agent_client_protocol::{self as acp, Client as _};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
@@ -660,20 +660,23 @@ impl AcpPrompter {
         }
     }
 
-    /// Request `_meta`: bash selection scope, or protected-edit description for Edit.
+    /// Request `_meta`: bash selection scope, or protected-edit description for
+    /// Edit (never both), plus the hook ask when one forced this prompt so a
+    /// client that writes its own title still sees it.
     fn permission_request_meta(
         &self,
         access: &AccessKind,
         protected_edit: Option<crate::permission::ProtectedEditReason>,
+        hook_ask: Option<&HookAsk>,
     ) -> Option<acp::Meta> {
-        if let Some(bash) = self.bash_selection_meta(access) {
-            return Some(bash);
+        let mut meta = self
+            .bash_selection_meta(access)
+            .or_else(|| protected_edit.and_then(protected_edit_meta))
+            .unwrap_or_default();
+        if let Some(value) = hook_ask.and_then(|ask| serde_json::to_value(ask).ok()) {
+            meta.insert(HOOK_ASK_META_KEY.to_owned(), value);
         }
-        let reason = protected_edit?;
-        let payload = crate::permission::ProtectedEditPermission::from_reason(reason);
-        serde_json::to_value(payload)
-            .ok()
-            .and_then(|v| v.as_object().cloned())
+        (!meta.is_empty()).then_some(meta)
     }
 
     /// Build the per-access-kind option map WITHOUT the
@@ -866,11 +869,15 @@ impl AcpPrompter {
         }
     }
 
+    /// Prompt the user. `hook_ask` is set when a `PreToolUse` hook forced this
+    /// prompt; it is prepended to the request title so the user sees which hook
+    /// asked and why.
     pub async fn request(
         &self,
         access: &AccessKind,
         tool_call_update: &acp::ToolCallUpdate,
         protected_edit: Option<crate::permission::ProtectedEditReason>,
+        hook_ask: Option<&HookAsk>,
     ) -> PromptOutcome {
         let tool_name = tool_name_for_access(access);
         // events.jsonl: `PermissionRequested` at prompt-start. The `Instant`
@@ -883,7 +890,7 @@ impl AcpPrompter {
         let prompt_start = Instant::now();
         let mut resolved_guard = ResolvedOnDrop {
             event_writer: &self.event_writer,
-            tool_name: Some(tool_name),
+            tool_name: Some(tool_name.clone()),
             prompt_start,
         };
 
@@ -895,6 +902,7 @@ impl AcpPrompter {
                     transport.as_ref(),
                     access,
                     tool_call_update.tool_call_id.0.as_ref(),
+                    hook_ask,
                 )
                 .await
             }
@@ -902,10 +910,14 @@ impl AcpPrompter {
                 let permission_options = self.build_options(access);
                 let req = acp::RequestPermissionRequest::new(
                     self.session_id.clone(),
-                    tool_call_update.clone(),
+                    with_hook_ask_header(tool_call_update, hook_ask, &tool_name),
                     permission_options.values().cloned().collect(),
                 )
-                .meta(self.permission_request_meta(access, protected_edit));
+                .meta(self.permission_request_meta(
+                    access,
+                    protected_edit,
+                    hook_ask,
+                ));
                 match self.gateway.request_permission(req).await {
                     Ok(resp) => match resp.outcome {
                         acp::RequestPermissionOutcome::Cancelled => PromptOutcome::Cancelled,
@@ -958,6 +970,35 @@ impl Drop for ResolvedOnDrop<'_> {
             });
         }
     }
+}
+
+fn protected_edit_meta(reason: crate::permission::ProtectedEditReason) -> Option<acp::Meta> {
+    let payload = crate::permission::ProtectedEditPermission::from_reason(reason);
+    serde_json::to_value(payload)
+        .expect("ProtectedEditPermission serializes infallibly")
+        .as_object()
+        .cloned()
+}
+
+/// The prompt's tool call with the hook ask prepended to its title. `tool_name`
+/// is the fallback title when the tool call has none.
+fn with_hook_ask_header(
+    tool_call_update: &acp::ToolCallUpdate,
+    hook_ask: Option<&HookAsk>,
+    tool_name: &str,
+) -> acp::ToolCallUpdate {
+    let mut update = tool_call_update.clone();
+    if let Some(ask) = hook_ask {
+        let action = update
+            .fields
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or(tool_name);
+        update.fields.title = Some(ask.prompt_header(action));
+    }
+    update
 }
 
 /// Tool name used for `events.jsonl` Permission* events AND for the
@@ -1177,6 +1218,82 @@ fn map_selected_outcome(
 mod tests {
     use super::*;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn hook_ask_reaches_both_the_title_and_the_request_meta() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let prompter = AcpPrompter::new(
+            acp::SessionId::new(Arc::from("sess-ask")),
+            GatewaySender::new(tx),
+            ClientType::Generic,
+        );
+        let ask = HookAsk {
+            hook_name: "guard".to_owned(),
+            reason: Some("confirm this".to_owned()),
+        };
+        let access = AccessKind::Edit("a.rs".to_owned());
+
+        let meta = prompter
+            .permission_request_meta(&access, /*protected_edit=*/ None, Some(&ask))
+            .expect("a hook ask always produces meta");
+        assert_eq!(
+            serde_json::Value::Object(meta),
+            serde_json::json!({
+                "hookAsk": { "hookName": "guard", "reason": "confirm this" },
+            })
+        );
+        let merged = prompter
+            .permission_request_meta(
+                &access,
+                Some(crate::permission::ProtectedEditReason::Sensitive),
+                Some(&ask),
+            )
+            .expect("an ask plus a protected edit always produces meta");
+        assert_eq!(
+            serde_json::Value::Object(merged),
+            serde_json::json!({
+                "kind": "sensitive",
+                "hookAsk": { "hookName": "guard", "reason": "confirm this" },
+            }),
+            "an ask and a protected edit must both survive the merge"
+        );
+        assert!(
+            prompter
+                .permission_request_meta(
+                    &access, /*protected_edit=*/ None, /*hook_ask=*/ None
+                )
+                .is_none(),
+            "no ask and no protected edit leaves the meta absent"
+        );
+
+        let untitled = acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("tc-ask")),
+            acp::ToolCallUpdateFields::default(),
+        );
+        let titled = acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("tc-ask")),
+            acp::ToolCallUpdateFields::new().title(Some("Edit a.rs".to_owned())),
+        );
+        assert_eq!(
+            with_hook_ask_header(&untitled, Some(&ask), "search_replace")
+                .fields
+                .title,
+            Some("search_replace — hook 'guard' asks: confirm this".to_owned())
+        );
+        assert_eq!(
+            with_hook_ask_header(&titled, Some(&ask), "search_replace")
+                .fields
+                .title,
+            Some("Edit a.rs — hook 'guard' asks: confirm this".to_owned())
+        );
+        assert_eq!(
+            with_hook_ask_header(&titled, None, "search_replace")
+                .fields
+                .title,
+            titled.fields.title,
+            "no ask leaves the title untouched"
+        );
+    }
 
     /// Wire-compatibility pin: `PromptOutcome::kind()` maps each payload-bearing
     /// variant to the owner [`PromptOutcomeKind`] whose `wire_str` is the exact,
@@ -2177,7 +2294,14 @@ mod tests {
             acp::ToolCallUpdateFields::default(),
         );
 
-        let outcome = prompter.request(&access, &tool_call_update, None).await;
+        let outcome = prompter
+            .request(
+                &access,
+                &tool_call_update,
+                /*protected_edit=*/ None,
+                /*hook_ask=*/ None,
+            )
+            .await;
         assert!(
             matches!(outcome, PromptOutcome::Error(_)),
             "dropped gateway receiver should yield PromptOutcome::Error"
@@ -2227,7 +2351,14 @@ mod tests {
             acp::ToolCallId::new(Arc::from("tc-2")),
             acp::ToolCallUpdateFields::default(),
         );
-        let outcome = prompter.request(&access, &tool_call_update, None).await;
+        let outcome = prompter
+            .request(
+                &access,
+                &tool_call_update,
+                /*protected_edit=*/ None,
+                /*hook_ask=*/ None,
+            )
+            .await;
         assert!(matches!(outcome, PromptOutcome::Error(_)));
     }
 }

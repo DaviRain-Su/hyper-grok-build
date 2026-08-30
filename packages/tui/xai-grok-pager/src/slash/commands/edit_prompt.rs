@@ -1,29 +1,19 @@
-//! `/edit-prompt` -- edit the composer in an external editor.
+//! `/edit-prompt`: edit the composer in an external editor.
 //!
-//! The full TUI's only route to the editor (`Ctrl+G` stays with the tasks
-//! pane there); in minimal mode it doubles as the fallback for terminals
-//! that reserve the `Ctrl+G` chord.
+//! In the full TUI this is the only route to the editor, because `Ctrl+G` belongs to the tasks pane there.
+//! In minimal mode it doubles as the fallback for terminals that reserve the `Ctrl+G` chord.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
 pub struct EditPromptCommand;
 
 impl SlashCommand for EditPromptCommand {
-    fn name(&self) -> &str {
-        "edit-prompt"
-    }
-
-    fn description(&self) -> &str {
-        "Open an external editor for an empty prompt; use the command palette to preserve a draft"
-    }
-
-    fn usage(&self) -> &str {
-        "/edit-prompt"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
+    slash_meta! {
+        name: "edit-prompt",
+        description: "Open an external editor for an empty prompt; use the command palette to preserve a draft",
+        usage: "/edit-prompt",
+        session_scoped: true,
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {

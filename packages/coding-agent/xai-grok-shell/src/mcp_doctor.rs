@@ -186,7 +186,7 @@ fn discover_servers(cwd: &Path) -> (Vec<ConfigSourceStatus>, Vec<DiscoveredServe
                 reason: "claude_compat imported = true".to_string(),
             },
         });
-    } else if let Some(home) = dirs::home_dir() {
+    } else if let Some(home) = xai_dirs::home_dir() {
         let claude_path = home.join(".claude.json");
         if claude_path.is_file() {
             sources.push(ConfigSourceStatus {
@@ -281,7 +281,8 @@ async fn check_server_start(
 ) -> Result<(mcp_servers::McpClient, Check), Check> {
     let start = std::time::Instant::now();
     let noop = xai_grok_session_events::EventWriter::noop();
-    let ctx = mcp_servers::McpSpawnCtx::session_less(&noop);
+    let ctx = mcp_servers::McpSpawnCtx::standalone(&noop)
+        .with_oauth_discovery(mcp_servers::McpOauthDiscovery::Network);
     match mcp_servers::start_mcp_server(acp_server, Some(cwd), None, None, &ctx).await {
         Ok(client) => {
             let elapsed = start.elapsed();

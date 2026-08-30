@@ -187,7 +187,7 @@ impl Harness {
         self.actor.state.lock().await.running_task = Some(AgentTask::new(prompt_id, handle));
     }
 
-    async fn cancel(&self, trigger: CancelTrigger) -> super::tasks_cancel::CancelOutcome {
+    async fn cancel(&self, trigger: CancelTrigger) -> super::cancel::CancelOutcome {
         self.cancel_with(trigger, true).await
     }
 
@@ -195,7 +195,7 @@ impl Harness {
         &self,
         trigger: CancelTrigger,
         cancel_subagents: bool,
-    ) -> super::tasks_cancel::CancelOutcome {
+    ) -> super::cancel::CancelOutcome {
         self.actor
             .cancel_running_task(crate::session::CancelOptions {
                 cancel_subagents,
@@ -438,12 +438,14 @@ async fn a_subagent_session_end_names_the_child() {
 
         let mut parent = Harness::new().await;
         parent.listen(&events);
-        super::run_loop::fire_session_end_hooks(&parent.actor, "shutdown").await;
+        let timer = xai_grok_telemetry::session_end::SessionEndTimer::new_shared();
+        super::run_loop::fire_session_end_hooks(&parent.actor, "shutdown", &timer).await;
         assert_eq!(parent.fired(), vec!["session_end", "stop"]);
 
         let mut child = Harness::subagent().await;
         child.listen(&events);
-        super::run_loop::fire_session_end_hooks(&child.actor, "shutdown").await;
+        let child_timer = xai_grok_telemetry::session_end::SessionEndTimer::new_shared();
+        super::run_loop::fire_session_end_hooks(&child.actor, "shutdown", &child_timer).await;
         let fired = child.fired_payloads();
         assert_eq!(
             fired.len(),

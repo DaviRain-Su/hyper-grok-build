@@ -139,11 +139,10 @@ pub struct SamplerConfig {
     pub compaction_at_tokens: Option<CompactionAtTokens>,
 
     /// Server-side doom-loop check policy; `None` disables it. When set, the
-    /// client itself sends the opt-in `x-grok-doom-loop-check` header on
-    /// streaming Responses API requests and absorbs the reported trigger
-    /// events (unlike the environment headers in [`Self::extra_headers`],
-    /// this header gates the client's own decode behavior, so it lives with
-    /// the decoder).
+    /// client sends both reporting headers on streaming Responses API requests:
+    /// the configured tail window and the default exact-repetition minimum.
+    /// It also absorbs the reported trigger events (unlike environment headers
+    /// in [`Self::extra_headers`], this gates the client's decode behavior).
     #[serde(default)]
     pub doom_loop_recovery: Option<DoomLoopRecoveryPolicy>,
 

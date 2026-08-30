@@ -3,9 +3,8 @@
 use super::common::*;
 use xai_grok_pager_pty_harness::StyledLine;
 
-/// Per-cell `(bg, inverse)` styling for one screen line (`StyledLine.line` is
-/// 1-based), expanded from its runs in column order. Selection highlight shows
-/// up as a changed `bg` and/or `inverse` on these cells.
+/// Per-cell `(bg, inverse)` styling for one screen line (`StyledLine.line` is 1-based), expanded from its runs in column order.
+/// Selection highlight shows up as a changed `bg` and/or `inverse` on these cells.
 fn row_cells(lines: &[StyledLine], target_line: usize) -> Vec<(Option<String>, bool)> {
     let mut cells = Vec::new();
     for line in lines {
@@ -28,16 +27,14 @@ fn differing_cells(base: &[(Option<String>, bool)], other: &[(Option<String>, bo
         .count()
 }
 
-/// PTY: a drag whose release was lost (xtermjs/xterm.js#4781) must be finished
-/// by the first bare-motion report (`<35`): the copy lands and the highlight
-/// freezes at the drag's end instead of following the pointer forever.
+/// PTY: a drag whose release was lost (xtermjs/xterm.js#4781) must be finished by the first bare-motion report (`<35`).
+/// The copy lands and the highlight freezes at the drag's end instead of following the pointer forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn stuck_drag_finishes_on_bare_motion_pty() {
     let content = ContentController::start().await.expect("start content");
 
-    // Hold selections on screen so the finished highlight can't flash away
-    // before sampling.
+    // Hold selections on screen so the finished highlight can't flash away before sampling
     seed_keep_text_selection_config(&content);
 
     // A wide one-line response gives a long selectable line to drag across.
@@ -77,7 +74,7 @@ async fn stuck_drag_finishes_on_bare_motion_pty() {
     let base = harness.screen_styled();
     let base_row = row_cells(&base, target_line);
 
-    // Press + drag with no release: the lost-Up state the detection targets.
+    // Press and drag with no release: the lost-Up state the detection targets
     harness
         .inject_keys(mouse_drag_no_release(row, from_col, to_col).as_bytes())
         .expect("drag without release");
@@ -91,8 +88,7 @@ async fn stuck_drag_finishes_on_bare_motion_pty() {
         harness.screen_contents()
     );
 
-    // Bare motion (`<35`) at a far column: the release was lost, so this
-    // must finish the drag, not extend it there.
+    // Bare motion (`<35`) at a far column: the release was lost, so this must finish the drag, not extend it there
     harness
         .inject_keys(sgr_mouse(35, row, far_col, 'M').as_bytes())
         .expect("bare motion after lost up");

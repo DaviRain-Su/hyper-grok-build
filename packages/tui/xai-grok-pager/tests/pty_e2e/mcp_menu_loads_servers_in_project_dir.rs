@@ -2,7 +2,7 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 13. **MCP menu loads in a project dir** (temp dir with a `.git` ancestor).
+/// **MCP menu loads in a project dir** (temp dir with a `.git` ancestor).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn mcp_menu_loads_servers_in_project_dir() {

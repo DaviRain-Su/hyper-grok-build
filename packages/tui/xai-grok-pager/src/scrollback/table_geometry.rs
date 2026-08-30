@@ -1,32 +1,29 @@
-//! Box-drawing table grid detection so selection inside rendered tables
-//! operates on cells; anything `detect` can't prove falls back to linear.
+//! Box-drawing table grid detection so selection inside rendered tables operates on cells; anything `detect` can't prove falls back to linear.
 //! Table lines never soft-wrap, so one rendered line is one block line.
 
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+use xai_grok_markdown::{TableCellCopy, TableCopyMeta};
 
-/// A cell position within a detected grid: `row` indexes logical rows
-/// (header = 0), `col` indexes columns left to right.
+/// A cell position within a detected grid: `row` indexes logical rows (the header is row 0), `col` indexes columns left to right.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellRef {
     pub row: usize,
     pub col: usize,
 }
 
-/// Geometry of one box-drawing table, in the block's line/column space:
-/// line indices are `block_line_idx` values, columns are display columns in
-/// the same space as `RangeHit::col_within_range`.
+/// Geometry of one box-drawing table, in the block's line/column space.
+/// Line indices are `block_line_idx` values, columns are display columns in the same space as `RangeHit::col_within_range`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableGeometry {
-    /// Full extent of the grid, top border line ..= bottom border line
-    /// (half-open).
+    /// Full extent of the grid, top border line ..= bottom border line (half-open).
     line_range: Range<usize>,
     /// Display columns of the vertical grid lines, ascending.
     /// `junction_cols.len() == column count + 1`.
     junction_cols: Vec<u16>,
-    /// Per logical row, the contiguous block-line range of its content lines
-    /// (a row wrapped inside cells spans several lines). Never empty.
+    /// Per logical row, the contiguous block-line range of its content lines (a row wrapped inside cells spans several lines).
+    /// Never empty.
     rows: Vec<Range<usize>>,
 }
 
@@ -54,15 +51,13 @@ enum GridLine {
 
 const BAR: char = '\u{2502}'; // │
 
-/// Chars permitted before a grid's left edge: indentation and blockquote
-/// bars (`│ `-prefixed tables render inside quotes with fully selectable
-/// text — see `QuoteBarStrip`).
+/// Chars permitted before a grid's left edge: indentation and blockquote bars.
+/// (`│ `-prefixed tables render inside quotes with fully selectable text; see `QuoteBarStrip`.)
 fn is_prefix_char(c: char) -> bool {
     c == ' ' || c == BAR
 }
 
-/// (display column, first char) for every grapheme in `text`, mirroring the
-/// column arithmetic of `slice_display_cols` / `word_boundaries_at_col`.
+/// (display column, first char) for every grapheme in `text`, mirroring the column arithmetic of `slice_display_cols` / `word_boundaries_at_col`.
 fn grapheme_cols(text: &str) -> impl Iterator<Item = (u16, char)> + '_ {
     let mut col = 0u16;
     text.graphemes(true).filter_map(move |g| {
@@ -76,9 +71,8 @@ fn grapheme_cols(text: &str) -> impl Iterator<Item = (u16, char)> + '_ {
     })
 }
 
-/// Parse a border row (`┌──┬──┐` / `├──┼──┤` / `└──┴──┘`), tolerating an
-/// indentation/blockquote prefix. Returns the junction columns (corners
-/// included) and the row family, or `None` when the line is not a border row.
+/// Parse a border row (`┌──┬──┐` / `├──┼──┤` / `└──┴──┘`), tolerating an indentation/blockquote prefix.
+/// Returns the junction columns (corners included) and the row family, or `None` when the line is not a border row.
 fn parse_border_row(text: &str) -> Option<(Vec<u16>, BorderKind)> {
     let (kind, mid, close) = ('\u{250C}', '\u{252C}', '\u{2510}'); // ┌ ┬ ┐
     let (dkind, dmid, dclose) = ('\u{251C}', '\u{253C}', '\u{2524}'); // ├ ┼ ┤
@@ -92,8 +86,7 @@ fn parse_border_row(text: &str) -> Option<(Vec<u16>, BorderKind)> {
     for (col, c) in grapheme_cols(text) {
         match family {
             None => {
-                // Still in the optional prefix; the first corner glyph opens
-                // the grid and fixes the family.
+                // Still in the optional prefix; the first corner glyph opens the grid and fixes the family
                 let f = match c {
                     _ if c == kind => Some(BorderKind::Top),
                     _ if c == dkind => Some(BorderKind::Divider),
@@ -135,9 +128,9 @@ fn parse_border_row(text: &str) -> Option<(Vec<u16>, BorderKind)> {
     Some((junctions, family.expect("closed implies family")))
 }
 
-/// Whether `text` is a content row of a grid with the given junction set:
-/// a `│` at every junction column, nothing but prefix chars before the left
-/// edge, and nothing after the right edge (selection text is end-trimmed).
+/// Whether `text` is a content row of a grid with the given junction set.
+/// That means a `│` at every junction column, nothing but prefix chars before the left edge, and nothing after the right edge.
+/// (Selection text is end-trimmed.)
 fn is_content_row(text: &str, junctions: &[u16]) -> bool {
     let (Some(&left), Some(&right)) = (junctions.first(), junctions.last()) else {
         return false;
@@ -177,20 +170,17 @@ fn classify(text: &str, junctions: &[u16]) -> GridLine {
 }
 
 impl TableGeometry {
-    /// Detect the grid containing `at_line`, reading lines through
-    /// `text_at`. `None` unless `at_line` sits inside a fully-enclosed,
-    /// column-consistent grid — callers then fall back to linear.
+    /// Detect the grid containing `at_line`, reading lines through `text_at`.
+    /// `None` unless `at_line` sits inside a fully-enclosed, column-consistent grid; callers then fall back to linear.
     pub fn detect(text_at: impl Fn(usize) -> Option<String>, at_line: usize) -> Option<Self> {
-        // The anchor line itself must be part of a grid; its border row (or,
-        // for content rows, the nearest border row above) fixes the junction
-        // set every other line is validated against.
+        // The anchor line itself must be part of a grid
+        // Its border row (or, for content rows, the nearest border row above) fixes the junction set every other line is validated against
         let anchor_text = text_at(at_line)?;
         let junctions: Vec<u16> = if let Some((j, _)) = parse_border_row(&anchor_text) {
             j
         } else {
             // Walk up to the nearest border row to fix the junction set.
-            // Capped: a real anchor's border is at most one wrapped row
-            // above; a long walk means prefix-led prose, not a table.
+            // Capped: a real anchor's border is at most one wrapped row above; a long walk means prose that merely starts with prefix chars, not a table
             const MAX_JUNCTION_SEARCH: usize = 400;
             let mut found: Option<Vec<u16>> = None;
             let mut line = at_line;
@@ -201,8 +191,7 @@ impl TableGeometry {
                     found = Some(j);
                     break;
                 }
-                // Cheap plausibility gate so we don't scan a whole prose
-                // block: rows of a grid always start with a prefix char.
+                // Cheap plausibility gate so we don't scan a whole prose block: rows of a grid always start with a prefix char
                 if !text.chars().next().is_some_and(is_prefix_char) {
                     break;
                 }
@@ -210,8 +199,7 @@ impl TableGeometry {
             found?
         };
 
-        // Validate outward: walk up to the top border, down to the bottom
-        // border, requiring every line in between to belong to the grid.
+        // Validate outward: walk up to the top border, down to the bottom border, requiring every line in between to belong to the grid
         let mut top = at_line;
         loop {
             let text = text_at(top)?;
@@ -220,9 +208,8 @@ impl TableGeometry {
                     kind: BorderKind::Top,
                     ..
                 } => break,
-                // Hitting a bottom border strictly above `at_line` means
-                // `at_line` was below the grid, not inside it. (`at_line`
-                // itself may be the bottom border.)
+                // Hitting a bottom border strictly above `at_line` means `at_line` was below the grid, not inside it
+                // (`at_line` itself may be the bottom border.)
                 GridLine::Border {
                     kind: BorderKind::Bottom,
                     ..
@@ -285,6 +272,10 @@ impl TableGeometry {
         self.junction_cols.len() - 1
     }
 
+    pub(super) fn checked_n_cols(&self) -> Option<usize> {
+        self.junction_cols.len().checked_sub(1).filter(|&n| n > 0)
+    }
+
     pub fn n_rows(&self) -> usize {
         self.rows.len()
     }
@@ -295,19 +286,25 @@ impl TableGeometry {
     }
 
     /// Content-line range of a logical row.
+    /// Empty when `row` is out of range so callers never panic on a stale `CellRef`.
     pub fn row_lines(&self, row: usize) -> Range<usize> {
-        self.rows[row].clone()
+        self.rows.get(row).cloned().unwrap_or(0..0)
     }
 
-    /// Display-column band of a column's cell interior: everything strictly
-    /// between the two flanking `│` glyphs (padding included).
+    /// Display-column band of a column's cell interior: everything strictly between the two flanking `│` glyphs (padding included).
+    /// Empty when `col` is out of range so callers never panic on a stale `CellRef`.
     pub fn band(&self, col: usize) -> Range<u16> {
-        self.junction_cols[col].saturating_add(1)..self.junction_cols[col + 1]
+        let Some(&left) = self.junction_cols.get(col) else {
+            return 0..0;
+        };
+        let Some(&right) = self.junction_cols.get(col + 1) else {
+            return 0..0;
+        };
+        left.saturating_add(1)..right
     }
 
-    /// The cell at (`line`, `col`), or `None` when `line` is a border row or
-    /// `col` falls outside the grid. A click exactly on a `│` snaps to the
-    /// cell on its right (left for the closing border).
+    /// The cell at (`line`, `col`), or `None` when `line` is a border row or `col` falls outside the grid.
+    /// A click exactly on a `│` snaps to the cell on its right (left for the closing border).
     pub fn cell_at(&self, line: usize, col: u16) -> Option<CellRef> {
         let row = self.row_of_line(line)?;
         let first = *self.junction_cols.first().expect("non-empty");
@@ -323,8 +320,7 @@ impl TableGeometry {
         Some(CellRef { row, col: c })
     }
 
-    /// The column whose content interior (band minus the renderer's one
-    /// padding column per side) contains `col`.
+    /// The column whose content interior (band minus the renderer's one padding column per side) contains `col`.
     fn interior_col_at(&self, col: u16) -> Option<usize> {
         (0..self.n_cols()).find(|&c| {
             let band = self.band(c);
@@ -334,9 +330,9 @@ impl TableGeometry {
         })
     }
 
-    /// Latched head-cell resolution: borders, padding, and divider rows
-    /// keep `held`; only another cell's content interior (or the grid's
-    /// outer edge, which clamps) moves it. Empty cells never capture it.
+    /// Resolve the latched head cell: borders, padding, and divider rows keep `held`.
+    /// Only another cell's content interior (or the grid's outer edge, which clamps) moves it.
+    /// Empty cells never capture it.
     pub fn latched_cell_at(&self, held: CellRef, line: usize, col: u16) -> CellRef {
         let row = if let Some(row) = self.row_of_line(line) {
             row
@@ -359,35 +355,74 @@ impl TableGeometry {
         CellRef { row, col }
     }
 
-    /// A cell's text: its per-line band slices trimmed and joined with a
-    /// space (cells wrap at spaces/punctuation, so a space join reconstructs
-    /// the content).
     pub fn cell_text(&self, cell: CellRef, text_at: impl Fn(usize) -> Option<String>) -> String {
+        self.cell_text_with_meta(cell, text_at, None)
+    }
+
+    pub fn cell_text_with_meta(
+        &self,
+        cell: CellRef,
+        text_at: impl Fn(usize) -> Option<String>,
+        meta: Option<&TableCopyMeta>,
+    ) -> String {
+        if let Some(copy) = self.cell_copy(cell, meta) {
+            return copy.text.clone();
+        }
+        let Some(n_cols) = self.checked_n_cols() else {
+            return String::new();
+        };
+        if cell.row >= self.n_rows() || cell.col >= n_cols {
+            return String::new();
+        }
         let band = self.band(cell.col);
-        let mut out = String::new();
+        let mut joiner = WrappedCellJoiner::new(band.end.saturating_sub(band.start));
         for line in self.row_lines(cell.row) {
             let Some(text) = text_at(line) else { continue };
             let slice = crate::scrollback::types::slice_display_cols(&text, band.start, band.end);
-            let fragment = slice.trim();
-            if fragment.is_empty() {
-                continue;
-            }
-            if !out.is_empty() {
-                out.push(' ');
-            }
-            out.push_str(fragment);
+            joiner.push(&slice, slice.trim());
         }
-        out
+        joiner.into_string()
     }
 
-    /// TSV for the rectangular cell range spanned by `a` and `b` (order
-    /// irrelevant): cells tab-joined, rows newline-joined. Tabs inside cell
-    /// text are flattened to spaces so the TSV shape survives.
+    pub(super) fn cell_copy<'a>(
+        &self,
+        cell: CellRef,
+        meta: Option<&'a TableCopyMeta>,
+    ) -> Option<&'a TableCellCopy> {
+        let meta = meta?;
+        let n_cols = self.checked_n_cols()?;
+        if meta.n_cols != n_cols {
+            return None;
+        }
+        let n_rows = self.n_rows();
+        let expected = n_rows.checked_mul(meta.n_cols)?;
+        if meta.cells.len() != expected {
+            return None;
+        }
+        if cell.row >= n_rows || cell.col >= n_cols {
+            return None;
+        }
+        let idx = cell.row.checked_mul(meta.n_cols)?.checked_add(cell.col)?;
+        meta.cells.get(idx)
+    }
+
+    /// TSV for the rectangular cell range spanned by `a` and `b` (order irrelevant): cells tab-joined, rows newline-joined.
+    /// Tabs inside cell text are flattened to spaces so the TSV shape survives.
     pub fn grid_tsv(
         &self,
         a: CellRef,
         b: CellRef,
         text_at: impl Fn(usize) -> Option<String>,
+    ) -> String {
+        self.grid_tsv_with_meta(a, b, text_at, None)
+    }
+
+    pub fn grid_tsv_with_meta(
+        &self,
+        a: CellRef,
+        b: CellRef,
+        text_at: impl Fn(usize) -> Option<String>,
+        meta: Option<&TableCopyMeta>,
     ) -> String {
         let (r0, r1) = (a.row.min(b.row), a.row.max(b.row));
         let (c0, c1) = (a.col.min(b.col), a.col.max(b.col));
@@ -395,7 +430,7 @@ impl TableGeometry {
         for row in r0..=r1 {
             let cells: Vec<String> = (c0..=c1)
                 .map(|col| {
-                    self.cell_text(CellRef { row, col }, &text_at)
+                    self.cell_text_with_meta(CellRef { row, col }, &text_at, meta)
                         .replace('\t', " ")
                 })
                 .collect();
@@ -405,10 +440,92 @@ impl TableGeometry {
     }
 }
 
+pub(super) struct WrappedCellJoiner {
+    content_width: usize,
+    out: String,
+    left_filled: bool,
+}
+
+impl WrappedCellJoiner {
+    pub(super) fn new(band_width: u16) -> Self {
+        Self {
+            content_width: (band_width as usize).saturating_sub(2),
+            out: String::new(),
+            left_filled: false,
+        }
+    }
+
+    pub(super) fn push(&mut self, full_band_slice: &str, fragment: &str) {
+        if fragment.is_empty() {
+            self.left_filled = false;
+            return;
+        }
+        let filled = fragment_fills_content_width(full_band_slice.trim(), self.content_width);
+        append_wrapped_cell_fragment(&mut self.out, fragment, self.left_filled);
+        self.left_filled = filled;
+    }
+
+    pub(super) fn into_string(self) -> String {
+        self.out
+    }
+}
+
+fn append_wrapped_cell_fragment(out: &mut String, fragment: &str, left_filled: bool) {
+    if fragment.is_empty() {
+        return;
+    }
+    if !out.is_empty() && !is_token_continuation(out, fragment, left_filled) {
+        out.push(' ');
+    }
+    out.push_str(fragment);
+}
+
+fn fragment_fills_content_width(fragment: &str, content_width: usize) -> bool {
+    let width = UnicodeWidthStr::width(fragment);
+    if width == content_width {
+        return true;
+    }
+    width + 1 == content_width
+        && fragment
+            .chars()
+            .any(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) >= 2)
+}
+
+fn is_token_continuation(left: &str, right: &str, left_filled: bool) -> bool {
+    let (Some(a), Some(b)) = (left.chars().last(), right.chars().next()) else {
+        return false;
+    };
+    const PATH_BREAK: &[char] = &['/', '-', '_', '=', '&', '%', '#', '+', '~', '@', '\\'];
+    const AMBIGUOUS: &[char] = &['.', ':', '?'];
+    if PATH_BREAK.contains(&a) || PATH_BREAK.contains(&b) || AMBIGUOUS.contains(&b) {
+        return true;
+    }
+    if !left_filled {
+        return false;
+    }
+    if AMBIGUOUS.contains(&a) {
+        return true;
+    }
+    a.is_alphanumeric()
+        && b.is_alphanumeric()
+        && (looks_like_unbreakable_token(left) || !a.is_ascii() || !b.is_ascii())
+}
+
+fn looks_like_unbreakable_token(s: &str) -> bool {
+    s.contains("://")
+        || s.contains('/')
+        || s.contains('@')
+        || s.contains('\\')
+        || s.contains('-')
+        || s.contains('_')
+        || (s.len() >= 8 && s.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use xai_grok_markdown::CellJoin;
 
     /// Text source over a static list of lines.
     fn src<'a>(lines: &'a [&'a str]) -> impl Fn(usize) -> Option<String> + 'a {
@@ -448,7 +565,7 @@ mod tests {
     #[test]
     fn cell_lookup_and_bands() {
         let geom = TableGeometry::detect(src(TABLE), 4).unwrap();
-        // "│ Alice   │ Eng    │" — junctions at cols 0, 10, 19.
+        // "│ Alice   │ Eng    │": junctions at cols 0, 10, 19
         assert_eq!(geom.band(0), 1..10);
         assert_eq!(geom.band(1), 11..19);
         assert_eq!(geom.cell_at(4, 3), Some(CellRef { row: 1, col: 0 }));
@@ -472,10 +589,10 @@ mod tests {
         // Divider and border rows keep the held row (no snap below).
         assert_eq!(geom.latched_cell_at(held, 5, 3), held);
         assert_eq!(geom.latched_cell_at(held, 1, 3), held);
-        // Above / below the grid clamps to the first / last row.
+        // Above or below the grid clamps to the first or last row
         assert_eq!(geom.latched_cell_at(held, 0, 3), CellRef { row: 0, col: 0 });
         assert_eq!(geom.latched_cell_at(held, 8, 3), CellRef { row: 2, col: 0 });
-        // "│ Alice   │ Eng    │" — junctions at 0, 10, 19; bands 1..10, 11..19.
+        // "│ Alice   │ Eng    │": junctions at 0, 10, 19; bands 1..10, 11..19
         // The junction and both flanking padding columns keep the held column.
         assert_eq!(geom.latched_cell_at(held, 4, 9), held);
         assert_eq!(geom.latched_cell_at(held, 4, 10), held);
@@ -551,6 +668,107 @@ mod tests {
     }
 
     #[test]
+    fn cell_text_with_meta_returns_original_verbatim() {
+        let geom = TableGeometry::detect(src(WRAPPED), 4).unwrap();
+        let meta = TableCopyMeta {
+            line_index: 0,
+            line_count: WRAPPED.len(),
+            n_cols: 2,
+            cells: vec![
+                TableCellCopy {
+                    text: "Name".into(),
+                    joins: vec![],
+                },
+                TableCellCopy {
+                    text: "Notes".into(),
+                    joins: vec![],
+                },
+                TableCellCopy {
+                    text: "Alice".into(),
+                    joins: vec![],
+                },
+                TableCellCopy {
+                    text: "likes  long   walks".into(),
+                    joins: vec![CellJoin::Gap("  ".into()), CellJoin::Gap("   ".into())],
+                },
+            ],
+        };
+        assert_eq!(
+            geom.cell_text_with_meta(CellRef { row: 1, col: 1 }, src(WRAPPED), Some(&meta)),
+            "likes  long   walks"
+        );
+        assert_eq!(
+            geom.grid_tsv_with_meta(
+                CellRef { row: 1, col: 1 },
+                CellRef { row: 1, col: 1 },
+                src(WRAPPED),
+                Some(&meta)
+            ),
+            "likes  long   walks"
+        );
+    }
+
+    #[test]
+    fn token_continuation_predicate() {
+        let cases = [
+            ("likes", "long", false, false),
+            ("likes", "long", true, false),
+            ("Alice", "Smith", false, false),
+            ("Alice", "Smith", true, false),
+            ("https://github.com/lon", "g/org/repo/pull/9", true, true),
+            ("你好", "世界", true, true),
+            ("foo/", "bar", false, true),
+            ("widget-base", "/01a0…", false, true),
+            ("01a014a2-fcc0-7943-", "990e-…", false, true),
+            ("Dr.", "Smith", false, false),
+            ("Note:", "details", false, false),
+            ("hello,", "world", false, false),
+            ("user@", "host.com", false, true),
+            ("registry.", "example.com", true, true),
+            ("example", ".com", false, true),
+            ("file", ".txt", false, true),
+        ];
+        for (left, right, filled, no_space) in cases {
+            assert_eq!(
+                is_token_continuation(left, right, filled),
+                no_space,
+                "{left}+{right} filled={filled}"
+            );
+        }
+    }
+
+    #[test]
+    fn punctuation_wrap_cell_copies_without_injected_spaces() {
+        const IMAGE_ID: &[&str] = &[
+            "┌───────────────────────────────────────┐",
+            "│ registry.example.com/acme/widget-base │",
+            "│ /01a014a2-fcc0-7943-                  │",
+            "│ 990e-8ee89115c6c5/turn_2:v4           │",
+            "└───────────────────────────────────────┘",
+        ];
+        let geom = TableGeometry::detect(src(IMAGE_ID), 1).unwrap();
+        assert_eq!(
+            geom.cell_text(CellRef { row: 0, col: 0 }, src(IMAGE_ID)),
+            "registry.example.com/acme/widget-base/01a014a2-fcc0-7943-990e-8ee89115c6c5/turn_2:v4"
+        );
+    }
+
+    #[test]
+    fn hard_split_url_cell_copies_without_injected_spaces() {
+        const URL: &[&str] = &[
+            "┌────────────────────────┐",
+            "│ https://github.com/lon │",
+            "│ g/org/repo/pull/9      │",
+            "└────────────────────────┘",
+        ];
+        let geom = TableGeometry::detect(src(URL), 1).unwrap();
+        assert_eq!(
+            geom.cell_text(CellRef { row: 0, col: 0 }, src(URL)),
+            "https://github.com/long/org/repo/pull/9"
+        );
+    }
+
+    #[test]
     fn blockquoted_table_with_quote_bar_prefix() {
         let quoted: &[&str] = &[
             "│ ┌─────┬─────┐",
@@ -615,5 +833,26 @@ mod tests {
         let prose: &[&str] = &["hello world", "─────────", "goodbye"];
         assert_eq!(TableGeometry::detect(src(prose), 0), None);
         assert_eq!(TableGeometry::detect(src(prose), 1), None);
+    }
+
+    #[test]
+    fn out_of_bounds_cell_access_does_not_panic() {
+        let geom = TableGeometry::detect(src(TABLE), 4).unwrap();
+        assert_eq!(geom.row_lines(99), 0..0);
+        assert_eq!(geom.band(99), 0..0);
+        assert_eq!(geom.cell_text(CellRef { row: 99, col: 0 }, src(TABLE)), "");
+        assert_eq!(geom.cell_text(CellRef { row: 0, col: 99 }, src(TABLE)), "");
+        assert_eq!(
+            geom.cell_text_with_meta(CellRef { row: 99, col: 99 }, src(TABLE), None),
+            ""
+        );
+        assert_eq!(
+            geom.grid_tsv(
+                CellRef { row: 99, col: 99 },
+                CellRef { row: 99, col: 99 },
+                src(TABLE)
+            ),
+            ""
+        );
     }
 }

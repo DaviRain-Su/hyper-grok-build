@@ -2,9 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 7. **Agent type mismatch — "No" returns to current session.**
-/// Selecting "No" dismisses the modal and keeps the current session
-/// with its original model.
+/// **Agent type mismatch: "No" returns to current session.**
+/// Selecting "No" dismisses the modal and keeps the current session with its original model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn agent_type_mismatch_no_keeps_current_session() {
@@ -34,19 +33,17 @@ async fn agent_type_mismatch_no_keeps_current_session() {
         .inject_keys(b"/model cursor-model\r")
         .expect("type model switch");
 
-    // Wait for the modal.
     harness
         .wait_for_text("requires starting a new session", Duration::from_secs(15))
         .expect("modal appeared");
 
-    // Select "No" (second option — press j then Enter).
+    // Select "No" (second option: press j then Enter)
     harness.inject_keys(keys::J).expect("move to No");
     harness.inject_keys(keys::ENTER).expect("select no");
 
-    // Modal should dismiss. Wait a moment for UI to settle.
+    // The modal dismisses; wait a moment for the UI to settle
     harness.update(Duration::from_millis(500));
 
-    // The original response should still be visible (same session).
     assert!(
         harness.contains_text(MOCK_RESPONSE_SENTINEL),
         "original response should still be visible after cancelling\nscreen:\n{}",

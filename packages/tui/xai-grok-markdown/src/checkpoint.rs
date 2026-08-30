@@ -1,14 +1,12 @@
 //! Checkpoint types for incremental markdown rendering.
 //!
-//! This module defines types for identifying stable boundaries in markdown text
-//! where rendered output can be "frozen" and cached. Content before a checkpoint
-//! will not change regardless of what text is appended after it.
+//! This module defines types for identifying stable boundaries in markdown text where rendered output can be "frozen" and cached.
+//! Content before a checkpoint will not change regardless of what text is appended after it.
 //!
 //! # Design
 //!
-//! Checkpoints are only created at **top-level** (depth=0) block boundaries. Blocks
-//! nested inside lists, blockquotes, or tables cannot be checkpoints because the
-//! outer container might continue.
+//! Checkpoints are only created at **top-level** (depth=0) block boundaries.
+//! Blocks nested inside lists, blockquotes, or tables cannot be checkpoints because the outer container might continue.
 //!
 //! # Example
 //!

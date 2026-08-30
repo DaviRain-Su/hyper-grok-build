@@ -27,7 +27,7 @@ fn accept_one_word_takes_first_word_leaves_rest() {
     let accepted = sc.accept_ghost(AcceptMode::OneWord);
     assert_eq!(accepted.as_deref(), Some("--verbose"));
     assert_eq!(sc.ghost_text(), Some(" --debug"));
-    // Source preserved while ghost is non-empty.
+    // The source is preserved while the ghost is non-empty
     assert_eq!(sc.ghost.source, SuggestionSource::PathExecutable);
 }
 
@@ -147,7 +147,7 @@ fn progressive_match_multi_char_append_clears() {
     sc.set_ghost("ls -la".into(), SuggestionSource::History);
     sc.set_last_request_text("");
 
-    // Two chars appended at once -- not a progressive match.
+    // Two chars appended at once do not count as a progressive match
     assert!(!sc.try_progressive_match("ls"));
     assert!(!sc.has_ghost());
 }
@@ -190,7 +190,7 @@ fn progressive_match_empty_suffix_clears() {
     sc.set_ghost("ls".into(), SuggestionSource::History);
     sc.set_last_request_text("abc");
 
-    // Same text as last_request_text -- zero chars appended.
+    // Same text as last_request_text: zero chars appended
     assert!(!sc.try_progressive_match("abc"));
     assert!(!sc.has_ghost());
 }
@@ -257,9 +257,8 @@ fn text_changed_slash_active_suppresses_and_clears_ghost() {
     assert!(!sc.has_ghost());
 }
 
-/// Slash suppression is a full draft invalidation, not just a presentation
-/// clear: an armed debounce or a pending Tab landing must go stale instead
-/// of repopulating suggestion state behind the slash UI.
+/// Slash suppression is a full draft invalidation, not just a presentation clear.
+/// An armed debounce or a pending Tab landing must go stale instead of repopulating suggestion state behind the slash UI.
 #[test]
 fn text_changed_slash_active_invalidates_pending_state() {
     let mut sc = enabled_controller();
@@ -675,10 +674,8 @@ fn parse_completion_replace_range_absent_is_none() {
     assert_eq!(item.token_text, None);
 }
 
-/// `tokenText` and `replaceRange` parse as ONE atomic pair; half pairs
-/// degrade to the rangeless whole-line accept (a range without its token
-/// would splice the whole-line `insertText` into a token span — `cat no`
-/// becoming `cat cat notes.md`).
+/// `tokenText` and `replaceRange` parse as ONE atomic pair; half pairs degrade to the rangeless whole-line accept.
+/// A range without its token would splice the whole-line `insertText` into a token span: `cat no` becoming `cat cat notes.md`.
 #[test]
 fn parse_completion_token_text() {
     let item = parse_single_completion(serde_json::json!({
@@ -692,8 +689,7 @@ fn parse_completion_token_text() {
     assert_eq!(item.token_text.as_deref(), Some("grep"));
     assert_eq!(item.span_replacement(), "grep");
 
-    // Range without a token (history/AI whole-line rows): the range drops
-    // and the whole-line accept — the identical outcome — takes over.
+    // Range without a token (history/AI whole-line rows): the range drops and the whole-line accept (the identical outcome) takes over
     let whole_line = parse_single_completion(serde_json::json!({
         "display": "git status",
         "insertText": "git status",
@@ -716,9 +712,8 @@ fn parse_completion_token_text() {
     assert_eq!(token_only.token_text, None);
 }
 
-/// Malformed wire shapes degrade to `None` (legacy whole-line accept)
-/// instead of dropping the item or erroring — and take the now-unmoored
-/// `tokenText` down with them.
+/// Malformed wire shapes degrade to `None` (legacy whole-line accept) instead of dropping the item or erroring.
+/// The `tokenText`, left without its range, drops too.
 #[test]
 fn parse_completion_replace_range_malformed_is_none() {
     for bad in [
@@ -743,8 +738,7 @@ fn parse_completion_replace_range_malformed_is_none() {
     }
 }
 
-/// `truncated` parses leniently: absent or non-bool means `false` (older
-/// shells never send it), `true` survives.
+/// `truncated` parses leniently: absent or non-bool means `false` (older shells never send it), `true` survives.
 #[test]
 fn parse_completion_truncated_flag() {
     let absent = parse_single_completion(serde_json::json!({
@@ -791,9 +785,8 @@ fn validated_range_exact_text_passes_through() {
     );
 }
 
-/// Progressive typing appends at the end without clearing the dropdown;
-/// a range that reached the request text's end absorbs the typed tail —
-/// as long as the grown span still extends toward the replacement.
+/// Progressive typing appends at the end without clearing the dropdown.
+/// A range that reached the request text's end absorbs the typed tail, as long as the grown span still extends toward the replacement.
 #[test]
 fn validated_range_stretches_over_token_extension_tail() {
     let sc = anchored_controller("ls | gr");
@@ -807,17 +800,15 @@ fn validated_range_stretches_over_token_extension_tail() {
         sc.validated_replace_range(0..6, "git status --porcelain", "git sta"),
         Some(0..7)
     );
-    // Including progressively typed whitespace inside the completion.
+    // The stretch also covers progressively typed whitespace inside the completion
     assert_eq!(
         sc.validated_replace_range(0..6, "git status --porcelain", "git status "),
         Some(0..11)
     );
 }
 
-/// A tail that is NOT an extension toward the replacement (typed args,
-/// a diverging sibling item) refuses the accept outright — stretching
-/// would splice the user's tail away, not stretching would leave it
-/// glued after the replacement.
+/// A tail that is NOT an extension toward the replacement (typed args, a diverging sibling item) refuses the accept outright.
+/// Stretching would splice the user's tail away; not stretching would leave it glued after the replacement.
 #[test]
 fn validated_range_non_extension_tail_rejects() {
     let sc = anchored_controller("ls | gr");
@@ -830,8 +821,7 @@ fn validated_range_non_extension_tail_rejects() {
     );
 }
 
-/// A mid-text token range does NOT stretch — the tail after the token
-/// belongs to the rest of the command line.
+/// A mid-text token range does NOT stretch: the tail after the token belongs to the rest of the command line.
 #[test]
 fn validated_range_mid_text_token_keeps_end() {
     let sc = anchored_controller("cat hel | wc -l");
@@ -858,8 +848,7 @@ fn validated_range_out_of_bounds_falls_back() {
     assert_eq!(sc.validated_replace_range(0..2, "grep", "gr"), None);
 }
 
-/// A wire range landing mid-character in a multibyte draft is rejected
-/// (never a panic, never a mid-char splice).
+/// A wire range landing mid-character in a multibyte draft is rejected (never a panic, never a mid-char splice).
 #[test]
 fn validated_range_mid_char_boundary_rejects() {
     // "cat café": the é spans bytes 7..9, so offset 8 is mid-char.
@@ -901,8 +890,7 @@ fn common_prefix_fill_extends_typed_token() {
     assert_eq!(fill, "alpha_");
 }
 
-/// Progressive typing after the fetch: the span stretches over the tail
-/// (same rule as accepts) and the fill still applies.
+/// Progressive typing after the fetch: the span stretches over the tail (same rule as accepts) and the fill still applies.
 #[test]
 fn common_prefix_fill_stretches_over_typed_tail() {
     let mut sc = anchored_controller("cat al");
@@ -925,10 +913,8 @@ fn common_prefix_fill_none_when_lcp_equals_typed_token() {
     assert!(sc.common_prefix_fill("ls | gr").is_none());
 }
 
-/// Fuzzy candidates can share an LCP LONGER than the typed token that
-/// is not an extension of it (typed `nts`, candidates `notes_*` → LCP
-/// `notes_`): the `starts_with(typed)` guard refuses the fill — a
-/// fill must only ever append to what the user typed, never rewrite it.
+/// Fuzzy candidates can share an LCP LONGER than the typed token without extending it: typing `nts` against `notes_*` candidates gives LCP `notes_`.
+/// The `starts_with(typed)` guard refuses the fill: a fill must only ever append to what the user typed, never rewrite it.
 #[test]
 fn common_prefix_fill_none_for_fuzzy_non_extension_lcp() {
     let mut sc = anchored_controller("cat nts");
@@ -939,8 +925,7 @@ fn common_prefix_fill_none_for_fuzzy_non_extension_lcp() {
     assert!(sc.common_prefix_fill("cat nts").is_none());
 }
 
-/// Case-differing candidates (`notes.md` / `Notes Archive`) share no
-/// byte prefix — bail to plain-open rather than clobber the typed case.
+/// Case-differing candidates (`notes.md` / `Notes Archive`) share no byte prefix: bail to plain-open rather than clobber the typed case.
 #[test]
 fn common_prefix_fill_none_on_case_mismatch() {
     let mut sc = anchored_controller("cat no");
@@ -978,12 +963,11 @@ fn common_prefix_fill_none_on_stale_generation() {
     assert!(sc.common_prefix_fill("cat al").is_none());
 }
 
-/// Two multibyte candidates whose byte-level LCP lands mid-character:
-/// the boundary trim keeps the fill valid UTF-8 (here it collapses to
-/// the typed token, so no fill).
+/// Two multibyte candidates whose byte-level LCP lands mid-character: the boundary trim keeps the fill valid UTF-8.
+/// Here it collapses to the typed token, so no fill.
 #[test]
 fn common_prefix_fill_multibyte_boundary_trim() {
-    // é = C3 A9, è = C3 A8: byte LCP is "caf" + C3 (mid-char).
+    // é encodes as C3 A9 and è as C3 A8: the byte LCP is "caf" plus a lone C3 (mid-char)
     let mut sc = anchored_controller("cat caf");
     sc.dropdown.items = vec![
         span_item("caf\u{e9}.txt", 4..7, SuggestionSource::FilePath),
@@ -994,8 +978,7 @@ fn common_prefix_fill_multibyte_boundary_trim() {
 
 // -- tab_decision --------------------------------------------------------
 
-/// Anchored controller whose items are current for `request_text` typed
-/// with the cursor at its end — the state right after a landing.
+/// Anchored controller whose items are current for `request_text` typed with the cursor at its end: the state right after a landing.
 fn decision_controller(request_text: &str) -> SuggestionController {
     let mut sc = anchored_controller(request_text);
     sc.dropdown.request_cursor = request_text.len();
@@ -1020,10 +1003,9 @@ fn tab_decision_nothing_on_empty_or_stale_items() {
     );
 }
 
-/// THE stale-anchor regression: items fetched for one cursor position must
-/// not complete after the cursor moved without a text change (a mouse
-/// click reports no edit) — Tab has to fetch for the token actually under
-/// the cursor.
+/// THE stale-anchor regression: items fetched for one cursor position must not complete after the cursor moved without a text change.
+/// A mouse click reports no edit.
+/// Tab has to fetch for the token actually under the cursor.
 #[test]
 fn tab_decision_nothing_on_cursor_drift() {
     let mut sc = decision_controller("cat no");
@@ -1033,8 +1015,7 @@ fn tab_decision_nothing_on_cursor_drift() {
         TabAction::Nothing,
         "cursor moved off the fetched token"
     );
-    // Typing at the end is the one tolerated drift (mirrors the range
-    // stretch rule): cursor grew exactly with the tail.
+    // Typing at the end is the one tolerated drift (mirrors the range stretch rule): cursor grew exactly with the tail
     assert_eq!(
         sc.tab_decision("cat not", "cat not".len()),
         TabAction::InstaAccept
@@ -1066,8 +1047,7 @@ fn tab_decision_fill_for_shared_prefix() {
     );
 }
 
-/// History/AI (whole-line) and mixed sets never insta-accept or fill —
-/// the LCP rule sits behind the source gate in the same decision.
+/// History/AI (whole-line) and mixed sets never insta-accept or fill: the LCP rule sits behind the source gate in the same decision.
 #[test]
 fn tab_decision_open_for_whole_line_and_mixed_sets() {
     let mut sc = decision_controller("git st");
@@ -1092,13 +1072,12 @@ fn tab_decision_open_when_no_extending_lcp() {
     assert_eq!(sc.tab_decision("ls | gr", "ls | gr".len()), TabAction::Open);
 }
 
-/// THE legacy-shell data-loss case: a rangeless `path` row (old shells send
-/// `insertText: "grep"` with no range) must never insta-accept — its
-/// whole-line fallback would replace `ls | gr` with `grep`. Any rangeless
-/// or token-less row in the set forces plain-open.
+/// THE legacy-shell data-loss case: a rangeless `path` row (old shells send `insertText: "grep"` with no range) must never insta-accept.
+/// Its whole-line fallback would replace `ls | gr` with `grep`.
+/// Any rangeless or token-less row in the set forces plain-open.
 #[test]
 fn tab_decision_rangeless_rows_never_get_token_semantics() {
-    // The `item` fixture is rangeless/token-less — the old-shell row shape.
+    // The `item` fixture is rangeless/token-less, the old-shell row shape
     let rangeless = item("grep", SuggestionSource::PathExecutable);
     let mut sc = decision_controller("ls | gr");
     sc.dropdown.items = vec![rangeless.clone()];
@@ -1108,7 +1087,7 @@ fn tab_decision_rangeless_rows_never_get_token_semantics() {
         "sole rangeless row must open, not insta-accept"
     );
 
-    // Mixed rangeless PATH row + ranged file row: still open-only.
+    // A rangeless PATH row mixed with a ranged file row: still open-only
     let mut sc = decision_controller("ls | gr");
     sc.dropdown.items = vec![
         rangeless,
@@ -1124,8 +1103,7 @@ fn tab_decision_rangeless_rows_never_get_token_semantics() {
     assert_eq!(sc.tab_decision("cat no", "cat no".len()), TabAction::Open);
 }
 
-/// A truncated (capped-scan) set must not conclude: the unscanned tail
-/// could hold the row that disproves a sole match or extends past an LCP.
+/// A truncated (capped-scan) set must not conclude: the unscanned tail could hold the row that disproves a sole match or extends past an LCP.
 #[test]
 fn tab_decision_truncated_rows_open_only() {
     let mut it = span_item("notes.md", 4..6, SuggestionSource::FilePath);
@@ -1135,10 +1113,8 @@ fn tab_decision_truncated_rows_open_only() {
     assert_eq!(sc.tab_decision("cat no", "cat no".len()), TabAction::Open);
 }
 
-/// Token texts are rendered shell literals: `a b`/`a$c` arrive as
-/// `a\ b`/`a\$c`, whose byte LCP `a\` ends inside an escape. Filling it
-/// would leave a dangling backslash — the trim drops it, nothing extends
-/// the typed token, and the decision falls through to Open.
+/// Token texts are rendered shell literals: `a b`/`a$c` arrive as `a\ b`/`a\$c`, whose byte LCP `a\` ends inside an escape.
+/// Filling it would leave a dangling backslash: the trim drops it, nothing extends the typed token, and the decision falls through to Open.
 #[test]
 fn tab_decision_lcp_ending_mid_escape_opens() {
     let mut sc = decision_controller("cat a");
@@ -1149,8 +1125,7 @@ fn tab_decision_lcp_ending_mid_escape_opens() {
     assert_eq!(sc.tab_decision("cat a", "cat a".len()), TabAction::Open);
 }
 
-/// A COMPLETE escape in the LCP still fills (`a\ ` is a valid literal
-/// prefix); only the dangling half gets trimmed.
+/// A COMPLETE escape in the LCP still fills (`a\ ` is a valid literal prefix); only the dangling half gets trimmed.
 #[test]
 fn tab_decision_lcp_with_complete_escape_fills() {
     let mut sc = decision_controller("cat a");
@@ -1172,9 +1147,8 @@ fn accept_controller(request_text: &str, items: Vec<CompletionItemParsed>) -> Su
     sc
 }
 
-/// The view probes the accept resolution BEFORE committing (a splice into
-/// an atomic prompt element degrades to opening the dropdown): peek must
-/// resolve like accept while consuming nothing and touching no state.
+/// The view probes the accept resolution BEFORE committing (a splice into an atomic prompt element degrades to opening the dropdown).
+/// Peek must resolve like accept while consuming nothing and touching no state.
 #[test]
 fn peek_completion_splice_is_non_consuming() {
     let sc = accept_controller(
@@ -1190,8 +1164,7 @@ fn peek_completion_splice_is_non_consuming() {
     assert_eq!(sc.generation(), generation);
 }
 
-/// Token items resolve to an in-place splice — decided against the draft
-/// BEFORE the dropdown closes.
+/// Token items resolve to an in-place splice, decided against the draft BEFORE the dropdown closes.
 #[test]
 fn accept_completion_resolves_token_splice() {
     let mut sc = accept_controller(
@@ -1205,8 +1178,7 @@ fn accept_completion_resolves_token_splice() {
     assert!(sc.dropdown.items.is_empty(), "item moved out + closed");
 }
 
-/// A ranged item without a distinct `token_text` (history/AI whole-line
-/// completions) splices its `insert_text` over the span.
+/// A ranged item without a distinct `token_text` (history/AI whole-line completions) splices its `insert_text` over the span.
 #[test]
 fn accept_completion_range_without_token_uses_insert_text() {
     let mut item = item("git status --porcelain", SuggestionSource::History);
@@ -1234,8 +1206,7 @@ fn accept_completion_rangeless_resolves_whole_line() {
     );
 }
 
-/// A ranged item whose span no longer fits the draft resolves to `Stale`
-/// (the caller preserves the draft) — and still consumes the item.
+/// A ranged item whose span no longer fits the draft resolves to `Stale` (the caller preserves the draft) and still consumes the item.
 #[test]
 fn accept_completion_stale_range_resolves_stale() {
     let mut sc = accept_controller(
@@ -1292,8 +1263,7 @@ fn loaded_response_pins_request_text_on_dropdown() {
     assert_eq!(sc.dropdown.items.len(), 1);
 }
 
-/// Accepting items from a superseded generation refuses and closes: an
-/// edit outdated them (every non-matching edit bumps the generation).
+/// Accepting items from a superseded generation refuses and closes: an edit outdated them (every non-matching edit bumps the generation).
 #[test]
 fn accept_completion_stale_generation_refuses_and_closes() {
     let mut sc = loaded_controller("git st", None, "git status");
@@ -1305,9 +1275,8 @@ fn accept_completion_stale_generation_refuses_and_closes() {
     assert!(sc.dropdown.items.is_empty());
 }
 
-/// A successful accept bumps the generation, so a response fetched for
-/// the pre-accept text is discarded when it lands (no mis-anchored
-/// ghost after the freshly written command).
+/// A successful accept bumps the generation, so a response fetched for the pre-accept text is discarded when it lands.
+/// No mis-anchored ghost appears after the freshly written command.
 #[test]
 fn accept_completion_invalidates_in_flight_response() {
     let mut sc = loaded_controller("ls | gr", None, "ls | grep");
@@ -1338,9 +1307,8 @@ fn accept_ghost_invalidates_in_flight_response() {
     assert!(!sc.has_ghost());
 }
 
-/// Clearing the prompt invalidates in-flight fetches: their response
-/// must not resurrect a ghost (`atus --porcelain`) over the emptied
-/// draft, where Right would commit the orphaned fragment.
+/// Clearing the prompt invalidates in-flight fetches.
+/// Their response must not resurrect a ghost (`atus --porcelain`) over the emptied draft, where Right would commit the orphaned fragment.
 #[test]
 fn emptied_text_discards_in_flight_response() {
     let mut sc = enabled_controller();
@@ -1361,8 +1329,7 @@ fn emptied_text_discards_in_flight_response() {
     assert!(sc.dropdown.items.is_empty());
 }
 
-/// A non-matching edit tears down a ghost-less dropdown (pure path/file
-/// items have no ghost for `try_progressive_match` to clear).
+/// A non-matching edit tears down a ghost-less dropdown (pure path/file items have no ghost for `try_progressive_match` to clear).
 #[test]
 fn non_matching_edit_tears_down_ghostless_dropdown() {
     let mut sc = loaded_controller("ls | gr", None, "ls | grep");
@@ -1376,9 +1343,8 @@ fn non_matching_edit_tears_down_ghostless_dropdown() {
 
 // -- always-on Tab completion (no GROK_SUGGESTIONS) ------------------------
 
-/// Tab-triggered fetches work with the as-you-type pipeline OFF — the
-/// arming bumps the generation and the landing response still installs
-/// its dropdown items.
+/// Tab-triggered fetches work with the as-you-type pipeline OFF.
+/// The arming bumps the generation and the landing response still installs its dropdown items.
 #[test]
 fn tab_completion_arms_and_lands_while_disabled() {
     let mut sc = SuggestionController::new();
@@ -1403,8 +1369,7 @@ fn tab_completion_arms_and_lands_while_disabled() {
     assert!(!sc.take_pending_tab(generation), "consumed exactly once");
 }
 
-/// An edit between the Tab and its response makes the landing stale:
-/// the items are discarded and the pending Tab never fires.
+/// An edit between the Tab and its response makes the landing stale: the items are discarded and the pending Tab never fires.
 #[test]
 fn tab_completion_pending_stale_after_edit() {
     let mut sc = SuggestionController::new();
@@ -1427,9 +1392,8 @@ fn tab_completion_pending_stale_after_edit() {
     assert!(!sc.take_pending_tab(generation));
 }
 
-/// The pending-fetch probe used by the repeat-Tab dedupe: true only while
-/// the ARMED fetch is still current — silent refetches don't count, and any
-/// invalidation (edit, suppression) disarms it.
+/// The pending-fetch probe used by the repeat-Tab dedupe: true only while the ARMED fetch is still current.
+/// Silent refetches don't count, and any invalidation (edit, suppression) disarms it.
 #[test]
 fn tab_fetch_pending_tracks_armed_current_fetch_only() {
     let mut sc = SuggestionController::new();
@@ -1445,8 +1409,7 @@ fn tab_fetch_pending_tracks_armed_current_fetch_only() {
     assert!(!sc.tab_fetch_pending(), "silent refetches arm nothing");
 }
 
-/// The silent (post-accept/fill) refresh arms no pending Tab: items
-/// land and wait for the user's next Tab.
+/// The silent (post-accept/fill) refresh arms no pending Tab: items land and wait for the user's next Tab.
 #[test]
 fn tab_completion_silent_refetch_has_no_pending_tab() {
     let mut sc = SuggestionController::new();
@@ -1466,8 +1429,7 @@ fn tab_completion_silent_refetch_has_no_pending_tab() {
     assert!(!sc.take_pending_tab(generation));
 }
 
-/// With the pipeline disabled, a response ghost is ignored — ghost
-/// rendering stays env-gated even though the dropdown items land.
+/// With the pipeline disabled, a response ghost is ignored: ghost rendering stays env-gated even though the dropdown items land.
 #[test]
 fn disabled_controller_ignores_response_ghost() {
     let mut sc = SuggestionController::new();
@@ -1531,7 +1493,7 @@ fn full_pipeline_text_change_debounce_load() {
         other => panic!("expected Debounce, got {other:?}"),
     };
 
-    // 2. Debounce expires — generation still matches
+    // 2. Debounce expires: generation still matches
     assert!(sc.on_debounce_expired(current_gen));
 
     // 3. Response arrives with matching generation
@@ -1543,7 +1505,7 @@ fn full_pipeline_text_change_debounce_load() {
     );
     assert_eq!(sc.ghost_text(), Some("it commit"));
 
-    // 4. User types "i" — progressive match trims ghost
+    // 4. User types "i": progressive match trims ghost
     let action = sc.text_changed("gi", false, false);
     assert_eq!(action, Some(SuggestionAction::Matched));
     assert_eq!(sc.ghost_text(), Some("t commit"));
@@ -1568,9 +1530,9 @@ fn rapid_typing_discards_stale_debounce() {
     };
     assert!(gen2 > gen1);
 
-    // Old debounce fires — stale
+    // Old debounce fires: stale
     assert!(!sc.on_debounce_expired(gen1));
-    // New debounce fires — current
+    // New debounce fires: current
     assert!(sc.on_debounce_expired(gen2));
 }
 
@@ -1581,7 +1543,7 @@ fn slash_during_pending_debounce_suppresses() {
     // User types "git"
     sc.text_changed("git", false, false);
 
-    // User types "/" — slash becomes active
+    // User types "/": slash becomes active
     let result = sc.text_changed("/", true, false);
     assert!(result.is_none());
     assert!(!sc.has_ghost());

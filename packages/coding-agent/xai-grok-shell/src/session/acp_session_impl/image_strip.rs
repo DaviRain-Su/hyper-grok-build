@@ -15,9 +15,144 @@ use xai_chat_state::StripOutcome;
 use xai_grok_sampler::{RequestId, StripReason};
 
 use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
-use crate::session::acp_session::SessionActor;
+use crate::session::acp_session::{PendingImageStrip, SessionActor};
+
+const MAX_PENDING_IMAGE_STRIPS: usize = 16;
+
+fn enforce_pending_image_strip_bound(
+    pending: &mut std::collections::HashMap<RequestId, PendingImageStrip>,
+    preferred: Option<&RequestId>,
+) {
+    if pending.len() <= MAX_PENDING_IMAGE_STRIPS {
+        return;
+    }
+    let applying = pending.values().filter(|strip| strip.applying).count();
+    let preferred_slots =
+        usize::from(preferred.is_some_and(|request_id| {
+            pending.get(request_id).is_some_and(|strip| !strip.applying)
+        }));
+    let remaining = MAX_PENDING_IMAGE_STRIPS
+        .saturating_sub(applying)
+        .saturating_sub(preferred_slots);
+    let other_url_limit = pending
+        .iter()
+        .filter(|(request_id, strip)| {
+            !strip.applying
+                && !strip.urls.is_empty()
+                && preferred.is_none_or(|preferred| preferred != *request_id)
+        })
+        .count()
+        .min(remaining);
+    let other_placeholder_limit = remaining.saturating_sub(other_url_limit);
+    let mut retained_urls = 0usize;
+    let mut retained_placeholders = 0usize;
+    let before = pending.len();
+    pending.retain(|request_id, strip| {
+        strip.applying
+            || preferred == Some(request_id)
+            || if strip.urls.is_empty() {
+                let retain = retained_placeholders < other_placeholder_limit;
+                retained_placeholders += usize::from(retain);
+                retain
+            } else {
+                let retain = retained_urls < other_url_limit;
+                retained_urls += usize::from(retain);
+                retain
+            }
+    });
+    tracing::warn!(
+        maximum = MAX_PENDING_IMAGE_STRIPS,
+        applying,
+        dropped = before.saturating_sub(pending.len()),
+        "dropping excess timed-out image strips after pending-state bound was exceeded"
+    );
+}
 
 impl SessionActor {
+    pub(crate) fn should_defer_image_strip(
+        stripped_urls: &[std::sync::Arc<str>],
+        reason: &StripReason,
+    ) -> bool {
+        let Some(first) = stripped_urls.first() else {
+            return false;
+        };
+        reason == &StripReason::ServerRejected
+            && stripped_urls
+                .iter()
+                .all(|url| url.as_ref() == first.as_ref())
+    }
+
+    /// Drop abandoned strips at a turn boundary while retaining timed-out
+    /// requests whose terminal event still owes one request-scoped side effect.
+    pub(crate) fn retain_timed_out_image_strips_for_new_turn(&self) {
+        let ownership = self.turn_stream_drained.lock();
+        let mut pending = self.pending_image_strip.lock();
+        pending.retain(|request_id, strip| match ownership.get(request_id) {
+            Some(waiter) if waiter.is_none() => {
+                strip.timed_out = true;
+                true
+            }
+            Some(_) => false,
+            None => strip.timed_out || strip.applying,
+        });
+        for request_id in ownership
+            .iter()
+            .filter_map(|(request_id, waiter)| waiter.is_none().then_some(request_id))
+        {
+            pending
+                .entry(request_id.clone())
+                .or_insert_with(|| PendingImageStrip {
+                    urls: Vec::new(),
+                    timed_out: true,
+                    applying: false,
+                });
+            enforce_pending_image_strip_bound(&mut pending, Some(request_id));
+        }
+    }
+
+    /// Drop the ordering waiter while retaining request-scoped strip ownership.
+    /// The placeholder admits a queued `ImagesStripped` event even if cancel
+    /// clears ordinary stream ownership before the event drainer reaches it.
+    pub(crate) fn mark_stream_drain_timed_out(&self, request_id: &RequestId) {
+        let mut ownership = self.turn_stream_drained.lock();
+        let Some(waiter) = ownership.get_mut(request_id) else {
+            return;
+        };
+        waiter.take();
+        let mut pending = self.pending_image_strip.lock();
+        pending
+            .entry(request_id.clone())
+            .or_insert_with(|| PendingImageStrip {
+                urls: Vec::new(),
+                timed_out: true,
+                applying: false,
+            })
+            .timed_out = true;
+        enforce_pending_image_strip_bound(&mut pending, Some(request_id));
+    }
+
+    /// Relinquish normal stream ownership immediately when cancellation claims
+    /// a turn. Retain only timeout-owned work from older turns; late events for
+    /// the cancelled request are otherwise stale.
+    pub(crate) fn cancel_active_sampling_requests(&self) {
+        self.turn_stream_drained.lock().clear();
+        self.pending_image_strip
+            .lock()
+            .retain(|_, strip| strip.timed_out || strip.applying);
+    }
+
+    /// Invalidate queued strip work synchronously when rewind claims history.
+    pub(crate) fn cancel_pending_image_strips_for_rewind(&self) {
+        self.pending_image_strip.lock().clear();
+    }
+
+    /// Wait for any active strip write before validating and restoring history.
+    pub(crate) async fn prepare_image_strips_for_rewind(
+        &self,
+    ) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.image_strip_rewrite_barrier.lock_rewind().await
+    }
+
     /// Handle `SamplingEvent::ImagesStripped`: buffer a persistable strip
     /// for [`Self::apply_pending_image_strip`], or notify immediately for a
     /// request-local one.
@@ -30,12 +165,24 @@ impl SessionActor {
         let stripped = stripped_urls.len();
         // Blame is judged on unique URLs: the same image attached twice is
         // still one suspect. Distinct images are ambiguous: request-local.
+        let persist_deferred = Self::should_defer_image_strip(&stripped_urls, &reason);
         let mut unique = stripped_urls;
         unique.sort();
         unique.dedup();
-        let persist_deferred = reason == StripReason::ServerRejected && unique.len() == 1;
         if persist_deferred {
-            *self.pending_image_strip.lock() = Some((request_id.clone(), unique));
+            let mut pending = self.pending_image_strip.lock();
+            let timed_out = pending
+                .get(&request_id)
+                .is_some_and(|strip| strip.timed_out);
+            pending.insert(
+                request_id.clone(),
+                PendingImageStrip {
+                    urls: unique,
+                    timed_out,
+                    applying: false,
+                },
+            );
+            enforce_pending_image_strip_bound(&mut pending, Some(&request_id));
         }
         xai_grok_telemetry::unified_log::warn(
             "shell.turn.images_stripped",
@@ -64,18 +211,32 @@ impl SessionActor {
     /// is now blamed with evidence: persist it and tell the user once the
     /// disk write is acknowledged.
     pub(crate) async fn apply_pending_image_strip(&self, request_id: &RequestId) {
+        // Acquire rewrite ownership before claiming URLs. Rewind either clears
+        // queued work first, or waits until this proven strip finishes.
+        let _rewrite_guard = self.image_strip_rewrite_barrier.lock_strip().await;
         let urls = {
             let mut pending = self.pending_image_strip.lock();
-            match pending.take() {
-                Some((rid, urls)) if &rid == request_id => Some(urls),
-                other => {
-                    *pending = other;
-                    None
+            let Some(strip) = pending.get_mut(request_id) else {
+                return;
+            };
+            if strip.urls.is_empty() {
+                if !strip.applying {
+                    pending.remove(request_id);
                 }
+                return;
             }
+            strip.applying = true;
+            std::mem::take(&mut strip.urls)
         };
-        let Some(urls) = urls else { return };
         let outcome = self.chat_state_handle.strip_conversation_images(urls).await;
+        let still_owned = self
+            .pending_image_strip
+            .lock()
+            .remove(request_id)
+            .is_some_and(|strip| strip.applying);
+        if !still_owned {
+            return;
+        }
         let (outcome_label, persisted) = match outcome {
             StripOutcome::Applied { stripped } => ("applied", stripped),
             StripOutcome::NoMatch => ("no_match", 0),
@@ -116,13 +277,11 @@ impl SessionActor {
     /// buffered strip proves nothing, so drop it. Stored history keeps its
     /// images; the next turn starts fresh.
     pub(crate) fn drop_pending_image_strip(&self, request_id: &RequestId) {
-        let mut pending = self.pending_image_strip.lock();
-        if pending.as_ref().is_some_and(|(rid, _)| rid == request_id) {
+        if self.pending_image_strip.lock().remove(request_id).is_some() {
             tracing::debug!(
                 sampler_request_id = request_id.as_str(),
                 "dropping buffered image strip: the stripped retry did not complete"
             );
-            *pending = None;
         }
     }
 }

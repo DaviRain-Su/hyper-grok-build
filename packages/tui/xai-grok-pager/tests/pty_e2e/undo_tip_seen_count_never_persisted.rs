@@ -2,10 +2,9 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 17. **No persistence — the seen count never lands on disk.**
-/// After triggering the tip (the path the old code wrote
-/// `[hints] undo_tip_shown_count` to `config.toml` from), the persisted config
-/// must not carry the tip key.
+/// 17. **No persistence: the seen count never lands on disk.**
+/// After triggering the tip, the persisted config must not carry the tip key.
+/// The old code wrote `[hints] undo_tip_shown_count` to `config.toml` from this path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn undo_tip_seen_count_never_persisted() {
@@ -33,9 +32,8 @@ async fn undo_tip_seen_count_never_persisted() {
     harness.update(Duration::from_millis(500));
     harness.quit().expect("quit");
 
-    // Old behavior wrote `[hints] undo_tip_shown_count`; the in-memory cap
-    // writes nothing. A missing config.toml (read_to_string → "") also proves
-    // no persist happened, since the old code would have created it.
+    // The old code wrote `[hints] undo_tip_shown_count` here; the count now lives only in memory, so nothing is written
+    // A missing config.toml (read_to_string returns "") also proves nothing was persisted, since the old code would have created it
     let config = content.home().join(".grok").join("config.toml");
     let body = std::fs::read_to_string(&config).unwrap_or_default();
     assert!(

@@ -1,10 +1,8 @@
-// Per-test-case module for the `pty_e2e` integration test crate.
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Seed `[ui] keep_text_selection = "hold"`, open Settings (F2) after a turn,
-/// and assert the Mouse row label is visible (modal registration smoke).
-/// flash-vs-hold is covered by unit tests (UiConfig / cache / dispatch).
+/// Seed `[ui] keep_text_selection = "hold"`, open Settings (F2) after a turn, and assert the Mouse row label is visible.
+/// That only proves the settings modal registers the row; the flash and hold behaviors are covered by unit tests (UiConfig / cache / dispatch).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn keep_text_selection_settings_visible_pty() {

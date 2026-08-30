@@ -1,29 +1,20 @@
-//! `/import-claude` -- open the interactive Claude settings import modal.
+//! `/import-claude` opens the interactive Claude settings import modal.
 //!
-//! This is the in-session entry point. The slash command dispatches the
-//! shared `Action::ImportClaudeSettings` action; the dispatch handler
-//! scans `.claude/settings*.json`, `~/.claude.json`, and `.mcp.json`,
-//! populates the modal state, and the agent view overlays the modal on
-//! top of the active session. The user gets the same selection UI as the
-//! welcome screen's Ctrl-I shortcut.
+//! This is the in-session entry point: the slash command dispatches the shared `Action::ImportClaudeSettings` action.
+//! The dispatch handler scans `.claude/settings*.json`, `~/.claude.json`, and `.mcp.json` and populates the modal state.
+//! The agent view overlays the modal on top of the active session, the same selection UI as the welcome screen's Ctrl-I shortcut.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
 /// Open the interactive Claude settings import modal in the active session.
 pub struct ImportClaudeCommand;
 
 impl SlashCommand for ImportClaudeCommand {
-    fn name(&self) -> &str {
-        "import-claude"
-    }
-
-    fn description(&self) -> &str {
-        "Open the Claude settings import modal"
-    }
-
-    fn usage(&self) -> &str {
-        "/import-claude"
+    slash_meta! {
+        name: "import-claude",
+        description: "Open the Claude settings import modal",
+        usage: "/import-claude",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {

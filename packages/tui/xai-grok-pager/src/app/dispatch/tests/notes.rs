@@ -82,9 +82,8 @@ fn manual_recap_with_messages_requests_and_shows_spinner() {
     assert!(agent.toast.is_none());
 }
 
-/// Regression: during session/load, scrollback is batched so
-/// `turn_count()` stays 0 until `end_batch`, but UserPrompt entries may already
-/// be present. Manual `/recap` must still request a recap.
+/// Regression: during session/load, scrollback is batched so `turn_count()` stays 0 until `end_batch`, but UserPrompt entries may already be present.
+/// Manual `/recap` must still request a recap.
 #[test]
 fn manual_recap_during_batch_load_with_prompts_still_requests() {
     let mut app = test_app_with_agent();
@@ -96,7 +95,7 @@ fn manual_recap_during_batch_load_with_prompts_still_requests() {
         agent
             .scrollback
             .push_block(RenderBlock::user_prompt("hello from resume"));
-        // Batched push defers rebuild_turns — turn index is stale, entries aren't.
+        // Batched push defers rebuild_turns: the turn index is stale, the entries aren't
         assert_eq!(agent.scrollback.turn_count(), 0);
         assert!(scrollback_has_user_messages(&agent.scrollback));
     }
@@ -114,8 +113,7 @@ fn manual_recap_during_batch_load_with_prompts_still_requests() {
     app.agents.get_mut(&id).unwrap().scrollback.end_batch();
 }
 
-/// While session replay is still streaming, don't claim "No messages yet" even
-/// if scrollback looks empty — history may arrive on the next notification.
+/// While session replay is still streaming, don't claim "No messages yet" even if scrollback looks empty; history may arrive on the next notification.
 #[test]
 fn manual_recap_while_loading_replay_still_requests() {
     let mut app = test_app_with_agent();
@@ -333,8 +331,7 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
             if question == "first new"
     ));
 
-    // Reverse delivery order on fresh requests: active second completes first,
-    // then the background first response still resolves only the first panel.
+    // Reverse delivery order on fresh requests: active second completes first, then the background first response still resolves only the first panel
     switch_to_agent(&mut app, first, SwitchCause::Picker);
     let first_request = send_minimal_btw(&mut app, "first reverse");
     switch_to_agent(&mut app, second, SwitchCause::Picker);
@@ -421,7 +418,7 @@ fn btw_no_session_feedback_is_mode_specific() {
     assert_eq!(fullscreen.agents[&id].scrollback.len(), 0);
 }
 
-/// Bare `/feedback` opens a freeform ask-user-style pane (not prompt chrome).
+/// Bare `/feedback` opens a freeform pane in the ask-user style, not a restyled prompt.
 #[test]
 fn enter_feedback_mode_opens_local_question_pane() {
     use crate::app::dispatch::FEEDBACK_QUESTION_LABEL;
@@ -475,8 +472,7 @@ fn enter_feedback_mode_opens_local_question_pane() {
     );
 }
 
-/// Eligible sessions: Enter on the report advances to the trace-consent
-/// question instead of sending; turning trace upload on is preselected.
+/// Eligible sessions: Enter on the report advances to the trace-consent question instead of sending; turning trace upload on is preselected.
 #[test]
 fn feedback_enter_offers_trace_question_when_eligible() {
     use crate::app::app_view::InputOutcome;
@@ -546,8 +542,7 @@ fn feedback_enter_sends_directly_without_trace_offer() {
     );
 }
 
-/// Enter on the preselected trace option turns trace upload on: this
-/// report's archive uploads and the consent persists.
+/// Enter on the preselected trace option turns trace upload on: this report's archive uploads and the consent persists.
 #[test]
 fn feedback_trace_enter_turns_on_trace_upload() {
     use crate::app::actions::FeedbackTraceChoice;
@@ -629,8 +624,7 @@ fn feedback_trace_always_upload_persists_setting() {
     );
 }
 
-/// "Opt out and don't ask again" sends the report alone, latches the offer off
-/// for this session, and persists `[features] feedback_trace_card = false`.
+/// "Opt out and don't ask again" sends the report alone, latches the offer off for this session, and persists `[features] feedback_trace_card = false`.
 #[test]
 fn feedback_trace_never_ask_persists_suppression() {
     use crate::app::actions::FeedbackTraceChoice;
@@ -675,7 +669,7 @@ fn feedback_trace_never_ask_persists_suppression() {
     );
 }
 
-/// ↓↓ walks to "Opt out and don't ask again"; Enter maps to `NeverAsk`.
+/// Two Downs walk to "Opt out and don't ask again"; Enter maps to `NeverAsk`.
 #[test]
 fn feedback_trace_third_option_maps_to_never_ask() {
     use crate::app::actions::FeedbackTraceChoice;
@@ -700,7 +694,7 @@ fn feedback_trace_third_option_maps_to_never_ask() {
     );
 }
 
-/// ↓ walks to "Opt out this time"; Enter sends the report alone.
+/// One Down walks to "Opt out this time"; Enter sends the report alone.
 #[test]
 fn feedback_trace_no_upload_sends_report_alone() {
     use crate::app::actions::FeedbackTraceChoice;
@@ -735,8 +729,7 @@ fn feedback_trace_no_upload_sends_report_alone() {
     );
 }
 
-/// Esc on the trace question skips the upload but still sends the report the
-/// user already committed with Enter.
+/// Esc on the trace question skips the upload but still sends the report the user already committed with Enter.
 #[test]
 fn feedback_trace_esc_skips_upload_but_sends() {
     use crate::app::actions::FeedbackTraceChoice;
@@ -782,8 +775,7 @@ fn feedback_report_brackets_type_not_tabs() {
     );
 }
 
-/// "Always upload" is a persistent consent: the same session must not offer
-/// the trace question again.
+/// "Always upload" is a persistent consent: the same session must not offer the trace question again.
 #[test]
 fn feedback_always_upload_stops_reoffering_this_session() {
     use crate::app::actions::FeedbackTraceChoice;
@@ -803,9 +795,8 @@ fn feedback_always_upload_stops_reoffering_this_session() {
         "a persisted consent must clear the session-local offer"
     );
 
-    // A later auth-meta refresh (login, subscription check) recomputes the
-    // offer from shell config, which the persisted consent reaches
-    // asynchronously — it must not resurrect the question.
+    // A later auth-meta refresh (login, subscription check) recomputes the offer from shell config
+    // The persisted consent reaches that config asynchronously, so the refresh must not resurrect the question
     let meta = xai_grok_shell::auth::AuthMeta {
         feedback_trace_offer: true,
         ..Default::default()
@@ -833,9 +824,8 @@ fn feedback_always_upload_stops_reoffering_this_session() {
     );
 }
 
-/// An individual coding-data opt-out does NOT suppress the offer — the card
-/// is exactly how opted-out users switch trace upload (and sharing) back
-/// on. The turn-on option must advertise that it re-enables sharing.
+/// An individual coding-data opt-out does not suppress the offer: the card is exactly how opted-out users switch trace upload (and sharing) back on.
+/// The turn-on option must advertise that it re-enables sharing.
 #[test]
 fn feedback_opted_out_still_gets_trace_offer() {
     use crate::app::app_view::InputOutcome;
@@ -900,10 +890,8 @@ fn feedback_team_admin_never_gets_trace_offer() {
     );
 }
 
-/// Turning trace upload on while opted out is the switch-back-on
-/// affordance: it flips coding-data sharing through the standard write
-/// path, and this report's upload waits for that write to be confirmed
-/// (the storage proxy refuses uploads while the account is opted out).
+/// Turning trace upload on while opted out is how a user switches sharing back on: it flips coding-data sharing through the standard write path.
+/// This report's upload waits for that write to be confirmed (the storage proxy refuses uploads while the account is opted out).
 #[test]
 fn feedback_turn_on_while_opted_out_reenables_sharing_then_uploads() {
     use crate::app::actions::FeedbackTraceChoice;
@@ -984,9 +972,8 @@ fn feedback_turn_on_while_opted_out_reenables_sharing_then_uploads() {
     );
 }
 
-/// A write that confirms with `opted_in = false` (server kept sharing off)
-/// must behave like the failure path: no upload, no persist, latch undone so
-/// the card can re-offer.
+/// A write that confirms with `opted_in = false` (the server kept sharing off) must behave like the failure path.
+/// No upload, no persist, and the latch is undone so the card can re-offer.
 #[test]
 fn feedback_turn_on_unlatches_when_the_confirm_keeps_sharing_off() {
     use crate::app::actions::FeedbackTraceChoice;
@@ -1033,9 +1020,8 @@ fn feedback_turn_on_unlatches_when_the_confirm_keeps_sharing_off() {
     );
 }
 
-/// A failed opt-in write drops the parked upload: the storage proxy would
-/// still refuse it, and the user already sees the failure toast. The report
-/// itself was sent before the upload was parked.
+/// A failed opt-in write drops the parked upload: the storage proxy would still refuse it, and the user already sees the failure toast.
+/// The report itself was sent before the upload was parked.
 #[test]
 fn feedback_turn_on_upload_is_dropped_when_the_opt_in_write_fails() {
     use crate::app::actions::FeedbackTraceChoice;
@@ -1080,8 +1066,7 @@ fn feedback_turn_on_upload_is_dropped_when_the_opt_in_write_fails() {
         app.coding_data_retention_opt_out,
         "the optimistic flip is rolled back"
     );
-    // Neither dispatch persisted the consent: it was deferred to the confirm,
-    // which never came.
+    // Neither dispatch persisted the consent: it was deferred to the confirm, which never came
     assert!(
         !send_effects.iter().chain(effects.iter()).any(|e| matches!(
             e,
@@ -1098,9 +1083,8 @@ fn feedback_turn_on_upload_is_dropped_when_the_opt_in_write_fails() {
     );
 }
 
-/// An ACP question displacing the trace-consent card must not drop the
-/// report the user already committed with Enter: it sends without a trace,
-/// like Esc/skip.
+/// An ACP question displacing the trace-consent card must not drop the report the user already committed with Enter.
+/// It sends without a trace, like Esc/skip.
 #[test]
 fn acp_question_displacing_trace_card_still_sends_report() {
     let mut app = app_with_feedback_trace_question("clipboard is broken over ssh");
@@ -1133,9 +1117,8 @@ fn acp_question_displacing_trace_card_still_sends_report() {
     );
 }
 
-/// Ctrl-Y (and any other `dismiss_question_view` caller) on the trace-consent
-/// card must send the committed report without a trace, like Esc/skip —
-/// never drop it silently.
+/// Ctrl-Y (and any other `dismiss_question_view` caller) on the trace-consent card must send the committed report without a trace, like Esc/skip.
+/// It must never drop the report silently.
 #[test]
 fn dismissing_the_trace_card_still_sends_the_report() {
     use crate::app::actions::FeedbackTraceChoice;
@@ -1162,9 +1145,8 @@ fn dismissing_the_trace_card_still_sends_the_report() {
     );
 }
 
-/// A fresh install initializes before login, so the connection-time snapshot
-/// of the trace offer is `false`; the authenticate meta must refresh it or
-/// the first post-login `/feedback` silently skips the consent question.
+/// A fresh install initializes before login, so the connection-time snapshot of the trace offer is `false`.
+/// The authenticate meta must refresh it or the first post-login `/feedback` silently skips the consent question.
 #[test]
 fn auth_meta_refreshes_feedback_trace_offer() {
     let mut app = test_app_with_agent();
@@ -1374,8 +1356,8 @@ fn enter_feedback_mode_busy_question_is_mode_specific() {
     assert!(last_system_text(&minimal, id).contains("Finish answering the current question first"));
 }
 
-/// Casual commenting parks its draft and keeps the composer live, the opposite of a permission, so closing a card over it restores into
-/// the composer and leaves the parked draft alone.
+/// Casual commenting parks its draft and keeps the composer live, the opposite of a permission.
+/// Closing a card over it therefore restores into the composer and leaves the parked draft alone.
 #[test]
 fn casual_commenting_keeps_its_parked_draft_when_a_card_closes() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1491,7 +1473,8 @@ fn enter_feedback_mode_refuses_under_a_plan_approval() {
     );
 }
 
-/// A failed send surfaces the error and leaves the composer alone. The shell persisted the report locally before the POST, so nothing is lost here.
+/// A failed send reports the error and leaves the composer alone.
+/// The shell persisted the report locally before the POST, so nothing is lost here.
 #[test]
 fn feedback_failed_reports_the_error_and_spares_the_composer() {
     let id = AgentId(0);
@@ -1558,7 +1541,8 @@ fn app_with_feedback_pane(report: &str) -> crate::app::app_view::AppView {
     app
 }
 
-/// Enter on the feedback pane sends the report through the production submit path and closes the pane. Empty Enter holds the pane open instead.
+/// Enter on the feedback pane sends the report through the production submit path and closes the pane.
+/// Empty Enter holds the pane open instead.
 #[test]
 fn feedback_pane_enter_sends_report() {
     use crate::app::app_view::InputOutcome;
@@ -1597,7 +1581,7 @@ fn feedback_pane_enter_sends_report() {
     );
 }
 
-/// Screenshot-only feedback must submit, not hit the empty-report hold-open.
+/// Screenshot-only feedback must submit, not hit the hold-open path for an empty report.
 #[test]
 fn feedback_pane_enter_sends_image_only_report() {
     use crate::app::app_view::InputOutcome;
@@ -1628,7 +1612,7 @@ fn feedback_pane_enter_sends_image_only_report() {
     );
 }
 
-/// Paste-then-immediate-Enter must not drop the screenshot.
+/// Enter immediately after a paste must not drop the screenshot.
 #[test]
 fn feedback_pane_enter_during_paste_probe_defers_then_reissues_with_image() {
     use crate::app::agent_view::AgentDeferredSend;
@@ -1669,8 +1653,7 @@ fn feedback_pane_enter_during_paste_probe_defers_then_reissues_with_image() {
     }
     assert!(agent.question_view.is_none(), "reissue closes the pane");
 
-    // Dismissing the pane during the probe window clears the stash so it
-    // cannot fire on a later pane; a manually built reissue is also a no-op.
+    // Dismissing the pane during the probe window clears the stash so it cannot fire on a later pane; a manually built reissue is also a no-op
     let mut gone = app_with_feedback_pane("dismissed");
     let agent = gone.agents.get_mut(&AgentId(0)).unwrap();
     agent.deferred_send = Some(AgentDeferredSend::SubmitFeedback);
@@ -1693,9 +1676,8 @@ fn test_pasted_png() -> crate::prompt_images::PastedImage {
     })
 }
 
-/// Full TUI inline `/feedback <text>` composed alongside a pasted image:
-/// the chip survives the composer wipe, shows up live in the prefilled
-/// pane, and travels with the submitted report.
+/// Full TUI inline `/feedback <text>` composed alongside a pasted image.
+/// The chip survives the composer wipe, shows up live in the prefilled pane, and travels with the submitted report.
 #[test]
 fn inline_feedback_carries_composer_images_into_the_pane() {
     use crate::app::app_view::InputOutcome;
@@ -1743,8 +1725,8 @@ fn inline_feedback_carries_composer_images_into_the_pane() {
     }
 }
 
-/// Minimal-mode inline `/feedback <text>` submits immediately; a composer
-/// image must ride the submission instead of dying with the composer wipe.
+/// Minimal-mode inline `/feedback <text>` submits immediately.
+/// A composer image must travel with the submission instead of dying with the composer wipe.
 #[test]
 fn minimal_inline_feedback_sends_composer_images() {
     let mut app = test_app_with_agent();
@@ -1778,8 +1760,7 @@ fn minimal_inline_feedback_sends_composer_images() {
     );
 }
 
-/// The trace-consent stage must not lose the report's attachments: an
-/// image pasted into the pane still travels after the consent answer.
+/// The trace-consent stage must not lose the report's attachments: an image pasted into the pane still travels after the consent answer.
 #[test]
 fn feedback_trace_stage_carries_report_images() {
     use crate::app::actions::FeedbackTraceChoice;
@@ -1816,8 +1797,7 @@ fn feedback_trace_stage_carries_report_images() {
         "trace question must be up"
     );
 
-    // Esc skips the consent question; the committed report (image included)
-    // still sends.
+    // Esc skips the consent question; the committed report (image included) still sends
     let outcome =
         agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     match outcome {
@@ -1833,8 +1813,7 @@ fn feedback_trace_stage_carries_report_images() {
     }
 }
 
-/// A trace-consent card dropped with its view (session close, agent
-/// teardown) owns its attachments' staged temp files and must delete them.
+/// A trace-consent card dropped with its view (session close, agent teardown) owns its attachments' staged temp files and must delete them.
 #[test]
 fn feedback_trace_card_dropped_with_view_cleans_staged_temp_files() {
     use crate::app::app_view::InputOutcome;
@@ -1863,8 +1842,7 @@ fn feedback_trace_card_dropped_with_view_cleans_staged_temp_files() {
     agent.prompt.set_cursor(end);
     agent.prompt.insert_image(image).expect("chip");
 
-    // Enter commits the report into the trace card; the image now lives
-    // inside `LocalQuestionKind::FeedbackTrace`.
+    // Enter commits the report into the trace card; the image now lives inside `LocalQuestionKind::FeedbackTrace`
     let outcome = agent.submit_question_answers_for_test(false);
     assert!(matches!(outcome, InputOutcome::Changed));
     assert!(
@@ -1883,8 +1861,7 @@ fn feedback_trace_card_dropped_with_view_cleans_staged_temp_files() {
     );
 }
 
-/// `dispatch_send_feedback` bailing before the send (no agent view) still
-/// owns the attachments and must delete their staged temp files.
+/// `dispatch_send_feedback` bailing before the send (no agent view) still owns the attachments and must delete their staged temp files.
 #[test]
 fn send_feedback_without_agent_view_cleans_staged_temp_files() {
     let mut app = test_app_with_agent();
@@ -2006,7 +1983,8 @@ fn acp_question_displacing_feedback_pane_drops_the_report() {
     );
 }
 
-/// Ctrl+C on the feedback pane follows the composer: clear the report, then dismiss once the box is empty. It never parks the pane in navigation.
+/// Ctrl+C on the feedback pane follows the composer: clear the report, then dismiss once the box is empty.
+/// It never parks the pane in navigation.
 #[test]
 fn feedback_pane_ctrl_c_clears_then_dismisses() {
     use crate::views::question_view::QuestionFocus;
@@ -2053,8 +2031,8 @@ fn feedback_pane_click_outside_keeps_input_focus() {
     assert_eq!(qv.feedback_report(), "mid-report");
 }
 
-/// A permission blanks the composer and holds its text, so closing the pane has to hand the draft to that stash. Otherwise the permission
-/// restores the report into the composer later, which is the one place it must never reach.
+/// A permission blanks the composer and holds its text, so closing the pane has to hand the draft to that stash.
+/// Otherwise the permission restores the report into the composer later, which is the one place it must never reach.
 #[test]
 fn permission_holding_the_composer_gets_the_draft_back_not_the_report() {
     let id = AgentId(0);

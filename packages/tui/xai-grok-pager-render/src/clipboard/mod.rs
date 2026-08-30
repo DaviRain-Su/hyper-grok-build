@@ -2297,7 +2297,7 @@ mod tests {
     #[test]
     fn display_copy_path_abbreviates_home() {
         if std::env::var_os("GROK_HOME").is_none() {
-            let home = dirs::home_dir().expect("home resolves in tests");
+            let home = xai_dirs::home_dir().expect("home resolves in tests");
             assert_eq!(
                 display_copy_path(&home.join(".grok").join("last-copy.txt")),
                 "~/.grok/last-copy.txt"

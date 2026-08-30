@@ -1,15 +1,12 @@
 //! Optional `mmdc` (mermaid-cli) engine, detected at runtime.
 //!
-//! High-fidelity but heavy (Node + headless Chromium), so it is never selected
-//! automatically — a caller opts in via [`MmdcEngine::detect`] / [`MmdcEngine::new`].
-//! `mmdc` produces the SVG; we rasterize it through [`crate::rasterize`] so the
-//! same security posture (no file resolvers, bundled font) and sizing apply.
+//! High-fidelity but heavy (Node and headless Chromium), so it is never selected automatically.
+//! A caller opts in via [`MmdcEngine::detect`] or [`MmdcEngine::new`].
+//! `mmdc` produces the SVG; we rasterize it through [`crate::rasterize`] so the same protections (no file resolvers, bundled font) and sizing apply.
 //!
-//! Security: the subprocess is spawned with [`xai_tty_utils::detach_std_command`]
-//! (TTY/session detach) + [`xai_tty_utils::pager_env`] + null stdio, source is
-//! passed via a private temp file, and the shared [`crate::run_with_timeout`]
-//! enforces a wall-clock budget and reaps the process group (including Chromium
-//! grandchildren) on breach.
+//! Security: the subprocess is spawned with [`xai_tty_utils::detach_std_command`], [`xai_tty_utils::pager_env`], and null stdio.
+//! Source is passed via a private temp file.
+//! The shared [`crate::run_with_timeout`] enforces a wall-clock budget and reaps the process group (including Chromium grandchildren) on breach.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -28,8 +25,8 @@ pub fn detect_mmdc() -> Option<PathBuf> {
 
 /// An engine that shells out to `mmdc` (mermaid-cli).
 ///
-/// Off by default: construct it explicitly (it requires Node + headless
-/// Chromium). Use [`MmdcEngine::detect`] to build one only if `mmdc` is present.
+/// Off by default: construct it explicitly (it requires Node and headless Chromium).
+/// Use [`MmdcEngine::detect`] to build one only if `mmdc` is present.
 pub struct MmdcEngine {
     bin: PathBuf,
     timeout: Duration,
@@ -63,9 +60,8 @@ impl MmdcEngine {
 
 impl MermaidEngine for MmdcEngine {
     fn render(&self, source: &str, params: &RenderParams) -> Result<RenderedDiagram, MermaidError> {
-        // Environment/IO failures below are `Rasterize` (a render-pipeline
-        // failure), not `Unsupported` (which connotes "this input/engine isn't
-        // supported"); spawn failure stays `Unsupported` (engine unavailable).
+        // IO failures below map to `Rasterize` (a render-pipeline failure), not `Unsupported`
+        // A spawn failure stays `Unsupported`: the engine itself is unavailable
         let dir = tempfile::Builder::new()
             .prefix("xai-mermaid-")
             .tempdir()
@@ -73,8 +69,8 @@ impl MermaidEngine for MmdcEngine {
         let input = dir.path().join("diagram.mmd");
         let output = dir.path().join("diagram.svg");
 
-        // Create atomically with 0600 (no umask/chmod TOCTOU window). The parent
-        // tempdir is already 0700.
+        // Create atomically with 0600 (no umask/chmod TOCTOU window)
+        // The parent tempdir is already 0700
         write_private(&input, source)
             .map_err(|e| MermaidError::Rasterize(format!("could not write source: {e}")))?;
 
@@ -91,7 +87,7 @@ impl MermaidEngine for MmdcEngine {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .envs(xai_tty_utils::pager_env());
-        // setsid/console detach via the sanctioned helper (never a raw pre_exec).
+        // The setsid/console detach goes through the helper, never a raw pre_exec
         xai_tty_utils::detach_std_command(&mut cmd);
 
         // Source goes via the temp file, so no stdin payload.
@@ -111,11 +107,9 @@ fn theme_arg(theme: MermaidTheme) -> &'static str {
     }
 }
 
-/// Map a subprocess failure onto the engine error taxonomy: a spawn failure
-/// means `mmdc` is unavailable ([`MermaidError::Unsupported`]); a non-zero exit
-/// is a render/layout failure; a wait failure is a pipeline ([`Rasterize`]) error.
-///
-/// [`Rasterize`]: MermaidError::Rasterize
+/// Map a subprocess failure onto the engine error taxonomy.
+/// A spawn failure means `mmdc` is unavailable ([`MermaidError::Unsupported`]).
+/// A non-zero exit is a render/layout failure; a wait failure is a pipeline error ([`MermaidError::Rasterize`]).
 fn map_subprocess_error(e: SubprocessError) -> MermaidError {
     match e {
         SubprocessError::Spawn(e) => {
@@ -129,8 +123,7 @@ fn map_subprocess_error(e: SubprocessError) -> MermaidError {
     }
 }
 
-/// Write `contents` to `path`, creating it atomically with owner-only (0600)
-/// permissions on unix so there is no umask/chmod TOCTOU window.
+/// Write `contents` to `path`, creating it atomically with owner-only (0600) permissions on unix so there is no umask/chmod TOCTOU window.
 fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -155,8 +148,7 @@ mod tests {
     use std::time::Instant;
 
     /// Write an executable `#!/bin/sh` fake `mmdc` and return (dir-guard, path).
-    /// render() invokes `mmdc --input $2 --output $4 --outputFormat svg --theme $8`,
-    /// so the script reads `$4` as the output path.
+    /// render() invokes `mmdc --input $2 --output $4 --outputFormat svg --theme $8`, so the script reads `$4` as the output path.
     #[cfg(unix)]
     fn fake_mmdc(body: &str) -> (tempfile::TempDir, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
@@ -220,7 +212,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fake_mmdc_zero_exit_without_output_is_layout_error() {
-        // Exits 0 but writes nothing → the "no readable SVG output" Layout error.
+        // Exits 0 but writes nothing, producing the "no readable SVG output" Layout error
         let (_dir, bin) = fake_mmdc("exit 0");
         let err = MmdcEngine::new(bin)
             .render("flowchart LR; A-->B", &RenderParams::default())
@@ -231,8 +223,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fake_mmdc_nonzero_exit_maps_to_layout() {
-        // A non-zero exit from mmdc surfaces as a Layout error, distinct from a
-        // timeout or a missing binary.
+        // A non-zero exit from mmdc maps to a Layout error, distinct from a timeout or a missing binary
         let (_dir, bin) = fake_mmdc("exit 3");
         let err = MmdcEngine::new(bin)
             .render("flowchart LR; A-->B", &RenderParams::default())
@@ -243,8 +234,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn with_timeout_is_honored() {
-        // A fake that sleeps far longer than the configured timeout must time out
-        // (and be reaped) quickly — proving with_timeout feeds run_with_timeout.
+        // A fake that sleeps far longer than the configured timeout must time out and be reaped quickly
+        // That proves with_timeout feeds run_with_timeout
         let (_dir, bin) = fake_mmdc("sleep 30");
         let start = Instant::now();
         let err = MmdcEngine::new(bin)

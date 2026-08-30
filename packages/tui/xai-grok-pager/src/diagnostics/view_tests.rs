@@ -1,5 +1,3 @@
-//! Diagnostics view tests.
-
 use super::*;
 use crate::clipboard::ClipboardRoute;
 use crate::diagnostics::probes::{
@@ -720,9 +718,8 @@ fn keyboard_fact_and_formatter_use_snapshot_host() {
     }
 }
 
-/// `RGB` in the resolved feature list is the only signal that 24-bit color
-/// survives tmux. Empty output means the answer is unknown rather than
-/// negative: tmux before 3.2 renders the unknown format as an empty string.
+/// `RGB` in the resolved feature list is the only signal that 24-bit color survives tmux.
+/// Empty output means the answer is unknown rather than negative: tmux before 3.2 renders the unknown format as an empty string.
 #[test]
 fn client_features_decide_color_passthrough() {
     let cases = [

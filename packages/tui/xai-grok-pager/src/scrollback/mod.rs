@@ -1,4 +1,4 @@
-//! Scrollback — conversation display with blocks, scroll, selection, turns.
+//! Scrollback: conversation display with blocks, scroll, selection, turns.
 //!
 //! This module owns the scrollback rendering pipeline:
 //! - `block.rs` / `blocks/` — content block types (agent, thinking, tool, etc.)
@@ -9,7 +9,7 @@
 //! - `selection.rs` — SelectionBox rendering
 //! - `render.rs` — Scroll-aware rendering with scratch buffers
 //! - `types.rs` — Core types (BlockLine, BlockOutput, DisplayMode, etc.)
-//! - `wrappers/` — Rendering composition (EntryRenderer, BlockRenderer, etc.)
+//! - `wrappers/` — Rendering composition (EntryRenderer)
 
 pub mod block;
 pub mod blocks;

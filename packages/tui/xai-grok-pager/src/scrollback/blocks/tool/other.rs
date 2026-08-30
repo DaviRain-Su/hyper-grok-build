@@ -1,5 +1,3 @@
-//! OtherToolCallBlock - unknown/generic tool types.
-
 use ratatui::text::{Line, Span};
 
 use crate::appearance::AppearanceConfig;
@@ -10,20 +8,16 @@ use crate::scrollback::types::{
 };
 use crate::theme::Theme;
 
-/// Other/unknown tool call.
 #[derive(Debug, Clone)]
 pub struct OtherToolCallBlock {
-    /// Tool name.
     pub name: String,
-    /// Summary/target.
     pub summary: String,
-    /// Error message if the tool call failed (None = success).
+    /// Error message if the tool call failed; `None` means success.
     pub error: Option<String>,
-    /// Optional output.
     pub output: Option<String>,
-    /// When the tool started running (Phase 2: time tracking).
+    /// When the tool started running.
     pub started_at: Option<std::time::Instant>,
-    /// Elapsed time in ms after completion (Phase 2: time tracking).
+    /// Elapsed time in ms after completion.
     pub elapsed_ms: Option<i64>,
     /// Image references detected in the tool output.
     image_refs: Vec<crate::prompt_images::ScrollbackImageRef>,
@@ -32,11 +26,8 @@ pub struct OtherToolCallBlock {
 }
 
 impl OtherToolCallBlock {
-    /// Create a new other tool block.
-    ///
-    /// Pre-completed blocks have no meaningful local timing — `started_at`
-    /// is `None`. Timing is only set for blocks that enter a running UI
-    /// state (via `set_last_running(true)` in `ScrollbackState`).
+    /// Pre-completed blocks have no meaningful local timing, so `started_at` is `None`.
+    /// Timing is only set for blocks that enter a running UI state (via `set_last_running(true)` in `ScrollbackState`).
     pub fn new(name: impl Into<String>, summary: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -70,8 +61,7 @@ impl OtherToolCallBlock {
     }
 
     /// Set the media reference from a typed path (no prose scraping).
-    /// `from_path` validates the file and normalizes `\\?\`; an unresolvable
-    /// path is a no-op.
+    /// `from_path` validates the file and normalizes `\\?\`; an unresolvable path is a no-op.
     pub fn with_media_ref(mut self, path: impl Into<std::path::PathBuf>, is_video: bool) -> Self {
         let path = path.into();
         if is_video {
@@ -84,13 +74,11 @@ impl OtherToolCallBlock {
         self
     }
 
-    /// Check if successful (no error).
     pub fn is_success(&self) -> bool {
         self.error.is_none()
     }
 
-    /// Path of the first media reference (image or video) for the filepath
-    /// line of an inline-media block, independent of inline-graphics support.
+    /// Path of the first media reference (image or video) for the filepath line of an inline-media block, independent of inline-graphics support.
     pub(crate) fn media_ref_path(&self) -> Option<std::path::PathBuf> {
         if let Some(img) = self.image_refs.first() {
             return Some(img.path.clone());
@@ -101,7 +89,7 @@ impl OtherToolCallBlock {
         None
     }
 
-    /// Set error (mutable) — compute elapsed time if not already set (Phase 2).
+    /// Set error (mutable); computes elapsed time if not already set.
     pub fn set_error(&mut self, error: Option<String>) {
         if self.elapsed_ms.is_none()
             && let Some(start) = self.started_at
@@ -113,8 +101,7 @@ impl OtherToolCallBlock {
 
     /// Finalize elapsed time from `started_at`.
     ///
-    /// Idempotent: no-op if `started_at` is `None` (pre-completed block)
-    /// or if `elapsed_ms` is already set (already finalized).
+    /// Idempotent: no-op if `started_at` is `None` (pre-completed block) or if `elapsed_ms` is already set (already finalized).
     pub fn finish(&mut self) {
         if self.elapsed_ms.is_some() {
             return;
@@ -124,7 +111,6 @@ impl OtherToolCallBlock {
         }
     }
 
-    /// Get elapsed time in ms (Phase 2).
     pub fn elapsed_ms(&self) -> Option<i64> {
         match self.elapsed_ms {
             Some(ms) => Some(ms),
@@ -136,12 +122,11 @@ impl OtherToolCallBlock {
 
     /// Render collapsed line: **`Label`** `content` or **`Name`**.
     ///
-    /// If the name contains `: `, splits into bold label + muted/primary content
-    /// (e.g. "Ask: What is your favorite language?"). Otherwise renders
-    /// the full name in bold.
+    /// If the name contains `: `, splits into a bold label and muted/primary content (e.g. "Ask: What is your favorite language?").
+    /// Otherwise renders the full name in bold.
     ///
-    /// When `muted` is true (collapsed state), all text uses dim styles to
-    /// match other collapsed blocks. The label ("Ask") stays bold.
+    /// When `muted` is true (collapsed state), all text uses dim styles to match other collapsed blocks.
+    /// The label ("Ask") stays bold.
     fn collapsed_line(&self, theme: &Theme, muted: bool, width: Option<usize>) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
@@ -191,18 +176,16 @@ impl BlockContent for OtherToolCallBlock {
         let muted_collapsed =
             ctx.mute_when_collapsed(ctx.appearance.scrollback.blocks.tool.muted_collapsed);
 
-        // Inline media blocks (image_gen / video_gen): render the header and a
-        // filepath line on every terminal.
+        // Inline media blocks (image_gen / video_gen): render the header and a filepath line on every terminal
         if let Some(media_path) = self.media_ref_path() {
             let header = self.collapsed_line(&theme, muted_collapsed, Some(ctx.content_width()));
             let max_w = ctx.content_width();
-            // Percent-decode for display only (e.g. `%2F` → `/`); the stored
-            // path is unchanged so Open / copy-path still target the file.
+            // Percent-decode for display only (e.g. `%2F` becomes `/`); the stored path is unchanged so Open / copy-path still target the file.
             let raw_path = media_path.display().to_string();
             let path_str = urlencoding::decode(&raw_path)
                 .map(|s| s.into_owned())
                 .unwrap_or(raw_path);
-            // Char-boundary middle-ellipsis (decoded paths may be multibyte).
+            // Truncate in the middle on char boundaries (decoded paths may be multibyte)
             let path_display = if path_str.chars().count() > max_w {
                 let keep = max_w.saturating_sub(3) / 2;
                 let end_keep = max_w.saturating_sub(3) - keep;
@@ -219,8 +202,7 @@ impl BlockContent for OtherToolCallBlock {
             ));
             let mut lines: Vec<BlockLine> = vec![header.into(), path_line.into()];
 
-            // No inline graphics: centered "[Open]" button between blank
-            // spacers (its click target is registered in render.rs).
+            // No inline graphics: centered "[Open]" button between blank spacers (its click target is registered in render.rs)
             if let Some((_, is_video)) = self.inline_open_button() {
                 let label = crate::scrollback::render::media_open_button_label(is_video);
                 let col = crate::scrollback::render::media_open_button_col(
@@ -308,7 +290,7 @@ impl BlockContent for OtherToolCallBlock {
     }
 
     fn accent(&self, ctx: &BlockContext) -> Option<AccentStyle> {
-        // No accent when collapsed — keeps accents reserved for Execute blocks in dense groups
+        // No accent when collapsed: keeps accents reserved for Execute blocks in dense groups
         if ctx.mode == DisplayMode::Collapsed {
             return None;
         }
@@ -412,8 +394,8 @@ impl BlockContent for OtherToolCallBlock {
     }
 
     fn inline_open_button(&self) -> Option<(std::path::PathBuf, bool)> {
-        // Only used when there is no inline-graphics overlay to host the button
-        // row. When the overlay is active it draws its own button row instead.
+        // Only used when there is no inline-graphics overlay to host the button row
+        // When the overlay is active it draws its own button row instead
         if crate::terminal::image::scrollback_inline_overlay_active() {
             return None;
         }
@@ -437,8 +419,8 @@ impl BlockContent for OtherToolCallBlock {
 /// **Path D (cancelled):** `User declined to answer...`
 /// **Paths B/C (plan mode):** `- "Q1"\n  Answer: A1\n- "Q2"\n  (No answer provided)`
 ///
-/// Returns `Vec<(question, answer)>`. Empty vec means the output is not a
-/// recognized Q&A format and should be rendered generically.
+/// Returns `Vec<(question, answer)>`.
+/// An empty vec means the output is not a recognized Q&A format and should be rendered generically.
 fn parse_ask_user_qa_pairs(output: &str) -> Vec<(String, String)> {
     // Path A: "User has answered your questions: "Q"="A", "Q"="A". You can now..."
     if let Some(rest) = output.strip_prefix("User has answered your questions: ") {
@@ -470,8 +452,7 @@ fn parse_ask_user_qa_pairs(output: &str) -> Vec<(String, String)> {
             let question = remaining[..q_end].to_string();
             remaining = &remaining[q_end + 3..]; // skip "="
 
-            // Find the end of the answer: next `", "` pair start or end of string.
-            // The answer value continues until we hit `, "` (next pair) or end.
+            // Find the end of the answer: the next `", "` pair start, or end of string
             let answer_end = remaining.find(", \"").unwrap_or(remaining.len());
 
             let mut answer_text = remaining[..answer_end].to_string();
@@ -480,8 +461,7 @@ fn parse_ask_user_qa_pairs(output: &str) -> Vec<(String, String)> {
                 answer_text.pop();
             }
 
-            // Remove annotation suffixes (selected preview:..., user notes:...)
-            // for display — keep just the label.
+            // Remove annotation suffixes (selected preview:..., user notes:...) for display; keep just the label
             if let Some(ann_start) = answer_text.find(" selected preview:") {
                 answer_text.truncate(ann_start);
             }
@@ -506,7 +486,7 @@ fn parse_ask_user_qa_pairs(output: &str) -> Vec<(String, String)> {
         return vec![]; // No Q&A to show
     }
 
-    // Paths B/C: plan mode — bullet format
+    // Paths B/C: plan mode, bullet format
     // - "Q1"\n  Answer: A1\n- "Q2"\n  (No answer provided)
     if output.contains("Questions asked") && output.contains("- \"") {
         let mut pairs = Vec::new();

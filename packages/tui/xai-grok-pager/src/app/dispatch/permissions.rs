@@ -16,13 +16,12 @@ use xai_grok_workspace::permission::{BashCommandSelectedTerms, McpScopeSelection
 /// Free-form pattern taken from the editor on confirm.
 pub(super) struct EditedPattern {
     pub pattern: String,
-    /// True when the buffer was mutated — routes to `allowed_bash_globs`.
+    /// True when the buffer was mutated; routes to `allowed_bash_globs`.
     pub is_glob: bool,
 }
 
-/// Take the free-form pattern-editor buffer, honoring it only when the resolved
-/// request was in `PatternEdit` focus (and always clearing it, so an abandoned
-/// edit can't leak into a later prompt).
+/// Take the free-form pattern-editor buffer, honoring it only when the resolved request was in `PatternEdit` focus.
+/// The buffer is always cleared, so an abandoned edit can't leak into a later prompt.
 pub(super) fn take_edited_pattern(
     agent: &mut AgentView,
     perm: &PermissionViewState,
@@ -39,11 +38,10 @@ pub(super) fn take_edited_pattern(
         })
 }
 
-/// Build the ACP response meta for a permission selection — the single source
-/// of truth shared by the main and dashboard dispatch paths. MCP scope wins for
-/// the `allow-always-mcp` id; otherwise a free-form edited pattern (glob when
-/// dirty) wins over the arrow word-scope (literal prefix). `None` when there is
-/// nothing to scope.
+/// Build the ACP response meta for a permission selection, the one copy shared by the main and dashboard dispatch paths.
+/// MCP scope wins for the `allow-always-mcp` id.
+/// Otherwise a free-form edited pattern (glob when dirty) wins over the arrow word-scope (literal prefix).
+/// `None` when there is nothing to scope.
 pub(super) fn build_selection_meta(
     perm: &PermissionViewState,
     option_id: &acp::PermissionOptionId,
@@ -74,15 +72,14 @@ pub(super) fn build_selection_meta(
     }
 
     if let Some(edited) = edited.filter(|_| {
-        // The editor authors an *allow* pattern, so apply it only to the bash
-        // allow-always option. A different selection (reject-always, allow-once)
-        // made while the editor is open must fall through to the arrow word-scope
-        // — otherwise the allow text would land in the deny set.
+        // The editor authors an *allow* pattern, so apply it only to the bash allow-always option
+        // A different selection (reject-always, allow-once) made while the editor is open must fall through to the arrow word-scope
+        // Otherwise the allow text would land in the deny set
         option_id.0.as_ref() == "allow-always-command" && perm.bash_highlights.is_some()
     }) {
-        // Glob only when the editor is dirty. Unedited save is a literal grant
-        // of the pre-filled command, so metacharacters that came from the
-        // command itself (e.g. `find . -name *.rs`) stay literal.
+        // Glob only when the editor is dirty
+        // An unedited save is a literal grant of the pre-filled command, so metacharacters from the command itself (e.g. `find . -name *.rs`)
+        // stay literal
         return serde_json::to_value(BashCommandSelectedTerms {
             command_parts: vec![edited.pattern],
             is_glob: edited.is_glob,
@@ -91,9 +88,8 @@ pub(super) fn build_selection_meta(
         .and_then(obj);
     }
 
-    // Each scoped row owns its selection (the deny row narrows freely, the
-    // allow row is clamped), so the persisted words must come from the count
-    // of the row that was actually chosen.
+    // Each scoped row owns its selection (the deny row narrows freely, the allow row is clamped)
+    // So the persisted words must come from the count of the row that was actually chosen
     let count =
         if option_id.0.as_ref() == crate::views::permission_view::REJECT_ALWAYS_COMMAND_OPTION_ID {
             perm.bash_deny_selection_count
@@ -115,8 +111,7 @@ pub(super) fn build_selection_meta(
 
 /// Handle permission option selection (AllowOnce, AllowAlways, RejectAlways).
 ///
-/// Pops the front request, sends the response, and handles queue transitions
-/// (prompt restore on empty, prompt clear on next-front).
+/// Pops the front request, sends the response, and handles queue transitions (prompt restore on empty, prompt clear on next-front).
 ///
 /// Special case for [`xai_grok_workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID`]:
 /// when the user picks the prepended "Yes, and don't ask again for anything"
@@ -126,9 +121,9 @@ pub(super) fn build_selection_meta(
 /// existing `set_yolo_mode(true)` flow to flip the local YOLO state, drain
 /// any remaining queued permissions, persist `[ui] permission_mode =
 /// "always-approve"` to `~/.grok/config.toml`, and fire the
-/// `x.ai/yolo_mode_changed` ACP notification. See the option-id constant
-/// doc-comment for the full client/shell split. Under a managed-policy
-/// pin step (b) is refused with a toast — the request is still allowed once.
+/// `x.ai/yolo_mode_changed` ACP notification.
+/// See the option-id constant doc-comment for the full client/shell split.
+/// Under a managed-policy pin step (b) is refused with a toast; the request is still allowed once.
 pub(super) fn dispatch_permission_select(
     app: &mut AppView,
     option_id: acp::PermissionOptionId,
@@ -145,20 +140,17 @@ pub(super) fn dispatch_permission_select(
 
     let edited_pattern = take_edited_pattern(agent, &perm);
 
-    // Detect the "enable always-approve mode" id BEFORE moving option_id
-    // into the response. Cheap str compare on the `Arc<str>` interior.
+    // Detect the "enable always-approve mode" id BEFORE moving option_id into the response
+    // Cheap str compare on the `Arc<str>` interior
     let enable_always_approve =
         option_id.0.as_ref() == xai_grok_workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID;
 
-    // Remember the user's choice (by option kind) so the next prompt's cursor
-    // sticks to it. Allow-flavored choices only — a rejection must not steer a
-    // later prompt's cursor onto a reject row. Also skip the two options that
-    // aren't per-prompt choices:
-    //  - the global always-approve (YOLO) option flips global auto-approve, so
-    //    there will be no subsequent prompt to land on;
-    //  - "allow all edits during this session" is edit-scoped (kind
-    //    `AllowAlways`) — letting it stick would steer an unrelated later
-    //    prompt onto its "always allow this command" row, escalating scope.
+    // Remember the user's choice (by option kind) so the next prompt's cursor sticks to it
+    // Allow-flavored choices only: a rejection must not steer a later prompt's cursor onto a reject row
+    // Also skip the two options that aren't per-prompt choices:
+    //  - the global always-approve (YOLO) option flips global auto-approve, so there will be no subsequent prompt to land on;
+    //  - "allow all edits during this session" is edit-scoped (kind `AllowAlways`)
+    //    Letting it stick would steer an unrelated later prompt onto its "always allow this command" row, escalating scope
     let steers_next_cursor = !enable_always_approve
         && option_id.0.as_ref() != xai_grok_workspace::permission::ALLOW_EDITS_SESSION_OPTION_ID;
     if steers_next_cursor
@@ -190,16 +182,12 @@ pub(super) fn dispatch_permission_select(
     // Queue transition: restore prompt if queue is now empty, clear if next-front.
     resolve_permission_queue_transition(agent);
 
-    // "Enable always-approve" side effect: flip YOLO + persist + notify.
-    // Reuses the existing `set_yolo_mode` pipeline so telemetry, queue
-    // drain, toast, modal refresh, config persistence, and ACP
-    // notification all flow through one well-tested code path.
+    // "Enable always-approve" side effect: flip YOLO, persist, and notify
+    // Reuses the existing `set_yolo_mode` flow so telemetry, queue drain, toast, modal refresh, persistence, and the notification share a path
     //
-    // Idempotency: if YOLO is already on, the pager auto-approves in
-    // `handle_permission_request` before the panel is shown, so the
-    // user couldn't have selected this option. The `is_yolo()` guard
-    // is defensive — a redundant call would re-emit the toast and a
-    // duplicate `PersistPermissionMode` effect, but is otherwise safe.
+    // Idempotency: if YOLO is already on, the pager auto-approves in `handle_permission_request` before the panel is shown
+    // So the user couldn't have selected this option
+    // The `is_yolo()` guard is defensive; a redundant call would re-emit the toast and a duplicate `PersistPermissionMode` effect, but is safe
     if enable_always_approve {
         let already_on = app
             .agents
@@ -226,7 +214,6 @@ pub(super) fn dispatch_permission_followup(app: &mut AppView, text: String) -> V
         return vec![];
     };
 
-    // Find the RejectOnce option.
     let option_id = perm
         .options
         .iter()
@@ -234,7 +221,7 @@ pub(super) fn dispatch_permission_followup(app: &mut AppView, text: String) -> V
         .map(|o| o.option_id.clone());
 
     let Some(option_id) = option_id else {
-        // No RejectOnce option — cancel instead.
+        // No RejectOnce option; cancel instead
         perm.request
             .response_tx
             .send(Ok(acp::RequestPermissionResponse::new(
@@ -268,7 +255,7 @@ pub(super) fn dispatch_permission_followup(app: &mut AppView, text: String) -> V
     vec![]
 }
 
-/// Handle permission cancel (Ctrl-C / Esc — cancels front request only).
+/// Handle permission cancel (Ctrl-C / Esc; cancels the front request only).
 pub(super) fn dispatch_permission_cancel(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -293,8 +280,8 @@ pub(super) fn dispatch_permission_cancel(app: &mut AppView) -> Vec<Effect> {
 
 /// Drain all queued permission requests, sending `Cancelled` to each.
 ///
-/// Called on turn-end and turn-cancel. After draining, restores stashed
-/// prompt/pane. Distinct from `dispatch_permission_cancel` (front only).
+/// Called on turn-end and turn-cancel; after draining, restores the stashed prompt/pane.
+/// Distinct from `dispatch_permission_cancel` (front only).
 pub(super) fn drain_permission_queue(agent: &mut AgentView) {
     agent.last_permission_click = None;
     if agent.permission_queue.is_empty() {
@@ -311,21 +298,18 @@ pub(super) fn drain_permission_queue(agent: &mut AgentView) {
     restore_permission_stashes(agent);
 }
 
-/// Handle queue transition after resolving (select/followup/cancel) the front
-/// permission request.
+/// Handle queue transition after resolving (select/followup/cancel) the front permission request.
 ///
-/// - Queue now empty → restore stashed prompt/pane.
-/// - Queue still has items → clear prompt text and reset next front to Options.
+/// - Queue now empty: restore the stashed prompt/pane.
+/// - Queue still has items: clear prompt text and reset the next front to Options.
 pub(crate) fn resolve_permission_queue_transition(agent: &mut AgentView) {
     agent.last_permission_click = None;
-    // The pattern editor is front-request scoped: drop any buffer when the
-    // front request is resolved (covers cancel/followup/select paths).
+    // The pattern editor is front-request scoped: drop any buffer when the front request is resolved (covers cancel/followup/select paths)
     agent.permission_pattern_edit = None;
     if agent.permission_queue.is_empty() {
         restore_permission_stashes(agent);
     } else {
-        // Clear any followup text from the just-resolved permission so it
-        // doesn't leak into the next permission's UI.
+        // Clear any followup text from the just-resolved permission so it doesn't leak into the next permission's UI
         agent.prompt.set_text("");
         // Reset next front's focus to Options.
         if let Some(next) = agent.permission_queue.front_mut() {
@@ -341,9 +325,8 @@ pub(super) fn restore_permission_stashes(agent: &mut AgentView) {
         agent.plan_freeform_prefill_deferred = false;
         agent.restore_card_prompt(stashed);
     } else if agent.plan_freeform_prefill_deferred {
-        // Only when exit_plan_mode deferred prefill under an open permission;
-        // not on every restore (e.g. YOLO with an empty queue) or freeform notes
-        // during steady-state plan review get wiped / re-prefilled.
+        // Only when exit_plan_mode deferred the prefill under an open permission
+        // On any other restore (e.g. YOLO with an empty queue), freeform notes typed during plan review must not be wiped or re-prefilled.
         agent.plan_freeform_prefill_deferred = false;
         if let Some(pav) = agent.plan_approval_view.as_ref() {
             let session = pav.stashed_prompt.clone_for_live_prefill();
@@ -410,8 +393,7 @@ mod plan_prefill_after_permission_tests {
         };
         agent.plan_approval_view = Some(pav);
         agent.plan_freeform_prefill_deferred = true;
-        // Typed followup after plan opened under permission (session draft was
-        // already taken into pav.stashed_prompt; permission_stashed is empty).
+        // Typed followup after plan opened under permission (session draft already in pav.stashed_prompt; permission_stashed is empty)
         agent.prompt.set_text("leftover permission followup");
         agent.permission_queue.clear();
         restore_permission_stashes(&mut agent);
@@ -437,7 +419,7 @@ mod plan_prefill_after_permission_tests {
         agent.plan_approval_view = Some(pav);
         agent.plan_freeform_prefill_deferred = false;
         agent.prompt.set_text("in-progress freeform notes");
-        // e.g. set_yolo_mode with an already-empty permission queue
+        // E.g. set_yolo_mode with an already-empty permission queue
         restore_permission_stashes(&mut agent);
         assert_eq!(
             agent.prompt.text(),

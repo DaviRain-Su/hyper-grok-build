@@ -1,6 +1,6 @@
 //! The `streaming-messages-json` reducer (Anthropic Messages API wire format).
-//! The coordinator: owns [`MessagesReducer`] and its [`Reducer`] impl; cohesive
-//! pieces live in the `wire`/`state`/`partial`/`usage`/`web_search` submodules.
+//! This module is the coordinator: it owns [`MessagesReducer`] and its [`Reducer`] impl.
+//! The rest lives in the `wire`/`state`/`partial`/`usage`/`web_search` submodules.
 
 use agent_client_protocol as acp;
 use serde_json::{Value, json};
@@ -46,26 +46,26 @@ pub(crate) struct MessagesReducer {
     assistant_frames: u64,
     /// Completed responses this turn, including contentless ones; the `num_turns` fallback.
     completed_responses: u64,
-    /// Current response lifecycle phase; dropped at response boundaries so it cannot leak.
+    /// Phase of the current response; dropped at response boundaries so it cannot leak.
     response: ResponseState,
     /// In-order signature for the currently-open thinking block, so each block keeps its own.
     open_signature: Option<String>,
-    /// Terminal tool results buffered for one grouped `user` message, tagged with
-    /// the `tool_use`'s emission order so the group flushes in `tool_use` order.
+    /// Terminal tool results buffered for one grouped `user` message.
+    /// Each is tagged with its `tool_use`'s emission order so the group flushes in `tool_use` order.
     pending_tool_results: Vec<(u64, ToolResultBlock)>,
     /// Monotonic order stamped on each `tool_use` so a later `tool_result` sorts back into place.
     next_tool_use_order: u64,
-    /// Unmatched client `tool_use` blocks (id -> emission order); leftovers at turn
-    /// end get an `is_error` `tool_result` to keep the transcript valid.
+    /// Unmatched client `tool_use` blocks, keyed by id with their emission order.
+    /// Leftovers at turn end get an `is_error` `tool_result` to keep the transcript valid.
     pending_client_tool_uses: std::collections::HashMap<String, u64>,
-    /// In-flight backend `web_search` calls (id -> order + call); query and results
-    /// arrive only at completion, so the `ToolCall` defers here.
+    /// Backend `web_search` calls still running, keyed by id with their order and call.
+    /// The query and results arrive only at completion, so the `ToolCall` defers here.
     backend_web_search_calls: std::collections::HashMap<String, (u64, ToolCallEvent)>,
-    /// Count of successful inline backend `web_search` invocations (errored ones excluded, not billed).
+    /// Count of successful inline backend `web_search` invocations; errored ones are not billed, so they are excluded.
     web_search_requests: u64,
     /// Text of the most recently flushed assistant frame (the `result.result` value).
     last_text: String,
-    /// Typed partial-stream framing sub-state; only with `--include-partial-messages`.
+    /// Framing state for the partial stream; only used with `--include-partial-messages`.
     framing: PartialFraming,
     /// Monotonic counter for synthesized partial `message_start.id` placeholders.
     partial_msg_seq: u64,
@@ -99,7 +99,7 @@ impl MessagesReducer {
         }
     }
 
-    /// The session id, or `""` before `begin` (the startup-error last resort).
+    /// The session id, or `""` before `begin` (the last resort for errors during startup).
     fn session_id(&self) -> &str {
         self.session.as_ref().map_or("", |s| s.session_id.as_str())
     }
@@ -140,7 +140,7 @@ impl MessagesReducer {
     }
 
     fn append_text(&mut self, kind: TextKind, text: &str) {
-        // Finalize a differing or pending signature-only block so it keeps its position.
+        // Finalize when the kind changes or a signature-only block is pending, so that block keeps its position
         if self.open_kind.is_some_and(|k| k != kind)
             || (self.open_kind.is_none() && self.open_signature.is_some())
         {
@@ -209,8 +209,7 @@ impl MessagesReducer {
         }
     }
 
-    // The frame and its partial `message_delta` resolve stop reason, usage, and
-    // stop sequence through these three, so the two renderings never disagree.
+    // The frame and its partial `message_delta` both resolve stop reason, usage, and stop sequence through these three, so they never disagree
 
     /// Reported reason, else `default`; a `None` default forces null so a failed turn is not mislabeled.
     fn resolved_stop_reason(&self, default: Option<&str>) -> Option<String> {
@@ -236,8 +235,8 @@ impl MessagesReducer {
             .and_then(|p| p.stop_sequence.clone())
     }
 
-    /// Flush the accumulated blocks as one assistant message. `default_stop_reason`
-    /// applies only when no `ResponseCompleted` supplied one; `None` stamps null.
+    /// Flush the accumulated blocks as one assistant message.
+    /// `default_stop_reason` applies only when no `ResponseCompleted` supplied one; `None` stamps null.
     fn flush_assistant(&mut self, default_stop_reason: Option<&str>) -> Option<Value> {
         self.finalize_open();
         if self.blocks.is_empty() {
@@ -312,8 +311,7 @@ impl MessagesReducer {
         self.open_signature = None;
     }
 
-    /// Close the open partial message and flush the assistant frame with the same
-    /// default stop reason, so the partial rebuild and frame never disagree.
+    /// Close the open partial message and flush the assistant frame with the same default stop reason, so the partial rebuild and frame never disagree.
     fn close_and_flush(&mut self, out: &mut Vec<Value>, default_stop_reason: Option<&str>) {
         self.partial_close_message(out, default_stop_reason);
         if let Some(assistant) = self.flush_assistant(default_stop_reason) {
@@ -321,8 +319,8 @@ impl MessagesReducer {
         }
     }
 
-    /// Shared terminal preamble for `finish`/`error`: init, reconcile deferred web
-    /// searches, close+flush the open frame, then flush grouped tool results.
+    /// Shared terminal preamble for `finish`/`error`.
+    /// Emits init, reconciles deferred web searches, closes and flushes the open frame, then flushes grouped tool results.
     fn flush_terminal_preamble(&mut self, out: &mut Vec<Value>, default_stop_reason: Option<&str>) {
         if let Some(init) = self.ensure_init() {
             out.push(init);
@@ -333,8 +331,8 @@ impl MessagesReducer {
         self.flush_tool_results(out);
     }
 
-    /// Reconcile deferred `web_search` calls that never terminated: emit each as a
-    /// `server_tool_use` + `web_search_tool_result_error` pair, in invocation order.
+    /// Reconcile deferred `web_search` calls that never terminated.
+    /// Each is emitted as a `server_tool_use` and `web_search_tool_result_error` pair, in invocation order.
     fn flush_unresolved_web_searches(&mut self, out: &mut Vec<Value>) {
         if self.backend_web_search_calls.is_empty() {
             return;
@@ -350,7 +348,7 @@ impl MessagesReducer {
             "error_code": "unavailable",
         });
         for (_order, id) in leftovers {
-            // Query never arrived, so empty; the error result reflects an unresolved search.
+            // The query never arrived, so it stays empty; the error result reflects an unresolved search
             self.append_web_search_result(out, &id, "", &error);
         }
     }
@@ -380,7 +378,7 @@ impl MessagesReducer {
             .unwrap_or_else(|| "unknown".to_string())
     }
 
-    /// Flush a completed-but-un-flushed response before new content begins.
+    /// Flush a response that completed but was never flushed, before new content begins.
     fn flush_prior_response(&mut self, out: &mut Vec<Value>) {
         if self.response.is_completed() {
             self.close_and_flush(out, Some("end_turn"));
@@ -394,8 +392,7 @@ impl MessagesReducer {
         order
     }
 
-    /// Buffer one terminal tool result for the next grouped `user` message, tagged
-    /// with its `tool_use`'s emission order.
+    /// Buffer one terminal tool result for the next grouped `user` message, tagged with its `tool_use`'s emission order.
     fn buffer_tool_result(&mut self, u: ToolCallUpdateEvent) {
         let is_error = u.status == Some(acp::ToolCallStatus::Failed);
         let order = self
@@ -413,8 +410,8 @@ impl MessagesReducer {
         ));
     }
 
-    /// Buffer an `is_error` `tool_result` for any client `tool_use` that never got one,
-    /// so every `tool_use` is matched and the transcript stays valid.
+    /// Buffer an `is_error` `tool_result` for any client `tool_use` that never got one.
+    /// Every `tool_use` is then matched and the transcript stays valid.
     fn reconcile_unmatched_client_tools(&mut self) {
         if self.pending_client_tool_uses.is_empty() {
             return;
@@ -491,7 +488,7 @@ impl Reducer for MessagesReducer {
             include_partials: ctx.include_partial_messages,
             context_window: ctx.context_window,
         });
-        // Init is deferred to the first output line so tool/command lists fill.
+        // Init is deferred to the first output line so the tool and command lists are populated first
         Vec::new()
     }
 
@@ -563,7 +560,7 @@ impl Reducer for MessagesReducer {
                 }
             }
             StreamEvent::ToolCall(tc) if tc.backend_web_search => {
-                // Query and results are unknown until completion, so defer; stamp invocation order.
+                // The query and results are unknown until completion, so defer the call and stamp its invocation order
                 let order = self.take_tool_use_order();
                 self.backend_web_search_calls
                     .insert(tc.tool_call_id.clone(), (order, tc));
@@ -658,7 +655,7 @@ impl Reducer for MessagesReducer {
                 stop_sequence,
             } => {
                 self.flush_boundary(&mut out);
-                // Drop a late completion for an already-flushed response (id differs), else it cross-attributes.
+                // Drop a late completion for an already-flushed response (id differs); applying it would attribute metadata to the wrong response
                 let open_id = self.response.identity().message_id;
                 let stale = self.response.is_started()
                     && matches!((&open_id, &message_id), (Some(o), Some(d)) if o != d);

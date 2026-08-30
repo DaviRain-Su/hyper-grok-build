@@ -1,9 +1,6 @@
-//! Memory system for cross-session knowledge persistence.
+//! Cross-session memory for Grok.
 //!
-//! This crate provides a markdown-based memory storage layer that allows
-//! Grok to persist important information across sessions. Memory files are
-//! stored under `~/.grok/memory/` with workspace-scoped subdirectories
-//! keyed by a blake3 hash of the workspace path.
+//! Memory files are markdown under `~/.grok/memory/`, one global file plus a subdirectory per workspace.
 //!
 //! ## Data Layout
 //!
@@ -47,11 +44,11 @@ pub(crate) const MEMORY_LOG_TARGET: &str = "xai_memory";
 
 /// Embed all chunks that don't have embeddings yet.
 ///
-/// Queries the index for unembedded chunks, batches them through the
-/// embedding provider, and upserts the results. Logs progress.
+/// Queries the index for unembedded chunks, batches them through the embedding provider, and upserts the results.
+/// Logs progress.
 ///
-/// This is the async glue between the sync `MemoryIndex` and the async
-/// `EmbeddingProvider`. Call after reindex, flush writes, or session-end writes.
+/// This is the async glue between the sync `MemoryIndex` and the async `EmbeddingProvider`.
+/// Call after reindex, flush writes, or session-end writes.
 pub async fn embed_missing_chunks(
     index: &MemoryIndex,
     provider: &dyn embedding::EmbeddingProvider,
@@ -72,7 +69,7 @@ pub async fn embed_missing_chunks(
     let total = chunks.len();
     let mut embedded = 0;
 
-    // Batch in groups of 32 (provider's typical max batch size)
+    // 32 is the provider's typical max batch size
     for batch in chunks.chunks(32) {
         let texts: Vec<&str> = batch.iter().map(|(_, text)| text.as_str()).collect();
         match provider.embed_batch(&texts).await {

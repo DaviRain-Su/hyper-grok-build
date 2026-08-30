@@ -1,28 +1,22 @@
-//! PTY: a user prompt queued behind a running auto-wake turn must survive a
-//! Ctrl+C cancel — it runs next and is durable across `--continue`.
+//! PTY: a user prompt queued behind a running auto-wake turn must survive a Ctrl+C cancel; it runs next and is durable across `--continue`.
 //!
-//! The failure chain this guards: a background task completes while the agent
-//! is idle, so the shell injects a synthetic `task-completed-<id>` prompt
-//! (auto-wake) whose reminder tells the model to poll the task-output tool.
-//! That tool result triggers the consumed-completion sweep of
-//! `pending_inputs`, which must NOT delete the running auto-wake turn's own
-//! front slot. If it does, a user prompt queued behind it (the pager doesn't
-//! adopt synthetic turns, so a typed message dispatches immediately) shifts to
-//! the front, and the next Ctrl+C resolves THE USER'S prompt as Cancelled: it
-//! never reaches the model, and — since user messages are only persisted when
-//! their turn starts — it is silently gone after a `--continue` resume.
+//! The failure chain this guards starts when a background task completes while the agent is idle.
+//! The shell then injects a synthetic `task-completed-<id>` prompt (auto-wake) whose reminder tells the model to poll the task-output tool.
+//! That tool result triggers the sweep that clears consumed completions from `pending_inputs`.
+//! The sweep must NOT delete the running auto-wake turn's own front slot.
+//! If it does, the user prompt queued behind that slot shifts to the front.
+//! (The pager does not adopt synthetic turns, so a typed message dispatches immediately and queues behind the wake turn.)
+//! The next Ctrl+C then resolves THE USER'S prompt as Cancelled, and it never reaches the model.
+//! User messages are only persisted when their turn starts, so the prompt is silently gone after a `--continue` resume.
 //!
-//! Set `GROK_PTY_CAST_DIR` to also dump asciinema casts of both pager runs
-//! (written before the final asserts so a failing run still produces them).
+//! Set `GROK_PTY_CAST_DIR` to also dump asciinema casts of both pager runs (written before the final asserts so a failing run still produces them).
 //!
-//! The scenario body is shared with the Esc and [stop]-click mirrors (see
-//! `auto_wake_cancel_via_esc_…` / `auto_wake_cancel_via_stop_click_…`) via
-//! [`run_wake_cancel_scenario`].
+//! [`run_wake_cancel_scenario`] shares the scenario body with the Esc and [stop]-click mirror tests.
+//! Those live in `auto_wake_cancel_via_esc_…` and `auto_wake_cancel_via_stop_click_…`.
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Marker for the user's mid-auto-wake message. Unique enough to grep for in
-/// request bodies and replayed history without false positives.
+/// Marker for the user's mid-auto-wake message; it is unique enough to grep for in request bodies and replayed history without false positives.
 #[cfg(unix)]
 const CLARIFY_MARKER: &str = "CLARIFY_MARKER_XYZ";
 
@@ -32,23 +26,19 @@ const POST_CANCEL_MARKER: &str = "POST_CANCEL_MARKER_XYZ";
 #[cfg(unix)]
 const UNWANTED_AUTO_WAKE_SENTINEL: &str = "UNWANTED_AUTO_WAKE_SENTINEL_XYZ";
 
-/// Background sleep that triggers the auto-wake on completion. Long enough
-/// that turn 1 settles and the auto-wake scripts are enqueued before it fires,
-/// even on a loaded CI host.
+/// Background sleep that triggers the auto-wake on completion.
+/// It is long enough that turn 1 settles and the auto-wake scripts are enqueued before it fires, even on a loaded CI host.
 #[cfg(unix)]
 const BG_SLEEP_SECS: &str = "6";
 
-/// Foreground sleep that holds the auto-wake turn deterministically running
-/// while the user message and Ctrl+C are injected. Never runs to completion —
-/// the cancel kills it on both the broken and fixed paths — so a generous
-/// bound costs nothing and removes the settle-before-cancel race.
+/// Foreground sleep that holds the auto-wake turn deterministically running while the user message and Ctrl+C are injected.
+/// It never runs to completion; the cancel kills it on both the broken and fixed paths.
+/// A generous bound therefore costs nothing and removes the race where the hold settles before the cancel lands.
 #[cfg(unix)]
 const HOLD_SLEEP_SECS: &str = "15";
 
-/// Which cancel gesture the scenario drives. All three ride the same
-/// `session/cancel` wire; only the input path differs. Esc and StopClick
-/// also gate on the wake stop affordance ([stop] while the pane is idle),
-/// which only exists with the wake-turn cancel support.
+/// Which cancel gesture the scenario drives. All three send the same `session/cancel`; only the input path differs.
+/// Esc and StopClick also gate on the wake stop affordance ([stop] while the pane is idle), which only exists with the wake-turn cancel support.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum WakeCancelGesture {
@@ -64,16 +54,14 @@ async fn auto_wake_cancel_preserves_queued_user_prompt() {
     run_wake_cancel_scenario(WakeCancelGesture::CtrlC, "auto_wake_repro").await;
 }
 
-/// Shared body for the three gesture tests (Ctrl+C here, Esc and a [stop]
-/// click in their mirror files). `cast_prefix` keeps the optional asciinema
-/// dumps distinct per gesture.
+/// Shared body for the three gesture tests (Ctrl+C here, Esc and a [stop] click in their mirror files).
+/// `cast_prefix` keeps the optional asciinema dumps distinct per gesture.
 #[cfg(unix)]
 pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_prefix: &str) {
     let content = ContentController::start().await.expect("start content");
 
-    // Turn 1: the model backgrounds a sleep via run_terminal_command, then the
-    // follow-up turn settles to plain text so the agent goes idle while the
-    // background task runs (the precondition for an auto-wake).
+    // Turn 1: the model backgrounds a sleep via run_terminal_command
+    // The follow-up turn settles to plain text so the agent goes idle while the background task runs (the precondition for an auto-wake)
     let bg_args = json!({
         "command": format!("/bin/sleep {BG_SLEEP_SECS}"),
         "description": "auto-wake trigger",
@@ -111,9 +99,8 @@ pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_pr
             )
         });
 
-    // The runtime task id (a UUID minted by the terminal actor, NOT the
-    // scripted tool_call_id) rides in the tool result of turn 1's follow-up
-    // request, inside a <task-id>…</task-id> envelope.
+    // The runtime task id is a UUID minted by the terminal actor, NOT the scripted tool_call_id
+    // It arrives in the tool result of turn 1's follow-up request, inside a <task-id>…</task-id> envelope
     let task_id = poll_for(Duration::from_secs(10), || {
         content
             .request_bodies()
@@ -127,10 +114,9 @@ pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_pr
         )
     });
 
-    // Enqueue the auto-wake turn's scripts BEFORE the background sleep
-    // completes: first a task-output poll (whose completed result triggers the
-    // consumed-completion sweep), then a foreground sleep that pins the turn
-    // running while the user message and Ctrl+C land.
+    // Enqueue the auto-wake turn's scripts BEFORE the background sleep completes
+    // The first script is a task-output poll; its completed result triggers the sweep of consumed completions
+    // The second is a foreground sleep that pins the turn running while the user message and Ctrl+C land
     let poll_args = json!({ "task_ids": [task_id.clone()] }).to_string();
     let _poll_turn = expect_tool_turn(
         &content,
@@ -149,13 +135,11 @@ pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_pr
         "run_terminal_command",
         hold_args,
     );
-    // Fallback for every unscripted request after the queues drain (and the
-    // response the surviving user prompt streams on the fixed path).
+    // This is the fallback for every unscripted request after the queues drain, and the response the surviving user prompt streams on the fixed path
     content.set_response("AUTO_WAKE_SETTLED");
 
-    // Auto-wake mid-flight gate: the request AFTER the task-output tool call
-    // executed carries its result ("=== Task <id> ==="). At that point the
-    // sweep has run and the foreground hold is about to start.
+    // Gate on the auto-wake turn being underway: the request AFTER the task-output tool call executed carries its result ("=== Task <id> ===")
+    // At that point the sweep has run and the foreground hold is about to start
     let wake_polled = poll_for(Duration::from_secs(30), || {
         let marker = format!("=== Task {task_id} ===");
         content
@@ -173,9 +157,8 @@ pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_pr
     );
     harness.update(Duration::from_millis(500));
 
-    // Esc / StopClick gate on the wake stop affordance first: the pane is
-    // still idle here (nothing typed), so a rendered [stop] is the wake
-    // turn's, and it does not exist without the wake-turn cancel support.
+    // Esc / StopClick gate on the wake stop affordance first: the pane is still idle here (nothing typed), so a rendered [stop] is the wake turn's
+    // That affordance does not exist without the wake-turn cancel support
     if !matches!(gesture, WakeCancelGesture::CtrlC) {
         harness
             .wait_for_text("[stop]", Duration::from_secs(10))
@@ -187,10 +170,9 @@ pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_pr
             });
     }
 
-    // The pager does not adopt synthetic turns, so it believes it is idle and
-    // dispatches the typed message immediately — it queues server-side behind
-    // the running auto-wake turn. Text and Enter go separately so a bulk
-    // inject can't be paste-coalesced past the submit.
+    // The pager does not adopt synthetic turns, so it believes it is idle and dispatches the typed message immediately
+    // The message queues server-side behind the running auto-wake turn
+    // Text and Enter go separately so paste coalescing cannot swallow the Enter into the pasted text
     harness
         .inject_keys(format!("{CLARIFY_MARKER} please stop").as_bytes())
         .expect("type clarifying message");
@@ -200,8 +182,7 @@ pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_pr
         .expect("submit clarifying message");
     harness.update(Duration::from_millis(500));
 
-    // One cancel gesture: must cancel the auto-wake turn (killing the held
-    // sleep), not the queued user prompt.
+    // One cancel gesture: it must cancel the auto-wake turn (killing the held sleep), not the queued user prompt
     match gesture {
         WakeCancelGesture::CtrlC => {
             harness.inject_keys(keys::CTRL_C).expect("press ctrl+c");
@@ -215,7 +196,7 @@ pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_pr
                 .expect("[stop] visible before the click");
             let (row, col) = locate_screen_text(&harness.screen_contents(), "[stop]")
                 .expect("locate [stop] on screen");
-            // SGR press + release inside the button's hit area.
+            // SGR press and release inside the button's hit area
             let click = format!(
                 "{}{}",
                 sgr_mouse(0, row, col + 1, 'M'),
@@ -236,8 +217,7 @@ pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_pr
     })
     .is_some();
     if marker_on_wire {
-        // Let the promoted turn finish streaming so the resumed replay below
-        // is deterministic on the fixed path.
+        // Let the promoted turn finish streaming so the resumed replay below is deterministic on the fixed path
         let _ = harness.wait_for_full_text("AUTO_WAKE_SETTLED", Duration::from_secs(15));
     }
 
@@ -250,8 +230,7 @@ pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_pr
     harness.inject_keys(b"\x11").expect("ctrl-q confirm");
     harness.quit().expect("reap pager");
 
-    // Resume the same session: the user's message must have been persisted
-    // (user messages are only written once their turn starts) and replay.
+    // Resume the same session: the user's message must have been persisted (user messages are only written once their turn starts) and must replay
     let mut resumed = PtyHarness::spawn_with_content_in_dir(
         &binary,
         DEFAULT_ROWS,
@@ -261,9 +240,8 @@ pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_pr
         Some(content.home()),
     )
     .expect("spawn resumed pager");
-    // The replay follows the transcript tail, so on the fixed path turn 1 may
-    // have scrolled above the viewport — the marker near the tail is an
-    // equally valid replay-finished signal.
+    // The replay follows the transcript tail, so on the fixed path turn 1 may have scrolled above the viewport
+    // The marker near the tail is an equally valid replay-finished signal
     let replay_ok = resumed
         .wait_for_full_text("TURN1_SETTLED", Duration::from_secs(30))
         .is_ok();
@@ -426,9 +404,8 @@ async fn cancel_before_task_completion_defers_auto_wake_until_user_prompt() {
     harness
         .wait_for_full_text("Task completed in", Duration::from_secs(15))
         .expect("background completion chip");
-    // hold must be strictly less than timeout: wait_until_stable stamps
-    // true_since after the deadline is fixed, so timeout == hold flakes under
-    // load even when the condition is always true (remote --runs_per_test).
+    // The hold must be strictly less than the timeout: wait_until_stable stamps true_since after the deadline is fixed
+    // A hold equal to the timeout therefore flakes under load even when the condition is always true (remote --runs_per_test)
     harness
         .wait_until_stable(
             "no auto-wake response after background completion",

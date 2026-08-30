@@ -1,44 +1,24 @@
-//! `/cd [path]` — change the working directory new dashboard sessions
-//! spawn in.
+//! `/cd [path]`: change the working directory new dashboard sessions spawn in.
 //!
-//! With no argument it opens the dashboard's location picker; with a path
-//! it changes directly. Both are dashboard affordances — invoked from a
-//! non-dashboard surface the dispatcher prints a toast pointing the user
-//! at `/dashboard` (see `dispatch_dashboard_open_location_picker` /
-//! `dispatch_dashboard_change_location`).
+//! With no argument it opens the dashboard's location picker; with a path it changes directly.
+//! Both only work on the dashboard: anywhere else the dispatcher prints a toast pointing the user at `/dashboard`.
+//! See `dispatch_dashboard_open_location_picker` and `dispatch_dashboard_change_location`.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
-/// Change the working directory for newly dispatched dashboard sessions.
 pub struct CdCommand;
 
 impl SlashCommand for CdCommand {
-    fn name(&self) -> &str {
-        "cd"
-    }
-
-    fn description(&self) -> &str {
-        "Change the working directory for new agents"
-    }
-
-    fn usage(&self) -> &str {
-        "/cd [path]"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("path")
-    }
-
-    /// `/cd` only makes sense on the dashboard (it changes where the
-    /// dashboard dispatches new agents), so hide it from completion on
-    /// every other surface — the agent view and the welcome screen.
-    fn dashboard_only(&self) -> bool {
-        true
+    slash_meta! {
+        name: "cd",
+        description: "Change the working directory for new agents",
+        usage: "/cd [path]",
+        takes_args: true,
+        // `/cd` only makes sense on the dashboard (it changes where the dashboard dispatches new agents).
+        // Hide it from completion everywhere else (the agent view and the welcome screen)
+        dashboard_only: true,
+        arg_placeholder: "path",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -59,8 +39,8 @@ mod tests {
     use crate::acp::model_state::ModelState;
     use crate::app::bundle::BundleState;
 
-    /// Build a throwaway exec ctx over the given borrows. Mirrors the
-    /// inline ctx construction in `dashboard.rs`'s command tests.
+    /// Build a throwaway exec ctx over the given borrows.
+    /// It mirrors the inline ctx construction in `dashboard.rs`'s command tests.
     fn ctx<'a>(models: &'a ModelState, bundle: &'a BundleState) -> CommandExecCtx<'a> {
         CommandExecCtx {
             models,
@@ -117,8 +97,7 @@ mod tests {
         assert_eq!(cmd.arg_placeholder(), Some("path"));
         assert!(!cmd.description().is_empty());
         assert!(!cmd.usage().is_empty());
-        // `/cd` is dashboard-only — hidden from completion on every other
-        // surface (the agent view, the welcome screen).
+        // Dashboard-only hides `/cd` from completion everywhere else (the agent view, the welcome screen)
         assert!(cmd.dashboard_only(), "/cd must be dashboard-only");
     }
 }

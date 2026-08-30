@@ -4,39 +4,21 @@ use xai_grok_tools::implementations::grok_build::{
     imagine_video_usage_message,
 };
 
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
 const REQUIRED_TOOLS: &[&str] = &[IMAGE_TO_VIDEO_TOOL_NAME];
 
 pub struct ImagineVideoCommand;
 
 impl SlashCommand for ImagineVideoCommand {
-    fn name(&self) -> &str {
-        IMAGINE_VIDEO_COMMAND_NAME
-    }
-
-    fn description(&self) -> &str {
-        "Generate a video from a text description"
-    }
-
-    fn usage(&self) -> &str {
-        "/imagine-video <description>"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn args_required(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("description of the video to generate")
-    }
-
-    fn required_tools(&self) -> &[&str] {
-        REQUIRED_TOOLS
+    slash_meta! {
+        name: IMAGINE_VIDEO_COMMAND_NAME,
+        description: "Generate a video from a text description",
+        usage: "/imagine-video <description>",
+        takes_args: true,
+        args_required: true,
+        arg_placeholder: "description of the video to generate",
+        required_tools: REQUIRED_TOOLS,
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {

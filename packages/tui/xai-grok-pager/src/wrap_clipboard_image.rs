@@ -1,19 +1,15 @@
 //! Host clipboard image paste mediated by `grok wrap`.
 //!
-//! On a full remote paste miss (no image/text/file URLs) with
-//! `osc52_sink_active()`, remote emits a private OSC on stderr; wrap injects a
-//! bracketed-paste frame on PTY stdin for the normal paste-chip path.
+//! On a full remote paste miss (no image/text/file URLs) with `osc52_sink_active()`, remote emits a private OSC on stderr.
+//! Wrap injects a bracketed-paste frame on PTY stdin for the normal paste-chip path.
 //!
 //! # Trust model
 //!
-//! Answering the private request OSC is effectively an image clipboard *read*
-//! for the wrapped session: any process that can write to the PTY (not only
-//! the inner `grok`) can solicit the host pasteboard. That is intentional and
-//! acceptable for `grok wrap` because (1) the user opted into wrap on their
-//! own host, (2) the answer stays inside their session, and (3) the remote
-//! only requests when `osc52_sink_active()` (wrap already set
-//! `GROK_OSC52_SINK` / `LC_GROK_OSC52_SINK`). Do not generalize this pattern
-//! to untrusted multiplexers without an explicit allowlist.
+//! Answering the private request OSC is effectively an image clipboard *read* for the wrapped session.
+//! Any process that can write to the PTY (not only the inner `grok`) can solicit the host pasteboard.
+//! That is intentional and acceptable for `grok wrap`: the user opted into wrap on their own host, and the answer stays inside their session.
+//! The remote also only requests when `osc52_sink_active()` (wrap already set `GROK_OSC52_SINK` / `LC_GROK_OSC52_SINK`).
+//! Do not generalize this pattern to untrusted multiplexers without an explicit allowlist.
 
 use base64::Engine as _;
 use xai_grok_pager_render::clipboard::{ImageData, osc52_sink_active};
@@ -38,16 +34,15 @@ pub const MAGIC_IMG: &str = "GROK_WRAP_IMG";
 pub const MAGIC_NONE: &str = "GROK_WRAP_NONE";
 
 /// Max decoded image bytes on this path (OSC 52 text limits unchanged).
-/// Retina screenshots are often multi‑MB PNG; 4 MiB was too small and
-/// silently became [`MAGIC_NONE`]. 20 MiB covers typical screenshots;
-/// host inject may JPEG-recompress if still over budget.
+/// Retina screenshots are often multi-MB PNG; 4 MiB was too small and silently became [`MAGIC_NONE`].
+/// 20 MiB covers typical screenshots; host inject may JPEG-recompress if still over budget.
 pub const MAX_WRAP_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
 /// Result of decoding a wrap-injected bracketed paste.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WrapImagePaste {
     Image(ImageData),
-    /// Explicit host "no image" — must not be inserted as text.
+    /// Explicit host "no image"; must not be inserted as text.
     NoImage,
 }
 
@@ -93,8 +88,8 @@ fn write_request_osc() -> std::io::Result<()> {
 
 /// Decode wrap host-image paste content (`Event::Paste` payload).
 ///
-/// `None` → not wrap magic (caller treats as normal text). Malformed wrap
-/// frames yield [`WrapImagePaste::NoImage`] so they never land as text.
+/// `None` means not wrap magic (caller treats as normal text).
+/// Malformed wrap frames yield [`WrapImagePaste::NoImage`] so they never land as text.
 pub fn try_decode_wrap_host_image_paste(text: &str) -> Option<WrapImagePaste> {
     if text == MAGIC_NONE {
         return Some(WrapImagePaste::NoImage);
@@ -128,8 +123,7 @@ pub fn try_decode_wrap_host_image_paste(text: &str) -> Option<WrapImagePaste> {
 }
 
 /// Bracketed-paste bytes for wrap to inject into PTY stdin.
-/// Oversized host images are JPEG-recompressed when possible so screenshots
-/// still arrive instead of a silent [`MAGIC_NONE`].
+/// Oversized host images are JPEG-recompressed when possible so screenshots still arrive instead of a silent [`MAGIC_NONE`].
 pub fn encode_wrap_image_response(image: Option<&ImageData>) -> Vec<u8> {
     let Some(img) = image.filter(|i| !i.data.is_empty()) else {
         return format!("\x1b[200~{MAGIC_NONE}\x1b[201~").into_bytes();
@@ -144,8 +138,8 @@ pub fn encode_wrap_image_response(image: Option<&ImageData>) -> Vec<u8> {
     }
 }
 
-/// Max pixel area when decoding oversized clipboard images for recompression
-/// (~48MP — large enough for retina screenshots, not a decompression bomb).
+/// Max pixel area when decoding oversized clipboard images for recompression.
+/// ~48MP is large enough for retina screenshots without allowing a decompression bomb.
 const MAX_WRAP_DECODE_PIXELS: u64 = 48 * 1024 * 1024;
 
 /// Keep encoded bytes under [`MAX_WRAP_IMAGE_BYTES`], JPEG-recompressing if needed.
@@ -280,7 +274,7 @@ mod tests {
             data: vec![0u8; MAX_WRAP_IMAGE_BYTES + 1],
             mime_type: "image/png".into(),
         };
-        // Random bytes fail JPEG fit → NONE frame.
+        // Random bytes fail the JPEG fit, yielding a NONE frame
         let s = String::from_utf8_lossy(&encode_wrap_image_response(Some(&img))).into_owned();
         assert!(s.contains(MAGIC_NONE));
     }

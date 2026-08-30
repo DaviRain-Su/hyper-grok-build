@@ -6,7 +6,7 @@
 use std::io::IsTerminal;
 use std::rc::Rc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
@@ -101,19 +101,13 @@ impl Drop for AgentShutdownGuard {
     }
 }
 
-/// Why the join ended, so each case is explicit at the call site (and callers
-/// can tell a completed flush from an abandoned one).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 enum JoinOutcome {
-    /// Worker returned cleanly: session actors flushed within the grace.
     Joined,
-    /// Worker returned an error; the flush may be incomplete.
     Failed(String),
-    /// Worker panicked, with the payload rendered as text.
     Panicked(String),
-    /// Worker was still running when the budget elapsed.
     TimedOut,
-    /// The join helper vanished without reporting (helper thread itself died).
     HelperLost,
 }
 
@@ -127,29 +121,44 @@ enum JoinOutcome {
 fn join_agent_thread(handle: thread::JoinHandle<Result<()>>, timeout: Duration) -> JoinOutcome {
     use std::sync::mpsc::RecvTimeoutError;
 
+    let span = xai_grok_telemetry::session_end::join_span();
+    let start = Instant::now();
+
     let (tx, rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
         let _ = tx.send(handle.join());
     });
 
-    // Two-phase wait: silent for a short join (overwhelmingly the common case),
-    // then a one-line notice so a slow SessionEnd pipeline does not look like a
-    // frozen exit. Only for a terminal — piped/JSON consumers stay clean.
     let quiet = timeout.min(JOIN_NOTICE_AFTER);
-    match rx.recv_timeout(quiet) {
-        Ok(result) => return classify_join(result),
+    let mut notice_shown = false;
+    let outcome = match rx.recv_timeout(quiet) {
+        Ok(result) => classify_join(result),
+        Err(RecvTimeoutError::Disconnected) => JoinOutcome::HelperLost,
         Err(RecvTimeoutError::Timeout) => {
             if std::io::stderr().is_terminal() {
                 eprintln!("{JOIN_NOTICE}");
+                notice_shown = true;
+            }
+            match rx.recv_timeout(timeout.saturating_sub(quiet)) {
+                Ok(result) => classify_join(result),
+                Err(RecvTimeoutError::Timeout) => JoinOutcome::TimedOut,
+                Err(RecvTimeoutError::Disconnected) => JoinOutcome::HelperLost,
             }
         }
-        Err(RecvTimeoutError::Disconnected) => return JoinOutcome::HelperLost,
-    }
-    match rx.recv_timeout(timeout.saturating_sub(quiet)) {
-        Ok(result) => classify_join(result),
-        Err(RecvTimeoutError::Timeout) => JoinOutcome::TimedOut,
-        Err(RecvTimeoutError::Disconnected) => JoinOutcome::HelperLost,
-    }
+    };
+
+    let outcome_label: &'static str = (&outcome).into();
+    let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    xai_grok_telemetry::session_end::record_join(&span, outcome_label, elapsed_ms, notice_shown);
+    crate::unified_log::write_direct_info(
+        "session_end.worker_join",
+        Some(serde_json::json!({
+            "elapsed_ms": elapsed_ms,
+            "outcome": outcome_label,
+            "notice_shown": notice_shown,
+        })),
+    );
+    outcome
 }
 
 fn classify_join(result: thread::Result<Result<()>>) -> JoinOutcome {

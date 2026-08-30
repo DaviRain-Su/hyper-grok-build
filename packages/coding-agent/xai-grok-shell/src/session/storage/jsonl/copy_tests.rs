@@ -1165,6 +1165,79 @@ async fn copy_session_data_inherits_source_summary_fields() {
     assert_eq!(loaded.sandbox_profile.as_deref(), Some("workspace"));
 }
 
+fn worktree_target_cwd(home: &std::path::Path) -> String {
+    let cwd = home
+        .join("worktrees")
+        .join("xai")
+        .join("fix-bug")
+        .join("src");
+    std::fs::create_dir_all(&cwd).unwrap();
+    cwd.to_string_lossy().into_owned()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn fork_with_default_kind_into_worktree_cwd_stamps_worktree_identity() {
+    let home = TempDir::new().unwrap();
+    let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+    let adapter = JsonlStorageAdapter::with_root(home.path().join("sessions-root"));
+    let source_info = Info {
+        id: acp::SessionId::new("src-plain-fork"),
+        cwd: "/src".to_string(),
+    };
+    let target_info = Info {
+        id: acp::SessionId::new("tgt-in-worktree"),
+        cwd: worktree_target_cwd(home.path()),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+
+    adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+
+    let summary = adapter.load_summary(&target_info).await.unwrap();
+    assert_eq!(summary.session_kind.as_deref(), Some("worktree"));
+    assert_eq!(summary.worktree_label.as_deref(), Some("fix-bug"));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn explicit_subagent_fork_kind_wins_over_worktree_target_cwd() {
+    let home = TempDir::new().unwrap();
+    let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+    let adapter = JsonlStorageAdapter::with_root(home.path().join("sessions-root"));
+    let source_info = Info {
+        id: acp::SessionId::new("src-subagent-fork"),
+        cwd: "/src".to_string(),
+    };
+    let target_info = Info {
+        id: acp::SessionId::new("tgt-subagent-in-worktree"),
+        cwd: worktree_target_cwd(home.path()),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+
+    let options = CopySessionOptions {
+        session_kind: Some("subagent_fork".to_string()),
+        ..Default::default()
+    };
+    adapter
+        .copy_session_data(&source_info, &target_info, options)
+        .await
+        .unwrap();
+
+    let summary = adapter.load_summary(&target_info).await.unwrap();
+    assert_eq!(summary.session_kind.as_deref(), Some("subagent_fork"));
+    assert!(summary.source_workspace_dir.is_none());
+    assert_eq!(summary.worktree_label.as_deref(), Some("fix-bug"));
+}
+
 async fn assert_copy_clears_pending_relocation(fork_filter: bool) {
     use crate::session::persistence::PendingCwdSwitchReminder;
 

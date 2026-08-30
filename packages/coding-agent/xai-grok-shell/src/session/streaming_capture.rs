@@ -39,6 +39,9 @@ pub(crate) struct DoomLoopSegmentStamp {
 /// reasoning-only generation per retry); a normal turn produces one.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StreamSegment {
+    /// Request ownership used only while the turn is live. Never uploaded.
+    #[serde(skip)]
+    pub(crate) request_id: Option<String>,
     /// Stream-start timestamp (ms epoch) for this generation.
     pub(crate) started_at_ms: Option<i64>,
     /// Reasoning channel text for this generation.
@@ -74,6 +77,9 @@ pub(crate) struct StreamSegment {
 /// non-empty capture.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StreamingTurnCapture {
+    /// Request owning the in-progress generation. Never uploaded.
+    #[serde(skip)]
+    pub(crate) current_request_id: Option<String>,
     /// `promptId` of the turn that produced this capture.
     pub(crate) prompt_id: Option<String>,
     /// Turn number for the trace artifact path.
@@ -171,10 +177,28 @@ impl StreamingTurnCapture {
     /// stamp the new generation's start time, and count the attempt. Same-turn
     /// restarts call this without `begin_turn`, so each generation is retained
     /// and counted separately.
+    #[cfg(test)]
     pub(crate) fn start_stream(&mut self, started_at_ms: i64) {
+        self.start_request_stream("test-request", started_at_ms);
+    }
+
+    pub(crate) fn start_request_stream(&mut self, request_id: &str, started_at_ms: i64) {
         self.push_current_segment();
+        self.current_request_id = Some(request_id.to_owned());
         self.started_at_ms = Some(started_at_ms);
         self.attempt_count += 1;
+    }
+
+    /// Ensure a dropped `StreamStarted` still assigns the first chunk to its
+    /// sampler request without disturbing an already active generation.
+    pub(crate) fn claim_current_request(&mut self, request_id: &str) {
+        if self.current_request_id.is_none() {
+            self.current_request_id = Some(request_id.to_owned());
+        }
+    }
+
+    pub(crate) fn current_request_matches(&self, request_id: &str) -> bool {
+        self.current_request_id.as_deref() == Some(request_id)
     }
 
     /// Fold the in-progress slot (the flat fields) into `segments` and clear it
@@ -193,6 +217,7 @@ impl StreamingTurnCapture {
             return;
         }
         self.segments.push(StreamSegment {
+            request_id: self.current_request_id.take(),
             started_at_ms: self.started_at_ms,
             reasoning_text: std::mem::take(&mut self.reasoning_text),
             response_text: std::mem::take(&mut self.response_text),
@@ -204,6 +229,44 @@ impl StreamingTurnCapture {
         self.reasoning_chunks = 0;
         self.text_chunks = 0;
         self.phase = CapturePhase::default();
+    }
+
+    /// Stamp one request's generation, even if a later request is now active.
+    pub(crate) fn stamp_request_doom_loop(
+        &mut self,
+        request_id: &str,
+        stamp: DoomLoopSegmentStamp,
+    ) {
+        if self.current_request_matches(request_id) {
+            self.stamp_doom_loop(stamp);
+        } else if let Some(segment) = self
+            .segments
+            .iter_mut()
+            .rev()
+            .find(|segment| segment.request_id.as_deref() == Some(request_id))
+        {
+            segment.doom_loop = Some(stamp);
+        }
+    }
+
+    /// Clear a committed generation only when it still belongs to this request.
+    pub(crate) fn clear_request_segment(&mut self, request_id: &str) {
+        if self.current_request_matches(request_id) {
+            self.clear_current_segment();
+        } else if let Some(index) = self
+            .segments
+            .iter()
+            .rposition(|segment| segment.request_id.as_deref() == Some(request_id))
+        {
+            let segment = &mut self.segments[index];
+            if segment.doom_loop.is_some() {
+                segment.reasoning_text.clear();
+                segment.response_text.clear();
+            } else {
+                self.segments.remove(index);
+            }
+            self.truncated = self.total_bytes() >= STREAMING_CAPTURE_MAX_BYTES;
+        }
     }
 
     /// Stamp the in-progress generation with a doom-loop recovery action.
@@ -227,6 +290,7 @@ impl StreamingTurnCapture {
     pub(crate) fn clear_current_segment(&mut self) {
         if let Some(stamp) = self.doom_loop.take() {
             self.segments.push(StreamSegment {
+                request_id: self.current_request_id.clone(),
                 started_at_ms: self.started_at_ms,
                 reasoning_text: String::new(),
                 response_text: String::new(),
@@ -236,6 +300,7 @@ impl StreamingTurnCapture {
                 doom_loop: Some(stamp),
             });
         }
+        self.current_request_id = None;
         self.reasoning_text.clear();
         self.response_text.clear();
         self.reasoning_chunks = 0;

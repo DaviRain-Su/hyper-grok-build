@@ -1,35 +1,27 @@
-//! `/auto` -- toggle auto permission mode (LLM classifier).
+//! `/auto` toggles auto permission mode (LLM classifier).
 //!
-//! - Off (or always-approve) → `SetPermissionMode(Auto)`
-//! - Already auto → `SetPermissionMode(Ask)` (toggle off)
+//! - Off (or always-approve): returns `SetPermissionMode(Auto)`.
+//! - Already auto: returns `SetPermissionMode(Ask)` to toggle off.
 //!
-//! The dispatcher owns state mutation, persistence (with rollback), and toast.
-//! Visibility is gated by
-//! [`crate::slash::SlashController::set_auto_mode_available`]: `/auto` is
-//! hard-hidden when the auto permission-mode feature is off.
+//! The dispatcher mutates the state, persists it (rolling back on failure), and shows the toast.
+//! Visibility is gated by [`crate::slash::SlashController::set_auto_mode_available`].
+//! `/auto` is hard-hidden when the auto permission-mode feature is off.
 
 use crate::app::actions::{Action, PermissionModeKind};
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
 /// Toggle auto permission mode (LLM classifier).
 pub struct AutoCommand;
 
 impl SlashCommand for AutoCommand {
-    fn name(&self) -> &str {
-        "auto"
-    }
-
-    fn description(&self) -> &str {
-        "Toggle auto mode (classifier approves safe tools)"
-    }
-
-    fn usage(&self) -> &str {
-        "/auto"
+    slash_meta! {
+        name: "auto",
+        description: "Toggle auto mode (classifier approves safe tools)",
+        usage: "/auto",
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        // Yolo wins over auto: if always-approve is on, treat auto as off so
-        // `/auto` switches into auto rather than "toggling off" to ask.
+        // Yolo wins over auto: if always-approve is on, treat auto as off so `/auto` switches into auto rather than "toggling off" to ask
         let currently_auto = ctx.pager_state.auto_mode && !ctx.pager_state.yolo_mode;
         let kind = if currently_auto {
             PermissionModeKind::Ask

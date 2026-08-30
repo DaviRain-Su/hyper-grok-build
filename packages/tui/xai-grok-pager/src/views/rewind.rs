@@ -213,12 +213,10 @@ pub fn confirm_cursor(phase: &RewindPhase) -> RewindInput {
 
 /// Hit-test a screen position against the rewind overlay's clickable rows.
 ///
-/// Returns the logical cursor index under `(col, row)` for the current
-/// phase, or `None` if the position is not on a selectable row.
+/// Returns the logical cursor index under `(col, row)` for the current phase, or `None` if the position is not on a selectable row.
 ///
-/// IMPORTANT: the row geometry here mirrors `render_rewind_overlay`. Keep
-/// this, `render_rewind_overlay`, and `rewind_overlay_height` in sync when
-/// changing layout.
+/// IMPORTANT: the row geometry here mirrors `render_rewind_overlay`.
+/// Keep this, `render_rewind_overlay`, and `rewind_overlay_height` in sync when changing layout.
 pub fn rewind_row_at(phase: &RewindPhase, area: Rect, col: u16, row: u16) -> Option<usize> {
     if area.height == 0 || area.width < 10 {
         return None;
@@ -295,8 +293,7 @@ pub fn set_rewind_cursor(phase: &mut RewindPhase, idx: usize) -> bool {
     }
 }
 
-/// The activation input for the current cursor position — equivalent to
-/// pressing Enter on the focused row. Used by mouse-click handling.
+/// The activation input for the current cursor position, equivalent to pressing Enter on the focused row. Used by mouse-click handling.
 pub fn rewind_activate(phase: &RewindPhase) -> RewindInput {
     match phase {
         RewindPhase::Picker { points, selected } => points
@@ -365,9 +362,8 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
             );
         }
         RewindPhase::Picker { points, selected } => {
-            // Shared list-overlay chrome + row geometry (also used by /jump).
-            // It applies the unfocus dim itself, so return before the shared
-            // blend at the bottom of this function.
+            // Shared list-overlay frame and row geometry (also used by /jump)
+            // It applies the unfocus dim itself, so return before the shared blend at the bottom of this function
             crate::views::overlay_list::ListOverlay {
                 len: points.len(),
                 selected: *selected,
@@ -545,10 +541,8 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
         }
     }
 
-    // Unfocus dim: when the prompt area is unfocused (e.g. user moved
-    // to scrollback), blend foregrounds toward `bg_light` so the panel
-    // visually recedes. Mirrors the unfocused prompt widget pattern
-    // (`prompt_widget.rs:1948`).
+    // Unfocus dim: when the prompt area is unfocused (user moved to scrollback), blend foregrounds toward `bg_light` so the panel recedes
+    // Mirrors the unfocused prompt widget pattern (see `prompt_widget.rs`)
     if !focused {
         crate::render::color::blend_area(buf, area, Some((bg, 0.66)), None);
     }
@@ -732,7 +726,7 @@ mod tests {
         };
         assert!(set_rewind_cursor(&mut phase, 1));
         assert!(!set_rewind_cursor(&mut phase, 1)); // no change
-        // Clamp out-of-range to last point (already at last → no change).
+        // Clamp out-of-range to last point (already at last, so no change)
         assert!(!set_rewind_cursor(&mut phase, 99));
         if let RewindPhase::Picker { selected, .. } = phase {
             assert_eq!(selected, 1);

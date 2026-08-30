@@ -15,3 +15,23 @@ fn sampler_state_keeps_exact_latest_prepared_items() {
         serde_json::to_value(second.items).unwrap()
     );
 }
+
+#[test]
+fn acp_error_message_reads_string_and_object_shaped_data() {
+    let string_err = acp::Error::internal_error().data("compact failed: boom");
+    assert_eq!(
+        crate::sampling::error::acp_error_message(&string_err),
+        "compact failed: boom"
+    );
+    let object_err = acp::Error::internal_error()
+        .data(serde_json::json!({"kind": "compact_cancelled", "message": "compact cancelled"}));
+    assert_eq!(
+        crate::sampling::error::acp_error_message(&object_err),
+        "compact cancelled"
+    );
+    let no_data = acp::Error::internal_error();
+    assert_eq!(
+        crate::sampling::error::acp_error_message(&no_data),
+        "Internal error"
+    );
+}

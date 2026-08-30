@@ -2,20 +2,16 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// Resize hazard: minimal mode uses only the built-in viewport
-/// machinery and never re-emits committed history (`resize_purge_rerender` /
-/// `emit_to_scrollback` are forbidden). The terminal reflows committed
-/// scrollback natively on resize. This commits a tall response into native
-/// scrollback, resizes the terminal smaller (rows AND cols), and asserts the
-/// committed content survives (not wiped, not double-printed), the pager does
-/// not panic or exit, and the prompt is still functional afterwards.
+/// Resize hazard: minimal mode never re-emits committed history (`resize_purge_rerender` and `emit_to_scrollback` are forbidden).
+/// The terminal itself reflows committed scrollback on resize.
+/// This test commits a tall response into native scrollback, then shrinks the terminal in both rows and cols.
+/// It asserts the committed content survives (not wiped, not double-printed), the pager does not panic or exit, and the prompt still works.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_resize_preserves_committed_scrollback() {
     let content = ContentController::start().await.expect("start content");
-    // Sentinel on the first rendered row; 80 code-block rows >> screen, so the
-    // head scrolls into native scrollback once the block commits. (Prose would
-    // markdown-reflow into one short on-screen paragraph — see `tall_response`.)
+    // The sentinel is on the first rendered row and the 80 code-block rows overflow the screen, so the head commits into native scrollback
+    // Prose would reflow into one short on-screen markdown paragraph instead; see `tall_response`
     content.set_response(tall_response(MOCK_RESPONSE_SENTINEL, 80));
 
     let mut harness = spawn_minimal(&content);
@@ -35,8 +31,8 @@ async fn minimal_resize_preserves_committed_scrollback() {
         harness.scrollback_text()
     );
 
-    // Resize smaller in both dimensions. The terminal reflows committed history
-    // natively; minimal must neither reprint (double-print) nor wipe it.
+    // Resize smaller in both dimensions
+    // The terminal reflows committed history natively; minimal must neither reprint (double-print) nor wipe it
     harness.resize(30, 80).expect("resize smaller");
     harness.update(Duration::from_millis(800));
 

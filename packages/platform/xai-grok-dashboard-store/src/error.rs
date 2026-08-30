@@ -1,5 +1,4 @@
-//! Typed failures for the workspace store, and the classification helpers
-//! that map SQLite failures onto them.
+//! Typed failures for the workspace store, and the classification helpers that map SQLite failures onto them.
 
 /// Crate-wide result alias.
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -7,20 +6,17 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 /// Every typed failure the store API can return.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// The file was written by a newer grok (`user_version` above what this
-    /// build supports). The handle stays open read-only; every write returns
-    /// this.
+    /// The file was written by a newer grok (`user_version` above what this build supports).
+    /// The handle stays open read-only; every write returns this.
     #[error("workspace store is schema v{found}; this build supports v{supported} (read-only)")]
     NewerSchema { found: u32, supported: u32 },
 
-    /// `insert_member` at capacity with zero unpinned members — the only
-    /// capacity case surfaced to the user.
+    /// `insert_member` hit capacity with zero unpinned members; the only capacity case the user ever sees.
     #[error("workspace is full ({capacity} members) and every member is pinned")]
     AllPinned { capacity: usize },
 
-    /// Returned where a missing row is a real caller error
-    /// (`update_member_metadata`, the rank setters, `rekey`). Never returned
-    /// by `remove_member`, which is idempotent.
+    /// Returned where a missing row is a real caller error (`update_member_metadata`, the rank setters, `rekey`).
+    /// Never returned by `remove_member`, which is idempotent.
     #[error("no workspace member {session_id} ({kind})")]
     MemberNotFound { session_id: String, kind: String },
 
@@ -45,22 +41,19 @@ pub enum StoreError {
         reason: &'static str,
     },
 
-    /// A caller-supplied unknown enum value over the byte cap. Rejected,
-    /// never truncated: a clipped `kind` would address a different primary
-    /// key, and a clipped origin/grouping would break byte-identical
-    /// passthrough.
+    /// A caller-supplied unknown enum value over the byte cap.
+    /// Rejected, never truncated: a clipped `kind` would address a different primary key.
+    /// A clipped origin or grouping would break byte-identical passthrough.
     #[error("unknown {column} value exceeds {max} bytes")]
     EnumValueTooLong { column: &'static str, max: usize },
 
-    /// The busy timeout elapsed while another connection held the write
-    /// lock. `waited_ms` is measured by the store around the failing
-    /// operation; SQLite's busy handler reports nothing.
+    /// The busy timeout elapsed while another connection held the write lock.
+    /// `waited_ms` is measured by the store around the failing operation; SQLite's busy handler reports nothing.
     #[error("workspace store busy after {waited_ms}ms")]
     Busy { waited_ms: u64 },
 
-    /// The file is corrupt or is not a SQLite database. The store never
-    /// deletes, truncates, or quarantines it: the user's workspace stays on
-    /// disk for manual recovery.
+    /// The file is corrupt or is not a SQLite database.
+    /// The store never deletes, truncates, or quarantines it: the user's workspace stays on disk for manual recovery.
     #[error("workspace store file is unusable: {source}")]
     Unusable {
         #[source]
@@ -107,9 +100,8 @@ pub(crate) fn classify_unusable(error: rusqlite::Error) -> StoreError {
     }
 }
 
-/// Single classification point so every operation maps busy-budget
-/// exhaustion identically. The elapsed time is measured here because
-/// SQLite's busy handler reports nothing.
+/// Single classification point so every operation maps an exhausted busy budget to the same typed error.
+/// The elapsed time is measured here because SQLite's busy handler reports nothing.
 pub(crate) fn classify_busy(
     error: StoreError,
     op: &'static str,
@@ -125,9 +117,8 @@ pub(crate) fn classify_busy(
     }
 }
 
-/// Open-path classification: maps SQLite corruption, preserves already typed
-/// store errors, then applies busy classification. The store never deletes or
-/// recreates an unusable file.
+/// Open-path classification: maps SQLite corruption, preserves already typed store errors, then applies busy classification.
+/// The store never deletes or recreates an unusable file.
 pub(crate) fn classify_open_error(
     error: StoreError,
     started: std::time::Instant,

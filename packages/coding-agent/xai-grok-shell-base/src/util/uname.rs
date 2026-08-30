@@ -1,18 +1,14 @@
 //! OS version string for the `<user_info>` preamble.
 //!
-//! Emits `OS Version: <kernel> <release>` (e.g. `darwin 24.6.0`,
-//! `linux 6.5.0-...`).
+//! Emits `OS Version: <kernel> <release>` (e.g. `darwin 24.6.0`, `linux 6.5.0-...`).
 //!
-//! `std::env::consts::OS` returns `"macos"` / `"linux"` -- the OS *family*,
-//! not the kernel name and not the release. This module wraps `libc::uname`
-//! (Unix) with a `std::env::consts::OS` fallback (any non-unix platform or
-//! syscall failure) so the result is always a non-empty string we can drop
-//! into the placeholder bag.
+//! `std::env::consts::OS` returns `"macos"` / `"linux"`: the OS *family*, not the kernel name and not the release.
+//! This module wraps `libc::uname` (Unix) with a `std::env::consts::OS` fallback for any non-unix platform or syscall failure.
+//! The result is always a non-empty string for the `os_family` placeholder.
 
-/// Return `"<kernel-lowercased> <release>"` for the `os_family` placeholder
-/// (e.g. `"darwin 24.6.0"` on macOS Sonoma 14.6, `"linux 6.5.0-1024-aws"` on
-/// Linux). Falls back to `std::env::consts::OS` when uname is unavailable
-/// or fails -- callers always get a non-empty string.
+/// Return `"<kernel-lowercased> <release>"` for the `os_family` placeholder.
+/// Examples: `"darwin 24.6.0"` on macOS Sonoma 14.6, `"linux 6.5.0-1024-aws"` on Linux.
+/// Falls back to `std::env::consts::OS` when uname is unavailable or fails; callers always get a non-empty string.
 pub fn os_kernel_and_release() -> String {
     #[cfg(unix)]
     {
@@ -52,9 +48,8 @@ fn uname_unix() -> Option<String> {
     Some(format!("{sysname} {release}"))
 }
 
-/// Convert a NUL-terminated `c_char` array (as returned in `utsname` fields)
-/// into an owned `String`. Returns `None` if the bytes are not valid UTF-8 or
-/// the array lacks a NUL terminator.
+/// Convert a NUL-terminated `c_char` array (as returned in `utsname` fields) into an owned `String`.
+/// Returns `None` if the bytes are not valid UTF-8 or the array lacks a NUL terminator.
 #[cfg(unix)]
 fn c_char_array_to_string(bytes: &[libc::c_char]) -> Option<String> {
     use std::ffi::CStr;
@@ -72,9 +67,8 @@ fn c_char_array_to_lowercase_string(bytes: &[libc::c_char]) -> Option<String> {
     c_char_array_to_string(bytes).map(|s| s.to_lowercase())
 }
 
-/// Return `"windows <major>.<minor>.<build>"` (e.g. `"windows 10.0.22631.4890"`)
-/// by parsing the output of `cmd /C ver`. Falls back to `None` on any failure
-/// so callers get the `std::env::consts::OS` default.
+/// Return `"windows <major>.<minor>.<build>"` (e.g. `"windows 10.0.22631.4890"`) by parsing the output of `cmd /C ver`.
+/// Falls back to `None` on any failure so callers get the `std::env::consts::OS` default.
 #[cfg(windows)]
 fn windows_version() -> Option<String> {
     use std::process::Command;
@@ -102,25 +96,21 @@ fn windows_version() -> Option<String> {
 mod tests {
     use super::*;
 
-    /// On any platform the function produces a non-empty string. Exact
-    /// content varies by host so we only assert the shape.
+    /// On any platform the function produces a non-empty string.
+    /// Exact content varies by host so we only assert the shape.
     #[test]
     fn os_kernel_and_release_is_non_empty() {
         let s = os_kernel_and_release();
         assert!(!s.is_empty(), "os_kernel_and_release returned empty");
     }
 
-    /// On Unix hosts the format is `<kernel> <release>` -- two
-    /// whitespace-separated tokens, both non-empty, both lowercase for
-    /// the kernel half.
+    /// On Unix hosts the format is `<kernel> <release>`: two whitespace-separated tokens, both non-empty, with the kernel half lowercase.
     #[cfg(unix)]
     #[test]
     fn os_kernel_and_release_unix_shape() {
         let s = os_kernel_and_release();
-        // Skip the assertion if uname failed and we fell back to
-        // `std::env::consts::OS` (single token, e.g. "macos"). The
-        // fallback is correct behavior; the test just can't tell which
-        // path produced the value without re-calling uname itself.
+        // Skip the assertion if uname failed and we fell back to `std::env::consts::OS` (single token, e.g. "macos").
+        // The fallback is correct behavior; the test can't tell which path produced the value without re-calling uname itself
         if !s.contains(' ') {
             return;
         }
@@ -136,15 +126,14 @@ mod tests {
         );
     }
 
-    /// On macOS specifically the kernel name is `darwin`. This is the
-    /// regression guard for the original bug ("OS Version: macos" vs
-    /// "OS Version: darwin 24.6.0").
+    /// On macOS specifically the kernel name is `darwin`.
+    /// This guards the regression where the preamble said "OS Version: macos" instead of "OS Version: darwin 24.6.0".
     #[cfg(target_os = "macos")]
     #[test]
     fn os_kernel_and_release_macos_says_darwin() {
         let s = os_kernel_and_release();
-        // Skip if uname failed (fallback returns "macos"). On real CI/dev
-        // hardware this branch is never taken.
+        // Skip if uname failed (fallback returns "macos")
+        // On real CI/dev hardware this branch is never taken
         if !s.contains(' ') {
             return;
         }

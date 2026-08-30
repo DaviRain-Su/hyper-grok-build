@@ -87,12 +87,11 @@ pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
             xai_token_estimation::estimate_tokens(&b.text_summary())
         }
         ConversationItem::Reasoning(r) => {
-            // Summary + content text follow the standard bytes-per-token
-            // estimate; encrypted blobs are base64 and don't survive
-            // tokenization 1:1, so estimate at len/4 as well.
+            // Text and encrypted blob are the same reasoning twice: take the
+            // larger, not the sum. The ciphertext is base64, ~4/3 over raw bytes.
             let text_bytes = xai_grok_sampling_types::reasoning_item_text(r).len();
             let enc_bytes = r.encrypted_content.as_deref().map(str::len).unwrap_or(0);
-            ((text_bytes + enc_bytes) as u64) / xai_token_estimation::BYTES_PER_TOKEN
+            (text_bytes.max(enc_bytes * 3 / 4) as u64) / xai_token_estimation::BYTES_PER_TOKEN
         }
         ConversationItem::Compaction(compaction) => {
             (compaction.encrypted_content.len() as u64) / xai_token_estimation::BYTES_PER_TOKEN
@@ -324,6 +323,29 @@ mod tests {
                 "counter must report the same trusted count as estimate_item_tokens"
             );
         }
+    }
+
+    #[test]
+    fn reasoning_estimate_takes_max_of_text_and_encrypted_not_sum() {
+        // max(4000, 4000*3/4)/4 = 1000, not the (4000+4000)/4 = 2000 double-count.
+        let mut r = xai_grok_sampling_types::synthesized_reasoning_item("x".repeat(4000));
+        r.encrypted_content = Some("e".repeat(4000));
+        assert_eq!(estimate_item_tokens(&ConversationItem::Reasoning(r)), 1000);
+    }
+
+    #[test]
+    fn reasoning_estimate_encrypted_only_scales_base64_down() {
+        // No visible text: base64-corrected size, 4000*3/4/4 = 750.
+        let mut r = xai_grok_sampling_types::synthesized_reasoning_item("");
+        r.summary.clear();
+        r.encrypted_content = Some("e".repeat(4000));
+        assert_eq!(estimate_item_tokens(&ConversationItem::Reasoning(r)), 750);
+    }
+
+    #[test]
+    fn reasoning_estimate_text_only_is_plain_bytes_per_token() {
+        let r = xai_grok_sampling_types::synthesized_reasoning_item("x".repeat(4000));
+        assert_eq!(estimate_item_tokens(&ConversationItem::Reasoning(r)), 1000);
     }
 
     #[test]

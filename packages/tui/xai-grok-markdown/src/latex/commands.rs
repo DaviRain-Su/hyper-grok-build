@@ -12,9 +12,8 @@ use super::{MAX_DEPTH, Mode};
 
 /// Render an atom's source to a flat (single-line) Unicode string.
 ///
-/// Atoms are arguments to commands (fraction sides, script bodies, accent
-/// targets); they always render flat — multi-row content inside them joins
-/// with `; `.
+/// Atoms are arguments to commands (fraction sides, script bodies, accent targets).
+/// They always render flat; multi-row content inside them joins with `; `.
 pub(super) fn render_atom(atom: &str, depth: usize, mode: Mode) -> String {
     let mut cursor = Cursor::new(atom);
     let mut out = MathBox::new(true);
@@ -24,8 +23,7 @@ pub(super) fn render_atom(atom: &str, depth: usize, mode: Mode) -> String {
 
 /// Core renderer: walks `cursor`, appending Unicode to `out`.
 ///
-/// `stop_at` optionally terminates the sequence at an unbalanced `}` (used
-/// when rendering inside a group whose `{` was consumed by the caller).
+/// `stop_at` optionally terminates the sequence at an unbalanced `}` (used when rendering inside a group whose `{` was consumed by the caller).
 pub(super) fn render_sequence(
     cursor: &mut Cursor<'_>,
     out: &mut MathBox,
@@ -49,8 +47,7 @@ pub(super) fn render_sequence(
                     // Too deep: render the group body flat, without recursing.
                     out.push_str(cursor.read_group_body());
                 } else {
-                    // Render the group body into the same box so environments
-                    // inside groups keep their 2D layout.
+                    // Render the group body into the same box so environments inside groups keep their 2D layout
                     let body = cursor.read_group_body();
                     let mut sub = Cursor::new(body);
                     render_sequence(&mut sub, out, depth + 1, mode, None);
@@ -90,8 +87,7 @@ pub(super) fn render_sequence(
             }
             c if c.is_whitespace() => {
                 cursor.skip_ws();
-                // TeX collapses whitespace runs (including newlines) to
-                // nothing semantically; keep a single space for readability.
+                // TeX ignores whitespace runs (including newlines); keep a single space for readability
                 if !out.at_line_start() && !out.ends_with_space() {
                     out.push(' ');
                 }
@@ -111,14 +107,11 @@ enum Script {
     Sub,
 }
 
-/// Render `^atom` / `_atom` using Unicode script chars when every char of
-/// the rendered atom has a script form; otherwise `^x` / `^(...)` fallback.
+/// Render `^atom` / `_atom` using Unicode script chars when every char of the rendered atom has a script form; otherwise `^x` / `^(...)` fallback.
 ///
-/// Word-like atoms take the fallback even when fully mappable: labels such as
-/// `p_{\text{torso}}` or `x_{max}` would otherwise become long modifier-letter
-/// runs (`pₜₒᵣₛₒ`) that are hard to read and render with visible gaps in
-/// terminal fonts lacking those glyphs. Index-like atoms (`x_{ij}`,
-/// `T_{i+1}`, `n^{th}`) keep the compact Unicode form.
+/// Word-like atoms take the fallback even when fully mappable: labels like `p_{\text{torso}}` or `x_{max}` would become long runs like `pₜₒᵣₛₒ`.
+/// Those modifier-letter runs are hard to read and render with visible gaps in terminal fonts lacking those glyphs.
+/// Index-like atoms (`x_{ij}`, `T_{i+1}`, `n^{th}`) keep the compact Unicode form.
 fn render_script(
     cursor: &mut Cursor<'_>,
     out: &mut MathBox,
@@ -165,15 +158,11 @@ fn render_script(
 ///
 /// Two signals, checked on the atom *source* and its rendered form:
 ///
-/// - the source routes through a text-family command (`\text{…}`, `\mathrm{…}`,
-///   `\operatorname{…}`, …): the author explicitly marked the content as a
-///   word;
-/// - the rendered form contains a run of 3+ ASCII letters: multi-letter runs
-///   read as words (`max`, `torso`), while 1–2 letter runs are index
-///   juxtapositions (`ij`, `th`) that stay compact.
+/// - the source routes through a text-family command (`\text{…}`, `\mathrm{…}`, `\operatorname{…}`, …): the author marked the content as a word.
+/// - the rendered form contains a run of 3+ ASCII letters: multi-letter runs read as words (`max`, `torso`).
+///   One- or two-letter runs read as indices (`ij`, `th`) and stay compact.
 fn script_atom_is_wordlike(atom: &str, rendered: &str) -> bool {
-    // `\text` also catches `\textrm`/`\textbf`/`\textit`/`\textsf`/`\texttt`/
-    // `\textnormal` by prefix; `\math…` variants and box commands likewise.
+    // `\text` also catches `\textrm`/`\textbf`/`\textit`/`\textsf`/`\texttt`/`\textnormal` by prefix; `\math…` variants and box commands likewise
     const TEXT_MARKERS: [&str; 8] = [
         "\\text",
         "\\mathrm",
@@ -280,8 +269,7 @@ fn render_command(cursor: &mut Cursor<'_>, out: &mut MathBox, depth: usize, mode
             out.push_str(radical);
             if let Some(arg) = cursor.read_atom() {
                 let rendered = render_atom(arg, depth, mode);
-                // Parenthesize any multi-char radicand: `√ab` would read as
-                // `(√a)b`.
+                // Parenthesize any multi-char radicand: `√ab` would read as `(√a)b`
                 if rendered.chars().count() > 1 {
                     let _ = write!(out, "({rendered})");
                 } else {
@@ -492,8 +480,7 @@ fn format_fraction(num: &str, den: &str) -> String {
     format!("{n}/{d}")
 }
 
-/// Render an alphabet-mapping command (`\mathbb{R}` etc.): map chars that
-/// have a styled form, keep the rest as rendered.
+/// Render an alphabet-mapping command (`\mathbb{R}` etc.): map chars that have a styled form, keep the rest as rendered.
 fn render_mapped_alphabet(
     cursor: &mut Cursor<'_>,
     out: &mut MathBox,
@@ -510,8 +497,7 @@ fn render_mapped_alphabet(
     }
 }
 
-/// Render an accent command by appending a combining mark to each char of
-/// the argument.
+/// Render an accent command by appending a combining mark to each char of the argument.
 fn render_accent(
     cursor: &mut Cursor<'_>,
     out: &mut MathBox,

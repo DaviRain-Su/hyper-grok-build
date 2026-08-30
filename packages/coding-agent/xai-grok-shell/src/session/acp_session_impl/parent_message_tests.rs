@@ -178,9 +178,8 @@ async fn busy_state_lock_waits_before_commit_and_receipt_handoff() {
         assert_eq!(
             await_with_timeout(actor.state.lock())
                 .await
-                .pending_inputs
-                .len(),
-            1
+                .running_prompt_id(),
+            Some("parent-message-busy")
         );
     }))
     .await;
@@ -195,8 +194,13 @@ async fn committed_delivery_queues_protected_fifo_row_with_typed_receipt_identit
             "PARENT_PREFIX_READY".to_string()
         }));
         let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
-        await_with_timeout(actor.state.lock()).await.running_task =
-            Some(super::super::support::running_task_stub("running"));
+        {
+            let mut state = await_with_timeout(actor.state.lock()).await;
+            state
+                .pending_inputs
+                .push_back(super::super::support::user_item("running", "owner"));
+            state.running_task = Some(super::super::support::running_task_stub("running"));
+        }
         let (receipt_sink, mut receipt_rx) = mpsc::channel(1);
         let (respond_to, response_rx) = oneshot::channel();
 
@@ -220,7 +224,8 @@ async fn committed_delivery_queues_protected_fifo_row_with_typed_receipt_identit
             0,
         );
         let state = await_with_timeout(actor.state.lock()).await;
-        let queued = state.pending_inputs.front().expect("queued input");
+        assert_eq!(state.pending_inputs.len(), 2);
+        let queued = state.pending_inputs.back().expect("queued input");
         assert_eq!(queued.prompt_id, receipt.prompt_id);
         assert!(queued.is_queue_protected());
         assert!(matches!(

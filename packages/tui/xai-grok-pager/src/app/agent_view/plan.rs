@@ -1,5 +1,4 @@
-//! Plan surfaces: plan chip/preview, plan approval + feedback, and casual
-//! plan commenting (incl. the casual-commenting test fixture).
+//! Plan UI: the plan chip and preview, plan approval and feedback, and casual plan commenting (incl. the casual-commenting test fixture).
 use super::AgentView;
 #[cfg(test)]
 use super::{ActivePane, InputMode, test_fixtures};
@@ -16,8 +15,7 @@ use crate::views::prompt_widget::{EnterOutcome, PromptEvent};
 #[cfg(test)]
 use crossterm::event::KeyModifiers;
 use crossterm::event::{KeyCode, KeyEvent};
-/// Telemetry for every way a plan review resolves ("build", "abandon",
-/// "revise").
+/// Telemetry for every way a plan review resolves ("build", "abandon", "revise").
 fn log_plan_submit(action: &str) {
     use xai_grok_telemetry::events::PlanSubmit;
     use xai_grok_telemetry::session_ctx::log_event;
@@ -45,20 +43,16 @@ impl AgentView {
             v.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
         })
     }
-    /// Whether the user is currently composing a comment via the prompt
-    /// input inside the *casual* plan preview (the modal opened with no
-    /// `plan_approval_view`). Mirrors the `pav.focus == Commenting`
-    /// check used by the plan-approval path so the prompt/footer
-    /// behaves identically across both modes.
+    /// Whether the user is composing a comment via the prompt input inside the *casual* plan preview (the modal opened with no `plan_approval_view`).
+    /// Mirrors the `pav.focus == Commenting` check used by the plan-approval path so the prompt/footer behaves identically across both modes.
     pub(super) fn is_casual_commenting(&self) -> bool {
         self.plan_approval_view.is_none()
             && self.is_plan_viewer()
             && self.casual_commenting_range.is_some()
     }
     /// Whether the prompt "auto" (LLM classifier mode) flag should render.
-    /// Extracted for unit testing the precedence: auto shows only when the
-    /// session is in auto mode and neither yolo (always-approve wins) nor plan
-    /// is active.
+    /// Extracted for unit testing the precedence.
+    /// Auto shows only when the session is in auto mode and neither yolo (always-approve wins) nor plan is active.
     pub(super) fn auto_flag_visible(&self, effective_plan: bool) -> bool {
         self.session.is_auto() && !self.session.is_yolo() && !effective_plan
     }
@@ -68,9 +62,8 @@ impl AgentView {
     }
     /// Whether the "plan" status-bar chip should be rendered.
     ///
-    /// Visible while plan mode is active, or always when the user has set
-    /// `show_plan_chip = true` in `pager.toml`. Hidden by default once the
-    /// user exits plan mode.
+    /// Visible while plan mode is active, or always when the user has set `show_plan_chip = true` in `pager.toml`.
+    /// Hidden by default once the user exits plan mode.
     pub(super) fn should_show_plan_chip(
         &self,
         appearance: &crate::appearance::AppearanceConfig,
@@ -86,10 +79,8 @@ impl AgentView {
     }
     /// Resolve the plan body for the line-viewer preview.
     ///
-    /// Prefers content carried on the approval request (inline plan-creation or
-    /// the shell-read file body), then falls back to the on-disk plan file.
-    /// Request body first keeps file-backed previews working when the path
-    /// resolution fails or the file disappears between intercept and open.
+    /// Prefers content carried on the approval request (inline plan-creation or the shell-read file body), then falls back to the on-disk plan file.
+    /// Request body first keeps file-backed previews working when the path resolution fails or the file disappears between intercept and open.
     pub(super) fn plan_body_for_preview(&self) -> Option<String> {
         if let Some(content) = self
             .plan_approval_view
@@ -110,8 +101,7 @@ impl AgentView {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .filter(|s| !s.trim().is_empty())
     }
-    /// Open the plan preview when content exists, or when plan approval is
-    /// parked with an empty body (so the decision surface always pops).
+    /// Open the plan preview when content exists, or when plan approval is parked with an empty body (so the decision surface always pops).
     pub(crate) fn show_plan_preview_if_available(&mut self) {
         if self.plan_preview_available() || self.plan_approval_view.is_some() {
             self.show_plan_preview();
@@ -119,9 +109,8 @@ impl AgentView {
     }
     /// Show the plan in the line viewer overlay or a "no plan" toast.
     ///
-    /// When plan approval is parked without a body, opens a placeholder
-    /// preview so the user always sees a decision surface (a/s/q) instead of
-    /// a dead "Waiting on plan approval" line with a no-op Tab:plan.
+    /// When plan approval is parked without a body, opens a placeholder preview.
+    /// The user then always sees a decision surface (a/s/q) instead of a dead "Waiting on plan approval" line with a no-op Tab:plan.
     pub fn show_plan_preview(&mut self) {
         let body = self.plan_body_for_preview();
         let approval_empty = self
@@ -165,14 +154,9 @@ impl AgentView {
         }
         self.line_viewer = Some(viewer);
     }
-    /// Test fixture: drive the agent into casual-commenting state
-    /// (line viewer open in plan-preview mode + `casual_commenting_range`
-    /// armed) so the `Event::Paste` plan-feedback arm at ~1539 is
-    /// reachable from a unit test without spawning the real
-    /// keystroke pipeline. Consolidates three field mutations into
-    /// one helper so a future refactor of casual-commenting state
-    /// only has to update this fixture rather than every test that
-    /// reaches into the fields by name.
+    /// Test fixture: drive the agent into casual-commenting state (line viewer open in plan-preview mode, `casual_commenting_range` set).
+    /// Makes the `Event::Paste` plan-feedback arm reachable from a unit test without spawning the real keystroke pipeline.
+    /// One helper instead of three field mutations, so a refactor of this state only updates the fixture.
     #[cfg(test)]
     pub(crate) fn enter_casual_commenting_for_test(&mut self) {
         let mut viewer =
@@ -221,11 +205,10 @@ impl AgentView {
         }
         InputOutcome::Changed
     }
-    /// Fold freeform-only images into the session draft. Prefill clones share
-    /// `display_number` *and* payload with the session image and are dropped;
-    /// number reuse after freeform clear (Ctrl+C resets the counter) is not a
-    /// clone and must renumber-merge. New images get matching `[Image #N]` chip
-    /// text/elements so `restore` can re-bind them.
+    /// Fold freeform-only images into the session draft.
+    /// Prefill clones share `display_number` *and* payload with the session image and are dropped.
+    /// Number reuse after freeform clear (Ctrl+C resets the counter) is not a clone and must renumber-merge.
+    /// New images get matching `[Image #N]` chip text/elements so `restore` can re-bind them.
     fn merge_live_images_into_stash(
         prompt: &mut crate::views::prompt_widget::PromptWidget,
         session: &mut crate::views::prompt_widget::StashedPrompt,
@@ -296,16 +279,12 @@ impl AgentView {
         self.close_plan_review(pav, "abandon");
         InputOutcome::Changed
     }
-    /// Shared teardown for the two plan-review decisions that end the
-    /// review (approve and abandon). The shell leaves plan mode as a
-    /// result, but its confirming `CurrentModeUpdate("default")` is
-    /// fire-and-forget and only arrives after the exit tool runs — so
-    /// flip the mode indicator optimistically here (a lost update would
-    /// otherwise leave the badge stuck on "plan"), restore the
-    /// pre-review UI, and log the decision.
+    /// Shared teardown for the two plan-review decisions that end the review (approve and abandon).
+    /// The shell leaves plan mode, but its confirming `CurrentModeUpdate("default")` is fire-and-forget and only arrives after the exit tool runs.
+    /// So flip the mode indicator optimistically here; a lost update would otherwise leave the badge stuck on "plan".
+    /// Also restore the pre-review UI and log the decision.
     ///
-    /// Not for the revision path (`send_plan_feedback`): the shell
-    /// stays in plan mode there, so the indicator must stay on.
+    /// Not for the revision path (`send_plan_feedback`): the shell stays in plan mode there, so the indicator must stay on.
     fn close_plan_review(&mut self, pav: PlanApprovalViewState, action: &'static str) {
         self.plan_mode_pending = Some(false);
         self.plan_freeform_prefill_deferred = false;
@@ -593,8 +572,7 @@ impl AgentView {
     /// Enter casual commenting mode from the plan preview.
     ///
     /// If the cursor is on a comment line, enter edit mode for that comment.
-    /// If the cursor is on a source line, capture the line range and enter
-    /// new-comment mode.
+    /// If the cursor is on a source line, capture the line range and enter new-comment mode.
     pub(super) fn enter_casual_plan_commenting(&mut self) -> InputOutcome {
         let viewer = match self.line_viewer.as_mut() {
             Some(v) => v,
@@ -687,11 +665,9 @@ impl AgentView {
         }
         InputOutcome::Changed
     }
-    /// Key handler used while the user is composing a casual plan
-    /// comment via the prompt input. Mirrors `handle_plan_feedback_key`
-    /// (which serves the plan-approval Commenting focus) so the UX is
-    /// identical: Enter saves, Esc cancels, Tab cancels back to the
-    /// modal, and everything else routes to the prompt textarea.
+    /// Key handler used while the user is composing a casual plan comment via the prompt input.
+    /// Mirrors `handle_plan_feedback_key` (which serves the plan-approval Commenting focus) so the UX is identical.
+    /// Enter saves, Esc cancels, Tab cancels back to the modal, and everything else routes to the prompt textarea.
     pub(super) fn handle_casual_plan_feedback_key(&mut self, key: &KeyEvent) -> InputOutcome {
         if key.code == KeyCode::Esc {
             if self.prompt.file_search_visible() {
@@ -764,8 +740,7 @@ impl AgentView {
 #[cfg(test)]
 mod prompt_flag_tests {
     use super::test_fixtures::make_agent;
-    /// The prompt "auto" (classifier) mode flag shows only when the session is
-    /// in Auto and neither yolo (always-approve wins) nor plan is active.
+    /// The prompt "auto" (classifier) mode flag shows only when the session is in Auto and neither yolo (always-approve wins) nor plan is active.
     #[test]
     fn auto_flag_visible_precedence() {
         let mut agent = make_agent();
@@ -1383,12 +1358,9 @@ mod plan_approval_enter_tests {
         );
     }
 }
-/// The mode indicator renders
-/// `plan_mode_pending.unwrap_or(plan_mode_active)`, and the shell's
-/// confirming `CurrentModeUpdate("default")` only arrives after the exit
-/// tool runs (and can be lost entirely). Resolving the review with a
-/// decision must therefore optimistically clear the effective plan mode
-/// on BOTH decision paths — approve and abandon.
+/// The mode indicator renders `plan_mode_pending.unwrap_or(plan_mode_active)`.
+/// The shell's confirming `CurrentModeUpdate("default")` only arrives after the exit tool runs (and can be lost entirely).
+/// Resolving the review with a decision must therefore optimistically clear the effective plan mode on BOTH decision paths (approve and abandon).
 #[cfg(test)]
 mod plan_approval_optimistic_mode_tests {
     use super::test_fixtures::make_agent;
@@ -1435,8 +1407,7 @@ mod plan_approval_optimistic_mode_tests {
         let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).unwrap();
         assert_eq!(parsed["outcome"], "approved");
     }
-    /// Approve with review comments takes the early `Action::Interject`
-    /// return — the optimistic clear must happen before that branch.
+    /// Approve with review comments takes the early `Action::Interject` return; the optimistic clear must happen before that branch.
     #[test]
     fn approve_plan_with_comments_still_clears_plan_mode() {
         let (mut agent, _rx) = agent_in_plan_mode_with_approval();

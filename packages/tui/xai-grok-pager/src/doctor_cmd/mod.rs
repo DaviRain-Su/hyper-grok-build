@@ -200,8 +200,7 @@ fn write_fix_preview(plan: &FixPlan, writer: &mut impl Write) -> std::io::Result
 }
 
 fn shell_home_and_kind() -> Option<(std::path::PathBuf, ShellKind)> {
-    #[allow(deprecated)]
-    let home = std::env::home_dir()?;
+    let home = xai_dirs::home_dir()?;
     let shell = std::env::var_os("SHELL")?;
     let kind = ShellKind::from_shell_path(Path::new(&shell))?;
     Some((home, kind))

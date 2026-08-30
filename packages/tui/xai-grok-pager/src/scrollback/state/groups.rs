@@ -1,21 +1,14 @@
 //! Derived group model for the scrollback's view-time folds.
 //!
-//! One scan owns every grouping decision: verb-group runs claim their
-//! entries first, then group truncation ("N more") runs over the rest. The
-//! scan produces [`GroupSpan`]s — the authoritative description of every
-//! fold — and [`project_to_layout`] is the single writer that turns spans
-//! into the per-entry `EntryLayoutInfo` flags the renderer and navigation
-//! consume. Keeping the decision (scan) and the flag writes (projection)
-//! in one module means a consumer can never observe a fold shape the model
-//! doesn't describe.
+//! One scan owns every grouping decision: verb-group runs claim their entries first, then group truncation ("N more") runs over the rest.
+//! The scan produces [`GroupSpan`]s, the authoritative description of every fold.
+//! [`project_to_layout`] is the single writer that turns spans into the per-entry `EntryLayoutInfo` flags the renderer and navigation consume.
+//! Keeping the decision (scan) and the flag writes (projection) in one module means consumers never observe a fold shape the model doesn't describe.
 //!
-//! The spans are stored on the layout cache (see `LayoutCache::groups`) and
-//! rebuilt whenever the folds are re-applied. Like the per-entry flags, they
-//! go stale between an incremental entry append and the next structural
-//! rebuild (`gaps_may_be_dirty` covers both).
+//! The spans are stored on the layout cache (see `LayoutCache::groups`) and rebuilt whenever the folds are re-applied.
+//! Like the per-entry flags, they go stale between an incremental entry append and the next structural rebuild (`gaps_may_be_dirty` covers both).
 //!
-//! Per-entry run classification ([`run_step`]) and the rendered header label
-//! stay in [`super::verb_group`]; this module owns run *shapes*.
+//! Per-entry run classification ([`run_step`]) and the rendered header label stay in [`super::verb_group`]; this module owns run *shapes*.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -31,32 +24,26 @@ use crate::scrollback::types::DisplayMode;
 /// One folded region of the transcript, in entry indices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupSpan {
-    /// Entries the fold walked. For verb runs this ends one past the last
-    /// claimed entry (trailing transparent entries stay outside). For
-    /// truncation it is the whole dense run, visible tail included, and may
-    /// end with trailing hidden-thinking entries the walk skipped over.
+    /// Entries the fold walked.
+    /// For verb runs this ends one past the last claimed entry (trailing transparent entries stay outside).
+    /// For truncation it is the whole dense run, visible tail included, and may end with trailing hidden-thinking entries the walk skipped over.
     pub range: Range<usize>,
     /// Which fold produced this span and its count data.
     pub kind: GroupKind,
-    /// Whether the user manually expanded this group (keyed by the first
-    /// entry's ID in `ScrollbackState::expanded_groups`).
+    /// Whether the user manually expanded this group (keyed by the first entry's ID in `ScrollbackState::expanded_groups`).
     pub expanded: bool,
 }
 
-/// The two fold families. Both render a synthetic header row; they differ in
-/// when they fold and what the header says.
+/// The two fold families. Both render a synthetic header row; they differ in when they fold and what the header says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupKind {
-    /// Eagerly folded run of verb-groupable members (tool calls and subagent
-    /// rows) — the aggregated "Read 2 skills" header. `members` counts
-    /// label-bearing members only; claimed thoughts fold in but never count.
+    /// Eagerly folded run of verb-groupable members (tool calls and subagent rows): the aggregated "Read 2 skills" header.
+    /// `members` counts label-bearing members only; claimed thoughts fold in but never count.
     VerbRun { members: usize },
-    /// Budget truncation of an over-long dense run — the "N more" header.
-    /// `participants` counts the entries eligible to hide (hidden thinking
-    /// excluded); `hidden` is how many of them the collapsed state conceals
-    /// (`participants - max_visible`, > 0 by the fold gate). The header row
-    /// is the first hidden participant, so its plain count shows
-    /// `hidden - 1` while its aggregated label describes all `hidden`.
+    /// Budget truncation of an over-long dense run: the "N more" header.
+    /// `participants` counts the entries eligible to hide (hidden thinking excluded).
+    /// `hidden` is how many of them the collapsed state conceals (`participants - max_visible`, positive by the fold gate).
+    /// The header row is the first hidden participant, so its plain count shows `hidden - 1` while its aggregated label describes all `hidden`.
     Truncation { participants: usize, hidden: usize },
 }
 
@@ -66,11 +53,9 @@ pub fn span_containing(spans: &[GroupSpan], idx: usize) -> Option<&GroupSpan> {
     spans.get(pos).filter(|s| s.range.contains(&idx))
 }
 
-/// Reset every entry's group flags, scan for spans, and project them onto
-/// the layout slice. Returns the spans for the caller to store on the
-/// layout cache. Reads the `group_tool_verbs` / `show_thinking_blocks`
-/// settings once so both fold families and the projection agree within a
-/// rebuild.
+/// Reset every entry's group flags, scan for spans, and project them onto the layout slice.
+/// Returns the spans for the caller to store on the layout cache.
+/// Reads the `group_tool_verbs` / `show_thinking_blocks` settings once so both fold families and the projection agree within a rebuild.
 pub(super) fn apply(
     entries: &IndexMap<EntryId, ScrollbackEntry>,
     layout_cache: &mut [EntryLayoutInfo],
@@ -98,10 +83,9 @@ pub(super) fn apply(
     spans
 }
 
-/// Scan the transcript for every fold, in the order the folds take
-/// precedence: verb runs claim entries first, truncation runs over the
-/// rest (claimed entries break truncation runs). Returns spans sorted by
-/// start index; spans never overlap.
+/// Scan the transcript for every fold, in the order the folds take precedence: verb runs claim entries first, truncation runs over the rest.
+/// Claimed entries break truncation runs.
+/// Returns spans sorted by start index; spans never overlap.
 pub(super) fn scan(
     entries: &IndexMap<EntryId, ScrollbackEntry>,
     max_visible: usize,
@@ -123,11 +107,9 @@ pub(super) fn scan(
     spans
 }
 
-/// Find maximal runs of verb-groupable member entries — plus any finished
-/// collapsed thoughts among them — that fold per `RunScan::folds`, gated on
-/// the `group_tool_verbs` setting. Also returns the claimed-entry mask
-/// (members and thought members of folding runs): the truncation scan
-/// treats claimed entries as run breakers.
+/// Find maximal runs of verb-groupable member entries (plus any finished collapsed thoughts among them) that fold per `RunScan::folds`.
+/// The `group_tool_verbs` setting gates the whole scan.
+/// Also returns the claimed-entry mask (members and thought members of folding runs): the truncation scan treats claimed entries as run breakers.
 fn scan_verb_runs(
     entries: &IndexMap<EntryId, ScrollbackEntry>,
     expanded_groups: &HashSet<EntryId>,
@@ -154,9 +136,8 @@ fn scan_verb_runs(
             continue;
         }
 
-        // Which in-run entries claim must agree with the member arms in
-        // `scan_run_forward`; transparent entries stay unclaimed inside the
-        // span and keep rendering their own rows.
+        // Which entries inside the run get claimed must agree with the member arms in `scan_run_forward`
+        // Transparent entries stay unclaimed inside the span and keep rendering their own rows
         for (offset, slot) in claimed[i..scan.end].iter_mut().enumerate() {
             if matches!(
                 run_step(
@@ -182,7 +163,7 @@ fn scan_verb_runs(
     (spans, claimed)
 }
 
-/// Collapsed+groupable entries that may join a truncation run.
+/// Collapsed and groupable entries may join a truncation run.
 /// Hidden thinking is excluded so tools elect their own "N more" header.
 fn participates_in_truncation(entry: &ScrollbackEntry, show_thinking: bool) -> bool {
     entry.block.is_groupable()
@@ -190,11 +171,10 @@ fn participates_in_truncation(entry: &ScrollbackEntry, show_thinking: bool) -> b
         && !entry.is_hidden_thinking(show_thinking)
 }
 
-/// Find consecutive runs of collapsed+groupable entries longer than
-/// `max_visible + 1`. Hidden thinking is transparent (skipped, not a
-/// run-breaker), mirroring the gap rule in `recompute_gap_after`, so an
-/// interspersed thought can't split a run and suppress truncation. Entries
-/// claimed by the verb scan break runs.
+/// Find consecutive runs of collapsed, groupable entries longer than `max_visible + 1`.
+/// Hidden thinking is transparent (skipped, not a run-breaker), mirroring the gap rule in `recompute_gap_after`.
+/// An interspersed thought thus can't split a run and suppress truncation.
+/// Entries claimed by the verb scan break runs.
 fn scan_truncations(
     entries: &IndexMap<EntryId, ScrollbackEntry>,
     max_visible: usize,
@@ -252,10 +232,9 @@ fn scan_truncations(
     spans
 }
 
-/// The single writer of group heights, gaps, and header flags. Every layout
-/// consequence of a fold happens here, driven only by the spans (plus
-/// per-entry `run_step` classification for verb runs, whose transparent
-/// entries keep their own rows).
+/// The single writer of group heights, gaps, and header flags.
+/// Every layout consequence of a fold happens here, driven only by the spans.
+/// Verb runs also read the per-entry `run_step` classification; their transparent entries keep their own rows.
 pub(super) fn project_to_layout(
     spans: &[GroupSpan],
     entries: &IndexMap<EntryId, ScrollbackEntry>,
@@ -285,10 +264,9 @@ pub(super) fn project_to_layout(
 }
 
 /// Collapsed: the header is `height=1`; other claimed entries are `height=0`.
-/// Expanded: every member keeps its measured rows while the header stacks
-/// above member 0. Gaps zero only within the run; the last claimed entry keeps
-/// the boundary gap to the following entry. Transparent entries keep their
-/// rows but donate their gap while collapsed.
+/// Expanded: every member keeps its measured rows while the header stacks above member 0.
+/// Gaps zero only within the run; the last claimed entry keeps the boundary gap to the following entry.
+/// Transparent entries keep their rows but donate their gap while collapsed.
 fn project_verb_run(
     span: &GroupSpan,
     members: usize,
@@ -308,8 +286,7 @@ fn project_verb_run(
                 }
                 continue;
             }
-            // Unreachable: a span's range never spans a Break (arm kept for
-            // match exhaustiveness).
+            // Unreachable: a span's range never spans a Break (arm kept for match exhaustiveness)
             RunStep::Break => continue,
         }
         if idx == span.range.start {
@@ -321,9 +298,7 @@ fn project_verb_run(
             } else {
                 cached.height = 1;
             }
-            // A singleton run's header is also its last claimed entry: it
-            // keeps the pairwise boundary gap, else the header glues to what
-            // follows.
+            // A singleton run's header is also its last claimed entry: it keeps the pairwise boundary gap, else the header glues to what follows
             if idx != last_claimed {
                 cached.gap_after = 0;
             }
@@ -336,15 +311,13 @@ fn project_verb_run(
     }
 }
 
-/// Collapsed: the first participating entry becomes the "N more" header
-/// (count excludes the header itself), older participants hide, and the
-/// last `max_visible` stay untouched. Expanded: entry 0 becomes a
-/// standalone collapse header (`height=1`, content replaced) counting the
-/// `participants - 1` entries below it, which all keep their own rows.
+/// Collapsed: the first participating entry becomes the "N more" header (count excludes the header itself).
+/// Older participants hide, and the last `max_visible` stay untouched.
+/// Expanded: entry 0 becomes a standalone collapse header (`height=1`, content replaced) counting the `participants - 1` entries below it.
+/// The entries below it all keep their own rows.
 /// Hidden thinking is skipped in both states.
-/// `verb_group::truncation_header_label` mirrors this walk's participant
-/// rule for the header's aggregated label; a new transparency category here
-/// must update that walk too.
+/// `verb_group::truncation_header_label` mirrors this walk's participant rule for the header's aggregated label.
+/// A new transparency category here must update that walk too.
 fn project_truncation(
     span: &GroupSpan,
     participants: usize,
@@ -411,8 +384,7 @@ mod tests {
             .collect()
     }
 
-    /// Seed layout distinct from anything the projection writes, so a
-    /// changed entry is distinguishable from an untouched one.
+    /// Seed layout distinct from anything the projection writes, so a changed entry is distinguishable from an untouched one.
     fn seeded_layout(n: usize) -> Vec<EntryLayoutInfo> {
         vec![
             EntryLayoutInfo {
@@ -435,8 +407,7 @@ mod tests {
         spans
     }
 
-    /// The "Read 2 skills / 8 more" transcript shape: a verb run followed by
-    /// a 19-row dense run of commands and thoughts with the default budget.
+    /// The "Read 2 skills / 8 more" transcript shape: a verb run followed by a 19-row dense run of commands and thoughts with the default budget.
     #[test]
     fn verb_run_breaks_truncation_and_both_spans_project() {
         let mut list = vec![skill_read(), skill_read()];
@@ -550,8 +521,7 @@ mod tests {
 
     #[test]
     fn hidden_thinking_flows_through_truncation_without_participating() {
-        // 12 executes with a hidden thought interleaved: the run still
-        // truncates, the thought neither counts nor gets written.
+        // 12 executes with a hidden thought interleaved: the run still truncates, the thought neither counts nor gets written
         let mut list: Vec<ScrollbackEntry> = (0..6).map(|_| execute()).collect();
         list.push(thought());
         list.extend((0..6).map(|_| execute()));
@@ -573,7 +543,7 @@ mod tests {
             }
         );
         assert_eq!(layout[6].height, 5, "hidden thought layout untouched");
-        // Header + one hidden row land on the participating executes around it.
+        // The header and one hidden row land on the participating executes around it
         assert_eq!(layout[0].group_header_count, 1);
         assert_eq!(layout[1].height, 0);
         assert_eq!(layout[2].height, 5);

@@ -1,13 +1,11 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
-    /// Regression (resume sync): the on-disk replay stream re-emits persisted
-    /// notifications through the generic `x.ai/session/update` envelope. A
-    /// background `monitor`/bash task (`TaskBackgrounded`) must restore into
-    /// `bg_tasks` on a resumed / second terminal — not be dropped by the
-    /// default match arm — so the idle "watching" status line and the Tasks pane
-    /// match the originating terminal. (Before this routing only subagents
-    /// survived resume.)
+    /// Regression (resume sync): the on-disk replay stream re-emits persisted notifications through the generic `x.ai/session/update` envelope.
+    /// A background `monitor`/bash task (`TaskBackgrounded`) must restore into `bg_tasks` on a resumed / second terminal.
+    /// It must not be dropped by the default match arm.
+    /// The idle "watching" status line and the Tasks pane then match the originating terminal.
+    /// (Before this routing only subagents survived resume.)
     #[test]
     fn ext_session_update_replay_restores_bg_task() {
         let mut app = make_app_with_agent("sess-1");
@@ -37,11 +35,10 @@
         assert_eq!(task.status, BgTaskStatus::Running);
     }
 
-    /// Companion for scheduled `/loop`s: a replayed `ScheduledTaskCreated` must
-    /// restore `scheduled_tasks`, and a later `ScheduledTaskDeleted` must net it
-    /// back out — so a resumed terminal's loop count matches instead of staying
-    /// empty until the next live fire. (Pairs with the shell-side persistence of
-    /// these notifications in `notification_bridge.rs`.)
+    /// Companion for scheduled `/loop`s: a replayed `ScheduledTaskCreated` must restore `scheduled_tasks`.
+    /// A later `ScheduledTaskDeleted` must net it back out.
+    /// A resumed terminal's loop count then matches instead of staying empty until the next live fire.
+    /// (Pairs with the shell-side persistence of these notifications in `notification_bridge.rs`.)
     #[test]
     fn ext_session_update_replay_restores_then_removes_scheduled_task() {
         let mut app = make_app_with_agent("sess-1");
@@ -86,9 +83,8 @@
         );
     }
 
-    /// Regression: demotion path (foreground Execute → BgTask) must call
-    /// finish_running() so the entry is removed from the running set.
-    /// Without this, the entry stays orphaned as "running" forever.
+    /// Regression: the demotion path (foreground Execute to BgTask) must call finish_running() so the entry is removed from the running set.
+    /// Without the call, the entry stays orphaned as "running" forever.
     #[test]
     fn task_backgrounded_demotion_clears_running_state() {
         let mut app = make_app_with_agent("sess-1");
@@ -119,9 +115,8 @@
         assert!(agent.session.tracker.pending_tool_entry_id(tc_id).is_none());
     }
 
-    /// Regression: late-detected is_background=true (raw_input arrives after the
-    /// Execute block exists) followed by task_backgrounded must correctly demote
-    /// the existing Execute block — not create a duplicate BgTask.
+    /// Regression: late-detected is_background=true means raw_input arrives after the Execute block exists.
+    /// The task_backgrounded that follows must demote the existing Execute block, not create a duplicate BgTask.
     #[test]
     fn task_backgrounded_late_detection_demotes_existing_entry() {
         let mut app = make_app_with_agent("sess-1");
@@ -149,10 +144,8 @@
         assert!(!agent.session.tracker.bg_deferred_tools.contains_key(tc_id));
     }
 
-    /// Regression: even when the wire notification carries its own
-    /// `description`, the deferred-tool suppression key must still be drained
-    /// (it is preferred but the entry otherwise leaks and keeps dropping late
-    /// stdout updates for the rest of the session).
+    /// Regression: even when the wire notification carries its own `description`, the deferred-tool suppression key must still be drained.
+    /// (The wire description wins, but the entry otherwise leaks and keeps dropping late stdout updates for the rest of the session.)
     #[test]
     fn task_backgrounded_with_wire_description_still_drains_deferred_tool() {
         let mut app = make_app_with_agent("sess-1");
@@ -188,18 +181,15 @@
         );
     }
 
-    /// Regression: a blank/whitespace wire `description` must not shadow a
-    /// non-blank deferred (raw_input) description when there is no Execute
-    /// block to recover from (fresh BgTask path). The label must come from the
-    /// deferred description, not the blank wire value (which would otherwise
-    /// fall back to the raw command).
+    /// Regression: a blank/whitespace wire `description` must not shadow a non-blank deferred (raw_input) description.
+    /// This is the fresh BgTask path, with no Execute block to recover from.
+    /// The label must come from the deferred description, not the blank wire value (which would otherwise fall back to the raw command).
     #[test]
     fn task_backgrounded_blank_wire_description_prefers_deferred() {
         let mut app = make_app_with_agent("sess-1");
         let tc_id = "call-blank-wire";
 
-        // Simulate late is_background detection having stashed a real
-        // description, with the placeholder entry dropped (no pending tool).
+        // Simulate late is_background detection having stashed a real description, with the placeholder entry dropped (no pending tool)
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent
@@ -302,10 +292,8 @@
 
     #[test]
     fn task_backgrounded_monitor_prefix_marks_is_monitor() {
-        // Reparented monitor / older backend: the command carries the
-        // "[monitor] <desc>" prefix but the notification has no
-        // monitor_description. The pager must still mark it a monitor and use
-        // the stripped text as the description so it renders as a Monitor row.
+        // Reparented monitor / older backend: the command carries the "[monitor] <desc>" prefix but the notification has no monitor_description
+        // The pager must still mark it a monitor and use the stripped text as the description so it renders as a Monitor row
         let mut app = make_app_with_parent_and_child("parent-sess", "child-sess");
         let notif = make_task_backgrounded_notif(
             "parent-sess",
@@ -328,11 +316,9 @@
         assert_eq!(task.description.as_deref(), Some("event counter"));
     }
 
-    /// Resume regression: the agent's cold-load reconciliation
-    /// completes replay-restored dead tasks with `signal: "session_restart"`.
-    /// That synthetic completion must finalize state QUIETLY — finish the
-    /// replayed "Task started" entry and mark the task not-running — without
-    /// pushing a fresh red "Task failed" block into the resumed scrollback.
+    /// Resume regression: the agent's cold-load reconciliation completes replay-restored dead tasks with `signal: "session_restart"`.
+    /// That synthetic completion must finalize state QUIETLY: finish the replayed "Task started" entry and mark the task not-running.
+    /// It must not push a fresh red "Task failed" block into the resumed scrollback.
     #[test]
     fn session_restart_completion_finalizes_without_failure_block() {
         let mut app = make_app_with_agent("sess-1");
@@ -374,8 +360,7 @@
         );
     }
 
-    /// Guard that the quiet path is NARROW: any other kill signal keeps the
-    /// live behavior of pushing a completion/failure block.
+    /// Guard that the quiet path is NARROW: any other kill signal keeps the live behavior of pushing a completion/failure block.
     #[test]
     fn non_restart_signal_completion_still_pushes_failure_block() {
         let mut app = make_app_with_agent("sess-1");
@@ -415,7 +400,6 @@
         assert!(changed);
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        // Parent must NOT have a completion block.
         assert_eq!(
             agent.scrollback.len(),
             0,
@@ -547,7 +531,7 @@
         let notif =
             make_task_backgrounded_notif("child-sess", "tc-bg-inact", "task-bg-inact", "sleep 1");
         let changed = handle_task_backgrounded(&notif, &mut app);
-        // Active view was NOT affected — should return false.
+        // The active view was not affected
         assert!(!changed);
 
         // But the bg task state must still land in the child view.
@@ -636,8 +620,7 @@
         );
     }
 
-    /// Base snapshot for the Completed-before-Backgrounded race tests; tweak
-    /// fields per test (the shared helpers hardcode output/description).
+    /// Base snapshot for the Completed-before-Backgrounded race tests; tweak fields per test (the shared helpers hardcode output/description).
     fn race_snapshot(
         task_id: &str,
         command: &str,
@@ -684,9 +667,8 @@
         acp::ExtNotification::new("x.ai/task_completed", std::sync::Arc::from(raw))
     }
 
-    /// Short bg shells can exit — and `TaskCompleted` arrive — before their
-    /// `TaskBackgrounded`. The late `TaskBackgrounded` must not resurrect the
-    /// finished task as Running or push a stray "Task started" block.
+    /// Short bg shells can exit (and `TaskCompleted` arrive) before their `TaskBackgrounded`.
+    /// The late `TaskBackgrounded` must not resurrect the finished task as Running or push a stray "Task started" block.
     #[test]
     fn completed_before_backgrounded_does_not_resurrect_running() {
         let mut app = make_app_with_agent("sess-1");
@@ -759,9 +741,8 @@
         );
     }
 
-    /// Same race on the demotion path (foreground Execute auto-backgrounded):
-    /// the pending Execute block is still demoted to a finished BgTask block
-    /// and the terminal status survives.
+    /// Same race on the demotion path (foreground Execute auto-backgrounded).
+    /// The pending Execute block is still demoted to a finished BgTask block and the terminal status survives.
     #[test]
     fn completed_before_backgrounded_demotion_finishes_execute_block() {
         let mut app = make_app_with_agent("sess-1");
@@ -806,8 +787,7 @@
         );
     }
 
-    /// A completion tombstone prefers the snapshot's model-supplied
-    /// description, so the race renders the same label as the normal order.
+    /// A completion tombstone prefers the snapshot's model-supplied description, so the race renders the same label as the normal order.
     #[test]
     fn unknown_completed_prefers_snapshot_description() {
         let mut app = make_app_with_agent("sess-1");
@@ -838,8 +818,7 @@
         assert!(agent.session.bg_tasks["task-mon"].is_monitor);
     }
 
-    /// A tombstone from a replayed completion is historical context: it must
-    /// not read as new activity (mirrors restored `TaskBackgrounded`s).
+    /// A tombstone from a replayed completion is historical context: it must not read as new activity (mirrors restored `TaskBackgrounded`s).
     #[test]
     fn replayed_unknown_completed_marks_tombstone_restored() {
         let mut app = make_app_with_agent("sess-1");

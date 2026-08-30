@@ -1,13 +1,10 @@
 //! Onboarding tutorial overlay (`/tutorial`).
 //!
-//! A top-level modal (works over both the welcome screen and an agent
-//! session) with two screens:
+//! A top-level modal (works over both the welcome screen and an agent session) with two screens:
 //!
-//! - **List** — the tutorial topics from [`crate::tutorial_docs`] with ✓
-//!   marks for explored topics. Enter opens a topic; Esc closes.
-//! - **Topic** — a scrollable markdown page (same chrome as the release-notes
-//!   viewer); `→`/`←` flow through the topics in order, Esc returns to the
-//!   list.
+//! - **List**: the tutorial topics from [`crate::tutorial_docs`] with ✓ marks for explored topics. Enter opens a topic; Esc closes.
+//! - **Topic**: a scrollable markdown page (same chrome as the release-notes viewer).
+//!   `→`/`←` flow through the topics in order; Esc returns to the list.
 //!
 //! Opened on demand via `/tutorial` (also listed in the command palette).
 //! Never auto-shows.
@@ -38,12 +35,10 @@ pub enum TutorialScreen {
     List,
     /// A single topic page (index into [`TUTORIAL_TOPICS`]).
     Topic { index: usize },
-    /// The full how-to guide a topic's "Go deeper" points at (`d` from the
-    /// topic page); Esc returns to that topic.
+    /// The full how-to guide a topic's "Go deeper" points at (`d` from the topic page); Esc returns to that topic.
     Guide { topic: usize },
 }
 
-/// State for the tutorial overlay.
 pub struct TutorialState {
     pub screen: TutorialScreen,
     /// Topic indices the user has opened this launch (✓ marks).
@@ -54,8 +49,7 @@ pub struct TutorialState {
     pub window: ModalWindowState,
     /// Topic-screen scroll offset.
     pub scroll: u16,
-    /// Cached pre-rendered markdown lines for the topic screen, keyed by
-    /// the width they were rendered at (invalidated on resize).
+    /// Cached pre-rendered markdown lines for the topic screen, keyed by the width they were rendered at (invalidated on resize).
     pub cached_lines: Option<(u16, Vec<Line<'static>>)>,
 }
 
@@ -118,12 +112,11 @@ impl Default for TutorialState {
 pub enum TutorialOutcome {
     /// The overlay consumed the event (it owns all input while open).
     Consumed,
-    /// The user closed the tutorial — the host should drop the state.
+    /// The user closed the tutorial; the host should drop the state.
     Closed,
 }
 
-/// List-screen picker config. Search is disabled: six fixed topics don't
-/// need filtering, and letter keys would otherwise start a query.
+/// Search is disabled: six fixed topics don't need filtering, and letter keys would otherwise start a query.
 fn list_picker_config() -> PickerConfig<'static> {
     PickerConfig {
         title: None,
@@ -149,8 +142,8 @@ fn list_picker_config() -> PickerConfig<'static> {
     }
 }
 
-/// Route an input event to the tutorial overlay. The overlay consumes all
-/// key and mouse input while open (top-level modal semantics).
+/// Route an input event to the tutorial overlay.
+/// The overlay consumes all key and mouse input while open (it is a top-level modal).
 pub fn handle_tutorial_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
     match st.screen {
         TutorialScreen::Topic { .. } => handle_topic_input(ev, st),
@@ -159,8 +152,7 @@ pub fn handle_tutorial_input(ev: &Event, st: &mut TutorialState) -> TutorialOutc
     }
 }
 
-/// Guide screen: scroll like a topic page; Esc (or the close button)
-/// returns to the topic it came from.
+/// Guide screen: scroll like a topic page; Esc (or the close button) returns to the topic it came from.
 fn handle_guide_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
     let TutorialScreen::Guide { topic } = st.screen else {
         return TutorialOutcome::Consumed;
@@ -225,9 +217,7 @@ fn handle_topic_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
                 mw::ModalWindowOutcome::Handled => return TutorialOutcome::Consumed,
                 _ => {}
             }
-            // Linear flow: `→` reads on to the next topic (the list, once
-            // the tour is done); `←` steps back; `d` opens the "Go deeper"
-            // guide.
+            // Linear flow: `→` reads on to the next topic (the list, once the tour is done); `←` steps back; `d` opens the "Go deeper" guide
             if let TutorialScreen::Topic { index } = st.screen {
                 match key.code {
                     crossterm::event::KeyCode::Right => {
@@ -271,8 +261,8 @@ fn handle_topic_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
 }
 
 fn handle_list_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
-    // Chrome first: close button clicks and Esc. `handle_picker_input` also
-    // maps Esc to `Closed`, but the close button lives on the ModalWindow.
+    // Chrome first: close button clicks and Esc
+    // `handle_picker_input` also maps Esc to `Closed`, but the close button lives on the ModalWindow
     if let Event::Mouse(mouse) = ev
         && matches!(
             mw::handle_modal_mouse(&mut st.window, mouse.kind, mouse.column, mouse.row),
@@ -286,9 +276,8 @@ fn handle_list_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
     {
         return TutorialOutcome::Consumed;
     }
-    // Search is disabled on the fixed topic list, but the picker's paste
-    // path fills the query regardless of `disable_search` — swallow paste
-    // here so it can't start an invisible filter.
+    // Search is disabled on the fixed topic list, but the picker's paste path fills the query regardless of `disable_search`
+    // Swallow paste here so it can't start an invisible filter
     if matches!(ev, Event::Paste(_)) {
         return TutorialOutcome::Consumed;
     }
@@ -304,47 +293,15 @@ fn handle_list_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
     }
 }
 
-/// Derive a stable snake_case slug from a tutorial topic title for i18n keys.
-/// Lowercases, replaces non-alnum runs with `_`, trims leading/trailing `_`.
-fn topic_slug(title: &str) -> String {
-    let mut slug = String::with_capacity(title.len());
-    let mut prev_under = false;
-    for ch in title.chars() {
-        if ch.is_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            prev_under = false;
-        } else if !prev_under {
-            slug.push('_');
-            prev_under = true;
-        }
-    }
-    slug.trim_matches('_').to_owned()
-}
+/// Intro copy shown above the topic list.
+/// It doesn't promise how long the tour takes, just what it is and how to leave.
+const INTRO_LINES: [&str; 2] = [
+    "Quick tips to get the most out of Grok Build.",
+    "Pick a topic. Esc when you're done.",
+];
 
-/// Translate a topic title via `tr_or`, falling back to the English source.
-fn topic_title_l10n(topic: &crate::tutorial_docs::TutorialTopic) -> std::borrow::Cow<'static, str> {
-    let slug = topic_slug(topic.title);
-    crate::i18n::tr_or(&format!("tutorial.topic.{slug}.title"), topic.title)
-}
-
-/// Translate a topic blurb via `tr_or`, falling back to the English source.
-fn topic_blurb_l10n(topic: &crate::tutorial_docs::TutorialTopic) -> std::borrow::Cow<'static, str> {
-    let slug = topic_slug(topic.title);
-    crate::i18n::tr_or(&format!("tutorial.topic.{slug}.blurb"), topic.blurb)
-}
-
-/// Intro copy shown above the topic list. No time promises — just what it
-/// is and how to leave.
-fn intro_lines() -> [std::borrow::Cow<'static, str>; 2] {
-    [
-        rust_i18n::t!("tutorial.intro_quick_tips"),
-        rust_i18n::t!("tutorial.intro_pick_topic"),
-    ]
-}
-
-/// Topic page body: the embedded markdown minus its leading `# ` heading —
-/// the modal window chrome already shows the title, so rendering the H1
-/// would double it.
+/// Topic page body: the embedded markdown minus its leading `# ` heading.
+/// The modal window chrome already shows the title, so rendering the H1 would double it.
 fn topic_body(content: &str) -> &str {
     match content.split_once('\n') {
         Some((first, rest)) if first.starts_with("# ") => rest.trim_start_matches('\n'),
@@ -362,30 +319,30 @@ pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, com
                 return;
             };
             let next_hint = match TUTORIAL_TOPICS.get(index + 1) {
-                Some(next) => rust_i18n::t!("footer.next_title", title = next.title),
-                None => rust_i18n::t!("footer.arrow_done"),
+                Some(next) => format!("\u{2192} next: {}", next.title),
+                None => "\u{2192} done".to_owned(),
             };
             let mut shortcuts = vec![
                 Shortcut {
-                    label: rust_i18n::t!("footer.scroll"),
+                    label: "\u{2191}/\u{2193} scroll",
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: next_hint,
+                    label: &next_hint,
                     clickable: false,
                     id: 0,
                 },
             ];
             if topic.go_deeper.is_some() {
                 shortcuts.push(Shortcut {
-                    label: rust_i18n::t!("footer.d_go_deeper"),
+                    label: "d go deeper",
                     clickable: false,
                     id: 0,
                 });
             }
             shortcuts.push(Shortcut {
-                label: rust_i18n::t!("footer.esc_list"),
+                label: "Esc list",
                 clickable: false,
                 id: 0,
             });
@@ -393,7 +350,7 @@ pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, com
                 buf,
                 area,
                 &mut st.window,
-                topic_title_l10n(topic).as_ref(),
+                topic.title,
                 topic_body(topic.content),
                 &mut st.scroll,
                 &mut st.cached_lines,
@@ -427,35 +384,31 @@ pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, com
 }
 
 fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bool, theme: &Theme) {
+    let progress = format!("{}/{} explored", st.viewed.len(), TUTORIAL_TOPICS.len());
     let shortcuts = [
         Shortcut {
-            label: rust_i18n::t!(
-                "footer.explored",
-                n = st.viewed.len(),
-                m = TUTORIAL_TOPICS.len()
-            ),
+            label: &progress,
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: rust_i18n::t!("footer.navigate"),
+            label: "\u{2191}/\u{2193} navigate",
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: rust_i18n::t!("footer.enter_open"),
+            label: "Enter open",
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: rust_i18n::t!("footer.esc_done"),
+            label: "Esc done",
             clickable: false,
             id: 0,
         },
     ];
-    let modal_title = rust_i18n::t!("tutorial.welcome_title");
     let modal_config = ModalWindowConfig {
-        title: modal_title.as_ref(),
+        title: "Welcome to Grok Build",
         tabs: None,
         shortcuts: &shortcuts,
         sizing: ModalSizing {
@@ -477,11 +430,11 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
     // Intro copy, then a blank row, then the topic rows.
     let intro_style = Style::default().fg(theme.gray_bright);
     let mut y = mca.content.y;
-    for line in intro_lines() {
+    for line in INTRO_LINES {
         if y >= mca.content.y + mca.content.height {
             break;
         }
-        Paragraph::new(Line::styled(line.as_ref(), intro_style)).render(
+        Paragraph::new(Line::styled(line, intro_style)).render(
             Rect {
                 x: mca.content.x,
                 y,
@@ -504,24 +457,19 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
         return;
     }
 
-    // Narrow modals can't fit title + blurb on one row; stack the blurb below.
+    // Narrow modals can't fit title and blurb on one row; stack the blurb below
     const NARROW_THRESHOLD: u16 = 64;
     let narrow = entries_area.width < NARROW_THRESHOLD;
-    // Localize titles/blurbs at consumption (static data stays English).
-    let titles_l10n: Vec<std::borrow::Cow<'static, str>> =
-        TUTORIAL_TOPICS.iter().map(topic_title_l10n).collect();
-    let blurbs_l10n: Vec<std::borrow::Cow<'static, str>> =
-        TUTORIAL_TOPICS.iter().map(topic_blurb_l10n).collect();
-    let blurb_slices: Vec<[&str; 1]> = blurbs_l10n.iter().map(|b| [b.as_ref()]).collect();
+    let blurb_slices: Vec<[&str; 1]> = TUTORIAL_TOPICS.iter().map(|t| [t.blurb]).collect();
 
     let picker_entries: Vec<PickerEntry<'_>> = TUTORIAL_TOPICS
         .iter()
         .enumerate()
-        .map(|(i, _t)| {
+        .map(|(i, t)| {
             let viewed = st.viewed.contains(&i);
             PickerEntry::Row(PickerRow {
-                label: titles_l10n[i].as_ref(),
-                right_label: if narrow { "" } else { blurbs_l10n[i].as_ref() },
+                label: t.title,
+                right_label: if narrow { "" } else { t.blurb },
                 selected: i == st.picker.selected,
                 expanded: narrow,
                 fields: &[],
@@ -633,8 +581,7 @@ mod tests {
 
     #[test]
     fn topic_body_strips_the_duplicated_h1() {
-        // The window title already names the topic; the H1 must not render
-        // a second time inside the page.
+        // The window title already names the topic; the H1 must not render a second time inside the page
         assert_eq!(topic_body("# Title\n\nBody text.\n"), "Body text.\n");
         // Every real topic starts with an H1, so every body drops it.
         for t in TUTORIAL_TOPICS {
@@ -650,7 +597,7 @@ mod tests {
         handle_tutorial_input(&key(KeyCode::Enter), &mut st);
         assert_eq!(st.screen, TutorialScreen::Topic { index: 0 });
 
-        // → walks the whole tour, marking each topic viewed…
+        // `→` walks the whole tour, marking each topic viewed…
         for expected in 1..TUTORIAL_TOPICS.len() {
             handle_tutorial_input(&key(KeyCode::Right), &mut st);
             assert_eq!(st.screen, TutorialScreen::Topic { index: expected });
@@ -669,7 +616,7 @@ mod tests {
         st.open_topic(1);
         handle_tutorial_input(&key(KeyCode::Left), &mut st);
         assert_eq!(st.screen, TutorialScreen::Topic { index: 0 });
-        // At the first topic, ← is a no-op (Esc returns to the list).
+        // At the first topic, `←` is a no-op (Esc returns to the list)
         handle_tutorial_input(&key(KeyCode::Left), &mut st);
         assert_eq!(st.screen, TutorialScreen::Topic { index: 0 });
     }
@@ -699,8 +646,7 @@ mod tests {
 
     #[test]
     fn list_paste_does_not_start_a_query() {
-        // The picker's paste path ignores `disable_search`; the list screen
-        // must swallow paste so it can't start an invisible filter.
+        // The picker's paste path ignores `disable_search`; the list screen must swallow paste so it can't start an invisible filter
         let mut st = TutorialState::new();
         let outcome = handle_tutorial_input(&Event::Paste("worktrees".to_owned()), &mut st);
         assert_eq!(outcome, TutorialOutcome::Consumed);

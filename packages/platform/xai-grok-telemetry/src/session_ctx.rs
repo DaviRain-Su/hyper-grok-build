@@ -143,6 +143,19 @@ pub fn log_event<T: TelemetryEvent>(data: T) {
     emit_event(T::NAME, data);
 }
 
+/// Like [`log_event`], but awaits delivery on the current runtime.
+///
+/// Fire-and-forget posts die with the session runtime on pager/embedded
+/// `/exit` ([`drain_at_session_exit`] is a no-op there; process-exit drain
+/// cannot see this runtime). Use for the last emit on that path.
+pub async fn log_event_now<T: TelemetryEvent>(data: T) {
+    crate::external::emit(&data);
+    if !client::is_enabled() {
+        return;
+    }
+    emit_event_now(T::NAME, data).await;
+}
+
 /// Emit one event to the external stream always (no-op unless the stream is
 /// active) and to the product events/Mixpanel funnel only when `internal_enabled`.
 ///
@@ -197,6 +210,14 @@ pub fn log_session_event_with_origin<T: TelemetryEvent>(origin: EmitterOrigin, d
 /// Emit an event with the default [`EmitterOrigin::Shell`] prefix.
 pub fn emit_event<T: Serialize + Send + 'static>(event_suffix: impl Into<String>, data: T) {
     emit_event_with_origin(EmitterOrigin::Shell, event_suffix, data);
+}
+
+/// Await delivery of a Shell-origin event on the current runtime.
+pub async fn emit_event_now<T: Serialize + Send + 'static>(
+    event_suffix: impl Into<String>,
+    data: T,
+) {
+    emit_event_with_origin_now(EmitterOrigin::Shell, event_suffix, data).await;
 }
 
 /// Posts spawned by [`emit_event_with_origin`] that haven't finished. Emission
@@ -264,12 +285,13 @@ pub async fn drain_pending(timeout: std::time::Duration) {
     }
 }
 
-/// Emit an event whose analytics name is `{origin prefix}{event_suffix}`.
-pub fn emit_event_with_origin<T: Serialize + Send + 'static>(
+type CtxSnapshot = Option<(String, Option<u32>)>;
+
+fn take_emit_context<T>(
     origin: EmitterOrigin,
     event_suffix: impl Into<String>,
     data: T,
-) {
+) -> (String, CtxSnapshot, crate::activity::ActivitySnapshot, T) {
     let event_name = format!("{}{}", origin.event_prefix(), event_suffix.into());
     let ctx_snapshot = TELEMETRY_CTX
         .try_with(|c| {
@@ -281,6 +303,51 @@ pub fn emit_event_with_origin<T: Serialize + Send + 'static>(
         .ok();
     // Read here, not in the spawned post: boundary events see their moment.
     let activity = crate::activity::ActivitySnapshot::read();
+    (event_name, ctx_snapshot, activity, data)
+}
+
+async fn post_event<T: Serialize>(
+    event_name: String,
+    ctx_snapshot: CtxSnapshot,
+    activity: crate::activity::ActivitySnapshot,
+    data: T,
+) {
+    let user_ctx = UserContext::collect();
+    let request_id = format!("{}-{}", event_name, uuid::Uuid::new_v4());
+
+    let mut metadata = match serde_json::to_value(data) {
+        Ok(serde_json::Value::Object(map)) => map,
+        Ok(other) => {
+            let mut m = Metadata::new();
+            m.insert("value".into(), other);
+            m
+        }
+        Err(_) => Metadata::new(),
+    };
+
+    if let Some((session_id, turn_number)) = ctx_snapshot {
+        metadata.insert("session_id".into(), json!(session_id));
+        if let Some(turn) = turn_number {
+            metadata.insert("turn_number".into(), json!(turn));
+        }
+    }
+
+    if let Ok(serde_json::Value::Object(gauges)) = serde_json::to_value(activity) {
+        for (key, value) in gauges {
+            metadata.entry(key).or_insert(value);
+        }
+    }
+
+    client::track(&event_name, &request_id, &user_ctx, metadata).await;
+}
+
+/// Emit an event whose analytics name is `{origin prefix}{event_suffix}`.
+pub fn emit_event_with_origin<T: Serialize + Send + 'static>(
+    origin: EmitterOrigin,
+    event_suffix: impl Into<String>,
+    data: T,
+) {
+    let (event_name, ctx_snapshot, activity, data) = take_emit_context(origin, event_suffix, data);
 
     if tokio::runtime::Handle::try_current().is_err() {
         // `spawn` below panics without a runtime; counting first would pin the
@@ -291,34 +358,20 @@ pub fn emit_event_with_origin<T: Serialize + Send + 'static>(
     let pending = PendingEventGuard::register();
     tokio::spawn(async move {
         let _pending = pending;
-        let user_ctx = UserContext::collect();
-        let request_id = format!("{}-{}", event_name, uuid::Uuid::new_v4());
-
-        let mut metadata = match serde_json::to_value(data) {
-            Ok(serde_json::Value::Object(map)) => map,
-            Ok(other) => {
-                let mut m = Metadata::new();
-                m.insert("value".into(), other);
-                m
-            }
-            Err(_) => Metadata::new(),
-        };
-
-        if let Some((session_id, turn_number)) = ctx_snapshot {
-            metadata.insert("session_id".into(), json!(session_id));
-            if let Some(turn) = turn_number {
-                metadata.insert("turn_number".into(), json!(turn));
-            }
-        }
-
-        if let Ok(serde_json::Value::Object(gauges)) = serde_json::to_value(activity) {
-            for (key, value) in gauges {
-                metadata.entry(key).or_insert(value);
-            }
-        }
-
-        client::track(&event_name, &request_id, &user_ctx, metadata).await;
+        post_event(event_name, ctx_snapshot, activity, data).await;
     });
+}
+
+/// Await delivery on the current runtime. Does not register
+/// [`PENDING_EVENTS`]: the caller blocks until the post finishes, so a
+/// following runtime drop cannot abort it.
+pub async fn emit_event_with_origin_now<T: Serialize + Send + 'static>(
+    origin: EmitterOrigin,
+    event_suffix: impl Into<String>,
+    data: T,
+) {
+    let (event_name, ctx_snapshot, activity, data) = take_emit_context(origin, event_suffix, data);
+    post_event(event_name, ctx_snapshot, activity, data).await;
 }
 
 #[cfg(test)]
@@ -366,11 +419,33 @@ mod tests {
         });
     }
 
+    /// Serializes tests that assert on the process-global `PENDING_EVENTS` gauge.
+    static EMIT_TEST_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Regression: the awaited emit must finish without the session-exit drain.
+    #[tokio::test]
+    async fn awaited_emit_finishes_without_session_exit_drain() {
+        let _guard = EMIT_TEST_GUARD.lock().await;
+        let before = PENDING_EVENTS.load(Ordering::Acquire);
+        emit_event_with_origin_now(
+            EmitterOrigin::Shell,
+            "session_end_timings",
+            json!({ "probe": true }),
+        )
+        .await;
+        assert_eq!(
+            PENDING_EVENTS.load(Ordering::Acquire),
+            before,
+            "awaited emit must not register a PENDING_EVENTS guard (survives runtime drop)"
+        );
+    }
+
     /// What a command exiting right after emitting (`grok login`) relies on.
     /// Asserts on the wait, not on the gauge: it is process-global and other
     /// tests in this binary emit concurrently.
     #[tokio::test]
     async fn drain_pending_waits_for_in_flight_posts() {
+        let _guard = EMIT_TEST_GUARD.lock().await;
         emit_event_with_origin(
             EmitterOrigin::Shell,
             "drain_probe",

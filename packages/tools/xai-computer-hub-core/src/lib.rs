@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bot_tools;
 pub mod inner;
 pub mod local;
 pub mod registry;
@@ -15,6 +16,9 @@ pub mod remote;
 pub mod resolver;
 pub mod transport;
 
+pub use bot_tools::{
+    GROK_BOT_TOOL_DESCRIPTIONS, GROK_BOT_TOOL_IDS, grok_bot_tool_description, is_grok_bot_tool,
+};
 pub use inner::InnerDispatchForResolver;
 pub use local::{LOCAL_INVOKE_SCOPE, LocalTransport};
 pub use registry::{

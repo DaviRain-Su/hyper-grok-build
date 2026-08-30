@@ -1,8 +1,7 @@
 // Per-test-case module for the `pty_e2e` integration test crate.
 //
-// Regression pin: Tab inside the `ask_user_question` card used to hand focus
-// to the scrollback while the card stayed drawn and the shortcuts bar kept
-// advertising card keys.
+// Regression pin: Tab inside the `ask_user_question` card used to hand focus to the scrollback
+// The card stayed drawn and the shortcuts bar kept advertising card keys
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -21,7 +20,7 @@ const SECOND_ROWS: [&str; 3] = ["A quick summary", "Every detail", "Type your an
 const DONE_SENTINEL: &str = "QUESTIONTABDONE";
 
 const TAB: &[u8] = b"\t";
-/// `BackTab` — the xterm encoding of Shift+Tab.
+/// `BackTab`, the xterm encoding of Shift+Tab.
 const SHIFT_TAB: &[u8] = b"\x1b[Z";
 const RIGHT: &[u8] = b"\x1b[C";
 const ESC: &[u8] = b"\x1b";
@@ -54,10 +53,9 @@ fn ask_user_question_args() -> String {
     .to_string()
 }
 
-/// Text of the answer row that currently carries the cursor band.
+/// Text of the answer row that currently carries the cursor band (the row's unique background).
 ///
-/// Reading the styled screen is the only way to observe cursor position from
-/// outside the process.
+/// Reading the styled screen is the only way to observe cursor position from outside the process.
 fn cursor_row(harness: &PtyHarness) -> Option<String> {
     let labels: Vec<&str> = FIRST_ROWS
         .iter()
@@ -114,8 +112,8 @@ fn string_leaves(value: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
-/// Drive the full Tab / Esc / answer-walk contract on a live `ask_user_question`
-/// card. `vim_mode` only changes the seed config — the contract is the same.
+/// Drive the full Tab / Esc / answer-walk contract on a live `ask_user_question` card.
+/// `vim_mode` only changes the seed config; the contract is the same.
 async fn assert_question_tab_contract(vim_mode: bool) {
     let content = ContentController::start().await.expect("start content");
     if vim_mode {
@@ -185,9 +183,8 @@ async fn assert_question_tab_contract(vim_mode: bool) {
     );
     write_screen_dump_if_requested(&harness, &dump("00b_parked"));
 
-    // Vim mode only: parked j/k are scrollback nav and must not walk the card
-    // behind the pane. (Without vim mode a bare letter focuses the prompt and
-    // types — different path, not part of this contract.)
+    // Vim mode only: parked j/k navigate the scrollback and must not walk the card behind the pane
+    // (Without vim mode a bare letter focuses the prompt and types, a different path outside this contract.)
     if vim_mode {
         let parked_cursor = cursor_row(&harness);
         harness.inject_keys(b"j").expect("parked j");
@@ -215,7 +212,7 @@ async fn assert_question_tab_contract(vim_mode: bool) {
         "the walk resumes where it was parked",
     );
 
-    // Focused j walks answers the same way as Tab — vim mode must not steal it.
+    // Focused j walks answers the same way as Tab; vim mode must not steal it
     harness.inject_keys(b"j").expect("focused j");
     expect_cursor_row(
         &mut harness,
@@ -307,8 +304,7 @@ async fn question_tab_cycles_answers() {
     assert_question_tab_contract(false).await;
 }
 
-/// Same contract under `[ui].vim_mode = true`: focused j/k walk answers, Esc
-/// parks, parked j/k stay on the scrollback, Tab returns, wrap and submit.
+/// Same contract under `[ui].vim_mode = true`: focused j/k walk answers, Esc parks, parked j/k stay on the scrollback, Tab returns, wrap and submit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn question_tab_cycles_answers_in_vim_mode() {

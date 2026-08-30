@@ -2,8 +2,7 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// `/fullscreen` from a minimal session switches in place (no re-exec); the
-/// in-memory conversation renders in the alt-screen scrollback pane.
+/// `/fullscreen` from a minimal session switches in place (no re-exec); the in-memory conversation renders in the alt-screen scrollback pane.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_slash_switches_to_fullscreen() {
@@ -35,8 +34,7 @@ async fn minimal_slash_switches_to_fullscreen() {
     harness.update(Duration::from_millis(150));
     harness.inject_keys(b"\r").expect("submit /fullscreen");
 
-    // The sentinel is already visible pre-switch, so the transition signal is
-    // the minimal idle status disappearing while history stays present.
+    // The sentinel is already visible pre-switch, so the transition signal is the minimal idle status disappearing while history stays present
     let deadline = Instant::now() + Duration::from_secs(45);
     loop {
         harness.update(Duration::from_millis(100));
@@ -79,7 +77,7 @@ async fn minimal_slash_switches_to_fullscreen() {
             )
         });
 
-    // Mode switches are session-scoped: must not write `[ui] screen_mode`.
+    // Mode switches are session-scoped, so /fullscreen must not persist `[ui] screen_mode`
     let config_path = content.home().join(".grok").join("config.toml");
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {

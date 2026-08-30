@@ -1,20 +1,16 @@
-//! Off-draw-thread full-file syntax highlight for edit diffs.
+//! Full-file syntax highlight for edit diffs, off the draw thread.
 //!
-//! Mirrors [`super::mermaid_worker`]: one `std::thread` + mpsc, coalesced by
-//! `entry_id` (latest job wins), polled each tick via `try_recv`. First paint
-//! stays hunk-only on the UI thread; this worker upgrades to file-scoped styles
-//! when the post-edit file is readable and under
-//! [`crate::scrollback::blocks::tool::EDIT_HL_MAX_BYTES`] /
-//! [`crate::scrollback::blocks::tool::EDIT_HL_MAX_LINES`].
+//! Mirrors [`super::mermaid_worker`]: one `std::thread` and mpsc, coalesced by `entry_id` (latest job wins), polled each tick via `try_recv`.
+//! First paint stays hunk-only on the UI thread; this worker upgrades to file-scoped styles when the post-edit file is readable and within the caps.
+//! The caps are [`crate::scrollback::blocks::tool::EDIT_HL_MAX_BYTES`] and [`crate::scrollback::blocks::tool::EDIT_HL_MAX_LINES`].
 //!
 //! # Cost model
 //!
-//! - **First paint** — hunk-only; never full-file on the UI thread.
-//! - **Upgrade** — one syntect pass up to the last hunk line, off-thread;
-//!   paints then overlay the style map onto the ordinary hunk render.
-//! - **Over cap / read fail** — stay hunk-only; no unbounded work.
+//! - **First paint**: hunk-only; never full-file on the UI thread.
+//! - **Upgrade**: one syntect pass up to the last hunk line, off-thread; paints then overlay the style map onto the ordinary hunk render.
+//! - **Over cap or read fail**: stay hunk-only; no unbounded work.
 //!
-//! Magnitudes: `benches/edit_highlight`.
+//! `benches/edit_highlight` measures the costs.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -57,7 +53,7 @@ pub enum EditHlOutcome {
         /// Theme the styles were baked under (paint skips a mismatched map).
         theme: crate::theme::ThemeKind,
     },
-    /// Cap, I/O, non-UTF8, mismatch, or missing syntax — stay hunk-only.
+    /// Cap, I/O, non-UTF8, mismatch, or missing syntax: stay hunk-only.
     Failed,
 }
 
@@ -71,7 +67,7 @@ pub struct EditHlResult {
     pub outcome: EditHlOutcome,
 }
 
-/// Per-[`AgentView`] edit-HL runtime: channels + in-flight bookkeeping.
+/// Per-[`AgentView`] edit-HL runtime: channels and in-flight bookkeeping.
 pub struct EditHlRuntime {
     tx: Sender<EditHlJob>,
     rx: Receiver<EditHlResult>,
@@ -157,8 +153,7 @@ fn run_job(job: &EditHlJob) -> EditHlOutcome {
     }
 
     let path = std::path::Path::new(&job.path);
-    // Read the theme beside the syntect walk so the result is labeled with the
-    // kind its foregrounds were actually baked under.
+    // Read the theme beside the syntect walk so the result is labeled with the kind its foregrounds were baked under
     let theme = crate::theme::cache::current_kind();
     match compute_file_scoped_styles(path, &file_text, &job.hunks) {
         Some(by_new_line) => EditHlOutcome::Ready {
@@ -176,7 +171,7 @@ fn run_job(job: &EditHlJob) -> EditHlOutcome {
     }
 }
 
-/// Read at most `max_bytes`; reject oversized / non-UTF8 / missing.
+/// Read at most `max_bytes`; reject oversized, non-UTF8, or missing files.
 fn read_file_capped(path: &std::path::Path, max_bytes: u64) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
     if !meta.is_file() {
@@ -192,7 +187,7 @@ fn read_file_capped(path: &std::path::Path, max_bytes: u64) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-/// Resolve a tool path against session cwd for compatibility callers.
+/// Resolve a tool path against the session cwd, kept public for source compatibility.
 pub fn resolve_edit_abs_path(path: &str, session_cwd: Option<&std::path::Path>) -> PathBuf {
     resolve_edit_target_path(path, session_cwd).unwrap_or_else(|| PathBuf::from(path))
 }
@@ -209,7 +204,7 @@ impl AgentView {
             .is_some_and(|rt| !rt.pending.is_empty())
     }
 
-    /// Poll worker results and attach FileScoped styles. Returns true if redraw.
+    /// Poll worker results and attach FileScoped styles. Returns true when a redraw is needed.
     pub fn edit_hl_tick(&mut self) -> bool {
         self.poll_edit_hl_results()
     }
@@ -221,9 +216,9 @@ impl AgentView {
         self.edit_hl.as_mut().expect("just created")
     }
 
-    /// Submit full-file HL for a completed Edit entry. Builds the job from the
-    /// live block; sets `Pending` without cache invalidate (paint-identical to
-    /// HunkOnly). No-op if missing / failed / empty hunks.
+    /// Submit full-file HL for a completed Edit entry.
+    /// Builds the job from the live block and sets `Pending` without a cache invalidate, since `Pending` paints identically to `HunkOnly`.
+    /// No-op when the entry is missing, the edit failed, or there are no hunks.
     pub fn submit_edit_highlight(&mut self, entry_id: EntryId) {
         let (path, hunks) = {
             let Some(entry) = self.scrollback.get_by_id(entry_id) else {
@@ -245,7 +240,7 @@ impl AgentView {
 
         let rt = self.ensure_edit_hl_runtime();
         let job_id = rt.alloc_job_id();
-        // Drop older pending for this entry so coalesce cannot pin Fast tick.
+        // Drop older pending jobs for this entry; the worker coalesces them away, so their results would never arrive and would pin the fast tick
         rt.pending.retain(|(_, eid)| *eid != entry_id);
 
         if let Some(entry) = self.scrollback.get_by_id_mut(entry_id)
@@ -272,9 +267,8 @@ impl AgentView {
                 "edit HL job submitted"
             );
         } else {
-            // Send fails only when the worker thread is gone: revert this
-            // entry and abandon every earlier in-flight job (their results
-            // can never arrive either).
+            // Send fails only when the worker thread is gone
+            // Revert this entry and abandon every earlier in-flight job; their results can never arrive either
             if let Some(entry) = self.scrollback.get_by_id_mut(entry_id)
                 && let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &mut entry.block
             {
@@ -340,18 +334,15 @@ impl AgentView {
             }
         }
         if disconnected {
-            // Near-unreachable in shipped builds (panic=abort kills the whole
-            // pager with the worker, as mermaid_worker documents); cheap
-            // insurance so a dead worker can't strand `pending` and pin
-            // `TickDemand::Fast` forever in unwind builds.
+            // Near-unreachable in shipped builds: panic=abort kills the whole pager with the worker, as mermaid_worker documents
+            // In unwind builds this stops a dead worker from stranding `pending` and pinning `TickDemand::Fast` forever
             self.abandon_edit_hl_worker("result channel disconnected");
         }
         redraw
     }
 
-    /// Forget a dead worker: drop its runtime (a later submit respawns a fresh
-    /// one) and revert every in-flight entry to `HunkOnly`, which paints
-    /// identically to `Pending`, so no redraw or cache invalidate is needed.
+    /// Forget a dead worker: drop its runtime (a later submit respawns a fresh one) and revert every in-flight entry to `HunkOnly`.
+    /// `HunkOnly` paints identically to `Pending`, so no redraw or cache invalidate is needed.
     fn abandon_edit_hl_worker(&mut self, context: &'static str) {
         let Some(rt) = self.edit_hl.take() else {
             return;
@@ -592,7 +583,7 @@ mod tests {
             edit.highlight = EditHighlightPhase::Pending { job_id: 7 };
         }
 
-        // Both worker-side channel ends dropped = dead worker thread.
+        // Dropping both worker-side channel ends simulates a dead worker thread
         let (job_tx, _) = mpsc::channel::<EditHlJob>();
         let (_, res_rx) = mpsc::channel::<EditHlResult>();
         agent.edit_hl = Some(EditHlRuntime {
@@ -647,7 +638,7 @@ mod tests {
             assert_eq!(rt.pending[0].1, entry_id);
         }
 
-        // Pump until settle (worker has no waker).
+        // Pump until it settles (the worker has no waker)
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while agent.edit_hl_needs_tick() {
             agent.edit_hl_tick();

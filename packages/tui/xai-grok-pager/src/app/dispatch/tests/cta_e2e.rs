@@ -99,9 +99,8 @@ fn plugin_cta_catalog_keeps_official_not_installed_only() {
 
     let cta = &app.agents[&id].plugin_cta;
     let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
-    // One source wins: both the first source and "Custom Mirror" are
-    // URL-verified official, so the first-registered one supplies the
-    // candidates and the install target.
+    // One source wins: both the first source and "Custom Mirror" are URL-verified official
+    // The first-registered one supplies the candidates and the install target
     assert_eq!(names, vec!["keep-me"]);
     assert_eq!(cta.candidates[0].install_status, "not_installed");
     assert_eq!(
@@ -116,9 +115,8 @@ fn plugin_cta_default_prefers_url_verified_official_over_impostor() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 
-    // A first-listed source that merely calls itself "xAI Official" must not
-    // become the install root; the URL-verified official source wins even
-    // when registered later.
+    // A first-listed source that merely calls itself "xAI Official" must not become the install root
+    // The URL-verified official source wins even when registered later
     let response = xai_hooks_plugins_types::MarketplaceListResponse {
         sources: vec![
             xai_hooks_plugins_types::MarketplaceScanResult {
@@ -159,8 +157,7 @@ fn plugin_cta_default_name_only_official_mirror_selected() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 
-    // No URL-verified official source in the scan: a mirror registered under
-    // the official name (e.g. an on-prem path source) still feeds the CTA.
+    // No URL-verified official source in the scan: a mirror registered under the official name (e.g. an on-prem path source) still feeds the CTA.
     let response = xai_hooks_plugins_types::MarketplaceListResponse {
         sources: vec![xai_hooks_plugins_types::MarketplaceScanResult {
             source_name: xai_grok_plugin_marketplace::OFFICIAL_SOURCE_NAME.into(),
@@ -230,9 +227,8 @@ fn plugin_cta_marketplace_duplicate_named_sources_first_wins() {
     app.plugin_cta_marketplace = Some("SpaceX Marketplace".into());
     let id = AgentId(0);
 
-    // Two sources share the override name: candidates and install target must
-    // both come from the first, or a later source's candidate would install
-    // against the wrong URL.
+    // Two sources share the override name: candidates and install target must both come from the first
+    // Otherwise a later source's candidate would install against the wrong URL
     let response = xai_hooks_plugins_types::MarketplaceListResponse {
         sources: vec![
             xai_hooks_plugins_types::MarketplaceScanResult {
@@ -460,10 +456,8 @@ fn plugin_cta_catalog_err_preserves_cache() {
 #[test]
 fn plugin_cta_catalog_reload_empty_candidates_preserves_installed_checkmark() {
     use crate::app::agent_view::CtaPhase;
-    // The just-installed plugin was the only not-installed official candidate,
-    // so the post-settle catalog refresh returns an empty candidate set. The
-    // "✓ installed" confirmation must survive (its 4s timer owns the dismiss),
-    // not get clobbered to Hidden.
+    // The just-installed plugin was the only not-installed official candidate, so the post-settle catalog refresh returns an empty candidate set
+    // The "✓ installed" confirmation must survive (its 4s timer owns the dismiss), not get clobbered to Hidden
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
@@ -503,8 +497,7 @@ fn plugin_cta_catalog_reload_empty_candidates_preserves_installed_checkmark() {
 #[test]
 fn plugin_cta_catalog_load_recomputes_match_for_typed_draft() {
     use crate::app::agent_view::CtaPhase;
-    // Redirect config reads to an empty temp home so the catalog-load
-    // dismissed-set read is hermetic, not just deterministic.
+    // Redirect config reads to an empty temp home so the catalog load's read of the dismissed set is hermetic, not just deterministic
     {
         use std::sync::OnceLock;
         static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
@@ -516,10 +509,9 @@ fn plugin_cta_catalog_load_recomputes_match_for_typed_draft() {
             tmp
         });
     }
-    // User typed a matching word and the debounce already fired against the
-    // (still-empty) catalog -> Hidden. When the async catalog lands, the CTA
-    // must surface without waiting for another keystroke. Uses a unique name
-    // so the cached dismissed-set read can't suppress it.
+    // The user typed a matching word and the debounce already fired against the (still-empty) catalog, leaving the CTA Hidden
+    // When the async catalog lands, the CTA must surface without waiting for another keystroke
+    // Uses a unique name so the cached dismissed-set read can't suppress it
     let mut app = test_app_with_agent();
     app.plugin_cta_enabled = true;
     let id = AgentId(0);
@@ -764,8 +756,7 @@ fn plugin_cta_debounce_preserves_in_flight_states() {
             name: "figma".into(),
             message: "boom".into(),
         },
-        // The brief "installed ✓" is owned by its auto-dismiss timer; a
-        // keystroke must not recompute it away (or re-offer the plugin).
+        // The brief "installed ✓" is owned by its auto-dismiss timer; a keystroke must not recompute it away (or re-offer the plugin)
         CtaPhase::Installed {
             name: "figma".into(),
         },
@@ -898,13 +889,15 @@ fn cta_install_done_non_success_sets_error_with_sanitized_message() {
         plugin_relative_path: "plugins/figma".into(),
         name: "figma".into(),
     };
+    // Input and expectation both derive from the shared table so no service name is respelled here and a rename cannot strand the assertions
+    let (pattern, expected) = xai_grok_shell::sampling::error::SERVICE_NAME_REWRITES[0];
     let effects = dispatch(
         Action::TaskComplete(TaskResult::CtaPluginInstallDone {
             agent_id: id,
             plugin_name: "figma".into(),
             result: Ok(cta_outcome(
                 OutcomeStatus::InternalError,
-                "cli-chat-proxy exploded",
+                &format!("{pattern} exploded"),
             )),
         }),
         &mut app,
@@ -912,8 +905,8 @@ fn cta_install_done_non_success_sets_error_with_sanitized_message() {
     assert!(effects.is_empty());
     match &app.agents[&id].plugin_cta.phase {
         CtaPhase::Error { message, .. } => {
-            assert!(message.contains("server"));
-            assert!(!message.contains("cli-chat-proxy"));
+            assert!(message.contains(expected), "sanitized message: {message}");
+            assert!(!message.contains(pattern), "unsanitized: {message}");
         }
         other => panic!("expected Error, got {other:?}"),
     }
@@ -1035,8 +1028,7 @@ fn cta_reload_done_non_success_sets_error() {
         };
         cta.expects_mcp = true;
     }
-    // A parsed-but-failed reload outcome must surface the error UI, not
-    // advance into MCP polling.
+    // A parsed-but-failed reload outcome must surface the error UI, not advance into MCP polling
     let effects = dispatch(
         Action::TaskComplete(TaskResult::CtaPluginReloadDone {
             agent_id: id,
@@ -1133,8 +1125,7 @@ fn cta_reload_done_ignored_for_stale_phase_or_plugin() {
 fn cta_mcps_loaded_handoff_requires_section_name_parity() {
     use crate::app::agent_view::CtaPhase;
     use crate::views::mcps_modal::McpServerDisplayStatus;
-    // Happy path: server "plugin: figma" matches the catalog name "figma" ->
-    // handoff fires (modal opens).
+    // Happy path: server "plugin: figma" matches the catalog name "figma", so the handoff fires (the modal opens)
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().plugin_cta.phase = CtaPhase::AwaitingMcps {
@@ -1155,8 +1146,8 @@ fn cta_mcps_loaded_handoff_requires_section_name_parity() {
     assert_eq!(app.agents[&id].plugin_cta.phase, CtaPhase::Hidden);
     assert!(app.agents[&id].extensions_modal.is_some());
 
-    // Mismatch: needs-auth server is labelled "plugin: figma-connector" while
-    // the catalog name is "figma" -> graceful degrade to Installed, no modal.
+    // Mismatch: the needs-auth server is labelled "plugin: figma-connector" while the catalog name is "figma"
+    // The CTA gracefully degrades to Installed, with no modal
     let mut app = test_app_with_agent();
     app.agents.get_mut(&id).unwrap().plugin_cta.phase = CtaPhase::AwaitingMcps {
         name: "figma".into(),
@@ -1195,7 +1186,7 @@ fn cta_mcps_loaded_initializing_keeps_waiting_and_retries() {
         };
         cta.expects_mcp = true;
     }
-    // Plugin server present but still initializing -> not yet terminal.
+    // The plugin server is present but still initializing, so its state is not yet terminal
     let servers = vec![cta_mcp_server(
         "figma-srv",
         Some("figma"),
@@ -1209,8 +1200,7 @@ fn cta_mcps_loaded_initializing_keeps_waiting_and_retries() {
         }),
         &mut app,
     );
-    // Phase stays AwaitingMcps; a delayed re-probe is queued and the attempt
-    // counter advances.
+    // Phase stays AwaitingMcps; a delayed re-probe is queued and the attempt counter advances
     assert_eq!(
         app.agents[&id].plugin_cta.phase,
         CtaPhase::AwaitingMcps {
@@ -1238,9 +1228,8 @@ fn cta_mcps_loaded_unavailable_keeps_waiting() {
         };
         cta.expects_mcp = true;
     }
-    // An OAuth server can briefly surface as Unavailable before flipping to
-    // NeedsAuth -- Unavailable is not a final verdict, so keep polling
-    // instead of settling early (which would miss the handoff).
+    // An OAuth server can briefly show as Unavailable before flipping to NeedsAuth
+    // Unavailable is not a final verdict, so keep polling instead of settling early (which would miss the handoff)
     let servers = vec![cta_mcp_server(
         "figma-srv",
         Some("figma"),
@@ -1367,9 +1356,8 @@ fn cta_mcps_loaded_empty_list_keeps_waiting_not_absent_settle() {
         cta.expects_mcp = true;
         cta.mcp_attempt = CTA_MCP_ABSENT_MAX_ATTEMPTS;
     }
-    // An entirely empty list means the post-reload config isn't reflected yet
-    // (read too early), not that the plugin ships no MCP servers. Keep polling
-    // so a slow MCP-bearing plugin's auth handoff isn't skipped.
+    // An entirely empty list means the post-reload config isn't reflected yet (read too early), not that the plugin ships no MCP servers
+    // Keep polling so a slow MCP-bearing plugin's auth handoff isn't skipped
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PluginCtaMcpsLoaded {
             agent_id: id,
@@ -1448,8 +1436,7 @@ fn cta_mcps_loaded_times_out_to_installed_after_budget() {
         cta.expects_mcp = true;
         cta.mcp_attempt = CTA_MCP_POLL_MAX_ATTEMPTS;
     }
-    // Still initializing, but the attempt budget is exhausted -> final
-    // no-auth verdict: Installed (never loops forever).
+    // Still initializing, but the attempt budget is exhausted, so the final no-auth verdict is Installed (never loops forever)
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PluginCtaMcpsLoaded {
             agent_id: id,
@@ -1865,7 +1852,7 @@ mod cta_e2e {
     fn no_auth_path_settles_installed_without_modal() {
         let mut app = app_awaiting_mcps();
         let id = AgentId(0);
-        // All of the plugin's servers are Ready (terminal, no auth) -> settle.
+        // All of the plugin's servers are Ready (terminal, no auth), so settle
         let effects = dispatch(
             Action::TaskComplete(TaskResult::PluginCtaMcpsLoaded {
                 agent_id: id,
@@ -1895,7 +1882,7 @@ mod cta_e2e {
                 .iter()
                 .any(|e| matches!(e, Effect::RetryPluginCtaMcps { .. }))
         );
-        // Settling schedules the ✓ auto-dismiss and refreshes the candidate set.
+        // Settling schedules the checkmark's auto-dismiss and refreshes the candidate set
         assert!(
             effects
                 .iter()
@@ -2110,9 +2097,8 @@ mod cta_e2e {
     fn plugin_name_parity_mismatch_degrades_to_installed() {
         let mut app = app_awaiting_mcps();
         let id = AgentId(0);
-        // A NeedsAuth server whose section plugin-name does not match the CTA
-        // name is not a handoff trigger. Under the poll it keeps waiting, so
-        // drive it to the attempt budget to force the terminal no-auth verdict.
+        // A NeedsAuth server whose section plugin-name does not match the CTA name is not a handoff trigger
+        // Under the poll it keeps waiting, so drive it to the attempt budget to force the terminal no-auth verdict
         app.agents.get_mut(&id).unwrap().plugin_cta.mcp_attempt = CTA_MCP_POLL_MAX_ATTEMPTS;
         let effects = dispatch(
             Action::TaskComplete(TaskResult::PluginCtaMcpsLoaded {

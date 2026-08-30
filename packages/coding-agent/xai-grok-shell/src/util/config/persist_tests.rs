@@ -3,6 +3,34 @@ use super::super::mcp::{McpConfig, parse_mcp_config_with_oauth};
 use super::*;
 use toml::Value as TomlValue;
 use toml::map::Map as TomlMap;
+/// First-run `ensure` creates a 0-byte `$GROK_HOME/config.toml`. Empty and
+/// whitespace-only files must parse as an empty table so the first settings
+/// write is not "refusing to overwrite unparseable". Non-empty garbage still
+/// refuses.
+#[test]
+fn parse_existing_config_toml_blank_is_empty_table_not_unparseable() {
+    for blank in ["", "   ", "\n", "\n\t  \n", " \r\n "] {
+        let v = parse_existing_config_toml(blank)
+            .unwrap_or_else(|e| panic!("blank {blank:?} must be an empty table, got {e}"));
+        assert_eq!(
+            v,
+            TomlValue::Table(TomlMap::new()),
+            "blank {blank:?} must be an empty table"
+        );
+    }
+    let parsed = parse_existing_config_toml("[ui]\nyolo = true\n").unwrap();
+    assert_eq!(
+        parsed
+            .get("ui")
+            .and_then(|u| u.get("yolo"))
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert!(
+        parse_existing_config_toml("this is [not valid toml\n").is_err(),
+        "non-empty unparseable TOML must still be refused"
+    );
+}
 /// The `[toolset.ask_user_question]` settings write merges only that
 /// sub-table: the toggled field lands, hand-written sibling keys survive,
 /// and no other `[toolset]` defaults (bash/web_search) are splatted into

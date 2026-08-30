@@ -2,16 +2,12 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Alias-route e2e, contract form: a bare program name that PATH cannot
-/// resolve (the alias case, and the old hard-ENOENT failure) must be handed to
-/// `$SHELL` as exactly `-i -c "<name> '<tail>'"` — first word bare so the
-/// shell can expand it as an alias, tail words quoted.
+/// A bare program name that PATH cannot resolve (the alias case, and the old hard-ENOENT failure) must be handed to `$SHELL`.
+/// The exact argv is `-i -c "<name> '<tail>'"`: first word bare so the shell can expand it as an alias, tail words quoted.
 ///
-/// A fake argv-echoing `$SHELL` makes the assertion deterministic: real alias
-/// expansion is the shell's own contract (and rc-file dependent), while the
-/// argv shape is the part `grok wrap` owns. The quoting round-trip against a
-/// real shell is covered by `joined_line_roundtrips_words_through_real_sh` in
-/// `wrap_cmd_tests`.
+/// A fake argv-echoing `$SHELL` makes the assertion deterministic.
+/// Real alias expansion is the shell's own contract (and rc-file dependent); the argv shape is the part `grok wrap` owns.
+/// The quoting round-trip against a real shell is covered by `joined_line_roundtrips_words_through_real_sh` in `wrap_cmd_tests`.
 #[test]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 #[cfg(unix)]

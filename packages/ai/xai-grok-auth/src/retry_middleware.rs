@@ -9,21 +9,15 @@ use reqwest_middleware::{Error, Middleware, Next};
 use crate::AuthCredentialProvider;
 use crate::bearer_fragment::bearer_suffix;
 
-/// Tail fragment of the bearer
-/// this middleware stamped, recorded into the request's `http::Extensions`
-/// at stamp time. 401-attribution sites read it back via
-/// [`execute_with_stamp`] instead of re-resolving at record time, which
-/// races with the refresh the 401 itself triggers. Absent ⇒ nothing was
-/// stamped; a retry overwrites it, so it always describes the attempt whose
-/// response the caller holds. Only the tail crosses this boundary — JWT
-/// heads are a shared constant, and the tail is safe for sinks to log.
+/// Tail fragment of the bearer this middleware stamped, recorded into the request's `http::Extensions` at stamp time.
+/// 401-attribution sites read it back via [`execute_with_stamp`]; re-resolving at record time races with the refresh the 401 itself triggers.
+/// Absent means nothing was stamped; a retry overwrites it, so it always describes the attempt whose response the caller holds.
+/// Only the tail is stored: JWT heads are a shared constant, and the tail is safe for sinks to log.
 #[derive(Clone, Debug)]
 pub struct StampedBearerSuffix(pub String);
 
-/// Execute `req` on a middleware-wrapped client and return the response
-/// together with the [`StampedBearerSuffix`] the auth middleware recorded
-/// (if it stamped anything). The one blessed way for 401-attribution
-/// call sites to learn what was actually sent on the wire.
+/// Execute `req` on a middleware-wrapped client and return the response plus the [`StampedBearerSuffix`] the auth middleware recorded, if any.
+/// This is how 401-attribution call sites learn what was actually sent on the wire.
 pub async fn execute_with_stamp(
     client: &reqwest_middleware::ClientWithMiddleware,
     req: Request,
@@ -181,7 +175,7 @@ mod tests {
         m.assert_async().await;
     }
 
-    /// Simulates a real auth manager: starts with stale token, refresh swaps to fresh.
+    /// Simulates a real auth manager: starts with a stale token, and a refresh swaps in the fresh one.
     struct SimulatedAuthManager {
         token: Mutex<Option<String>>,
         fresh_token: String,
@@ -278,9 +272,8 @@ mod tests {
         mock.assert_async().await;
     }
 
-    /// The stamp must describe the bearer of the attempt whose response
-    /// the caller holds: after a 401 → refresh → retry, that is the
-    /// FRESH token, not the stale one stamped on the first attempt.
+    /// The stamp must describe the bearer of the attempt whose response the caller holds.
+    /// After a 401, a refresh, and a retry, that is the fresh token, not the stale one stamped on the first attempt.
     #[tokio::test]
     async fn execute_with_stamp_reports_last_stamped_bearer() {
         let mut server = mockito::Server::new_async().await;
@@ -306,14 +299,13 @@ mod tests {
         let req = client.get(format!("{}/api", server.url())).build().unwrap();
         let (resp, stamp) = execute_with_stamp(&client, req).await.unwrap();
         assert_eq!(resp.status(), 200);
-        // ≤ 12 chars → the suffix is the whole token.
+        // A token of 12 chars or fewer is its own suffix
         assert_eq!(stamp.expect("bearer was stamped").0, "fresh-token");
         m401.assert_async().await;
         m200.assert_async().await;
     }
 
-    /// No credential ⇒ no stamp: attribution must see "nothing was sent",
-    /// not an empty string or a stale record.
+    /// No credential means no stamp: attribution must see "nothing was sent", not an empty string or a stale record.
     #[tokio::test]
     async fn execute_with_stamp_is_none_when_nothing_stamped() {
         let mut server = mockito::Server::new_async().await;

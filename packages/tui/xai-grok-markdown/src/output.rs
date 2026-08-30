@@ -4,13 +4,13 @@ use std::ops::Range;
 
 use ratatui::text::Line;
 
-use crate::buffers::CodeBlockMeta;
+use crate::buffers::{CodeBlockMeta, TableCopyMeta};
 
 /// A hyperlink target extracted from rendered markdown.
 ///
 /// Each instance maps a contiguous cell range on one rendered line to a URL.
-/// When a link wraps across lines, multiple `HyperlinkTarget`s share the same
-/// `id` and `url` -- the `id` enables OSC 8 hover-grouping across wrapped lines.
+/// When a link wraps across lines, multiple `HyperlinkTarget`s share the same `id` and `url`.
+/// The shared `id` enables OSC 8 hover-grouping across wrapped lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HyperlinkTarget {
     /// Index of the rendered line this target appears on.
@@ -19,80 +19,68 @@ pub struct HyperlinkTarget {
     pub column_range: Range<usize>,
     /// The destination URL.
     pub url: String,
-    /// Stable identifier for grouping link fragments that belong to the
-    /// same logical link (e.g., a link whose text wraps across lines).
+    /// Stable identifier for grouping link fragments that belong to the same logical link (e.g., a link whose text wraps across lines).
     pub id: u32,
 }
 
 /// A fenced code block discovered while rendering markdown.
 ///
-/// One `CodeBlockSpan` is produced per **closed** fenced code block, in
-/// document order. An unterminated (still-open) fence at the end of the input
-/// produces no span: `pulldown-cmark` synthesizes a block end at end-of-input,
-/// so closure is detected structurally (a closing fence must follow the body)
-/// rather than from the end event alone.
+/// One `CodeBlockSpan` is produced per **closed** fenced code block, in document order.
+/// An unterminated (still-open) fence at the end of the input produces no span.
+/// `pulldown-cmark` synthesizes a block end at end-of-input, so closure requires a closing fence after the body rather than the end event alone.
 ///
-/// This is a generic, reusable description of a fenced block — it is not
-/// specific to any one info string (e.g. `mermaid`).
+/// The span describes any fenced block, whatever its info string (e.g. `mermaid`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeBlockSpan {
     /// The fence info string, e.g. `"mermaid"` or `"rust"`.
     ///
-    /// Empty for a fence opened with no info (just ` ``` `). Reported verbatim
-    /// as `pulldown-cmark` yields it (the full info string, not just the first
-    /// word).
+    /// Empty for a fence opened with no info (just ` ``` `).
+    /// Reported verbatim as `pulldown-cmark` yields it (the full info string, not just the first word).
     pub info: String,
 
-    /// The fence body content — the clean, container-stripped code/diagram
-    /// source.
+    /// The fence body content: the clean, container-stripped code/diagram source.
     ///
-    /// This is `pulldown-cmark`'s merged body text, so container markers are
-    /// removed (a blockquote `>` / list indentation does **not** leak in) and
-    /// CRLF line endings are normalized to `\n`. It ends with the body's
-    /// trailing newline and is empty for an empty-body fence. Prefer this over
-    /// slicing [`source_byte_range`](Self::source_byte_range) when you need the
-    /// logical body (e.g. a Mermaid diagram nested in a blockquote).
+    /// This is `pulldown-cmark`'s merged body text, so container markers are removed (a blockquote `>` / list indentation does **not** leak in).
+    /// CRLF line endings are normalized to `\n`.
+    /// It ends with the body's trailing newline and is empty for an empty-body fence.
+    /// Prefer this over slicing [`source_byte_range`](Self::source_byte_range) for the logical body (e.g. a Mermaid diagram in a blockquote).
     pub body: String,
 
-    /// Range of **pre-wrap** rendered body lines for this block, as indices
-    /// into [`MarkdownRenderOutput::lines`] / [`MarkdownRenderView::lines`].
+    /// Range of **pre-wrap** rendered body lines for this block, as indices into [`MarkdownRenderOutput::lines`] / [`MarkdownRenderView::lines`].
     ///
-    /// Covers only the body — the delimiter ` ``` ` lines are excluded — so it
-    /// is independent of whether the renderer hides those delimiters in pretty
-    /// mode. Empty (`start == end`) for a fence with an empty body.
+    /// Covers only the body, with the delimiter ` ``` ` lines excluded, so hiding those delimiters in pretty mode does not affect it.
+    /// Empty (`start == end`) for a fence with an empty body.
     pub output_line_range: Range<usize>,
 
     /// Byte range of the fence body in the **raw** source text.
     ///
-    /// Spans from the first body byte to the last, with the delimiter fence
-    /// lines excluded; empty (`start == end`) for an empty body. Unlike
-    /// [`body`](Self::body) this is a raw slice, so for a fence nested in a
-    /// blockquote or list it covers the source between the delimiters and may
-    /// include container markers/indentation (and `\r` for CRLF) on
-    /// continuation lines. Use [`body`](Self::body) for the clean content.
+    /// Spans from the first body byte to the last, with the delimiter fence lines excluded; empty (`start == end`) for an empty body.
+    /// Unlike [`body`](Self::body) this is a raw slice of the source.
+    /// For a fence nested in a blockquote or list, continuation lines may keep container markers/indentation (and `\r` for CRLF).
+    /// Use [`body`](Self::body) for the clean content.
     pub source_byte_range: Range<usize>,
 }
 
 /// Output from rendering markdown to ratatui Lines.
 ///
-/// Contains all the information needed to display rendered markdown and
-/// support copy operations back to source text.
+/// Contains all the information needed to display rendered markdown and support copy operations back to source text.
 #[derive(Debug, Clone, Default)]
 pub struct MarkdownRenderOutput {
     /// Rendered lines ready for display.
     pub lines: Vec<Line<'static>>,
 
     /// Maps each rendered line index to its source line number.
-    /// `line_source_map[rendered_line_idx]` = source line number (0-indexed).
+    /// `line_source_map[rendered_line_idx]` is the source line number (0-indexed).
     pub line_source_map: Vec<usize>,
 
-    /// Maps a cell range on a rendered line to a URL. Links that
-    /// wrap across lines produce multiple entries with the same `id` and `url`.
+    /// Maps a cell range on a rendered line to a URL.
+    /// Links that wrap across lines produce multiple entries with the same `id` and `url`.
     pub hyperlinks: Vec<HyperlinkTarget>,
 
     /// Fenced code blocks discovered during rendering, in document order.
     /// One entry per closed fenced block; see [`CodeBlockSpan`].
     pub code_blocks: Vec<CodeBlockSpan>,
+    pub tables: Vec<TableCopyMeta>,
 }
 
 impl MarkdownRenderOutput {
@@ -107,6 +95,7 @@ impl MarkdownRenderOutput {
         self.line_source_map.clear();
         self.hyperlinks.clear();
         self.code_blocks.clear();
+        self.tables.clear();
     }
 
     /// Get a borrowed view of this output.
@@ -116,14 +105,14 @@ impl MarkdownRenderOutput {
             line_source_map: &self.line_source_map,
             hyperlinks: &self.hyperlinks,
             code_blocks: &self.code_blocks,
+            tables: &self.tables,
         }
     }
 }
 
 /// Borrowed view of rendered markdown output.
 ///
-/// This is a zero-copy reference to rendered content, used by the streaming
-/// renderer to avoid cloning frozen content on every render.
+/// This is a zero-copy reference to rendered content, used by the streaming renderer to avoid cloning frozen content on every render.
 #[derive(Debug, Clone, Copy)]
 pub struct MarkdownRenderView<'a> {
     /// Rendered lines ready for display.
@@ -138,6 +127,7 @@ pub struct MarkdownRenderView<'a> {
     /// Fenced code blocks discovered during rendering, in document order.
     /// One entry per closed fenced block; see [`CodeBlockSpan`].
     pub code_blocks: &'a [CodeBlockSpan],
+    pub tables: &'a [TableCopyMeta],
 }
 
 impl<'a> MarkdownRenderView<'a> {
@@ -149,20 +139,15 @@ impl<'a> MarkdownRenderView<'a> {
 
 /// Map parse-time code-block metadata onto the rendered output.
 ///
-/// Runs after `render_ratatui` has produced `line_source_map`, turning each
-/// captured [`CodeBlockMeta`] into a public [`CodeBlockSpan`]. The
-/// pre-wrap body line range is derived from `line_source_map`: a fence body
-/// occupies source lines `[src_first, src_last]`, and because the renderer
-/// emits exactly one output line per body source line (and never maps a
-/// non-body line into that source-line range), the matching output lines form
-/// one contiguous run. `line_source_map` is non-decreasing, so the run is
-/// located with two `partition_point`s.
+/// Runs after `render_ratatui` has produced `line_source_map`, turning each captured [`CodeBlockMeta`] into a public [`CodeBlockSpan`].
+/// The pre-wrap body line range is derived from `line_source_map`: a fence body occupies source lines `[src_first, src_last]`.
+/// The renderer emits exactly one output line per body source line and never maps a non-body line into that range.
+/// The matching output lines therefore form one contiguous run.
+/// `line_source_map` is non-decreasing, so the run is located with two `partition_point`s.
 ///
-/// Cost is O(text_len + lines·log) per render: the metas are in ascending body
-/// order, so newline counts come from a single monotonic forward cursor over
-/// `text` rather than rescanning from byte 0 for every meta (which would be
-/// O(metas·text_len) — quadratic in the number of fences on the streaming hot
-/// path).
+/// Cost is O(text_len + lines·log) per render.
+/// The metas are in ascending body order, so newline counts come from a single monotonic forward cursor over `text`.
+/// Rescanning from byte 0 for every meta would be O(metas·text_len), quadratic in the number of fences on the streaming hot path.
 pub(crate) fn build_code_block_spans(
     text: &str,
     line_source_map: &[usize],
@@ -173,9 +158,8 @@ pub(crate) fn build_code_block_spans(
     }
 
     let bytes = text.as_bytes();
-    // Monotonic newline cursor. Each query advances from the previous position
-    // (metas ascend by body offset), so the whole pass is O(text_len). '\n' is
-    // single-byte ASCII, so byte counting is UTF-8-safe at any offset.
+    // Monotonic newline cursor. Each query advances from the previous position (metas ascend by body offset), so the whole pass is O(text_len).
+    // '\n' is single-byte ASCII, so byte counting is UTF-8-safe at any offset
     let mut cursor_pos = 0usize;
     let mut cursor_newlines = 0usize;
     let mut newlines_before = |pos: usize| -> usize {
@@ -199,13 +183,11 @@ pub(crate) fn build_code_block_spans(
             let range = meta.body_source_range;
             let src_first = newlines_before(range.start);
             let output_line_range = if range.end <= range.start {
-                // Empty body: no rendered body lines. Anchor an empty range at
-                // the first output line that does not precede the body.
+                // Empty body: no rendered body lines. Anchor an empty range at the first output line that does not precede the body.
                 let start = line_source_map.partition_point(|&src| src < src_first);
                 start..start
             } else {
-                // `range.end - 1` is the last body byte; its source line is the
-                // inclusive last body source line, robust to a trailing newline.
+                // `range.end - 1` is the last body byte; its source line is the inclusive last body source line, robust to a trailing newline
                 let src_last = newlines_before(range.end - 1);
                 let start = line_source_map.partition_point(|&src| src < src_first);
                 let end = line_source_map.partition_point(|&src| src <= src_last);
@@ -252,10 +234,8 @@ mod code_block_span_tests {
 
     #[test]
     fn closed_fence_top_level_pretty_and_raw() {
-        // A non-rendered language (`text`): its rendered body lines are the
-        // verbatim source, so the span's `output_line_range` maps back to them.
-        // (A `mermaid` fence renders to diagram art instead — see
-        // `mermaid_fence_renders_inline_but_span_keeps_clean_source`.)
+        // A non-rendered language (`text`): its rendered body lines are the verbatim source, so the span's `output_line_range` maps back to them
+        // (A `mermaid` fence renders to diagram art instead; see `mermaid_fence_renders_inline_but_span_keeps_clean_source`.)
         let src = "```text\nflowchart TD\n  A --> B\n```\n";
         for pretty in [true, false] {
             let (lines, cbs) = blocks(src, pretty);
@@ -267,8 +247,7 @@ mod code_block_span_tests {
                 vec!["flowchart TD", "  A --> B"],
                 "pretty={pretty}",
             );
-            // Byte range and clean body are mode-independent; for a top-level
-            // fence both equal the verbatim fence body.
+            // Byte range and clean body are mode-independent; for a top-level fence both equal the verbatim fence body
             assert_eq!(body_source(src, &cbs[0]), "flowchart TD\n  A --> B\n");
             assert_eq!(cbs[0].body, "flowchart TD\n  A --> B\n");
         }
@@ -276,8 +255,7 @@ mod code_block_span_tests {
 
     #[test]
     fn open_fence_produces_no_span() {
-        // Unterminated fence at EOF: pulldown still emits a block end, but no
-        // span must be produced (malformed/partial input).
+        // Unterminated fence at EOF: pulldown still emits a block end, but no span must be produced (malformed/partial input)
         for src in [
             "```mermaid\nflowchart TD\n",
             "```mermaid\nflowchart TD",
@@ -306,25 +284,22 @@ mod code_block_span_tests {
             assert_eq!(body_source(src, &cbs[1]), "A-->B\n");
             assert_eq!(body_lines(&lines, &cbs[0]), vec!["fn a() {}"]);
             assert_eq!(body_lines(&lines, &cbs[1]), vec!["A-->B"]);
-            // Document order ⇒ disjoint, increasing line ranges.
+            // Document order implies disjoint, increasing line ranges
             assert!(cbs[0].output_line_range.end <= cbs[1].output_line_range.start);
         }
     }
 
     #[test]
     fn fence_nested_in_list() {
-        // Multi-line body so the list's base indent stripping is exercised on a
-        // continuation line ("    A --> B" → "  A --> B").
+        // Multi-line body so the list's base indent stripping is exercised on a continuation line ("    A --> B" becomes "  A --> B")
         let src = "- item\n  ```mermaid\n  flowchart TD\n    A --> B\n  ```\n- next\n";
         for pretty in [true, false] {
             let (_lines, cbs) = blocks(src, pretty);
             assert_eq!(cbs.len(), 1, "pretty={pretty}");
             assert_eq!(cbs[0].info, "mermaid");
-            // `body` is the clean, de-prefixed source: the list base indent is
-            // stripped but inner relative indentation is preserved.
+            // `body` is the clean, de-prefixed source: the list base indent is stripped but inner relative indentation is preserved
             assert_eq!(cbs[0].body, "flowchart TD\n  A --> B\n", "pretty={pretty}");
-            // The raw byte range, by contrast, also strips the per-line base
-            // indent here (pulldown's text-event range starts after it).
+            // The raw byte range, by contrast, also strips the per-line base indent here (pulldown's text-event range starts after it)
             assert_eq!(
                 body_source(src, &cbs[0]),
                 "flowchart TD\n    A --> B\n",
@@ -336,9 +311,8 @@ mod code_block_span_tests {
 
     #[test]
     fn fence_nested_in_blockquote() {
-        // The motivating case for the structural closure rule: the closing
-        // fence line is "> ```" (not a bare fence), and the body must come out
-        // de-prefixed (no leaked "> " / "│ ").
+        // The motivating case for the structural closure rule: the closing fence line is "> ```", not a bare fence
+        // The body must come out de-prefixed (no leaked "> " / "│ ")
         let src = "> ```mermaid\n> flowchart TD\n>   A --> B\n> ```\n";
         for pretty in [true, false] {
             let (_lines, cbs) = blocks(src, pretty);
@@ -350,7 +324,7 @@ mod code_block_span_tests {
 
     #[test]
     fn open_blockquote_fence_produces_no_span() {
-        // Unterminated fence inside a blockquote ⇒ no span.
+        // An unterminated fence inside a blockquote yields no span
         let src = "> ```mermaid\n> flowchart TD\n";
         for pretty in [true, false] {
             let (_, cbs) = blocks(src, pretty);
@@ -360,8 +334,7 @@ mod code_block_span_tests {
 
     #[test]
     fn indented_code_block_is_not_a_fence() {
-        // A 4-space indented code block is not a fenced block ⇒ no span, even
-        // when its literal content looks like a fence.
+        // A 4-space indented code block is not a fenced block, so it yields no span even when its literal content looks like a fence
         let src = "para\n\n    ```mermaid\n    A-->B\n    ```\n";
         for pretty in [true, false] {
             let (_, cbs) = blocks(src, pretty);
@@ -372,16 +345,14 @@ mod code_block_span_tests {
     #[test]
     fn empty_body_closed_fence() {
         let src = "```mermaid\n```\n";
-        // Pretty: both fence lines are hidden ⇒ no output lines ⇒ the empty
-        // anchor lands at 0..0 (exact, not merely is_empty()).
+        // Pretty: both fence lines are hidden, so there are no output lines and the empty anchor lands at 0..0 (exact, not merely is_empty())
         let (_, cbs) = blocks(src, true);
         assert_eq!(cbs.len(), 1);
         assert_eq!(cbs[0].info, "mermaid");
         assert_eq!(cbs[0].output_line_range, 0..0);
         assert_eq!(body_source(src, &cbs[0]), "");
         assert_eq!(cbs[0].body, "");
-        // Raw: both fence lines are shown ⇒ the empty body is anchored between
-        // them at 1..1.
+        // Raw: both fence lines are shown, so the empty body is anchored between them at 1..1
         let (_, cbs_raw) = blocks(src, false);
         assert_eq!(cbs_raw.len(), 1);
         assert_eq!(cbs_raw[0].output_line_range, 1..1);
@@ -420,23 +391,20 @@ mod code_block_span_tests {
 
     #[test]
     fn crlf_body_is_normalized_but_byte_range_retains_cr() {
-        // CRLF: pulldown normalizes the body content to `\n`, while the raw
-        // byte range still slices the `\r`. Line counting (over `\n`) is
-        // unaffected.
+        // CRLF: pulldown normalizes the body content to `\n`, while the raw byte range still slices the `\r`
+        // Line counting (over `\n`) is unaffected
         let src = "```text\r\nA-->B\r\n```\r\n";
         let (lines, cbs) = blocks(src, true);
         assert_eq!(cbs.len(), 1);
         assert_eq!(cbs[0].body, "A-->B\n");
         assert_eq!(body_source(src, &cbs[0]), "A-->B\r\n");
-        // One rendered body line (the renderer keeps the raw `\r`; `body` is the
-        // normalized source of truth).
+        // One rendered body line (the renderer keeps the raw `\r`; `body` is the normalized text)
         assert_eq!(body_lines(&lines, &cbs[0]).len(), 1);
     }
 
     #[test]
     fn multibyte_body_slices_safely() {
-        // Multi-byte UTF-8 in the body: `source_byte_range` must land on char
-        // boundaries (no slice panic) and `body` is the exact content.
+        // Multi-byte UTF-8 in the body: `source_byte_range` must land on char boundaries (no slice panic) and `body` is the exact content
         let src = "```text\nA --> \u{65e5}\u{672c}\u{8a9e}\nC --> \u{1f980}\n```\n";
         let (lines, cbs) = blocks(src, true);
         assert_eq!(cbs.len(), 1);
@@ -453,8 +421,7 @@ mod code_block_span_tests {
 
     #[test]
     fn long_fence_with_inner_backticks() {
-        // A 4-backtick fence whose body contains a ``` line must not close
-        // early — one span whose body includes the inner fence text.
+        // A 4-backtick fence whose body contains a ``` line must not close early: one span whose body includes the inner fence text
         let src = "````mermaid\n```\ninner\n```\n````\n";
         let (_lines, cbs) = blocks(src, true);
         assert_eq!(cbs.len(), 1);
@@ -464,8 +431,7 @@ mod code_block_span_tests {
 
     #[test]
     fn tab_in_body_is_preserved_by_crate() {
-        // The markdown crate preserves a literal tab in the body (the pager
-        // expands tabs before rendering; the crate itself does not).
+        // The markdown crate preserves a literal tab in the body (the pager expands tabs before rendering; the crate itself does not)
         let src = "```mermaid\n\tA --> B\n```\n";
         let (_lines, cbs) = blocks(src, true);
         assert_eq!(cbs.len(), 1);
@@ -474,8 +440,7 @@ mod code_block_span_tests {
 
     #[test]
     fn rendered_body_lines_match_span_body() {
-        // The rendered (pre-wrap) body lines reconstruct to the span body
-        // (sans the trailing newline a line-join drops). Both pretty and raw.
+        // The rendered (pre-wrap) body lines reconstruct to the span body, minus the trailing newline a line-join drops
         let src = "```text\nflowchart TD\n  A --> B\n  B --> C\n```\n";
         for pretty in [true, false] {
             let (lines, cbs) = blocks(src, pretty);
@@ -490,20 +455,16 @@ mod code_block_span_tests {
 
     #[test]
     fn mermaid_fence_renders_inline_but_span_keeps_clean_source() {
-        // A closed ```mermaid fence is rendered inline by the markdown crate
-        // (its body lines are replaced with diagram art), yet its CodeBlockSpan
-        // still exposes the clean SOURCE via `body` — what the pager feeds the
-        // PNG engine — and an `output_line_range` that spans the rendered
-        // diagram, where the pager anchors its affordance row. This contract is
-        // what the pager's Mermaid affordance row relies on.
+        // A closed ```mermaid fence renders inline: its body lines are replaced with diagram art
+        // The CodeBlockSpan still exposes the clean source via `body`, which the pager feeds the PNG engine
+        // Its `output_line_range` spans the rendered diagram, where the pager anchors its Mermaid affordance row
         let src = "```mermaid\nflowchart TD\n  A --> B\n```\n";
         let (lines, cbs) = blocks(src, true);
         assert_eq!(cbs.len(), 1);
         assert_eq!(cbs[0].info, "mermaid");
         // `body` is the verbatim diagram source, independent of rendering.
         assert_eq!(cbs[0].body, "flowchart TD\n  A --> B\n");
-        // The fence is rendered inline: the spanned output lines are the diagram
-        // art, not the verbatim source.
+        // The fence is rendered inline: the spanned output lines are the diagram art, not the verbatim source
         assert!(!cbs[0].output_line_range.is_empty());
         let rendered = body_lines(&lines, &cbs[0]).join("\n");
         assert_ne!(rendered, "flowchart TD\n  A --> B");
@@ -554,8 +515,7 @@ mod code_block_span_tests {
 
     #[test]
     fn streaming_open_fence_has_no_frozen_span() {
-        // While the fence is still open, any transient span must remain in the
-        // unfrozen tail (never within the frozen prefix).
+        // While the fence is still open, any transient span must remain in the unfrozen tail (never within the frozen prefix)
         let mut renderer = StreamingMarkdownRenderer::new(STYLE, true);
         for chunk in ["intro\n\n", "```mermaid\n", "flowchart TD\n", "A --> B\n"] {
             renderer.push_and_render(chunk, None);

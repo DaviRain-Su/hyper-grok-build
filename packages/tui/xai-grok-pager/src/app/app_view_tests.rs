@@ -45,12 +45,11 @@ fn parse_esc_ttl_bounds() {
         Duration::from_millis(ESC_DOUBLE_PRESS_TEST_MS)
     );
 }
-/// `AppView::draw` is the ONLY drain point for the process-wide deferred
-/// release flag; if the wrapper loses its `run_deferred_release()` call,
-/// every draw/tick-path cliff (video scroll-off, takeover drain,
-/// frame-set replacement) silently stops purging. Drives the real
-/// `draw()` against a channel-backed terminal (no tty; same recipe as
-/// pager-render's `draw_frame` tests). Serialized: process-wide flag.
+/// `AppView::draw` is the ONLY drain point for the process-wide deferred release flag.
+/// If the wrapper loses its `run_deferred_release()` call, every draw/tick-path cliff silently stops purging.
+/// The cliffs are video scroll-off, takeover drain, and frame-set replacement.
+/// Drives the real `draw()` against a channel-backed terminal (no tty; same recipe as pager-render's `draw_frame` tests).
+/// Serialized: process-wide flag.
 #[test]
 #[serial_test::serial(MEMORY_RELEASE_DEFER)]
 fn app_draw_drains_deferred_release_after_flush() {
@@ -431,8 +430,7 @@ fn dashboard_x11_primary_provenance_bypasses_unrelated_clipboard_image() {
     )));
     assert_eq!(probe_calls, 0);
 }
-/// With the image-input tip OFF, the poll short-circuits at the window gate
-/// before touching the pasteboard — the per-tip gate fails closed.
+/// With the image-input tip OFF, the poll short-circuits at the window gate before touching the pasteboard; the per-tip gate fails closed.
 #[test]
 fn clipboard_poll_no_op_when_flag_off() {
     let mut app = test_app_with_agent();
@@ -443,12 +441,10 @@ fn clipboard_poll_no_op_when_flag_off() {
     assert!(!app.poll_clipboard_focus_tip(), "tip-off poll is a no-op");
     assert!(!app.agents[&id].ephemeral_tip.is_active());
 }
-/// The in-window gate decides whether an already-running iteration may touch
-/// the pasteboard at all. It opens only when contextual hints are on, the
-/// probe is supported (macOS), the fire cooldown is clear, the terminal is
-/// focused, and the active agent is eligible; flipping any one closes it so
-/// the poll reads the clipboard zero times. (Probe support is macOS-only, so
-/// the in-window result tracks the platform.)
+/// The in-window gate decides whether an already-running iteration may touch the pasteboard at all.
+/// It opens only with contextual hints on, the probe supported, the fire cooldown clear, the terminal focused, and the active agent eligible.
+/// Flipping any one closes it so the poll reads the clipboard zero times.
+/// (Probe support is macOS-only, so the in-window result tracks the platform.)
 #[test]
 fn clipboard_poll_window_gate() {
     let mut app = test_app_with_agent();
@@ -483,10 +479,9 @@ fn clipboard_poll_window_gate() {
     app.clipboard_focus_tip.note_fired(&fired, now);
     assert!(!app.clipboard_tip_in_poll_window(now), "in cooldown");
 }
-/// A positive, deduped, un-cooled-down outcome on a drawable agent shows the
-/// tip and commits the cooldown + changeCount dedup (same content won't
-/// re-fire). Drives `apply_clipboard_probe` with a synthetic outcome so it
-/// is independent of the real pasteboard.
+/// A positive, deduped, un-cooled-down outcome on a drawable agent shows the tip and commits the cooldown and changeCount dedup.
+/// The same content won't re-fire.
+/// Drives `apply_clipboard_probe` with a synthetic outcome so it is independent of the real pasteboard.
 #[test]
 fn clipboard_probe_shows_and_commits_on_positive_outcome() {
     use crate::tips::clipboard_focus::CheckOutcome;
@@ -506,8 +501,7 @@ fn clipboard_probe_shows_and_commits_on_positive_outcome() {
         "fired content must commit the changeCount dedup"
     );
 }
-/// A refused show (here: the renderability gate on a short terminal) must
-/// burn nothing — the same outcome stays fireable.
+/// A refused show (here: the renderability gate on a short terminal) must burn nothing; the same outcome stays fireable.
 #[test]
 fn clipboard_probe_refused_show_burns_nothing() {
     use crate::tips::clipboard_focus::CheckOutcome;
@@ -527,7 +521,7 @@ fn clipboard_probe_refused_show_burns_nothing() {
         "refused show must leave cooldown and dedup uncommitted"
     );
 }
-/// Build an idle subagent child `AgentView` for child gate↔tick symmetry tests.
+/// Build an idle subagent child `AgentView` for child gate/tick symmetry tests.
 fn idle_child_view(app: &AppView, id_n: usize, sid: &str) -> Box<AgentView> {
     let session = AgentSession {
         id: super::super::agent::AgentId(id_n),
@@ -572,8 +566,7 @@ fn idle_child_view(app: &AppView, id_n: usize, sid: &str) -> Box<AgentView> {
 fn key_event(code: KeyCode, mods: KeyModifiers) -> Event {
     Event::Key(KeyEvent::new(code, mods))
 }
-/// Build a registry pinned to the non-VSCode bindings so tests are
-/// deterministic regardless of the host terminal.
+/// Build a registry pinned to the non-VSCode bindings so tests are deterministic regardless of the host terminal.
 fn pin_non_vscode_registry(app: &mut AppView) {
     let mut actions = crate::actions::default_actions(ScreenMode::Fullscreen, false);
     for def in actions.iter_mut() {
@@ -736,9 +729,8 @@ fn tick_demand_fast_while_wake_turn_streams() {
         "wake chrome spinner must tick while the pane stays Idle"
     );
 }
-/// The welcome screen shimmer only advances ~12fps, so a resting welcome
-/// screen must demand Slow ticks — not a 30fps loop; the deep-search
-/// spinner upgrades it to Fast while loading.
+/// The welcome screen shimmer only advances ~12fps, so a resting welcome screen must demand Slow ticks, not a 30fps loop.
+/// The deep-search spinner upgrades it to Fast while loading.
 #[test]
 fn tick_demand_welcome_is_slow_unless_loading() {
     let mut app = test_app();
@@ -748,10 +740,8 @@ fn tick_demand_welcome_is_slow_unless_loading() {
     app.session_picker_content_loading = true;
     assert_eq!(app.tick_demand(), TickDemand::Fast);
 }
-/// An open modal session picker that is still fetching keeps fast ticks
-/// alive on an otherwise-idle agent (its loading spinner must animate) —
-/// including after the fast foreign scan lands rows the default Grok
-/// filter hides; once the native list settles the demand parks again.
+/// An open modal session picker that is still fetching keeps fast ticks alive on an otherwise-idle agent (its loading spinner must animate).
+/// That holds even after the fast foreign scan lands rows the default Grok filter hides; once the native list settles the demand parks again.
 #[test]
 fn tick_demand_fast_while_modal_session_picker_loads() {
     let mut app = test_app_with_agent();
@@ -819,8 +809,7 @@ fn tick_demand_fast_while_modal_session_picker_loads() {
         "settled picker must not keep demanding ticks"
     );
 }
-/// An idle agent view demands no ticks at all; the macOS Cmd link-hover
-/// poll (when it is the only pending work) demands Slow, never Fast.
+/// An idle agent view demands no ticks at all; the macOS Cmd link-hover poll (when it is the only pending work) demands Slow, never Fast.
 #[test]
 #[cfg(target_os = "macos")]
 fn tick_demand_link_poll_is_slow_only() {
@@ -882,9 +871,8 @@ fn needs_animation_gates_mode_switch_banner_countdown() {
         "expired mode banner must stop requesting ticks"
     );
 }
-/// Draw-entry resync: an `expires_at` crossing between pushes must close
-/// the `/announcements` gate on the next frame; a later live list re-opens
-/// it through the same divergence check.
+/// Draw-entry resync: an `expires_at` crossing between pushes must close the `/announcements` gate on the next frame.
+/// A later live list re-opens it through the same divergence check.
 #[test]
 fn slash_gate_resyncs_when_critical_expires_between_pushes() {
     let mut app = test_app_with_agent();
@@ -923,8 +911,7 @@ fn slash_gate_resyncs_when_critical_expires_between_pushes() {
         "a live critical must re-open the gate"
     );
 }
-/// Critical freezes tip TTL and must not arm needs_animation for a tip
-/// that is not counting down (session-long metronome heat).
+/// Critical freezes tip TTL and must not arm needs_animation for a tip that is not counting down (session-long metronome heat).
 #[test]
 fn ephemeral_tip_frozen_under_critical_does_not_request_animation_or_burn_ttl() {
     use std::collections::HashMap;
@@ -1321,6 +1308,7 @@ fn needs_animation_gates_pending_turn_end_reconcile() {
             cancel_trigger: None,
             cancellation_category: None,
             cancellation_context: None,
+            error_kind: None,
             received_at: std::time::Instant::now()
                 - (TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1)),
         });
@@ -1477,14 +1465,12 @@ fn gboom_backgrounded_game_drops_held_movement() {
         "a backgrounded game must drop its holds"
     );
 }
-/// `Event::Resize` must close the tip show gate of every agent view —
-/// parent AND fullscreen-capable subagent children — until the next draw
-/// re-measures: a trigger firing between the event and the (debounced)
-/// resize draw would otherwise act on the pre-resize measurement and burn
-/// a seen count on a tip the new layout can never paint. The event must
-/// NOT write the full terminal size into `last_terminal_size` — views can
-/// paint into chrome-shrunk rects, so the event height proves nothing
-/// about the banner row.
+/// `Event::Resize` must close the tip show gate of every agent view until the next draw re-measures.
+/// That covers the parent AND fullscreen-capable subagent children.
+/// A trigger firing between the event and the (debounced) resize draw would otherwise act on the pre-resize measurement.
+/// It would burn a seen count on a tip the new layout can never paint.
+/// The event must NOT write the full terminal size into `last_terminal_size`.
+/// Views can paint into chrome-shrunk rects, so the event height proves nothing about the banner row.
 #[test]
 fn resize_event_closes_tip_show_gate_until_redraw() {
     let mut app = test_app_with_agent();
@@ -1612,15 +1598,12 @@ fn expected_tier_restricted_commands() -> Vec<String> {
         .map(|n| (*n).to_string())
         .collect()
 }
-/// Make every tier-restricted command visible on the welcome prompt so the
-/// present/absent assertions exercise the deny list, not incidental
-/// fail-closed hiding:
-/// - `/imagine`, `/imagine-video` are `required_tools()`-gated, so advertise
-///   their tools (otherwise the registry fail-closes them).
-/// - `/voice` is fail-closed hidden until the remote flag turns it on, so
-///   reveal it via the registry directly. (We drive the prompt's registry
-///   rather than `apply_voice_mode_enabled`, which also flips a process-global
-///   atomic and would leak across parallel tests.)
+/// Make every tier-restricted command visible on the welcome prompt.
+/// The present/absent assertions must exercise the deny list, not incidental fail-closed hiding:
+/// - `/imagine`, `/imagine-video` are `required_tools()`-gated, so advertise their tools (otherwise the registry fail-closes them).
+/// - `/voice` is fail-closed hidden until the remote flag turns it on, so reveal it via the registry directly.
+///   We drive the prompt's registry rather than `apply_voice_mode_enabled`.
+///   The latter also flips a process-global atomic and would leak across parallel tests.
 fn advertise_media_tools(app: &mut AppView) {
     app.welcome_prompt
         .slash_controller
@@ -1935,13 +1918,10 @@ fn non_minimal_ctrl_t_leaves_todo_panel_flag_untouched() {
         "the minimal todo-panel flag must never flip outside minimal mode"
     );
 }
-/// The minimal info-row transcript hint and the Ctrl+O key remap are gated
-/// on the same predicate. Ctrl+O opens the transcript pager unless it is
-/// the interject chord (Apple Terminal) AND an interject would actually
-/// consume the press (turn running + non-empty composer, turn running +
-/// queued follow-up with empty composer, or editing a queued row) — at
-/// idle / empty composer with no queue the interject path is a silent
-/// no-op, so the remap keeps the key (it looked simply dead before).
+/// The minimal info-row transcript hint and the Ctrl+O key remap are gated on the same predicate.
+/// Ctrl+O opens the transcript pager unless it is the interject chord (Apple Terminal) AND an interject would actually consume the press.
+/// The consuming cases: a running turn with a non-empty composer, a running turn with a queued follow-up and empty composer, or editing a queued row.
+/// At idle with an empty composer and no queue the interject path is a silent no-op, so the remap keeps the key (it looked dead before).
 #[test]
 fn minimal_ctrl_o_transcript_predicate_tracks_interject_binding() {
     let mut app = test_app_with_agent();
@@ -1996,9 +1976,8 @@ fn minimal_ctrl_o_transcript_predicate_tracks_interject_binding() {
         "editing a queued row: Ctrl+O must stay the interject/save key"
     );
 }
-/// In minimal mode Ctrl+O routes to `Action::OpenTranscriptPager` (unless
-/// interject owns the chord AND would consume the press — see the
-/// predicate test above).
+/// In minimal mode Ctrl+O routes to `Action::OpenTranscriptPager` unless interject owns the chord AND would consume the press.
+/// See the predicate test above.
 #[test]
 fn minimal_ctrl_o_opens_transcript_pager() {
     let mut app = test_app_with_agent();
@@ -2010,12 +1989,10 @@ fn minimal_ctrl_o_opens_transcript_pager() {
         "expected OpenTranscriptPager, got {out:?}"
     );
 }
-/// Apple Terminal (interject = Ctrl+O), minimal mode: at idle the interject
-/// path would silently no-op, so Ctrl+O must open the transcript — this was
-/// the "Ctrl+O appears dead on Mac" report. With a running turn and text in
-/// the composer the same key must send-now (cancel-and-send). With a running
-/// turn, empty composer, and a queued follow-up it must force-send that row
-/// (send-now).
+/// Apple Terminal (where interject is Ctrl+O), minimal mode: at idle the interject path would silently no-op, so Ctrl+O must open the transcript.
+/// This was the "Ctrl+O appears dead on Mac" report.
+/// With a running turn and text in the composer the same key must send-now (cancel-and-send).
+/// With a running turn, empty composer, and a queued follow-up it must force-send that row (send-now).
 #[test]
 fn minimal_ctrl_o_on_apple_terminal_transcript_at_idle_interject_with_payload() {
     let mut app = test_app_with_agent();
@@ -2264,8 +2241,8 @@ fn consent_pending_app() -> AppView {
         vec![(0, Rect::new(5, 12, 5, 1)), (1, Rect::new(20, 12, 6, 1))];
     app
 }
-/// Accept is `a` alone. `y` belongs to the trust question one screen later, Enter may be buffered,
-/// and the rest have no meaning here.
+/// Accept is `a` alone.
+/// `y` belongs to the trust question one screen later, Enter may be buffered, and the rest have no meaning here.
 #[test]
 fn welcome_consent_answers_only_to_its_own_keys() {
     for code in [
@@ -2303,9 +2280,8 @@ fn welcome_consent_answers_only_to_its_own_keys() {
         "the screen offers Quit, so the key has to work",
     );
 }
-/// Every event from before the notice painted was aimed at the screen it replaced, and acting on
-/// one would quit and take the composer's text with it. Ctrl+C is the exception, because nothing
-/// else on this screen handles it.
+/// Every event from before the notice painted was aimed at the screen it replaced, and acting on one would quit and take the composer's text with it.
+/// Ctrl+C is the exception, because nothing else on this screen handles it.
 #[test]
 fn welcome_consent_ignores_everything_from_before_the_paint() {
     use crate::app::consent::ConsentState;
@@ -2380,8 +2356,8 @@ fn welcome_consent_answers_and_links_are_reachable_by_key_and_click() {
         );
     }
 }
-/// What the renderer reports is the only thing standing between a click and an acceptance, so the
-/// three answers it can give have to land in the state exactly.
+/// What the renderer reports is the only thing standing between a click and an acceptance.
+/// The three answers it can give have to land in the state exactly.
 #[test]
 fn consent_paint_records_what_the_renderer_reported() {
     use crate::app::consent::{ConsentLegibility, ConsentNotice, ConsentState};
@@ -3068,6 +3044,57 @@ fn esc_from_prompt_pane_running_turn_cancels_in_non_vim_mode() {
     );
 }
 #[test]
+fn esc_from_prompt_pane_running_compact_cancels_in_non_vim_mode() {
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.state = AgentState::CommandRunning {
+        command: crate::app::agent::AgentCommand::Compact,
+        started_at: std::time::Instant::now(),
+    };
+    agent.active_pane = crate::views::agent::ActivePane::Prompt;
+    agent.vim_mode = false;
+    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+        "1× Esc while /compact runs must cancel in non-vim mode, got {outcome:?}"
+    );
+    assert!(
+        app.pending_action.is_none(),
+        "must not arm idle clear/rewind"
+    );
+    assert_eq!(
+        app.agents[&id].cancel_trigger_hint,
+        Some(crate::app::actions::CancelTrigger::Esc)
+    );
+}
+#[test]
+fn esc_from_prompt_pane_running_compact_vim_mode_is_swallowed() {
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.state = AgentState::CommandRunning {
+        command: crate::app::agent::AgentCommand::Compact,
+        started_at: std::time::Instant::now(),
+    };
+    agent.active_pane = crate::views::agent::ActivePane::Prompt;
+    agent.vim_mode = true;
+    agent.prompt.textarea.set_text("draft while compacting");
+    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "1× Esc while /compact runs must swallow in vim mode, got {outcome:?}"
+    );
+    assert!(app.pending_action.is_none());
+    assert!(app.agents[&id].cancel_trigger_hint.is_none());
+    assert_eq!(
+        app.agents[&id].prompt.textarea.text(),
+        "draft while compacting",
+        "vim mid-compact Esc must not clear the draft or arm idle clear"
+    );
+    assert!(app.agents[&id].session.state.is_compact_running());
+}
+#[test]
 fn esc_cancels_running_wake_turn_while_pane_is_idle() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
@@ -3432,9 +3459,8 @@ fn mouse_send_retires_armed_clear_so_next_esc_swallows() {
     assert!(app.agents[&id].cancel_trigger_hint.is_none());
     assert!(app.pending_action.is_none());
 }
-/// Arm an idle-Esc `ClearPrompt`, submit via `text`-carrying `action` (a
-/// turn-start path with no intervening key), assert the arm was retired, then
-/// with the turn running assert the next Esc swallows (never the stale clear).
+/// Arm an idle-Esc `ClearPrompt`, submit via `text`-carrying `action` (a turn-start path with no intervening key), assert the arm was retired.
+/// Then with the turn running assert the next Esc swallows (never the stale clear).
 fn assert_submit_path_retires_clear_arm(action: Action) {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
@@ -3665,11 +3691,9 @@ fn idle_images_only_double_esc_arms_clear() {
         "an images-only (empty-text) clear records nothing in prompt history"
     );
 }
-/// Scrollback-pane double-Esc, idle + empty prompt + messages: first Esc
-/// arms `RewindShowPicker` silently, second within the TTL opens the
-/// picker. Driven per scrollback nav mode because the routing differs —
-/// vim resolves through `lookup_with_mode(vim=true)`, non-vim adds the
-/// bare-letter forward-to-prompt fallback — and neither may consume Esc.
+/// Scrollback-pane double-Esc, idle, empty prompt, and messages: first Esc arms `RewindShowPicker` silently, second within the TTL opens the picker.
+/// Driven per scrollback nav mode because the routing differs and neither mode may consume Esc.
+/// Vim resolves through `lookup_with_mode(vim=true)`; non-vim adds the bare-letter forward-to-prompt fallback.
 fn assert_scrollback_double_esc_opens_rewind(vim: bool) {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
@@ -3718,12 +3742,10 @@ fn idle_scrollback_pane_double_esc_opens_rewind() {
 fn idle_scrollback_pane_double_esc_opens_rewind_vim_mode() {
     assert_scrollback_double_esc_opens_rewind(true);
 }
-/// From the SCROLLBACK pane an idle Esc with a draft in the (unfocused)
-/// composer arms NOTHING and leaves the draft intact: clear is skipped by
-/// the prompt-pane gate, and rewind is skipped by the global
-/// empty-composer gate even with turns present — never clear or
-/// rewind-stash a draft the reader has scrolled past. The Esc is
-/// swallowed (no pending, no global quit/back-out).
+/// From the SCROLLBACK pane an idle Esc with a draft in the (unfocused) composer arms NOTHING and leaves the draft intact.
+/// Clear is skipped by the prompt-pane gate, and rewind is skipped by the global empty-composer gate even with turns present.
+/// Never clear or rewind-stash a draft the reader has scrolled past.
+/// The Esc is swallowed (no pending, no global quit/back-out).
 #[test]
 fn idle_scrollback_pane_esc_with_draft_and_messages_swallows() {
     let mut app = test_app_with_agent();
@@ -3751,10 +3773,10 @@ fn idle_scrollback_pane_esc_with_draft_and_messages_swallows() {
         "scrollback-pane Esc must leave the composer draft intact"
     );
 }
-/// A pending needs-input overlay blocks the scrollback rewind arm: the
-/// overlay intercepts exempt the scrollback pane, so its Esc reaches the
-/// policy — which must swallow rather than arm a picker that would
-/// key-starve the pending overlay. The overlay must survive the Esc.
+/// A pending needs-input overlay blocks the scrollback rewind arm.
+/// The overlay intercepts exempt the scrollback pane, so its Esc reaches the policy.
+/// The policy must swallow rather than arm a picker that would starve the pending overlay of keys.
+/// The overlay must survive the Esc.
 #[test]
 fn idle_scrollback_pane_esc_with_pending_input_overlay_does_not_arm_rewind() {
     type OverlayInstaller = (&'static str, fn(&mut AgentView));
@@ -3805,8 +3827,9 @@ fn idle_scrollback_pane_esc_with_pending_input_overlay_does_not_arm_rewind() {
         );
     }
 }
-/// A latent Bash/Remember composer mode blocks the scrollback rewind arm: a rewind restore must not drop conversation text into a still-armed
-/// `!` composer. The Esc must swallow WITHOUT exiting the mode: mode exit stays a prompt-pane (step 0e) affordance.
+/// A latent Bash/Remember composer mode blocks the scrollback rewind arm.
+/// A rewind restore must not drop conversation text into a still-armed `!` composer.
+/// The Esc must swallow WITHOUT exiting the mode: mode exit belongs to the prompt pane (step 0e).
 #[test]
 fn idle_scrollback_pane_esc_in_bash_mode_does_not_arm_rewind() {
     let mut app = test_app_with_agent();
@@ -3835,10 +3858,10 @@ fn idle_scrollback_pane_esc_in_bash_mode_does_not_arm_rewind() {
         "scrollback Esc must not exit the composer mode either"
     );
 }
-/// An active prompt history search blocks the scrollback rewind arm — the
-/// step 0b intercept is prompt-pane-only, so a scrollback Esc reaches the
-/// policy while the search overlay is open and must swallow rather than
-/// stack a rewind arm under it. The search must survive the Esc.
+/// An active prompt history search blocks the scrollback rewind arm.
+/// The step 0b intercept is prompt-pane-only, so a scrollback Esc reaches the policy while the search overlay is open.
+/// The policy must swallow rather than stack a rewind arm under the search.
+/// The search must survive the Esc.
 #[test]
 fn idle_scrollback_pane_esc_with_history_search_does_not_arm_rewind() {
     let mut app = test_app_with_agent();
@@ -4209,8 +4232,7 @@ fn authenticating_command_esc_quits() {
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
 }
-/// Regression (user report): 'q' must type into the auth-code input,
-/// not quit.
+/// Regression (user report): 'q' must type into the auth-code input, not quit.
 #[test]
 fn authenticating_loopback_q_types_into_code_input() {
     let mut app = test_app();
@@ -4409,8 +4431,7 @@ fn authenticating_loopback_enter_with_content_submits() {
         other => panic!("expected SubmitAuthCode, got {:?}", other),
     }
 }
-/// A bare `Moved` after a press means the release was lost: the press
-/// must end, never promote into a selection.
+/// A bare `Moved` after a press means the release was lost: the press must end, never promote into a selection.
 #[test]
 fn moved_after_press_ends_gesture_instead_of_promoting() {
     let mut app = test_app_with_agent();
@@ -5019,9 +5040,8 @@ fn dashboard_shortcuts_modal_is_scroll_blocking() {
         "wheel must not reach the background scroll path while the cheatsheet is open",
     );
 }
-/// Ctrl+C on the session-less dashboard arms the quit confirmation
-/// (like the agent view) and a second press confirms. Regression for
-/// "Ctrl+C/D/Q do nothing on the dashboard prompt".
+/// Ctrl+C on the session-less dashboard arms the quit confirmation (like the agent view) and a second press confirms.
+/// Regression for "Ctrl+C/D/Q do nothing on the dashboard prompt".
 #[test]
 fn ctrl_c_on_dashboard_arms_then_confirms_quit() {
     let mut app = test_app();
@@ -5039,8 +5059,7 @@ fn ctrl_c_on_dashboard_arms_then_confirms_quit() {
         "second Ctrl+C must quit, got {outcome:?}"
     );
 }
-/// Ctrl+Q on the dashboard arms quit via the global `When::Always`
-/// lookup (it's not bound to `When::DashboardFocused`).
+/// Ctrl+Q on the dashboard arms quit via the global `When::Always` lookup (it's not bound to `When::DashboardFocused`).
 #[test]
 fn ctrl_q_on_dashboard_arms_quit() {
     let mut app = test_app();
@@ -5053,11 +5072,10 @@ fn ctrl_q_on_dashboard_arms_quit() {
         "Ctrl+Q on the dashboard must arm a pending quit confirmation"
     );
 }
-/// Ctrl+Space on the dashboard resolves to `VoiceToggle` via the global
-/// `When::Always` fallthrough — the dispatch input ignores the chord, so it
-/// falls through to `handle_global_action`. (The event loop intercepts
-/// Ctrl+Space before this for hold-to-talk/toggle when voice is enabled;
-/// this registry route is the cheatsheet/command-palette fallback.)
+/// Ctrl+Space on the dashboard resolves to `VoiceToggle` via the global `When::Always` fallthrough.
+/// The dispatch input ignores the chord, so it falls through to `handle_global_action`.
+/// The event loop intercepts Ctrl+Space before this for hold-to-talk/toggle when voice is enabled.
+/// This registry route is the cheatsheet/command-palette fallback.
 #[test]
 fn ctrl_space_on_dashboard_routes_to_voice_toggle() {
     let mut app = test_app();
@@ -5070,9 +5088,8 @@ fn ctrl_space_on_dashboard_routes_to_voice_toggle() {
         "Ctrl+Space on the dashboard must route to VoiceToggle, got {outcome:?}"
     );
 }
-/// With `[ui].voice_keybind_enabled = false` the global fallthrough must
-/// swallow the chord — otherwise Ctrl+Space would still start dictation via
-/// the registry route whenever the event-loop intercept skips it.
+/// With `[ui].voice_keybind_enabled = false` the global fallthrough must swallow the chord.
+/// Otherwise Ctrl+Space would still start dictation via the registry route whenever the event-loop intercept skips it.
 #[test]
 fn ctrl_space_on_dashboard_ignored_when_keybind_disabled() {
     let mut app = test_app();
@@ -5086,9 +5103,8 @@ fn ctrl_space_on_dashboard_ignored_when_keybind_disabled() {
         "Ctrl+Space must be inert with the voice shortcut disabled, got {outcome:?}"
     );
 }
-/// Esc while voice is recording on the dashboard must STOP voice (route to
-/// `VoiceToggle`) rather than fall into the dashboard's Esc cascade
-/// (clear filter / unfocus / deselect / exit).
+/// Esc while voice is recording on the dashboard must STOP voice (route to `VoiceToggle`).
+/// It must not fall into the dashboard's Esc cascade (clear filter / unfocus / deselect / exit).
 #[test]
 fn esc_on_dashboard_while_listening_stops_voice() {
     let mut app = test_app();
@@ -5106,8 +5122,7 @@ fn esc_on_dashboard_while_listening_stops_voice() {
         "Esc while recording on the dashboard must stop voice, got {outcome:?}"
     );
 }
-/// Esc on the dashboard while NOT recording must keep its normal cascade
-/// behaviour (here: not a `VoiceToggle`).
+/// Esc on the dashboard while NOT recording must keep its normal cascade behaviour (here: not a `VoiceToggle`).
 #[test]
 fn esc_on_dashboard_not_listening_does_not_toggle_voice() {
     let mut app = test_app();
@@ -5121,9 +5136,8 @@ fn esc_on_dashboard_not_listening_does_not_toggle_voice() {
         "Esc must not toggle voice when not recording, got {outcome:?}"
     );
 }
-/// Esc with a voice cold-start still queued (pipeline spawning, mic not yet
-/// open) must cancel it so the event loop doesn't open the mic after the user
-/// backed out — even though `voice_listening` is still false.
+/// Esc with a voice cold-start still queued (pipeline spawning, mic not yet open) must cancel it.
+/// Otherwise the event loop would open the mic after the user backed out, even though `voice_listening` is still false.
 #[test]
 fn esc_cancels_pending_voice_cold_start() {
     let mut app = test_app();
@@ -5145,9 +5159,8 @@ fn esc_cancels_pending_voice_cold_start() {
         "target dropped on cancel"
     );
 }
-/// The dictation overlay must only render on the surface that owns the bound
-/// target. After an explicit stop the interim is kept (`Stopping`) for a
-/// trailing final, so navigating away must not flash it on the wrong box.
+/// The dictation overlay must only render on the surface that owns the bound target.
+/// After an explicit stop the interim is kept (`Stopping`) for a trailing final, so navigating away must not flash it on the wrong box.
 #[test]
 fn voice_overlay_bound_to_target_surface() {
     let id = super::super::agent::AgentId(0);
@@ -5167,12 +5180,10 @@ fn voice_overlay_bound_to_target_surface() {
         "overlay hidden once the user navigates off the target surface"
     );
 }
-/// Entering a session from the dashboard sets `active_view = Agent(id)` but
-/// leaves `attached_agent = Some(id)` as a return breadcrumb. The agent is
-/// fullscreen, so dictation into its prompt must stay on-surface and the
-/// bind-enforcer must not auto-stop it. Regression: recording bar missing
-/// after clicking into a session. (Popup-over-dashboard suppression is
-/// covered by `dispatch::tests::voice_suppressed_while_dashboard_popup_open`.)
+/// Entering a session from the dashboard sets `active_view = Agent(id)` but leaves `attached_agent = Some(id)` as a return breadcrumb.
+/// The agent is fullscreen, so dictation into its prompt must stay on-surface and the bind-enforcer must not auto-stop it.
+/// Regression: recording bar missing after clicking into a session.
+/// (Popup-over-dashboard suppression is covered by `dispatch::tests::voice_suppressed_while_dashboard_popup_open`.)
 #[test]
 fn voice_target_on_agent_entered_from_dashboard() {
     let id = super::super::agent::AgentId(0);
@@ -5192,18 +5203,13 @@ fn voice_target_on_agent_entered_from_dashboard() {
         "entering a session from the dashboard must not auto-stop the mic"
     );
 }
-/// Attach a popup overlay onto a freshly-built `test_app_with_agent`
-/// and return the attached agent id. Convenience for the
-/// popup-handle-input tests.
-/// NOTE: this helper bypasses
-/// `dispatch_dashboard_attach`. The action-dispatcher path
-/// (which sets `attached_agent` via `Action::DashboardAttach(...)`)
-/// is pinned by tests in `dispatch.rs`
-/// (`dashboard_attach_top_level_opens_popup_overlay`,
-/// `dashboard_attach_subagent_opens_popup_with_subagent`).
-/// `attach_popup` exists so the `handle_input`/`dispatch_scroll`
-/// tests in this file can stand up a popup'd state in two lines
-/// without re-exercising the dispatcher each time.
+/// Attach a popup overlay onto a freshly-built `test_app_with_agent` and return the attached agent id.
+/// Convenience for the popup-handle-input tests.
+/// NOTE: this helper bypasses `dispatch_dashboard_attach`.
+/// The action-dispatcher path (which sets `attached_agent` via `Action::DashboardAttach(...)`) is pinned by tests in `dispatch.rs`.
+/// (`dashboard_attach_top_level_opens_popup_overlay`, `dashboard_attach_subagent_opens_popup_with_subagent`.)
+/// `attach_popup` exists so the `handle_input`/`dispatch_scroll` tests in this file can stand up a popup'd state in two lines.
+/// It avoids re-exercising the dispatcher each time.
 fn attach_popup(app: &mut AppView) -> super::super::agent::AgentId {
     app.active_view = ActiveView::AgentDashboard;
     let id = super::super::agent::AgentId(0);
@@ -5214,9 +5220,7 @@ fn attach_popup(app: &mut AppView) -> super::super::agent::AgentId {
     }
     id
 }
-/// Esc keystroke closes the popup at the
-/// `AppView::handle_input` layer (not the dispatch layer the
-/// other tests exercise).
+/// Esc keystroke closes the popup at the `AppView::handle_input` layer (not the dispatch layer the other tests exercise).
 #[test]
 fn handle_input_esc_closes_popup_overlay() {
     let mut app = test_app_with_agent();
@@ -5226,13 +5230,10 @@ fn handle_input_esc_closes_popup_overlay() {
     assert!(matches!(outcome, InputOutcome::Changed));
     assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, None);
 }
-/// Esc on a neutral overlay (scrollback focused, no modals
-/// or viewers, no text selection or link highlight, no
-/// question / goal / rewind / permission overlays) closes the
-/// dashboard session overlay — mirrors the `q` shortcut and
-/// gives users a single-key back-out from agent detail to
-/// the dashboard. The Esc cascade is preserved for non-
-/// neutral states: see `overlay_esc_passes_through_when_*`.
+/// Esc on a neutral overlay closes the dashboard session overlay.
+/// (Neutral: scrollback focused, no modals or viewers, no text selection or link highlight, no question / goal / rewind / permission overlays.)
+/// This mirrors the `q` shortcut and gives users a single-key back-out from agent detail to the dashboard.
+/// The Esc cascade is preserved for non-neutral states: see `overlay_esc_passes_through_when_*`.
 #[test]
 fn overlay_esc_exits_when_agent_is_neutral() {
     let mut app = test_app_with_agent();
@@ -5248,10 +5249,8 @@ fn overlay_esc_exits_when_agent_is_neutral() {
         "Esc on a neutral overlay must request DashboardOverlayExit, got {outcome:?}",
     );
 }
-/// In a dashboard overlay an empty, Normal-mode prompt-focused Esc backs
-/// out to the dashboard (attach lands on Prompt
-/// focus, so without this Esc would silently arm the agent's rewind policy
-/// instead of returning to the list).
+/// In a dashboard overlay an empty, Normal-mode prompt-focused Esc backs out to the dashboard.
+/// (Attach lands on Prompt focus, so without this Esc would silently arm the agent's rewind policy instead of returning to the list.)
 #[test]
 fn overlay_esc_backs_out_when_empty_normal_prompt() {
     let mut app = test_app_with_agent();
@@ -5271,8 +5270,7 @@ fn overlay_esc_backs_out_when_empty_normal_prompt() {
     );
     assert!(app.pending_action.is_none());
 }
-/// Overlay + open `/btw` + empty Normal prompt: Esc dismisses `/btw`, not
-/// dashboard back-out; a follow-up Esc still exits when the guard holds.
+/// Overlay with `/btw` open and an empty Normal prompt: Esc dismisses `/btw`, not dashboard back-out; a second Esc still exits when the guard holds.
 #[test]
 fn overlay_esc_dismisses_btw_before_dashboard_backout() {
     let mut app = test_app_with_agent();
@@ -5300,10 +5298,9 @@ fn overlay_esc_dismisses_btw_before_dashboard_backout() {
         "second Esc with no /btw must back out to the dashboard, got {second:?}",
     );
 }
-/// Regression: in an overlay, a bare Esc while a turn is
-/// RUNNING must swallow (matching full-screen vim mode), NOT detach to the
-/// dashboard and NOT cancel. The empty-prompt back-out is idle-gated, so Esc
-/// falls through to `try_handle_esc_policy` → mid-turn swallow.
+/// Regression: in an overlay, a bare Esc while a turn is RUNNING must swallow (matching full-screen vim mode).
+/// It must NOT detach to the dashboard and NOT cancel.
+/// The empty-prompt back-out is idle-gated, so Esc falls through to `try_handle_esc_policy` and the mid-turn swallow.
 #[test]
 fn overlay_esc_running_turn_empty_prompt_swallows_not_backout() {
     let mut app = test_app_with_agent();
@@ -5334,10 +5331,9 @@ fn overlay_esc_running_turn_empty_prompt_swallows_not_backout() {
     assert!(app.agents[&id].cancel_trigger_hint.is_none());
     assert!(app.pending_action.is_none());
 }
-/// Regression: in an overlay, a bare Esc from the
-/// (neutral) bare-scrollback pane while a turn is RUNNING must swallow, NOT
-/// detach — the neutral back-out is idle-gated. The fixture is otherwise
-/// neutral (so the gate, not a missing-neutral, is what suppresses detach).
+/// Regression: in an overlay, a bare Esc from the (neutral) bare-scrollback pane while a turn is RUNNING must swallow, NOT detach.
+/// The neutral back-out is idle-gated.
+/// The fixture is otherwise neutral (so the gate, not a missing-neutral, is what suppresses detach).
 #[test]
 fn overlay_esc_running_turn_scrollback_swallows_not_backout() {
     let mut app = test_app_with_agent();
@@ -5368,8 +5364,7 @@ fn overlay_esc_running_turn_scrollback_swallows_not_backout() {
     );
     assert!(app.agents[&id].cancel_trigger_hint.is_none());
 }
-/// Overlay + non-vim: mid-turn Esc CANCELS (matching full-screen), and
-/// still must not detach to the dashboard.
+/// Overlay in non-vim mode: mid-turn Esc CANCELS (matching full-screen), and still must not detach to the dashboard.
 #[test]
 fn overlay_esc_running_turn_non_vim_cancels_not_backout() {
     let mut app = test_app_with_agent();
@@ -5415,7 +5410,7 @@ fn overlay_esc_wake_turn_scrollback_does_not_backout() {
         "vim-mode wake Esc must swallow, not detach, got {outcome:?}",
     );
 }
-/// Overlay + TurnCancelling: Esc retries cancel (does not detach).
+/// Overlay while TurnCancelling: Esc retries cancel (does not detach).
 #[test]
 fn overlay_esc_cancelling_scrollback_retries_cancel_not_backout() {
     let mut app = test_app_with_agent();
@@ -5439,9 +5434,8 @@ fn overlay_esc_cancelling_scrollback_retries_cancel_not_backout() {
         "Esc must not detach while cancelling",
     );
 }
-/// Counterpart to the back-out: a NON-EMPTY draft Esc in an overlay must
-/// pass through to the agent's policy (arms "press again to clear"), never
-/// back out — so the user doesn't lose a draft by reaching for the dashboard.
+/// Counterpart to the back-out: a NON-EMPTY draft Esc in an overlay must pass through to the agent's policy (arms "press again to clear").
+/// It must never back out, so the user doesn't lose a draft by reaching for the dashboard.
 #[test]
 fn overlay_esc_with_draft_arms_clear_not_backout() {
     let mut app = test_app_with_agent();
@@ -5462,8 +5456,8 @@ fn overlay_esc_with_draft_arms_clear_not_backout() {
     let pending = app.pending_action.as_ref().expect("clear arm");
     assert_eq!(pending.label, Some("clear"));
 }
-/// A Bash/Remember empty prompt keeps Esc as its mode-exit even in an overlay: the back-out is gated to `PromptInputMode::Normal`, so the
-/// special-mode Esc is not stolen as a dashboard back-out.
+/// A Bash/Remember empty prompt keeps Esc as its mode-exit even in an overlay.
+/// The back-out is gated to `PromptInputMode::Normal`, so the special-mode Esc is not stolen as a dashboard back-out.
 #[test]
 fn overlay_esc_in_bash_mode_exits_mode_not_backout() {
     let mut app = test_app_with_agent();
@@ -5487,9 +5481,8 @@ fn overlay_esc_in_bash_mode_exits_mode_not_backout() {
         "Esc must have exited bash mode",
     );
 }
-/// A live highlighted link consumes Esc (the agent's scrollback
-/// handler clears it). We mustn't pre-empt that — the overlay
-/// closes only after the per-pane Esc work is drained.
+/// A live highlighted link consumes Esc (the agent's scrollback handler clears it).
+/// We mustn't pre-empt that: the overlay closes only after the per-pane Esc work is drained.
 #[test]
 fn overlay_esc_passes_through_when_link_highlight_present() {
     let mut app = test_app_with_agent();
@@ -5527,9 +5520,8 @@ fn open_agents_modal() -> crate::views::agents_modal::AgentsModalState {
         None,
     )
 }
-/// With a pending input overlay, neither `q` nor `Esc` is consumed as a
-/// dashboard-overlay exit — both fall through to the agent (the scrollback
-/// handler, not the overlay handler).
+/// With a pending input overlay, neither `q` nor `Esc` is consumed as a dashboard-overlay exit.
+/// Both fall through to the agent (the scrollback handler, not the overlay handler).
 #[test]
 fn overlay_q_esc_do_not_exit_while_input_overlay_pending() {
     let installers: [fn(&mut AgentView); 2] = [
@@ -5584,9 +5576,8 @@ fn overlay_q_esc_do_not_exit_while_input_overlay_pending() {
         }
     }
 }
-/// Left arrow on an empty, prompt-focused overlay backs out to the
-/// dashboard — the mirror of the dashboard's Right-arrow "open
-/// detail". Requires the prompt to be focused with an empty buffer.
+/// Left arrow on an empty, prompt-focused overlay backs out to the dashboard, the mirror of the dashboard's Right-arrow "open detail".
+/// Requires the prompt to be focused with an empty buffer.
 #[test]
 fn overlay_left_arrow_empty_prompt_exits_to_dashboard() {
     let (mut app, id) = neutral_overlay_app();
@@ -5597,8 +5588,8 @@ fn overlay_left_arrow_empty_prompt_exits_to_dashboard() {
         "Left on an empty focused prompt must exit the overlay, got {outcome:?}",
     );
 }
-/// `/gboom` is opened from an empty prompt — the exact state where the
-/// dashboard overlay steals Left/Esc as back-out. Both must reach the game.
+/// `/gboom` is opened from an empty prompt, the exact state where the dashboard overlay steals Left/Esc as back-out.
+/// Both must reach the game.
 #[test]
 fn overlay_gboom_owns_left_and_esc() {
     let (mut app, id) = neutral_overlay_app();
@@ -5626,9 +5617,8 @@ fn overlay_gboom_owns_left_and_esc() {
         "Esc should close /gboom",
     );
 }
-/// Left arrow with an active prompt history search (empty draft) is NOT
-/// an overlay exit — the search owns the key (Left moves its query caret),
-/// so it must reach the agent rather than backing out to the dashboard.
+/// Left arrow with an active prompt history search (empty draft) is NOT an overlay exit.
+/// The search owns the key (Left moves its query caret), so it must reach the agent rather than backing out to the dashboard.
 #[test]
 fn overlay_left_arrow_history_search_active_does_not_exit() {
     let (mut app, id) = neutral_overlay_app();
@@ -5647,11 +5637,9 @@ fn overlay_left_arrow_history_search_active_does_not_exit() {
         "Left with an active history search must reach the agent, got {outcome:?}",
     );
 }
-/// Left arrow with the `@` file-search dropdown open is NOT an overlay exit
-/// — the prompt widget owns picker nav (Right drills in, Up/Down move the
-/// selection), so the key must reach the agent rather than backing out. In
-/// production an open dropdown implies a non-empty draft (the `@` token);
-/// we force the decoupled state to isolate the explicit file-search guard.
+/// Left arrow with the `@` file-search dropdown open is NOT an overlay exit.
+/// The prompt widget owns picker nav (Right drills in, Up/Down move the selection), so the key must reach the agent rather than backing out.
+/// In production an open dropdown implies a non-empty draft (the `@` token); we force the decoupled state to isolate the explicit file-search guard.
 #[test]
 fn overlay_left_arrow_file_search_open_does_not_exit() {
     let (mut app, id) = neutral_overlay_app();
@@ -5688,9 +5676,8 @@ fn overlay_left_arrow_file_search_open_does_not_exit() {
         "Left with the @ dropdown open must reach the agent, got {outcome:?}",
     );
 }
-/// Left arrow with a non-empty prompt draft is NOT an overlay exit —
-/// it falls through to the prompt so it moves the caret within the
-/// text rather than closing the agent detail.
+/// Left arrow with a non-empty prompt draft is NOT an overlay exit.
+/// It falls through to the prompt so it moves the caret within the text rather than closing the agent detail.
 #[test]
 fn overlay_left_arrow_with_draft_does_not_exit() {
     let (mut app, id) = neutral_overlay_app();
@@ -5705,9 +5692,8 @@ fn overlay_left_arrow_with_draft_does_not_exit() {
         "Left with a non-empty prompt must NOT exit the overlay, got {outcome:?}",
     );
 }
-/// Left arrow while the scrollback pane is focused is NOT an overlay
-/// exit — it must reach the agent so the scrollback's `Left=collapse`
-/// binding keeps working (the back-out is prompt-only).
+/// Left arrow while the scrollback pane is focused is NOT an overlay exit.
+/// It must reach the agent so the scrollback's `Left=collapse` binding keeps working (the back-out is prompt-only).
 #[test]
 fn overlay_left_arrow_in_scrollback_does_not_exit() {
     let (mut app, _id) = neutral_overlay_app();
@@ -5717,10 +5703,9 @@ fn overlay_left_arrow_in_scrollback_does_not_exit() {
         "Left in scrollback must reach the agent, got {outcome:?}",
     );
 }
-/// An open modal (extensions, `/agents`, persona detail, block viewer, or
-/// `active_modal`) makes `is_empty_focused_prompt` false even on an empty,
-/// prompt-focused composer, so the modal — not the overlay back-out — owns
-/// Esc/Left.
+/// An open modal makes `is_empty_focused_prompt` false even on an empty, prompt-focused composer.
+/// (Extensions, `/agents`, persona detail, block viewer, or `active_modal`.)
+/// The modal, not the overlay back-out, then owns Esc/Left.
 #[test]
 fn overlay_open_modal_fails_empty_focused_prompt_guard() {
     let (mut app, id) = neutral_overlay_app();
@@ -5774,10 +5759,9 @@ fn overlay_open_modal_fails_empty_focused_prompt_guard() {
         "clearing the modals restores the guard",
     );
 }
-/// With an agent attached (dashboard overlay) and the extensions modal
-/// open on the Prompt pane, Esc/Left must reach the modal rather than
-/// backing out to the dashboard. Esc closes the modal; Left folds /
-/// is consumed by the modal — neither yields `DashboardOverlayExit`.
+/// With an agent attached (dashboard overlay) and the extensions modal open on the Prompt pane, Esc/Left must reach the modal.
+/// They must not back out to the dashboard.
+/// Esc closes the modal; Left folds or is consumed by the modal; neither yields `DashboardOverlayExit`.
 #[test]
 fn overlay_modal_open_esc_left_do_not_exit() {
     let (mut app, id) = neutral_overlay_app();
@@ -5867,9 +5851,8 @@ fn overlay_modal_open_esc_left_do_not_exit() {
         "Left must reach the agents modal, keeping it open",
     );
 }
-/// `/agents` open on a scrollback-focused overlay must own Esc (close the
-/// modal) rather than the neutral-scrollback overlay exit. `is_bare_scrollback`
-/// used to omit `agents_modal`, so this path looped dashboard ↔ conversation.
+/// `/agents` open on a scrollback-focused overlay must own Esc (close the modal) rather than the neutral-scrollback overlay exit.
+/// `is_bare_scrollback` used to omit `agents_modal`, so this path looped between the dashboard and the conversation.
 #[test]
 fn overlay_agents_modal_owns_esc_from_scrollback() {
     let (mut app, id) = neutral_overlay_app();
@@ -5901,11 +5884,9 @@ fn overlay_agents_modal_owns_esc_from_scrollback() {
         "closing /agents must leave the dashboard overlay attached",
     );
 }
-/// The graduated plan/Q&A back-out also defers to an open modal: with a
-/// single-question Q&A overlay at its back-out top AND a modal open, both
-/// `overlay_esc_backs_out` and `overlay_left_backs_out` return false (a modal
-/// and a question view can coexist when the ACP handler installs the overlay
-/// without closing the modal).
+/// The graduated plan/Q&A back-out also defers to an open modal.
+/// With a single-question Q&A overlay at its back-out top AND a modal open, both `overlay_esc_backs_out` and `overlay_left_backs_out` return false.
+/// (A modal and a question view can coexist when the ACP handler installs the overlay without closing the modal.)
 #[test]
 fn graduated_back_out_defers_to_open_modal() {
     let (mut app, id) = neutral_overlay_app();
@@ -5952,9 +5933,7 @@ fn graduated_back_out_defers_to_open_modal() {
         );
     }
 }
-/// Install a plan-approval overlay on the agent and put it in the
-/// "focused dashboard overlay, prompt pane" state the graduated
-/// back-out cares about.
+/// Install a plan-approval overlay on the agent and put it in the "focused dashboard overlay, prompt pane" state the graduated back-out cares about.
 fn install_plan_overlay(app: &mut AppView, id: super::super::agent::AgentId) {
     let a = app.agents.get_mut(&id).unwrap();
     a.in_dashboard_overlay = true;
@@ -5980,8 +5959,7 @@ fn install_plan_overlay(app: &mut AppView, id: super::super::agent::AgentId) {
     view.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
     a.plan_approval_view = Some(view);
 }
-/// Install a Q&A overlay with `n_questions` single-select questions,
-/// focused in the dashboard overlay's Navigation surface.
+/// Install a Q&A overlay with `n_questions` single-select questions, focused in the dashboard overlay's Navigation surface.
 fn install_question_overlay(
     app: &mut AppView,
     id: super::super::agent::AgentId,
@@ -6013,9 +5991,8 @@ fn install_question_overlay(
         crate::views::prompt_widget::StashedPrompt::default(),
     ));
 }
-/// Graduated back-out: at the plan feedback top state (empty prompt,
-/// no pending comment) a bare Esc returns to the dashboard, leaving
-/// the plan overlay pending (no approve / reject is sent).
+/// Graduated back-out: at the plan feedback top state (empty prompt, no pending comment) a bare Esc returns to the dashboard.
+/// It leaves the plan overlay pending (no approve / reject is sent).
 #[test]
 fn overlay_esc_exits_at_plan_top_state() {
     let (mut app, id) = neutral_overlay_app();
@@ -6030,8 +6007,7 @@ fn overlay_esc_exits_at_plan_top_state() {
         "backing out must leave the plan overlay pending (unanswered)",
     );
 }
-/// A typed feedback draft is NOT a top state — Esc keeps its
-/// in-overlay meaning so the draft isn't lost to an accidental exit.
+/// A typed feedback draft is NOT a top state: Esc keeps its in-overlay meaning so the draft isn't lost to an accidental exit.
 #[test]
 fn overlay_esc_does_not_exit_with_plan_draft() {
     let (mut app, id) = neutral_overlay_app();
@@ -6043,9 +6019,8 @@ fn overlay_esc_does_not_exit_with_plan_draft() {
         "Esc with a plan feedback draft must NOT back out, got {outcome:?}",
     );
 }
-/// Graduated back-out: in the Q&A Navigation surface with nothing
-/// selected, a bare Esc (whose only job there is to unselect) backs
-/// out to the dashboard instead of dead-ending.
+/// Graduated back-out: in the Q&A Navigation surface with nothing selected, a bare Esc backs out to the dashboard instead of dead-ending.
+/// (Its only job there is to unselect.)
 #[test]
 fn overlay_esc_exits_when_question_nav_unselected() {
     let (mut app, id) = neutral_overlay_app();
@@ -6060,10 +6035,9 @@ fn overlay_esc_exits_when_question_nav_unselected() {
         "backing out must leave the question overlay pending",
     );
 }
-/// Multi-question Q&A: on question 2+ a bare `Esc` must NOT back out — the
-/// flow isn't at its top, so `Esc` stays in-flow (the question view handles
-/// it) and `Left` can still walk back. Only `active_tab == 0` is the
-/// back-out top.
+/// Multi-question Q&A: on question 2+ a bare `Esc` must NOT back out.
+/// The flow isn't at its top, so `Esc` stays in-flow (the question view handles it) and `Left` can still walk back.
+/// Only `active_tab == 0` is the back-out top.
 #[test]
 fn overlay_esc_does_not_exit_on_later_multi_question() {
     let (mut app, id) = neutral_overlay_app();
@@ -6092,8 +6066,7 @@ fn overlay_esc_does_not_exit_on_later_multi_question() {
         "Esc on question 2+ of a multi-question Q&A must stay in-flow, got {outcome:?}",
     );
 }
-/// ...but from question 1 (the top of a multi-question flow) with nothing
-/// selected, a bare `Esc` still backs out, leaving the Q&A pending.
+/// ...but from question 1 (the top of a multi-question flow) with nothing selected, a bare `Esc` still backs out, leaving the Q&A pending.
 #[test]
 fn overlay_esc_exits_at_first_multi_question() {
     let (mut app, id) = neutral_overlay_app();
@@ -6108,9 +6081,7 @@ fn overlay_esc_exits_at_first_multi_question() {
         "backing out must leave the question overlay pending",
     );
 }
-/// With an option selected, Esc has something to clear — it must NOT
-/// back out (the first Esc unselects; a second, now-unselected Esc
-/// would exit).
+/// With an option selected, Esc has something to clear, so it must NOT back out (the first Esc unselects; a second, now-unselected Esc would exit).
 #[test]
 fn overlay_esc_does_not_exit_when_question_option_selected() {
     let (mut app, id) = neutral_overlay_app();
@@ -6128,9 +6099,8 @@ fn overlay_esc_does_not_exit_when_question_option_selected() {
         "Esc with a selection must unselect first, not back out, got {outcome:?}",
     );
 }
-/// Left backs out of a single-question Q&A (Left has no prev question
-/// to step to), but with multiple questions Left switches question
-/// and must NOT exit.
+/// Left backs out of a single-question Q&A (Left has no prev question to step to).
+/// With multiple questions Left switches question and must NOT exit.
 #[test]
 fn overlay_left_exits_single_question_only() {
     let (mut app, id) = neutral_overlay_app();
@@ -6148,12 +6118,10 @@ fn overlay_left_exits_single_question_only() {
         "Left in a multi-question Q&A must switch question, not back out, got {multi:?}",
     );
 }
-/// Single-question Q&A back-out is key-specific: `Left` has no in-overlay
-/// behaviour there (only multi-question `Left` switches questions; `Esc`
-/// owns unselect), so a bare `Left` backs out even with an option selected.
-/// The exit is non-destructive — the Q&A and its selection stay pending — so
-/// nothing is lost. (Esc stays graduated, clearing the selection first: see
-/// `overlay_esc_does_not_exit_when_question_option_selected`.)
+/// Single-question Q&A back-out is key-specific: `Left` has no in-overlay behaviour there, so a bare `Left` backs out even with an option selected.
+/// (Only multi-question `Left` switches questions; `Esc` owns unselect.)
+/// The exit is non-destructive (the Q&A and its selection stay pending), so nothing is lost.
+/// (Esc stays graduated, clearing the selection first: see `overlay_esc_does_not_exit_when_question_option_selected`.)
 #[test]
 fn overlay_left_exits_single_question_with_selection() {
     let (mut app, id) = neutral_overlay_app();
@@ -6191,11 +6159,9 @@ fn overlay_left_exits_single_question_with_selection() {
         "the selection must survive the back-out (Q&A still pending)",
     );
 }
-/// Install a plan-approval overlay showing the plan in the line
-/// viewer (`Preview` focus) — the default shape when the plan has
-/// content (`acp_handler` opens the preview). This is the state the
-/// user reported as stuck: `Esc` / `Left` are dead no-ops in the
-/// plan line viewer.
+/// Install a plan-approval overlay showing the plan in the line viewer (`Preview` focus).
+/// That is the default shape when the plan has content (`acp_handler` opens the preview).
+/// This is the state the user reported as stuck: `Esc` / `Left` are dead no-ops in the plan line viewer.
 fn install_plan_preview_overlay(app: &mut AppView, id: super::super::agent::AgentId) {
     let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
         session_id: "s".into(),
@@ -6216,9 +6182,8 @@ fn install_plan_preview_overlay(app: &mut AppView, id: super::super::agent::Agen
         "fixture must open the plan line viewer",
     );
 }
-/// Regression for the reported bug: in plan approval shown via the
-/// line viewer (the common case), Esc was a dead no-op. It must now
-/// back out to the dashboard, leaving the plan pending (unanswered).
+/// Regression for the reported bug: in plan approval shown via the line viewer (the common case), Esc was a dead no-op.
+/// It must now back out to the dashboard, leaving the plan pending (unanswered).
 #[test]
 fn overlay_esc_exits_at_plan_preview() {
     let (mut app, id) = neutral_overlay_app();
@@ -6233,8 +6198,7 @@ fn overlay_esc_exits_at_plan_preview() {
         "backing out must leave the plan overlay pending (unanswered)",
     );
 }
-/// Left is likewise a no-op in the plan line viewer (the list pane
-/// ignores it), so it backs out too.
+/// Left is likewise a no-op in the plan line viewer (the list pane ignores it), so it backs out too.
 #[test]
 fn overlay_left_exits_at_plan_preview() {
     let (mut app, id) = neutral_overlay_app();
@@ -6245,10 +6209,9 @@ fn overlay_left_exits_at_plan_preview() {
         "Left in the plan line-viewer preview must back out, got {outcome:?}",
     );
 }
-/// Backing out of the plan preview is non-destructive: dispatching the
-/// resulting `DashboardOverlayExit` switches to the dashboard but
-/// leaves BOTH the plan-approval view and its line-viewer preview
-/// intact, so re-opening the agent shows the plan exactly as before.
+/// Backing out of the plan preview is non-destructive.
+/// Dispatching the resulting `DashboardOverlayExit` switches to the dashboard.
+/// It leaves BOTH the plan-approval view and its line-viewer preview intact, so re-opening the agent shows the plan exactly as before.
 #[test]
 fn overlay_exit_from_plan_preview_keeps_preview_intact() {
     let (mut app, id) = neutral_overlay_app();
@@ -6272,8 +6235,7 @@ fn overlay_exit_from_plan_preview_keeps_preview_intact() {
         "the plan line-viewer preview must survive the back-out",
     );
 }
-/// Graduated: while a visual selection is active in the plan viewer,
-/// Esc must clear it first (reach the viewer) rather than backing out.
+/// Graduated: while a visual selection is active in the plan viewer, Esc must clear it first (reach the viewer) rather than backing out.
 #[test]
 fn overlay_esc_does_not_exit_plan_preview_in_visual_mode() {
     let (mut app, id) = neutral_overlay_app();
@@ -6292,10 +6254,8 @@ fn overlay_esc_does_not_exit_plan_preview_in_visual_mode() {
         "Esc with an active visual selection must reach the viewer, got {outcome:?}",
     );
 }
-/// Graduated: while an accepted search matcher is active in the plan
-/// viewer (input bar closed, filter still applied), the first Esc must
-/// clear it (reach the viewer) rather than backing out; only once it's
-/// cleared does Esc exit to the dashboard.
+/// Graduated: while an accepted search matcher is active in the plan viewer (input bar closed, filter still applied), the first Esc must clear it.
+/// It reaches the viewer rather than backing out; only once the matcher is cleared does Esc exit to the dashboard.
 #[test]
 fn overlay_esc_clears_matcher_before_exiting_plan_preview() {
     use crate::views::list_pane::{ListMatcher, MatchMode, QueryKind};
@@ -6336,10 +6296,8 @@ fn overlay_esc_clears_matcher_before_exiting_plan_preview() {
         "once the matcher is cleared, Esc must back out, got {outcome2:?}",
     );
 }
-/// Overlay Ctrl+X on an agent with a RUNNING turn — routes to the
-/// agent view's existing cancel behaviour (`Action::CancelTurn`,
-/// same as Ctrl+C) and never arms the close confirm: mashing
-/// Ctrl+X to stop a turn must not be able to close the session.
+/// Overlay Ctrl+X on an agent with a RUNNING turn routes to the agent view's existing cancel (`Action::CancelTurn`, same as Ctrl+C).
+/// It never arms the close confirm: mashing Ctrl+X to stop a turn must not be able to close the session.
 #[test]
 fn overlay_ctrl_x_busy_agent_cancels_turn_without_arming() {
     let (mut app, id) = neutral_overlay_app();
@@ -6379,10 +6337,8 @@ fn overlay_ctrl_x_compact_running_cancels_without_arming() {
         "Ctrl+X during /compact must not arm close confirm",
     );
 }
-/// Overlay Ctrl+X on a non-turn busy agent (command in flight,
-/// cancel pending) — `Action::CancelTurn` would no-op for these
-/// states, so the press arms the two-press close instead of
-/// being a dead key.
+/// Overlay Ctrl+X on a non-turn busy agent (command in flight, cancel pending) arms the two-press close instead of being a dead key.
+/// `Action::CancelTurn` would no-op for these states.
 #[test]
 fn overlay_ctrl_x_command_or_cancelling_agent_arms_close_confirm() {
     use crate::app::agent::{AgentCommand, AgentState};
@@ -6408,10 +6364,8 @@ fn overlay_ctrl_x_command_or_cancelling_agent_arms_close_confirm() {
         );
     }
 }
-/// Overlay Ctrl+X on an IDLE agent — arms the two-press close
-/// confirm (`pending_action` = `DashboardOverlayStop` so the
-/// shortcuts bar paints "press again to close this session");
-/// there is no turn to cancel.
+/// Overlay Ctrl+X on an IDLE agent arms the two-press close confirm; there is no turn to cancel.
+/// (`pending_action` = `DashboardOverlayStop` so the shortcuts bar paints "press again to close this session".)
 #[test]
 fn overlay_ctrl_x_idle_agent_arms_close_confirm() {
     let (mut app, _id) = neutral_overlay_app();
@@ -6435,9 +6389,8 @@ fn overlay_ctrl_x_idle_agent_arms_close_confirm() {
         "no CancelTurn for an idle agent",
     );
 }
-/// Overlay Ctrl+X, second press inside the confirm window — the
-/// pending-action fast path consumes the key and fires
-/// `Action::DashboardOverlayStop` (close + back to dashboard).
+/// Overlay Ctrl+X, second press inside the confirm window: the pending-action fast path consumes the key.
+/// It fires `Action::DashboardOverlayStop` (close and back to dashboard).
 #[test]
 fn overlay_ctrl_x_second_press_fires_overlay_stop() {
     let (mut app, _id) = neutral_overlay_app();
@@ -6453,10 +6406,8 @@ fn overlay_ctrl_x_second_press_fires_overlay_stop() {
         "firing must consume the pending confirm",
     );
 }
-/// Overlay Ctrl+X then ANY other key — the pending-action fast
-/// path disarms the confirm (the dashboard's stop-confirm
-/// semantics: any other press cancels), and the other key is
-/// still processed normally.
+/// Overlay Ctrl+X then ANY other key: the pending-action fast path disarms the confirm, and the other key is still processed normally.
+/// (The dashboard's stop-confirm rule: any other press cancels.)
 #[test]
 fn overlay_ctrl_x_other_key_disarms_confirm() {
     let (mut app, _id) = neutral_overlay_app();
@@ -6473,9 +6424,8 @@ fn overlay_ctrl_x_other_key_disarms_confirm() {
         "Ctrl+X after a disarm must re-arm, not fire, got {outcome:?}",
     );
 }
-/// OUTSIDE the overlay (a plain agent view, no dashboard attach),
-/// Ctrl+X must keep its existing agent-screen behaviour — the
-/// overlay stop binding lives in `When::DashboardOverlay` only.
+/// OUTSIDE the overlay (a plain agent view, no dashboard attach), Ctrl+X must keep its existing agent-screen behaviour.
+/// The overlay stop binding lives in `When::DashboardOverlay` only.
 #[test]
 fn plain_agent_ctrl_x_does_not_arm_overlay_stop() {
     let mut app = test_app_with_agent();
@@ -6522,10 +6472,8 @@ fn handle_input_clears_stale_attached_agent_on_input() {
         "stale attached_agent must be cleared on input",
     );
 }
-/// Click on the popup's `[✗]` close affordance
-/// closes the popup. The close-rect is registered into
-/// `state.popup_close_rect` by the renderer; we set it
-/// directly here since this test doesn't run a render pass.
+/// Click on the popup's `[✗]` close button closes the popup.
+/// The close-rect is registered into `state.popup_close_rect` by the renderer; we set it directly here since this test doesn't run a render pass.
 #[test]
 fn handle_input_mouse_click_on_close_affordance_closes_popup() {
     let mut app = test_app_with_agent();
@@ -6544,9 +6492,7 @@ fn handle_input_mouse_click_on_close_affordance_closes_popup() {
     assert!(matches!(outcome, InputOutcome::Changed));
     assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, None);
 }
-/// A click on a dashboard row outside the popup's
-/// outer rect dispatches `DashboardAttach(clicked_row)` so the
-/// popup target switches.
+/// A click on a dashboard row outside the popup's outer rect dispatches `DashboardAttach(clicked_row)` so the popup target switches.
 #[test]
 fn handle_input_mouse_click_outside_popup_on_row_switches_target() {
     let mut app = test_app_with_agent();
@@ -6572,11 +6518,9 @@ fn handle_input_mouse_click_outside_popup_on_row_switches_target() {
         other => panic!("expected DashboardAttach, got {other:?}"),
     }
 }
-/// Scroll routing through the popup
-/// overlay. A scroll inside `popup_outer_rect` must NOT advance
-/// the dashboard's `viewport_offset` (it forwards to the
-/// attached agent). A scroll outside the popup falls through to
-/// the dashboard list pane and DOES advance `viewport_offset`.
+/// Scroll routing through the popup overlay.
+/// A scroll inside `popup_outer_rect` must NOT advance the dashboard's `viewport_offset` (it forwards to the attached agent).
+/// A scroll outside the popup falls through to the dashboard list pane and DOES advance `viewport_offset`.
 #[test]
 fn handle_input_scroll_inside_popup_forwards_to_agent() {
     let mut app = test_app_with_agent();
@@ -6603,14 +6547,10 @@ fn handle_input_scroll_inside_popup_forwards_to_agent() {
         "scroll outside popup must advance the dashboard viewport",
     );
 }
-/// When the attached agent emits
-/// `Action::ExitSession` (via the synchronous outcome path,
-/// e.g. user presses the keybind for ExitSession inside the
-/// popup), the popup is closed but the agent stays in
-/// `app.agents`. The `/exit` slash command takes a different
-/// path (emits an effect) — see the user-guide for the
-/// asymmetry; this test pins only the synchronous-outcome
-/// branch.
+/// When the attached agent emits `Action::ExitSession` via the synchronous outcome path, the popup is closed but the agent stays in `app.agents`.
+/// (E.g. the user presses the keybind for ExitSession inside the popup.)
+/// The `/exit` slash command takes a different path (emits an effect); see the user-guide for the asymmetry.
+/// This test pins only the synchronous-outcome branch.
 ///
 /// We can't easily synthesize an `ExitSession` from
 /// `agent.handle_input` without a real prompt event sequence,

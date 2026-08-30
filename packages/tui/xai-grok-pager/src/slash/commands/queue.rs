@@ -1,32 +1,21 @@
-//! `/queue` -- list the queued prompts as a committed system block.
+//! `/queue` lists the queued prompts as a committed system block.
 //!
-//! Minimal mode has no interactive `QueuePane`, so `/queue` is the way to
-//! inspect what's waiting behind the running turn. It works in every
-//! render mode. The dispatcher (`dispatch_show_queue`) reads the merged
-//! server + local queue and commits a read-only list; editing the queue is
-//! out of scope here (use the queue pane in the full TUI).
+//! Minimal mode has no interactive `QueuePane`, so `/queue` is the way to inspect what's waiting behind the running turn.
+//! It works in every render mode.
+//! The dispatcher (`dispatch_show_queue`) reads the merged server and local queue and commits a read-only list.
+//! Editing the queue is out of scope here (use the queue pane in the full TUI).
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
-/// List the queued prompts.
 pub struct QueueCommand;
 
 impl SlashCommand for QueueCommand {
-    fn name(&self) -> &str {
-        "queue"
-    }
-
-    fn description(&self) -> &str {
-        "List the prompts queued behind the running turn"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    fn usage(&self) -> &str {
-        "/queue"
+    slash_meta! {
+        name: "queue",
+        description: "List the prompts queued behind the running turn",
+        usage: "/queue",
+        session_scoped: true,
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {

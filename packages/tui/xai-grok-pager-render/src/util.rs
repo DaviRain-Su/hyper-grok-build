@@ -62,15 +62,16 @@ pub fn abbreviate_path(path: &str) -> Cow<'_, str> {
         }
         return Cow::Owned(format!("{prefix}/{}", rest.display()));
     }
-    if let Ok(home) = std::env::var("HOME")
-        && !home.is_empty()
-        && let Some(rest) = path.strip_prefix(&home)
-    {
-        if rest.is_empty() {
-            return Cow::Borrowed("~");
-        }
-        if rest.starts_with('/') {
-            return Cow::Owned(format!("~{rest}"));
+    if let Some(home) = xai_dirs::home_dir() {
+        // Path::strip_prefix is separator-aware; a string prefix plus
+        // `starts_with('/')` misses Windows `\` remainders after USERPROFILE.
+        if !home.as_os_str().is_empty()
+            && let Ok(rest) = path_buf.strip_prefix(&home)
+        {
+            if rest.as_os_str().is_empty() {
+                return Cow::Borrowed("~");
+            }
+            return Cow::Owned(format!("~/{}", rest.display()));
         }
     }
     Cow::Borrowed(path)
@@ -146,22 +147,6 @@ pub fn system_time_from_instant(instant: Instant) -> SystemTime {
     SystemTime::now()
         .checked_sub(instant.elapsed())
         .unwrap_or_else(SystemTime::now)
-}
-
-/// Decode the HTML entities that appear in generated session summaries.
-pub fn decode_html_entities(s: &str) -> std::borrow::Cow<'_, str> {
-    if !s.contains('&') {
-        return std::borrow::Cow::Borrowed(s);
-    }
-    let mut out = s.to_string();
-    out = out.replace("&amp;", "&");
-    out = out.replace("&lt;", "<");
-    out = out.replace("&gt;", ">");
-    out = out.replace("&quot;", "\"");
-    out = out.replace("&#39;", "'");
-    out = out.replace("&#x27;", "'");
-    out = out.replace("&apos;", "'");
-    std::borrow::Cow::Owned(out)
 }
 
 pub fn parse_schedule_interval_secs(human: &str) -> Option<u64> {
@@ -406,25 +391,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_html_entities_decodes_and_borrows() {
-        let untouched = decode_html_entities("hello world");
-        assert!(matches!(untouched, std::borrow::Cow::Borrowed(_)));
-        assert_eq!(untouched.as_ref(), "hello world");
-
-        let cases = [
-            ("foo &amp; bar", "foo & bar"),
-            ("1 &lt; 2 &amp;&amp; 3 &gt; 2", "1 < 2 && 3 > 2"),
-            (
-                "&quot;hello&quot; &amp; &#39;world&#39;",
-                "\"hello\" & 'world'",
-            ),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(decode_html_entities(input).as_ref(), expected, "{input:?}");
-        }
-    }
-
-    #[test]
     fn display_grok_home_prefix_default_install() {
         if std::env::var("GROK_HOME").is_ok() {
             return;
@@ -434,7 +400,7 @@ mod tests {
 
     #[test]
     fn display_user_grok_path_joins_relative() {
-        let path = display_user_grok_path("config.toml");
+        let path = display_user_grok_path(xai_grok_config::USER_CONFIG_FILENAME);
         assert!(path.ends_with("/config.toml") || path.ends_with("\\config.toml"));
         assert!(path.contains(".grok") || path.contains("$GROK_HOME"));
     }
@@ -443,28 +409,49 @@ mod tests {
     fn display_user_grok_path_for_custom_home_uses_override_label() {
         let custom = std::env::temp_dir().join("grok-home-display-regression");
         assert_eq!(
-            display_user_grok_path_for(&custom, "config.toml"),
+            display_user_grok_path_for(&custom, xai_grok_config::USER_CONFIG_FILENAME),
             "$GROK_HOME/config.toml"
         );
         assert_eq!(
-            display_user_grok_path_for(&custom, "sandbox.toml"),
-            "$GROK_HOME/sandbox.toml"
+            display_user_grok_path_for(&custom, xai_grok_config::SANDBOX_CONFIG_FILENAME),
+            format!("$GROK_HOME/{}", xai_grok_config::SANDBOX_CONFIG_FILENAME)
         );
     }
 
     #[test]
     fn abbreviate_path_uses_home_when_under_default_grok() {
-        if let Ok(home) = std::env::var("HOME") {
-            if home.is_empty() {
-                return;
-            }
-            let full = format!("{home}/.grok/memory/MEMORY.md");
-            let abbreviated = abbreviate_path(&full);
-            assert!(
-                abbreviated.contains("memory/MEMORY.md"),
-                "got {abbreviated}"
-            );
+        let Some(home) = xai_dirs::home_dir() else {
+            return;
+        };
+        let home = home.to_string_lossy();
+        if home.is_empty() {
+            return;
         }
+        let full = format!("{home}/.grok/memory/MEMORY.md");
+        let abbreviated = abbreviate_path(&full);
+        assert!(
+            abbreviated.contains("memory/MEMORY.md"),
+            "got {abbreviated}"
+        );
+    }
+
+    #[test]
+    fn abbreviate_path_collapses_home_with_native_separator() {
+        let Some(home) = xai_dirs::home_dir() else {
+            return;
+        };
+        if home.as_os_str().is_empty() {
+            return;
+        }
+        // Stay outside grok_home so this hits the $HOME branch, not ~/.grok.
+        let full = home.join("not-grok-home").join("file.txt");
+        let full_str = full.to_string_lossy();
+        let abbreviated = abbreviate_path(&full_str);
+        let expected = format!(
+            "~/{}",
+            Path::new("not-grok-home").join("file.txt").display()
+        );
+        assert_eq!(abbreviated.as_ref(), expected);
     }
 
     #[test]

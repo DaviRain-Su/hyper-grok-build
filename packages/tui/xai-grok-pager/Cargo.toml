@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager"
-version = "1.0.11-r1"
+version = "1.0.12"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -17,6 +17,9 @@ xai-prompt-queue = { workspace = true }
 # Presentation-primitives layer (extracted)
 xai-grok-pager-render = { path = "../xai-grok-pager-render" }
 
+# The /gboom easter-egg game (extracted)
+xai-grok-gboom = { path = "../xai-grok-gboom" }
+
 # Diff hunk construction (extracted)
 xai-grok-pager-diff = { path = "../xai-grok-pager-diff" }
 
@@ -29,7 +32,6 @@ regex = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 strip-ansi-escapes = { workspace = true }
-enum_delegate = { workspace = true }
 
 # Markdown / syntax highlighting
 xai-grok-markdown = { workspace = true }
@@ -45,9 +47,9 @@ indexmap = { workspace = true }
 blake3 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+strum = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true, features = ["serde"] }
-globset = { workspace = true }
 
 # ANSI parsing (tracing pane)
 ansi-to-tui = { workspace = true }
@@ -56,9 +58,7 @@ ansi-to-tui = { workspace = true }
 portable-pty = "0.9"
 
 # Utilities
-derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 anyhow = { workspace = true }
-async-trait = { workspace = true }
 shlex = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 clap_complete = { workspace = true }
@@ -84,35 +84,28 @@ obfstr = { workspace = true }
 # Fuzzy matching (history search daemon)
 nucleo = { workspace = true }
 
-# Internationalization: translations are embedded at compile time from
-# `locales/*.yml`; `sys-locale` detects the OS language for `language = "auto"`.
-# Direct (non-workspace) deps on purpose — the workspace root Cargo.toml is
-# generated from the monorepo and must stay untouched.
-rust-i18n = "4"
-sys-locale = "0.3"
-
 # Prompt text input
 xai-ratatui-textarea = { workspace = true }
 xai-ratatui-inline = { workspace = true }
 
 # Update
-xai-grok-update = { path = "../../coding-agent/xai-grok-update" }
+xai-grok-update = { path = "../xai-grok-update" }
 
 # ACP
 agent-client-protocol = { workspace = true }
 xai-acp-lib = { workspace = true }
-xai-file-utils = { path = "../../platform/xai-file-utils" }
+xai-file-utils = { path = "../xai-file-utils" }
 # Crash-recovery registry of open TUI sessions.
 xai-grok-active-sessions = { workspace = true }
 xai-grok-config = { workspace = true }
+xai-dirs = { workspace = true }
 xai-grok-dashboard-store = { workspace = true }
 # Voice dictation. `audio` (mic capture) is enabled on every target. On
 # macOS/Windows it links cpal; on Linux it compiles a subprocess-recorder
 # backend instead, so cpal -> alsa-sys never reaches the static musl binary
 # (cpal is target-gated to non-Linux inside xai-grok-voice).
-xai-grok-voice = { path = "../../ai/xai-grok-voice", default-features = false, features = ["audio"] }
+xai-grok-voice = { path = "../xai-grok-voice", default-features = false, features = ["audio"] }
 xai-grok-shell = { workspace = true }
-xai-grok-models = { workspace = true }
 # The status-line contract: the config the user writes and the payload the
 # agent sends. A leaf crate rather than the agent's, so the client reads it
 # from upstream of the crate that fills it in.
@@ -122,20 +115,19 @@ xai-grok-workspace = { workspace = true }
 xai-grok-foreign-sessions = { workspace = true }
 xai-token-estimation = { workspace = true }
 xai-grok-telemetry = { workspace = true }
-xai-fast-worktree = { path = "../../platform/xai-fast-worktree", features = ["metadata"] }
+xai-fast-worktree = { path = "../xai-fast-worktree", features = ["metadata"] }
 backon = { workspace = true }
 chrono = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-grok-agent = { workspace = true }
-xai-grok-extension-api = { path = "../../extensions/xai-grok-extension-api" }
-xai-grok-extension-runtime = { path = "../../extensions/xai-grok-extension-runtime" }
-xai-grok-plugin-marketplace = { path = "../../extensions/xai-grok-plugin-marketplace" }
-xai-hooks-plugins-types = { path = "../../coding-agent/xai-hooks-plugins-types" }
-wait-timeout = { workspace = true }
+xai-grok-plugin-marketplace = { path = "../xai-grok-plugin-marketplace" }
+# Blocked-card copy: `hook_display_name` lives next to the hook-name grammar.
+xai-grok-hooks = { path = "../xai-grok-hooks" }
+xai-hooks-plugins-types = { path = "../xai-hooks-plugins-types" }
 walkdir = { workspace = true }
-xai-grok-sandbox = { path = "../../tools/xai-grok-sandbox", default-features = false }
+xai-grok-sandbox = { path = "../xai-grok-sandbox", default-features = false }
 
 # Base64 encoding for image data
 base64 = { workspace = true }
@@ -147,7 +139,6 @@ image = { workspace = true, features = ["png", "jpeg", "tiff", "gif", "webp"] }
 uuid = { workspace = true, features = ["v4"] }
 
 # Path computation (plan file, etc.)
-dirs = { workspace = true }
 shellexpand = "3.1"
 
 # libgit2 for the startup git-info populator (no fork/exec, runs once on launch
@@ -161,7 +152,7 @@ urlencoding = { workspace = true }
 url = { workspace = true }
 
 # Crash diagnostics
-xai-crash-handler = { path = "../../platform/xai-crash-handler" }
+xai-crash-handler = { path = "../xai-crash-handler" }
 
 # Non-poisoning mutex for signal handler (active-sessions crash recovery).
 parking_lot.workspace = true
@@ -189,6 +180,7 @@ windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 # The fixture that builds a `[ui.status_line]` section field by field.
 xai-grok-status-line = { workspace = true, features = ["test-support"] }
 xai-grok-pager-render = { path = "../xai-grok-pager-render", features = ["test-support"] }
+xai-grok-gboom = { path = "../xai-grok-gboom", features = ["test-support"] }
 xai-grok-shell = { workspace = true, features = ["test-support"] }
 pretty_assertions = { workspace = true }
 insta = { workspace = true }
@@ -213,6 +205,10 @@ harness = false
 
 [[bench]]
 name = "edit_highlight"
+harness = false
+
+[[bench]]
+name = "resize"
 harness = false
 
 # PTY integration tests are split into coherent scheduling families. The test
@@ -277,22 +273,6 @@ path = "tests/scripted_scenarios.rs"
 name = "pty_auto_mode"
 path = "tests/pty_auto_mode.rs"
 
-[[bin]]
-name = "mouse-events-playground"
-path = "src/bin/mouse_events_playground.rs"
-
-[[bin]]
-name = "scrollback-selection-playground"
-path = "src/bin/scrollback_selection_playground.rs"
-
-[[bin]]
-name = "question-view-playground"
-path = "src/bin/question_view_playground.rs"
-
-[[bin]]
-name = "todo-pane-playground"
-path = "src/bin/todo_pane_playground.rs"
-
 # Opt into [workspace.lints.clippy] (too_many_arguments etc.). Without this,
 # `cargo clippy --workspace -- -D warnings` on this package is stricter than
 # the workspace-default clippy allows used in CI.
@@ -300,7 +280,7 @@ path = "src/bin/todo_pane_playground.rs"
 workspace = true
 
 [features]
-default = ["jemalloc", "sandbox-enforce", "codex-live"]
+default = ["jemalloc", "sandbox-enforce"]
 default-bazel = [
     "jemalloc",
     "sandbox-enforce",
@@ -316,16 +296,7 @@ local-workspace = ["xai-grok-shell/local-workspace"]
 jemalloc = []
 sandbox-enforce = ["xai-grok-sandbox/enforce"]
 release-dist = []
-# Community Hyper branding (CLI name for completions / help strings). Empty
-# feature — gated with `cfg!(feature = "community-build")` in this crate.
-# Forwarded from `xai-grok-pager-bin` when that binary is a Hyper build.
-community-build = []
 # Exposes test-only view-model constructors/setters (e.g. `test_agent_view`,
 # `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
 # by `xai-grok-pager-minimal`'s unit tests. Never enabled in production builds.
-test-support = ["xai-grok-pager-render/test-support"]
-# Codex Live (`/live`): real-time bidirectional voice sessions against the
-# Codex sideband. Forwards `xai-grok-voice/live` so production code directly
-# uses the real `xai_grok_voice::live` types and `run_live_session`. Test
-# doubles are kept only under `#[cfg(test)]` where needed.
-codex-live = ["xai-grok-voice/live"]
+test-support = ["xai-grok-pager-render/test-support", "xai-grok-gboom/test-support"]

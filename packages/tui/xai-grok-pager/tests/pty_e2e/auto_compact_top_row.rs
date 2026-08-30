@@ -4,24 +4,18 @@ use super::common::*;
 
 // ── Auto-compact: the top padding row disappears on tiny terminals ─────────
 //
-// The default layout reserves a blank top padding row (`outer_vpad`) above the
-// status bar. When the terminal is `AUTO_COMPACT_MAX_ROWS` (20) or shorter,
-// the render-value compact flag is derived ON (auto-compact) and the padding
-// goes away, so the status bar moves to screen row 0. Growing the terminal
-// back restores the padding — the user's persisted compact setting never
-// changes.
+// The default layout reserves a blank top padding row (`outer_vpad`) above the status bar
+// At `AUTO_COMPACT_MAX_ROWS` (20) rows or shorter the compact render value is derived on and the padding goes away, so the status bar moves to row 0
+// Growing the terminal back restores the padding; the user's persisted compact setting never changes
 //
-// A YAML scenario cannot assert on-screen positions, so this test reads the
-// first non-blank screen row directly: row 0 blank = padding present, row 0
-// populated (by the status bar) = auto-compact engaged.
+// A YAML scenario cannot assert on-screen positions, so this test reads the first non-blank screen row directly
+// A blank row 0 means the padding is present; a populated row 0 (the status bar) means auto-compact engaged
 
-/// Short height that engages auto-compact. Above `SHORT_TERMINAL_ROWS` (16)
-/// but at most `AUTO_COMPACT_MAX_ROWS` (20), so it pins the auto-compact
-/// derivation specifically — not the older short-terminal layout trims.
+/// A height short enough to engage auto-compact.
+/// It is above `SHORT_TERMINAL_ROWS` (16) but at most `AUTO_COMPACT_MAX_ROWS` (20), so it pins the auto-compact derivation, not the layout trims.
 const SHORT_ROWS: u16 = 18;
 
-/// Index of the first screen row with any non-whitespace content, panicking
-/// with the screen when the whole screen is blank.
+/// Index of the first screen row with any non-whitespace content, panicking with the screen when the whole screen is blank.
 fn first_content_row(harness: &PtyHarness, when: &str) -> u16 {
     let screen = harness.screen_contents();
     screen
@@ -32,8 +26,8 @@ fn first_content_row(harness: &PtyHarness, when: &str) -> u16 {
 
 /// **Auto-compact drops the top padding row on tiny terminals.**
 /// Tall: row 0 is the blank top padding row (first content below it).
-/// At `SHORT_ROWS`: auto-compact removes the padding, status bar lands on
-/// row 0. Back tall: padding (and the blank row 0) restored.
+/// At `SHORT_ROWS`: auto-compact removes the padding and the status bar lands on row 0.
+/// Back tall: the padding (and the blank row 0) comes back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn auto_compact_top_row() {
@@ -106,10 +100,9 @@ async fn auto_compact_top_row() {
     harness.quit().expect("clean quit");
 }
 
-/// **Auto-compact engages from the startup seed alone.**
-/// Spawning already-tiny (no resize event ever fires) must still land the
-/// status bar on row 0: the startup seed (`crossterm::terminal::size()` into
-/// the initial appearance) is the only path that can have derived it.
+/// **Auto-compact engages at startup, with no resize event.**
+/// Spawning already tiny (no resize event ever fires) must still land the status bar on row 0.
+/// Only the startup read of `crossterm::terminal::size()` into the initial appearance can have derived the compact flag.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn auto_compact_at_startup() {
@@ -121,8 +114,8 @@ async fn auto_compact_at_startup() {
         PtyHarness::spawn_with_content(&binary, SHORT_ROWS, DEFAULT_COLS, &content, &[])
             .expect("spawn pager with content");
 
-    // The welcome menu may be trimmed on a short spawn; the prompt marker
-    // always paints. The first char promotes to the agent view under test.
+    // The welcome menu may be trimmed on a short spawn; the prompt marker always paints
+    // The first char promotes to the agent view under test
     harness
         .wait_for_text("\u{276f}", WELCOME_TIMEOUT)
         .expect("prompt marker");

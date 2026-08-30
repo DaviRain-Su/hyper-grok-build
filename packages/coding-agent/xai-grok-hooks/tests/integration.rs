@@ -755,16 +755,13 @@ async fn http_hook_url_env_expansion_end_to_end() {
         other => panic!("expected Failed run result, got {other:?}"),
     };
     assert_eq!(
-        info.url, "https://10.0.0.1/check",
-        "HttpInfo.url must reflect the post-expansion URL"
+        info.expanded_url, "https://10.0.0.1/check",
+        "HttpInfo.expanded_url must reflect the post-expansion URL"
     );
-    // raw_url mirrors the source string so wire-DTO
-    // consumers can prefer it over the post-expansion `url` for any
-    // user-facing display.
     assert_eq!(
-        info.raw_url.as_deref(),
+        info.source_url.as_deref(),
         Some("https://${INTERNAL}/check"),
-        "HttpInfo.raw_url must mirror HookSpec::url_raw"
+        "HttpInfo.source_url must mirror HookSpec::url_raw"
     );
 }
 

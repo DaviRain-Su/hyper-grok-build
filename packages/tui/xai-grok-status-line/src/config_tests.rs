@@ -1,14 +1,14 @@
-//! Some cases are written in TOML rather than JSON: `#[serde(untagged)]` replays
-//! a buffered value through a fresh deserializer, and that replay behaves in a
-//! format-dependent way, so the format a user writes needs its own coverage.
+//! Some cases are written in TOML rather than JSON.
+//! `#[serde(untagged)]` replays a buffered value through a fresh deserializer, and that replay behaves differently in TOML than in JSON.
+//! The format a user writes therefore needs its own coverage.
 
 use serde_json::json;
 
 use super::test_support::StatusLineConfigFixture;
 use super::*;
 
-/// Stands in for the `[ui]` table, which lives downstream. `theme` is a
-/// sibling key the section must not take down with it.
+/// Stands in for the `[ui]` table, which lives downstream.
+/// `theme` is a sibling key the section must not take down with it.
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct UiTable {
@@ -138,13 +138,12 @@ fn common_spellings_of_off_all_disable_the_row() {
         );
     }
 
-    // The same rule reaches the modes that are not `disabled`, which an alias
-    // list matched on its own would leave parsing by a stricter one.
+    // Trimming and case-insensitive matching also reach the modes that are not `disabled`
+    // Matching only the alias list would leave `builtin` and `command` parsing strictly
     let padded = ui(r#"{"type": " Builtin "}"#).status_line;
     assert_eq!(padded.declared_kind(), Some(StatusLineType::Builtin));
 
-    // The items read by the same rule: a user who capitalises one gets the row
-    // rather than a problem naming their own spelling back at them.
+    // Items are read by the same rule: a user who capitalises one gets the row rather than a problem naming their own spelling back at them
     let items = ui(r#"{"type": "builtin", "items": ["CWD", " model "]}"#).status_line;
     assert!(items.problem().is_none(), "{:?}", items.problem());
     assert_eq!(
@@ -259,8 +258,7 @@ fn only_a_row_that_can_change_mid_turn_keeps_recomputing_through_one() {
             .into_config()
     }
 
-    // Every segment against its own answer, so a row that stops asking one of
-    // them fails here rather than freezing mid-turn.
+    // Every segment is checked against its own answer, so a row that stops asking one of them fails here rather than freezing mid-turn
     for item in StatusLineItem::ALL {
         let row = section(Builtin, &[*item]);
         assert_eq!(

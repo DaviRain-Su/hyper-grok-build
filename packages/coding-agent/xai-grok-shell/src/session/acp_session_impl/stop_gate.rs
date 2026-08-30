@@ -66,11 +66,9 @@ fn stop_cron_from_scheduled(
     }
 }
 
-const STOP_FEEDBACK_TEXT_MAX: usize = 10_000;
-
 fn format_stop_feedback(blocks: &[dispatcher::StopBlock], additional_context: &[String]) -> String {
     use std::fmt::Write as _;
-    let clip = |text: &str| event::clip_text(text, STOP_FEEDBACK_TEXT_MAX);
+    let clip = |text: &str| event::clip_text(text, event::MAX_HOOK_FEEDBACK_CHARS);
     let mut feedback = String::new();
     if !blocks.is_empty() {
         feedback.push_str("Stop hook feedback:\n");
@@ -100,11 +98,13 @@ pub(super) fn demote_ignored_blocks(
                 hook_name,
                 elapsed,
                 http_info,
+                system_message,
                 ..
             } => HookRunResult::Success {
                 hook_name,
                 elapsed,
                 http_info,
+                system_message,
             },
             other => other,
         })
@@ -432,6 +432,7 @@ impl SessionActor {
             .await;
             xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::HookBlocked {
                 hook_name: block.hook_name.clone(),
+                cause: xai_grok_telemetry::events::HookBlockCause::StopBlocked,
             });
         }
         if blocks.is_empty() {
@@ -560,12 +561,14 @@ mod stop_gate_snapshot_tests {
                 detail: "blocked stop: run the tests".into(),
                 elapsed: std::time::Duration::from_millis(5),
                 http_info: None,
+                system_message: None,
             },
             HookRunResult::Failed {
                 hook_name: "broken".into(),
                 error: "exit code 1".into(),
                 elapsed: std::time::Duration::from_millis(3),
                 http_info: None,
+                system_message: None,
             },
             HookRunResult::Skipped {
                 hook_name: "disabled".into(),

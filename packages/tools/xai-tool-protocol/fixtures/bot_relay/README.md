@@ -15,6 +15,11 @@ generated clients — not produced by serializing the Rust types.
 A later PR adds the TS / Swift / Kotlin replay harnesses against this
 directory. Until then the Rust test is the executable consumer.
 
+`event_hub_turn_finished.json` carries a non-empty `preview` because the
+**wire schema** is a required string with no emptiness constraint.
+The computer-hub emitter always ships `""` (clients read the transcript
+tail). A non-empty value remains legal on the wire and must decode.
+
 ## Sequence fixtures
 
 Each sequence file is `{ must, expectedResyncCount, expectedDistinctEvents, frames }`.

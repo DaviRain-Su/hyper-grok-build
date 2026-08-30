@@ -2,9 +2,9 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 14. **Folder-trust decline quits the pager (no grant).**
-/// Same setup; pressing `n` exits the pager (the process ends) and writes NO
-/// grant — the product decision is decline => quit, not proceed-gated.
+/// Folder-trust decline quits the pager (no grant).
+/// Same setup; pressing `n` exits the pager (the process ends) and writes NO grant.
+/// The product decision: decline quits rather than proceeding in a gated state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn folder_trust_decline_quits_without_grant() {
@@ -28,7 +28,7 @@ async fn folder_trust_decline_quits_without_grant() {
         .wait_for_text(TRUST_QUESTION_SENTINEL, WELCOME_TIMEOUT)
         .expect("trust question renders");
 
-    // Decline => the pager quits (no session, no grant).
+    // Decline: the pager quits (no session, no grant)
     harness.inject_keys(b"n").expect("inject n");
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {

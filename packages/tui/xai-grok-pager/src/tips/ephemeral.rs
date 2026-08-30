@@ -1,23 +1,17 @@
-//! The ephemeral tip primitive: a single-slot, TTL'd, dedup-keyed banner hint
-//! and the show/seen-count gating state that drives it.
+//! The ephemeral tip primitive: a banner hint with a single slot, a TTL, and a dedup key, and the seen-count gating state that drives it.
 
 use std::collections::HashMap;
 
 use ratatui::text::Line;
 
-/// Default tip lifetime in animation ticks (~3 s: 90 ticks at the default
-/// 30 fps animation cadence).
+/// Default tip lifetime in animation ticks (~3 s: 90 ticks at the default 30 fps animation cadence).
 ///
-/// Expiry takes N+1 ticks: [`EphemeralTipState::tick`] checks `== 0` *before*
-/// decrementing, so a tip shown with `ticks_remaining = N` survives N ticks
-/// and is cleared on the (N+1)th.
+/// Expiry takes N+1 ticks: [`EphemeralTipState::tick`] checks `== 0` *before* decrementing.
+/// A tip shown with `ticks_remaining = N` therefore survives N ticks and is cleared on the (N+1)th.
 pub const DEFAULT_TIP_TICKS: u16 = 90;
 
-/// Whether the tip row can render given UI occlusion and the screen height.
-/// Single predicate shared by the show gate, the banner-height reservation,
-/// and the paint so the three can never drift. Shares the layout's
-/// short-terminal threshold so the tip row appears exactly when the optional
-/// rows above the prompt do.
+/// The show gate, the banner-height reservation, and the paint share this one predicate, so the three can never drift.
+/// It shares the layout's short-terminal threshold, so the tip row appears exactly when the optional rows above the prompt do.
 pub fn tip_row_renderable(occluded: bool, area_height: u16) -> bool {
     !occluded && area_height > crate::views::agent::SHORT_TERMINAL_ROWS
 }
@@ -25,24 +19,18 @@ pub fn tip_row_renderable(occluded: bool, area_height: u16) -> bool {
 /// A transient one-line hint shown in the banner row above the prompt.
 #[derive(Debug, Clone)]
 pub struct EphemeralTip {
-    /// Dedup key: re-showing the same key refreshes the TTL instead of
-    /// stacking, and [`EphemeralTipState::clear`] only removes a match.
+    /// Dedup key: re-showing the same key refreshes the TTL instead of stacking, and [`EphemeralTipState::clear`] only removes a match.
     pub key: &'static str,
     /// Pre-styled spans (dim text with a highlighted key chord).
     pub line: Line<'static>,
     /// Remaining animation ticks before the tip expires.
     pub ticks_remaining: u16,
-    /// In-memory seen-count map key paired with the per-session show cap:
-    /// `Some((key, cap))` stops showing once this session's count for `key`
-    /// reaches `cap`; `None` for tips that are never seen-gated. The count
-    /// lives only in `AppView::tip_seen_counts` (per session, never on disk).
+    /// `Some((key, cap))` stops showing the tip once this session's count for `key` reaches `cap`; `None` means the tip is never gated.
+    /// The count lives only in `AppView::tip_seen_counts` (per session, never on disk).
     pub session_seen: Option<(&'static str, u32)>,
-    /// Ambient hint, not contextual to the draft being edited: submission
-    /// ([`EphemeralTipState::clear_on_submit`]) does NOT retire it, and its
-    /// TTL burns only while the tip row can actually paint (occlusion pauses
-    /// instead of expiring it off-screen — see
-    /// `AgentView::ephemeral_tip_needs_tick`). Default `false` keeps the
-    /// edit-contextual tips' retire-on-submit + burn-while-occluded behavior.
+    /// An ambient hint is not about the draft being edited, so submission ([`EphemeralTipState::clear_on_submit`]) does not retire it.
+    /// Its TTL burns only while the tip row can paint; occlusion pauses it instead of expiring it off-screen (`AgentView::ephemeral_tip_needs_tick`).
+    /// The default `false` keeps the usual behavior: submit retires the tip and the TTL burns while occluded.
     pub ambient: bool,
 }
 
@@ -58,8 +46,7 @@ impl EphemeralTip {
         }
     }
 
-    /// Gate the tip on a per-session in-memory seen count: it stops showing
-    /// once this session's count reaches `cap` (resets every new pager run).
+    /// Gate the tip on a per-session in-memory seen count: it stops showing once this session's count reaches `cap` (resets every new pager run).
     pub fn with_session_seen_cap(mut self, key: &'static str, cap: u32) -> Self {
         self.session_seen = Some((key, cap));
         self
@@ -72,33 +59,29 @@ impl EphemeralTip {
     }
 }
 
-/// Single-slot ephemeral tip state. Seen counts are NOT stored here — gating
-/// runs against the app-level map passed into [`Self::show`], so there is
-/// exactly one copy of that state.
+/// Single-slot ephemeral tip state.
+/// Seen counts are not stored here; gating runs against the app-level map passed into [`Self::show`], so there is exactly one copy of that state.
 #[derive(Debug, Default)]
 pub struct EphemeralTipState {
     slot: Option<EphemeralTip>,
 }
 
 impl EphemeralTipState {
-    /// Show `tip`, replacing any currently shown tip. Re-showing the key
-    /// already on screen only refreshes the TTL (no second count increment).
+    /// Show `tip`, replacing any currently shown tip.
+    /// Re-showing the key already on screen only refreshes the TTL (no second count increment).
     ///
-    /// Seen-gating runs against `seen_counts` (the app-level per-session map):
-    /// a tip whose count reached its cap is a no-op. A passing show increments
-    /// the map in place. Returns true when the tip was newly shown (false on a
-    /// same-key TTL refresh or a gated no-op).
+    /// Seen-gating runs against `seen_counts` (the app-level per-session map): a tip whose count reached its cap is a no-op.
+    /// A passing show increments the map in place.
+    /// Returns true when the tip was newly shown (false on a same-key TTL refresh or a gated no-op).
     ///
-    /// Pager code must go through `AgentView::show_ephemeral_tip`, which
-    /// adds the renderability gate — calling this directly skips it and can
-    /// burn a seen count on a tip the user never sees (tests only).
+    /// Pager code must go through `AgentView::show_ephemeral_tip`, which adds the renderability gate.
+    /// Calling this directly skips that gate and can burn a seen count on a tip the user never sees (tests only).
     pub(crate) fn show(
         &mut self,
         tip: EphemeralTip,
         seen_counts: &mut HashMap<&'static str, u32>,
     ) -> bool {
-        // Refresh before gating so a visible tip never goes dark mid-TTL
-        // just because its first show already reached the cap.
+        // Refresh before gating so a visible tip never goes dark mid-TTL just because its first show already reached the cap
         if self.slot.as_ref().is_some_and(|cur| cur.key == tip.key) {
             self.slot = Some(tip);
             return false;
@@ -154,7 +137,7 @@ impl EphemeralTipState {
         self.slot.as_ref().map(|t| &t.line)
     }
 
-    /// The active tip's dedup key, if any (drives accept-site attribution).
+    /// The active tip's dedup key, if any; accept handlers use it to know which tip is on screen.
     pub fn current_key(&self) -> Option<&'static str> {
         self.slot.as_ref().map(|t| t.key)
     }
@@ -179,9 +162,9 @@ impl EphemeralTipState {
         false
     }
 
-    /// Submission retire: clear the tip unless it is ambient (an ambient tip
-    /// is not about the draft that was just submitted, so it lives out its
-    /// TTL across the submit). Returns true when a tip was removed.
+    /// Submission retire: clear the tip unless it is ambient.
+    /// An ambient tip is not about the draft that was just submitted, so it lives out its TTL across the submit.
+    /// Returns true when a tip was removed.
     pub fn clear_on_submit(&mut self) -> bool {
         if self.slot.as_ref().is_some_and(|t| t.ambient) {
             return false;
@@ -189,8 +172,7 @@ impl EphemeralTipState {
         self.clear_all()
     }
 
-    /// Whether the active tip (if any) is ambient — drives the TTL pause
-    /// while the tip row cannot paint.
+    /// Whether the active tip (if any) is ambient; this drives the TTL pause while the tip row cannot paint.
     pub(crate) fn active_is_ambient(&self) -> bool {
         self.slot.as_ref().is_some_and(|t| t.ambient)
     }
@@ -214,7 +196,7 @@ enum DismissReason {
 }
 
 impl DismissReason {
-    /// Telemetry string — must stay stable for `tip.dismissed` dashboards.
+    /// Telemetry string; must stay stable for `tip.dismissed` dashboards.
     fn as_str(self) -> &'static str {
         match self {
             Self::Replaced => "replaced",
@@ -248,9 +230,9 @@ mod tests {
         let mut state = EphemeralTipState::default();
         assert!(state.show(tip("a", 2), &mut HashMap::new()));
         assert!(state.is_active());
-        assert!(!state.tick()); // 2 -> 1
-        assert!(!state.tick()); // 1 -> 0
-        assert!(state.tick()); // 0 -> expired, needs redraw
+        assert!(!state.tick()); // ticks 2 down to 1
+        assert!(!state.tick()); // ticks 1 down to 0
+        assert!(state.tick()); // at 0: expired, needs redraw
         assert!(!state.is_active());
         assert!(state.line().is_none());
         assert!(!state.tick(), "empty slot ticks are no-ops");
@@ -308,8 +290,7 @@ mod tests {
     #[test]
     fn show_gates_against_preloaded_counts() {
         let mut state = EphemeralTipState::default();
-        // A session count already at the cap (e.g. shown earlier this run)
-        // blocks the next show.
+        // A session count already at the cap (e.g. shown earlier this run) blocks the next show.
         let mut counts = HashMap::from([("a_seen", 1u32)]);
         assert!(!state.show(tip("a", 5).with_session_seen_cap("a_seen", 1), &mut counts));
         assert!(!state.is_active());
@@ -320,8 +301,7 @@ mod tests {
         let mut state = EphemeralTipState::default();
         let mut counts = HashMap::new();
         assert!(state.show(tip("a", 5).with_session_seen_cap("a_seen", 1), &mut counts));
-        // Still visible: cap is reached but the refresh must not go dark
-        // and must not burn another count.
+        // Still visible: cap is reached but the refresh must not go dark and must not burn another count
         assert!(
             !state.show(tip("a", 5).with_session_seen_cap("a_seen", 1), &mut counts),
             "same-key refresh neither re-counts nor re-shows"

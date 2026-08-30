@@ -360,6 +360,7 @@ pub(crate) fn present_child_completion(
             task_completion_reservations: &completion_data.task_completion_reservations,
             parent_cmd_tx: completion_data.parent_cmd_tx.as_ref(),
             task_output_tool_name: &completion_data.task_output_tool_name,
+            scheduler_delete_tool_name: completion_data.scheduler_delete_tool_name.as_deref(),
             synthetic_trace_tx: &completion_data.synthetic_trace_tx,
             goal_loop_active: &completion_data.goal_loop_active,
         });
@@ -420,6 +421,7 @@ pub(crate) struct InjectParams<'a> {
         &'a Option<xai_grok_tools::reminders::task_completion::TaskCompletionReservations>,
     pub parent_cmd_tx: Option<&'a mpsc::UnboundedSender<SessionCommand>>,
     pub task_output_tool_name: &'a str,
+    pub scheduler_delete_tool_name: Option<&'a str>,
     pub synthetic_trace_tx:
         &'a Option<mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
     pub goal_loop_active: &'a std::sync::atomic::AtomicBool,
@@ -433,6 +435,7 @@ pub(crate) fn inject_subagent_completed_prompt(params: InjectParams) {
         task_completion_reservations,
         parent_cmd_tx,
         task_output_tool_name,
+        scheduler_delete_tool_name,
         synthetic_trace_tx,
         goal_loop_active,
     } = params;
@@ -453,6 +456,7 @@ pub(crate) fn inject_subagent_completed_prompt(params: InjectParams) {
     let message = xai_grok_tools::reminders::task_completion::format_subagent_completion(
         &summary,
         Some(task_output_tool_name),
+        scheduler_delete_tool_name,
     );
     let wrapped = xai_grok_tools::reminders::wrap_reminder(&message);
     let prompt_id = format!("subagent-completed-{subagent_id}");

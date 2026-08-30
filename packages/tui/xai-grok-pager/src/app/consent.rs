@@ -19,8 +19,8 @@ use crate::key;
 /// Backstop only. Bytes say nothing about rows, so [`MAX_CONSENT_BODY_ROWS`] is the real bound.
 const MAX_CONSENT_BODY_BYTES: usize = 2_000;
 
-/// No scrolling and an unreadable notice cannot be accepted, so the body must fit the smallest
-/// terminal we support. `the_largest_allowed_body_paints_at_every_height_it_promises` pins it.
+/// No scrolling and an unreadable notice cannot be accepted, so the body must fit the smallest terminal we support.
+/// `the_largest_allowed_body_paints_at_every_height_it_promises` pins it.
 pub(crate) const MAX_CONSENT_BODY_ROWS: usize = 12;
 
 /// Body width on an 80-column terminal: the screen's own wrap width at the default margin.
@@ -48,8 +48,8 @@ pub enum ConsentArmRefusal {
     EmptyBody,
     /// Too tall for the smallest supported terminal, so the gate could never be read or accepted.
     BodyTooTall(usize),
-    /// Markup the parser cannot pair off. Painting it would show a url, dropping it would cut the
-    /// notice short, and a legal notice may not be shown with a sentence missing.
+    /// Markup the parser cannot pair off.
+    /// Painting it would show a url, dropping it would cut the notice short, and a legal notice may not be shown with a sentence missing.
     UnpairedMarkup,
     /// A url outside a link. Terminals linkify one on sight, so it would open unchecked.
     UrlInPlainText,
@@ -105,8 +105,8 @@ pub enum ConsentState {
     },
 }
 
-/// Newlines survive; an embedded escape would corrupt the frame, and a bidi or zero-width character
-/// would let the painted order differ from the text the acceptance is recorded against.
+/// Newlines survive; an embedded escape would corrupt the frame.
+/// A bidi or zero-width character would let the painted order differ from the text the acceptance is recorded against.
 fn sanitize_notice_text(raw: &str) -> String {
     raw.chars()
         .filter(|c| {
@@ -116,8 +116,7 @@ fn sanitize_notice_text(raw: &str) -> String {
         .collect()
 }
 
-/// The invisible characters the shared set misses: soft hyphen, line and
-/// paragraph separators, annotation marks.
+/// The invisible characters the shared set misses: soft hyphen, line and paragraph separators, annotation marks.
 fn is_format_char(c: char) -> bool {
     matches!(
         c,
@@ -134,8 +133,8 @@ fn text_or(raw: Option<&str>, fallback: &str, max_cols: usize) -> String {
     crate::render::line_utils::truncate_str(&sanitize_notice_text(cleaned), max_cols)
 }
 
-/// Narrower than a url's own set: a machine with no browser offers the URL for
-/// pasting into a shell, so keep it free of quoting and expansion hazards.
+/// Narrower than a url's own set: a machine with no browser offers the URL for pasting into a shell.
+/// Keep it free of quoting and expansion hazards.
 fn is_safe_url_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
         || matches!(
@@ -168,9 +167,9 @@ fn is_usable_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// Split `[label](url)` out of the body. A url that fails the checks above degrades to its label
-/// as plain text, so one bad url costs a hyperlink rather than the notice. Markup that cannot be
-/// paired off is refused: the alternatives are painting a url or dropping part of the notice.
+/// Split `[label](url)` out of the body.
+/// A url that fails the checks above degrades to its label as plain text, so one bad url costs a hyperlink rather than the notice.
+/// Markup that cannot be paired off is refused: the alternatives are painting a url or dropping part of the notice.
 fn split_markdown_links(
     body: &str,
 ) -> Result<(Vec<ConsentSegment>, Vec<String>), ConsentArmRefusal> {
@@ -179,8 +178,8 @@ fn split_markdown_links(
     let mut rest = body;
 
     while let Some(open) = rest.find('[') {
-        // The label ends at the first `]`, so a stray bracket cannot swallow the sentence that
-        // follows it into a hyperlink. A `[` with no `]` at all is prose, and carries no url.
+        // The label ends at the first `]`, so a stray bracket cannot swallow the sentence that follows it into a hyperlink
+        // A `[` with no `]` at all is prose, and carries no url
         let Some(close) = rest[open..].find(']').map(|i| open + i) else {
             break;
         };
@@ -190,9 +189,8 @@ fn split_markdown_links(
             rest = &rest[close + 1..];
             continue;
         };
-        // A closer with whitespace or a bracket before it belongs to something further along, and
-        // taking it would swallow the text in between. Unsafe characters are a different matter:
-        // they make a well-formed link we will not open, which costs the hyperlink, not the copy.
+        // A closer with whitespace or a bracket before it belongs to something further along, and taking it would swallow the text in between
+        // Unsafe characters are a different matter: they make a well-formed link we will not open, which costs the hyperlink, not the copy
         let Some(url_len) = after_label.find(')').filter(|end| {
             !after_label[..*end].contains(|c: char| c.is_whitespace() || "[](".contains(c))
         }) else {
@@ -205,8 +203,8 @@ fn split_markdown_links(
             segments.push(ConsentSegment::Text(rest[..open].to_string()));
         }
 
-        // A label with nothing to paint takes its url with it, rather than leave a link the reader
-        // cannot see and a number key that opens it anyway.
+        // A label with nothing to paint takes its url with it
+        // That avoids a link the reader cannot see and a number key that opens it anyway
         if paints_something(label) {
             if is_paintable_url(url) {
                 segments.push(ConsentSegment::Link {
@@ -240,8 +238,7 @@ impl ConsentNotice {
     /// [`ConsentArmRefusal`] when the payload cannot safely arm the gate; every variant fails open.
     pub fn try_from_remote(gate: &ConsentGate) -> Result<Self, ConsentArmRefusal> {
         let body_source = gate.body.as_deref().unwrap_or_default();
-        // Sanitized before the emptiness check: a body of nothing but control characters would
-        // otherwise arm a gate with no text to read.
+        // Sanitized before the emptiness check: a body of nothing but control characters would otherwise arm a gate with no text to read
         let body = sanitize_notice_text(xai_grok_tools::util::truncate_str(
             body_source,
             MAX_CONSENT_BODY_BYTES,
@@ -270,8 +267,8 @@ impl ConsentNotice {
         }
 
         let rows = wrap(&segments, REFERENCE_BODY_COLS);
-        // The check above was on the raw body: dropping a link, or a body of nothing but
-        // zero-width characters, leaves text the screen will not paint and so cannot accept.
+        // The check above was on the raw body
+        // Dropping a link, or a body of nothing but zero-width characters, leaves text the screen will not paint and so cannot accept
         if !rows
             .iter()
             .flatten()
@@ -302,8 +299,8 @@ impl ConsentNotice {
     }
 }
 
-/// One grapheme with the columns it occupies and the link it belongs to. Counting characters
-/// rather than columns would clip a wide-character notice in half while reporting it painted.
+/// One grapheme with the columns it occupies and the link it belongs to.
+/// Counting characters rather than columns would clip a wide-character notice in half while reporting it painted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BodyCell {
     pub text: String,
@@ -317,8 +314,7 @@ pub fn row_cols(row: &[BodyCell]) -> u16 {
     row.iter().map(|cell| cell.cols).sum()
 }
 
-/// The key rides in the label, not a hint row, so it wraps and underlines with the link and counts
-/// against the row cap the validator measures.
+/// The key rides in the label, not a hint row, so it wraps and underlines with the link and counts against the row cap the validator measures.
 fn numbered_label(index: usize, label: &str) -> std::borrow::Cow<'_, str> {
     // Only nine links have a key, so a tenth gets no number it could not act on.
     if index < MAX_KEYED_LINKS {
@@ -409,8 +405,7 @@ fn cut_overlong_word(word: &mut BodyRow, rows: &mut Vec<BodyRow>, width: u16) {
     }
 }
 
-/// Links are addressable by number so they stay reachable with mouse reporting off, which is the
-/// norm over ssh and in CI consoles.
+/// Links are addressable by number so they stay reachable with mouse reporting off, which is the norm over ssh and in CI consoles.
 pub fn link_index_for_key(key: &crossterm::event::KeyEvent, link_count: usize) -> Option<usize> {
     let crossterm::event::KeyCode::Char(c) = key.code else {
         return None;
@@ -495,8 +490,8 @@ pub struct ConsentInputCtx<'a> {
     pub hover_link: &'a mut Option<usize>,
 }
 
-/// Accept is `a`: `y` accepts on the trust screen one step later, and Enter may be buffered before
-/// the notice paints. No decline, so `q` quits and the rest is swallowed.
+/// Accept is `a`: `y` accepts on the trust screen one step later, and Enter may be buffered before the notice paints.
+/// No decline, so `q` quits and the rest is swallowed.
 pub fn handle_answer(ev: &Event, ctx: &mut ConsentInputCtx<'_>) -> InputOutcome {
     let (link_count, painted_at, can_accept) = match ctx.state {
         ConsentState::Pending {
@@ -507,8 +502,8 @@ pub fn handle_answer(ev: &Event, ctx: &mut ConsentInputCtx<'_>) -> InputOutcome 
         ConsentState::Done => (0, None, false),
     };
 
-    // Ctrl+C and Ctrl+D answer nothing and this screen is their only handler, so they land even
-    // before the paint. Nothing else does: an earlier event would quit with the composer's text.
+    // Ctrl+C and Ctrl+D answer nothing and this screen is their only handler, so they land even before the paint
+    // Nothing else does: an earlier event would quit with the composer's text
     if let Event::Key(key) = ev
         && key.kind != KeyEventKind::Release
         && (key!('c', CONTROL).matches(key) || key!('d', CONTROL).matches(key))

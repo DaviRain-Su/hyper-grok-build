@@ -1,4 +1,3 @@
-// Per-test-case module for the `pty_e2e` integration test crate.
 #[allow(unused_imports)]
 use super::common::*;
 

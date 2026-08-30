@@ -2,32 +2,25 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// The suggestion the mock streams for every request. Serves BOTH the prompt
-/// turn and the turn-end `x.ai/suggestPrompt` call (the mock's fixed mode
-/// answers every request), so after the turn the ghost text mirrors it.
-/// Multi-word so the shell-side sanitizer (`sanitize_suggestion`) accepts it.
+/// The suggestion the mock streams for every request.
+/// The mock's fixed mode answers the prompt turn and the turn-end `x.ai/suggestPrompt` call alike, so the ghost text mirrors this string.
+/// It is multi-word so the shell-side sanitizer (`sanitize_suggestion`) accepts it.
 const SUGGESTION: &str = "review the staged changes";
 
-/// Bottom-bar hint that only renders while the prompt-suggestion ghost is
-/// visible (`build_hints` — `ActivePane::Prompt` arm). The ghost text itself
-/// is indistinguishable from the agent's reply in a plain-text screen dump
-/// (same string), so the hint is the observable for ghost visibility.
+/// Bottom-bar hint that only renders while the prompt-suggestion ghost is visible (the `ActivePane::Prompt` arm of `build_hints`).
+/// The ghost text is the same string as the agent's reply, so a plain-text screen dump cannot tell them apart; the hint proves the ghost is visible.
 const ACCEPT_HINT: &str = "accept suggestion";
 
-/// Next-prompt autocomplete e2e: after a turn completes, the predicted next
-/// prompt renders as ghost text in the empty prompt with a bottom-bar
-/// "accept suggestion" hint; typing a non-matching char hides it; clearing
-/// the input brings it back; Tab accepts it into the prompt (hint gone, text
-/// editable — verified by extending it and observing the echo).
+/// After a turn completes, the predicted next prompt renders as ghost text in the empty prompt with a bottom-bar "accept suggestion" hint.
+/// Typing a non-matching char hides it, and clearing the input brings it back.
+/// Tab accepts it into the prompt: the hint goes away and the text is editable (extending it and observing the echo proves that).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn prompt_suggestion_ghost_tab_accepts() {
-    // The suggestion model (`grok-4.6`, the shell's built-in default)
-    // must be in the mock catalog: the shell catalog-guards the effective
-    // suggestion model and *skips the request entirely* when it is not
-    // sampleable (`prompt_suggest::effective_suggest_model`). Listing it
-    // exercises the real guarded path end-to-end: pager hints the model from
-    // its catalog → shell guard passes → request fires → ghost renders.
+    // The suggestion model (`grok-4.6`, the shell's built-in default) must be in the mock catalog
+    // The shell skips the suggestion request entirely when the effective model is not sampleable (`prompt_suggest::effective_suggest_model`)
+    // Listing it exercises the real guarded path end-to-end
+    // The pager hints the model from its catalog, the shell guard passes, the request fires, and the ghost renders
     // `test-model` stays first so it remains the session's default model.
     let content = ContentController::start_with_models(vec![
         MockModel::new("test-model"),
@@ -66,25 +59,24 @@ async fn prompt_suggestion_ghost_tab_accepts() {
         .wait_for_text(SUGGESTION, Duration::from_secs(30))
         .expect("agent reply on screen");
 
-    // Turn end fires the suggestion fetch; the ghost + hint follow.
+    // Turn end fires the suggestion fetch; the ghost and its hint follow
     harness
         .wait_for_text(ACCEPT_HINT, Duration::from_secs(20))
         .expect("prompt-suggestion ghost visible (accept hint in shortcuts bar)");
 
-    // A non-matching keystroke hides the ghost (and its hint)…
+    // A non-matching keystroke hides the ghost (and its hint)
     harness.inject_keys(b"x").expect("type non-matching char");
     wait_for_text_gone(&mut harness, ACCEPT_HINT, Duration::from_secs(5))
         .expect("ghost hidden after divergent typing");
 
-    // …and clearing the input brings the suggestion back.
+    // Clearing the input brings the suggestion back
     harness.inject_keys(b"\x7f").expect("backspace");
     harness
         .wait_for_text(ACCEPT_HINT, Duration::from_secs(5))
         .expect("ghost returns once the input is empty again");
 
-    // Tab accepts: the hint goes away and the suggestion is now real,
-    // editable prompt text — typing appends after it (echo proves the
-    // cursor sits at the end of the accepted text).
+    // Tab accepts: the hint goes away and the suggestion is now real, editable prompt text
+    // Typing appends after it; the echo proves the cursor sits at the end of the accepted text
     harness.inject_keys(b"\t").expect("tab accepts suggestion");
     wait_for_text_gone(&mut harness, ACCEPT_HINT, Duration::from_secs(5))
         .expect("hint gone after accept");

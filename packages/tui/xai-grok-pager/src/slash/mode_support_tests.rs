@@ -87,8 +87,7 @@ fn already_in_mode_refusal_is_a_plain_statement() {
     );
 }
 
-/// Pinned on the composed sentence, not the variant, so a remedy that reads
-/// wrong to a user lands in the diff rather than only in the code.
+/// Pinned on the composed sentence, not the variant, so a remedy that reads wrong to a user lands in the diff rather than only in the code.
 #[test]
 fn mode_specific_builtin_refusals_are_pinned() {
     let commands = crate::slash::commands::builtin_commands();

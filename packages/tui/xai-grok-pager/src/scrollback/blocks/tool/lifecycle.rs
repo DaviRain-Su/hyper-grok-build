@@ -1,9 +1,7 @@
-//! LifecycleEventBlock — standalone block for lifecycle hook events
-//! (e.g. `user_prompt_submit`, `session_start`, `session_end`).
+//! Standalone block for lifecycle hook events (e.g. `user_prompt_submit`, `session_start`, `session_end`).
 //!
 //! These are rendered like tool call blocks but are *not* real tool calls.
-//! Having a dedicated variant lets `last_tool_call_entry_id()` skip them
-//! so that tool-associated hooks (pre/post_tool_use) don't misattach.
+//! Having a dedicated variant lets `last_tool_call_entry_id()` skip them so that pre/post_tool_use hooks don't attach to the wrong entry.
 
 use ratatui::text::{Line, Span};
 
@@ -12,7 +10,6 @@ use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockOutput, DisplayMode};
 use crate::theme::Theme;
 
-/// Block representing a lifecycle hook event.
 #[derive(Debug, Clone)]
 pub struct LifecycleEventBlock {
     /// Event name (e.g. `user_prompt_submit`).

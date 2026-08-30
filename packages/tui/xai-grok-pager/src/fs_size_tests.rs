@@ -65,7 +65,7 @@ fn physical_dir_size_sums_files_without_following_symlinks() {
     }
 }
 
-// The Err arm no permission trick can reach on a root-uid CI runner.
+// CI runs as root, so no permission trick can force the Err arm; a missing root reaches it
 #[test]
 fn missing_root_counts_one_unreadable_dir() {
     let missing = Path::new("/nonexistent-grok-du-root");
@@ -120,8 +120,7 @@ fn a_root_off_the_anchor_is_measured_by_nobody() {
     );
 }
 
-// statvfs pins the block unit statfs leaves ambiguous: Linux sizes f_blocks
-// by f_frsize, and reading f_bsize instead is the bug this crossed off.
+// statvfs pins the block unit statfs leaves ambiguous: Linux sizes f_blocks by f_frsize, so reading f_bsize instead miscounts capacity
 #[cfg(unix)]
 #[test]
 fn volume_bytes_reports_a_real_volume() {

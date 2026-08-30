@@ -256,7 +256,7 @@ fn load_shell_history() -> Vec<String> {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    xai_dirs::home_dir()
 }
 
 /// Keep only the most recent `max` entries, reverse to most-recent-first, and

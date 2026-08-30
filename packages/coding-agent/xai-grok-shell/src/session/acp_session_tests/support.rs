@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 use super::*;
-/// Wrap `id` in a shared auth-method handle for `SessionActor` test literals
-/// (the field is now a shared live handle, not an owned id).
 pub(crate) fn test_auth_method_id(id: &str) -> crate::agent::auth_method::SharedAuthMethodId {
     crate::agent::auth_method::new_shared_auth_method_id(Some(acp::AuthMethodId::new(id)))
 }
@@ -32,18 +30,12 @@ pub(crate) async fn test_agent_backend_search(
         true,
     )
 }
-/// Like [`test_agent_default`] but registers the `update_goal` tool so
-/// `command_availability().goal` is satisfied and `/goal …` slash commands
-/// resolve to their builtins when a turn is driven through `handle_prompt`.
 #[cfg(test)]
 pub(crate) async fn test_agent_with_goal_tool() -> xai_grok_agent::Agent {
     use xai_grok_tools::implementations::grok_build::update_goal::UpdateGoalTool;
     use xai_grok_tools::registry::types::ToolConfig;
     test_agent_with_tools(vec![ToolConfig::for_tool::<UpdateGoalTool>()]).await
 }
-/// Grok-build agent with the real `TodoWriteTool` (id `todo_write`, kind
-/// `Plan`) registered, so `tool_for_kind(ToolKind::Plan)` resolves through the
-/// live toolset instead of the literal fallback.
 #[cfg(test)]
 pub(crate) async fn test_grok_build_agent_with_todo() -> xai_grok_agent::Agent {
     use xai_grok_tools::implementations::grok_build::todo::TodoWriteTool;
@@ -61,9 +53,6 @@ pub(crate) async fn test_agent_with_active_message_tool() -> xai_grok_agent::Age
     ])
     .await
 }
-/// Agent with the real `enter_plan_mode` + `exit_plan_mode` tools registered so
-/// `prepare_tool_call` can parse a genuine `exit_plan_mode` call.
-/// `exit_plan_mode` only finalizes when `enter_plan_mode` is also present.
 #[cfg(test)]
 pub(crate) async fn test_agent_with_plan_tools() -> xai_grok_agent::Agent {
     use xai_grok_tools::implementations::grok_build::enter_plan_mode::EnterPlanModeTool;
@@ -263,6 +252,9 @@ pub(crate) async fn create_test_actor_with_terminal(
     );
     chat_state_handle.record_token_usage(total_tokens);
     let actor = SessionActor {
+        transient_retry_enabled: true,
+        transient_retries_prompt_total: std::cell::Cell::new(0),
+        transient_episode_start: std::cell::Cell::new(None),
         status_wake: Default::default(),
         session_info: SessionInfo {
             id: acp::SessionId::new("test-actor"),
@@ -453,8 +445,9 @@ pub(crate) async fn create_test_actor_with_terminal(
         title_refresh_enabled: false,
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
-        turn_stream_drained: parking_lot::Mutex::new(None),
-        pending_image_strip: parking_lot::Mutex::new(None),
+        turn_stream_drained: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        pending_image_strip: parking_lot::Mutex::new(HashMap::new()),
+        image_strip_rewrite_barrier: ImageStripRewriteBarrier::new(),
         sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
         sampling_gate: None,
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
@@ -500,9 +493,6 @@ pub(crate) async fn create_test_actor(
     .await
     .0
 }
-/// Build a user-originated `InputItem` carrying queue metadata, returning the
-/// completion receiver so a test can assert the prompt's in-flight RPC is
-/// resolved (not dropped) when the prompt is removed/cleared.
 #[cfg(test)]
 pub(crate) fn user_item_with_rx(
     id: &str,
@@ -542,8 +532,6 @@ pub(crate) fn user_item_with_rx(
     };
     (item, rx)
 }
-/// Build a user-originated `InputItem` carrying queue metadata (dropping the
-/// completion receiver — for tests that don't assert on the RPC result).
 #[cfg(test)]
 pub(crate) fn user_item(id: &str, owner: &str) -> InputItem {
     user_item_with_rx(id, owner).0
@@ -580,7 +568,6 @@ pub(crate) fn input_with_origin_rx(
     };
     (item, rx)
 }
-/// A plain Agent-mode `queue_input` request with every optional field defaulted.
 #[cfg(test)]
 pub(crate) fn queue_input_request(
     prompt_blocks: Vec<acp::ContentBlock>,
@@ -594,9 +581,6 @@ pub(crate) fn queue_input_request(
         respond_to,
     )
 }
-/// A running-turn `AgentTask` stub: a 60s sleeper that keeps the turn "in
-/// flight" until aborted. Assign to `state.running_task`; requires a
-/// `LocalSet` (`spawn_local`).
 #[cfg(test)]
 pub(crate) fn running_task_stub(prompt_id: &str) -> AgentTask {
     AgentTask::new(
@@ -619,8 +603,6 @@ pub(crate) async fn build_actor() -> (
         std::sync::Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
     (actor, gateway_rx)
 }
-/// A small valid inline PNG content block (survives normalization —
-/// 32×32 = 1024 px clears the API's 512-total-pixel floor).
 #[cfg(test)]
 pub(crate) fn test_image_content() -> acp::ImageContent {
     use base64::Engine as _;
@@ -641,8 +623,227 @@ pub(crate) fn set_goal_harness_for_tests(actor: &SessionActor) {
         .goal_harness_enabled
         .store(true, std::sync::atomic::Ordering::Relaxed);
 }
-/// An actor whose persistence channel answers the `FlushAndAck` barrier, so a
-/// turn driven with a `persist_ack` resolves (bare `build_actor` never acks).
+#[cfg(test)]
+pub(crate) async fn drain_gateway_turns() {
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+}
+#[cfg(test)]
+pub(crate) async fn prepare_call(
+    actor: &SessionActor,
+    call: ToolCallResponse,
+) -> Result<PreparedToolCall, ToolLoop> {
+    let mut deferred = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        actor.prepare_tool_call(call, &mut deferred),
+    )
+    .await
+    .expect("prepare_tool_call must not hang")
+    .expect("prepare_tool_call must not error")
+}
+#[cfg(test)]
+pub(crate) fn install_permission_manager(
+    actor: &mut SessionActor,
+    yolo: bool,
+    gateway: xai_acp_lib::AcpAgentGatewaySender,
+) {
+    use xai_grok_paths::AbsPathBuf;
+    use xai_grok_workspace::permission::{ClientType, spawn_permission_manager};
+    let cwd = AbsPathBuf::new(std::path::PathBuf::from(actor.session_info.cwd.clone()))
+        .unwrap_or_else(|_| AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap());
+    let (handle, _ev) = spawn_permission_manager(
+        actor.session_info.id.clone(),
+        gateway,
+        cwd,
+        ClientType::Generic,
+        None,
+        vec![],
+        vec![],
+        yolo,
+        None,
+    );
+    actor.permissions = handle;
+}
+#[cfg(test)]
+pub(crate) fn read_file_call(id: &str) -> ToolCallResponse {
+    ToolCallResponse {
+        id: id.to_string(),
+        kind: "function".to_string(),
+        function: crate::sampling::types::ToolCallFunction::new(
+            "read_file",
+            serde_json::json!({ "target_file": "/tmp/permission-hook.txt" }).to_string(),
+        ),
+    }
+}
+#[cfg(test)]
+pub(crate) fn search_replace_call(id: &str) -> ToolCallResponse {
+    search_replace_call_at(id, "/tmp/permission-hook.txt")
+}
+#[cfg(test)]
+pub(crate) fn search_replace_call_at(id: &str, path: &str) -> ToolCallResponse {
+    ToolCallResponse {
+        id: id.to_string(),
+        kind: "function".to_string(),
+        function: crate::sampling::types::ToolCallFunction::new(
+            "search_replace",
+            serde_json::json!({
+                "file_path": path,
+                "old_string": "a",
+                "new_string": "b",
+            })
+            .to_string(),
+        ),
+    }
+}
+#[cfg(test)]
+pub(crate) fn read_and_edit_toolset() -> Vec<xai_grok_tools::registry::types::ToolConfig> {
+    use xai_grok_tools::registry::types::ToolConfig;
+    vec![
+        ToolConfig::from_id("GrokBuild:read_file"),
+        ToolConfig {
+            id: "GrokBuild:search_replace".into(),
+            params: Some(
+                serde_json::from_value(serde_json::json!({
+                    "skip_read_before_edit": true
+                }))
+                .unwrap(),
+            ),
+            name_override: None,
+            params_name_overrides: None,
+            description_override: None,
+            behavior_version: None,
+            kind: None,
+        },
+    ]
+}
+#[cfg(test)]
+pub(crate) fn pre_tool_use_spec(
+    name: &str,
+    matcher: Option<&str>,
+    script: &str,
+) -> xai_grok_hooks::config::HookSpec {
+    xai_grok_hooks::config::HookSpec {
+        name: name.into(),
+        event: xai_grok_hooks::event::HookEventName::PreToolUse,
+        handler_type: xai_grok_hooks::config::HandlerType::Command,
+        configured_matcher: matcher.map(str::to_string),
+        matcher: matcher.map(|m| xai_grok_hooks::matcher::HookMatcher::new(m).unwrap()),
+        enabled: true,
+        command: Some(std::path::PathBuf::from(script)),
+        command_raw: Some(script.to_string()),
+        url: None,
+        url_raw: None,
+        timeout_ms: 5000,
+        source_dir: std::path::PathBuf::from("/tmp"),
+        extra_env: std::collections::HashMap::new(),
+        layer: xai_grok_hooks::config::HookProvenance::File,
+    }
+}
+#[cfg(test)]
+pub(crate) fn install_pre_tool_use_hooks(
+    actor: &mut SessionActor,
+    specs: Vec<xai_grok_hooks::config::HookSpec>,
+) {
+    let (mut registry, _) = xai_grok_hooks::discovery::load_hooks(None, None);
+    registry.append_specs(specs);
+    actor.hook_resolved_workspace_root = "/tmp".to_string();
+    *actor.hook_registry.borrow_mut() = Some(Arc::new(registry));
+}
+#[cfg(test)]
+pub(crate) fn activate_plan_mode(actor: &SessionActor) {
+    let mut tracker = actor.plan_mode.lock();
+    assert!(tracker.enter_pending());
+    assert!(tracker.activate());
+}
+#[cfg(test)]
+pub(crate) async fn tool_result_text(actor: &SessionActor, call_id: &str) -> String {
+    let conversation = actor.chat_state_handle.get_conversation().await;
+    conversation
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            xai_grok_sampling_types::ConversationItem::ToolResult(result)
+                if result.tool_call_id == call_id =>
+            {
+                Some(result.content.to_string())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no tool_result for {call_id} in {conversation:?}"))
+}
+#[cfg(test)]
+pub(crate) fn spawn_gateway_loop(
+    gateway_rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
+) -> Arc<std::sync::Mutex<Vec<serde_json::Value>>> {
+    spawn_gateway_loop_counting_prompt_hooks(
+        gateway_rx,
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        false,
+    )
+}
+#[cfg(test)]
+pub(crate) fn spawn_gateway_loop_counting_prompt_hooks(
+    gateway_rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
+    permission_prompt_hooks: Arc<std::sync::atomic::AtomicUsize>,
+    park_until_hook: bool,
+) -> Arc<std::sync::Mutex<Vec<serde_json::Value>>> {
+    use std::sync::atomic::Ordering;
+    let updates: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let captured = updates.clone();
+    let mut gateway_rx = gateway_rx;
+    tokio::task::spawn_local(async move {
+        while let Some(msg) = gateway_rx.recv().await {
+            match msg {
+                xai_acp_lib::AcpClientMessage::RequestPermission(args) => {
+                    let hooks = permission_prompt_hooks.clone();
+                    tokio::task::spawn_local(async move {
+                        if park_until_hook {
+                            let start = std::time::Instant::now();
+                            while hooks.load(Ordering::SeqCst) == 0 {
+                                assert!(
+                                    start.elapsed() < std::time::Duration::from_secs(3),
+                                    "permission_prompt hook must fire before the user answers"
+                                );
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                        let _ = args
+                            .response_tx
+                            .send(Ok(acp::RequestPermissionResponse::new(
+                                acp::RequestPermissionOutcome::Selected(
+                                    acp::SelectedPermissionOutcome::new(
+                                        acp::PermissionOptionId::new("allow-once"),
+                                    ),
+                                ),
+                            )));
+                    });
+                }
+                xai_acp_lib::AcpClientMessage::ExtNotification(args) => {
+                    let params: serde_json::Value =
+                        serde_json::from_str(args.request.params.get()).unwrap_or_default();
+                    match args.request.method.as_ref() {
+                        "x.ai/hooks/event" => {
+                            if params["notificationType"] == "permission_prompt" {
+                                permission_prompt_hooks.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                        "x.ai/session_notification" => {
+                            captured.lock().unwrap().push(params["update"].clone());
+                        }
+                        _ => {}
+                    }
+                }
+                xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                    let _ = args.response_tx.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    });
+    updates
+}
 #[cfg(test)]
 pub(crate) async fn actor_with_persistence_drain() -> std::sync::Arc<SessionActor> {
     let (gateway_tx, mut gateway_rx) =
@@ -667,4 +868,14 @@ pub(crate) async fn actor_with_persistence_drain() -> std::sync::Arc<SessionActo
     )
     .await;
     std::sync::Arc::new(actor)
+}
+/// Fresh per-step transient-retry state for direct `handle_sampling_failure`
+/// calls: `step_attempts` used, full turn budget, no open episode.
+pub(crate) fn transient_state(step_attempts: u32, enabled: bool) -> TransientRetryState {
+    TransientRetryState {
+        step_attempts,
+        prompt_attempts: 0,
+        episode_start: None,
+        enabled,
+    }
 }

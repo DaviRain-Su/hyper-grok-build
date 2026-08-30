@@ -1,11 +1,6 @@
-//! Subagent spawn-context inheritance: a child session must inherit the parent's
-//! permission handle, goal-loop gate, and configured tool-overrides cutoff so policy,
-//! run-state, and a backtest bound can't be bypassed by delegating to a subagent.
 use super::{build_minimal_agent_for_tests, make_test_handle};
 use agent_client_protocol as acp;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
-/// Subagents inherit the parent permission handle, so a managed `Read(**/.env)`
-/// deny still blocks the child — direct read and the `cat .env` shell equivalent.
 #[tokio::test]
 async fn subagent_spawn_context_inherits_parent_permission_handle() {
     use xai_grok_workspace::permission::types::{
@@ -52,17 +47,22 @@ async fn subagent_spawn_context_inherits_parent_permission_handle() {
                 xai_grok_workspace::permission::AccessKind::Bash("cat .env".into()),
             ] {
                 let decision = inherited
-                    .request(
-                        access.clone(),
-                        acp::ToolCallUpdate::new(
-                            acp::ToolCallId::new("tc"),
-                            Default::default(),
+                    .request(xai_grok_workspace::permission::PermissionRequest {
+                        session_id: Some("child-session".to_owned()),
+                        subagent_type: Some("general-purpose".to_owned()),
+                        subagent_description: Some(
+                            "permission inheritance regression".to_owned(),
                         ),
-                        Some("child-session".to_owned()),
-                        Some("general-purpose".to_owned()),
-                        Some("permission inheritance regression".to_owned()),
-                    )
-                    .await;
+                        ..xai_grok_workspace::permission::PermissionRequest::new(
+                            access.clone(),
+                            acp::ToolCallUpdate::new(
+                                acp::ToolCallId::new("tc"),
+                                Default::default(),
+                            ),
+                        )
+                    })
+                    .await
+                    .decision;
                 assert!(
                     matches!(
                         decision,
@@ -92,8 +92,6 @@ async fn subagent_spawn_context_shares_active_message_parent_prompt_index() {
         6,
     );
 }
-/// A subagent shares the parent's `goal_loop_active_gate` Arc, so flipping the
-/// parent gate is observed through the child context (same allocation).
 #[tokio::test]
 async fn subagent_spawn_context_shares_parent_goal_loop_gate() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -110,8 +108,6 @@ async fn subagent_spawn_context_shares_parent_goal_loop_gate() {
         "subagent context must observe the parent's goal-loop gate (same Arc)"
     );
 }
-/// A parent may expose `ask_user_question`, but that setting must never cross
-/// the subagent boundary.
 #[tokio::test]
 async fn subagent_spawn_context_disables_ask_user_question_from_enabled_parent() {
     let agent = build_minimal_agent_for_tests();
@@ -125,8 +121,6 @@ async fn subagent_spawn_context_disables_ask_user_question_from_enabled_parent()
         "subagent must not inherit the enabled parent ask_user_question gate"
     );
 }
-/// A subagent copies the parent's `non_interactive` flag, so a headless (`-p`)
-/// parent's children omit interactive prompt guidance.
 #[tokio::test]
 async fn subagent_spawn_context_copies_parent_non_interactive() {
     let agent = build_minimal_agent_for_tests();
@@ -179,8 +173,6 @@ async fn subagent_spawn_context_inherits_parent_configured_cutoff() {
         "an unbounded parent must not hand a subagent a cutoff"
     );
 }
-/// A subagent inherits the parent's `process_scope`, so an owner enrolled through it stays visible via the child.
-/// End-to-end reaping is covered by the spine's `process_scope_reclaim` tests.
 #[tokio::test]
 async fn subagent_spawn_context_inherits_parent_process_scope() {
     let agent = build_minimal_agent_for_tests();
@@ -243,8 +235,6 @@ async fn subagent_spawn_context_resolves_rate_limit_attempts_against_child_model
         "the per-model lookup keys on the passed model id"
     );
 }
-/// Subagents share the parent's env > config > remote > default chain
-/// (compiled default is `Segments`). Not pinned to `Summary`.
 #[test]
 #[serial_test::serial]
 fn subagent_spawn_context_resolves_compaction_mode_like_parent() {

@@ -1,9 +1,9 @@
 //! Layer-2 stream transform for the OpenAI Responses API.
 //!
-//! Consumes a raw [`ResponsesStreamItem`] stream and produces
+//! Consumes a raw `rs::ResponseStreamEvent` stream and produces
 //! [`SamplingEvent`]s. Pure: no I/O, no shell coupling.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -15,154 +15,23 @@ use futures_util::stream::{BoxStream, Stream};
 
 use xai_grok_sampling_types::{
     ConversationItem, ConversationResponse, ResponseModelMetadata, SamplingError, StopReason,
-    TokenUsage, rs,
+    TokenUsage, messages as messages_types, rs,
 };
 
 use crate::doom_loop_recovery::FailedResponseCapture;
 use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
-use crate::types::{RequestId, ResponsesStreamItem};
-
-type BackendToolOutcome = Result<Option<serde_json::Value>, String>;
-type OutputItemIdentity = (String, String);
-
-fn output_item_identity(item: &rs::OutputItem) -> Option<OutputItemIdentity> {
-    let value = serde_json::to_value(item).ok()?;
-    let kind = value.get("type")?.as_str()?;
-    let stable_id = value
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|id| !id.is_empty())
-        .or_else(|| {
-            value
-                .get("call_id")
-                .and_then(serde_json::Value::as_str)
-                .filter(|id| !id.is_empty())
-        })?;
-    Some((kind.to_string(), stable_id.to_string()))
-}
-
-fn merge_completed_output_items(
-    terminal_output: &mut Vec<rs::OutputItem>,
-    completed_output_items: Vec<rs::OutputItem>,
-) -> usize {
-    let mut added = 0;
-    for item in completed_output_items {
-        let identity = output_item_identity(&item);
-        let already_present = match identity {
-            Some(ref identity) => terminal_output
-                .iter()
-                .any(|existing| output_item_identity(existing).as_ref() == Some(identity)),
-            None => terminal_output.iter().any(|existing| existing == &item),
-        };
-        if !already_present {
-            terminal_output.push(item);
-            added += 1;
-        }
-    }
-    added
-}
-
-fn backend_tool_outcome(item: &rs::OutputItem) -> Option<(String, String, BackendToolOutcome)> {
-    match item {
-        rs::OutputItem::WebSearchCall(call) => {
-            let outcome = if call.status == rs::WebSearchToolCallStatus::Failed {
-                Err("web search failed".to_string())
-            } else {
-                Ok(serde_json::to_value(call).ok())
-            };
-            Some((call.id.clone(), "web_search".to_string(), outcome))
-        }
-        rs::OutputItem::CustomToolCall(call) => Some((
-            call.id.clone(),
-            "x_search".to_string(),
-            Ok(serde_json::to_value(call).ok()),
-        )),
-        rs::OutputItem::CodeInterpreterCall(call) => Some((
-            call.id.clone(),
-            "code_interpreter".to_string(),
-            Ok(serde_json::to_value(call).ok()),
-        )),
-        _ => None,
-    }
-}
-
-fn start_backend_tool(
-    active: &mut BTreeMap<String, String>,
-    terminal: &BTreeSet<String>,
-    request_id: &RequestId,
-    call_id: String,
-    name: &str,
-) -> Option<SamplingEvent> {
-    if terminal.contains(&call_id) || active.contains_key(&call_id) {
-        return None;
-    }
-    active.insert(call_id.clone(), name.to_string());
-    Some(SamplingEvent::BackendToolCallStarted {
-        request_id: request_id.clone(),
-        call_id,
-        name: name.to_string(),
-    })
-}
-
-fn finish_backend_tool(
-    active: &mut BTreeMap<String, String>,
-    terminal: &mut BTreeSet<String>,
-    request_id: &RequestId,
-    call_id: String,
-    name: String,
-    outcome: BackendToolOutcome,
-) -> Vec<SamplingEvent> {
-    if terminal.contains(&call_id) {
-        return Vec::new();
-    }
-    let mut events = Vec::new();
-    if let Some(started) = start_backend_tool(active, terminal, request_id, call_id.clone(), &name)
-    {
-        events.push(started);
-    }
-    active.remove(&call_id);
-    terminal.insert(call_id.clone());
-    events.push(match outcome {
-        Ok(result) => SamplingEvent::BackendToolCallCompleted {
-            request_id: request_id.clone(),
-            call_id,
-            name,
-            result,
-        },
-        Err(error) => SamplingEvent::BackendToolCallFailed {
-            request_id: request_id.clone(),
-            call_id,
-            name,
-            error,
-        },
-    });
-    events
-}
-
-fn fail_active_backend_tools(
-    active: &mut BTreeMap<String, String>,
-    terminal: &mut BTreeSet<String>,
-    request_id: &RequestId,
-    error: &str,
-) -> Vec<SamplingEvent> {
-    std::mem::take(active)
-        .into_iter()
-        .map(|(call_id, name)| {
-            terminal.insert(call_id.clone());
-            SamplingEvent::BackendToolCallFailed {
-                request_id: request_id.clone(),
-                call_id,
-                name,
-                error: error.to_string(),
-            }
-        })
-        .collect()
-}
+use crate::types::RequestId;
 
 /// Wire values of `incomplete_details.reason` on an `Incomplete` response.
+/// The xAI server emits the three `max_*` values; `content_filter` is OpenAI
+/// vocabulary, kept for spec compatibility.
 const INCOMPLETE_REASON_CONTENT_FILTER: &str = "content_filter";
 const INCOMPLETE_REASON_MAX_OUTPUT_TOKENS: &str = "max_output_tokens";
+/// The model's context window was exhausted mid-generation (xAI extension).
+const INCOMPLETE_REASON_MAX_PROMPT_TOKENS: &str = "max_prompt_tokens";
+/// A server-side time limit cut generation short (xAI extension).
+const INCOMPLETE_REASON_MAX_TIME_LIMIT: &str = "max_time_limit";
 
 /// Returns whether a Responses API event reflects real model progress
 /// rather than a liveness-only heartbeat / status transition.
@@ -336,18 +205,12 @@ fn observe_for_recovery(capture: &FailedResponseCapture, event: &rs::ResponseStr
 /// `SamplingError::Api { status: 500, .. }` so the actor's retry loop
 /// treats them as retryable.
 ///
-/// [`ResponsesStreamItem::Heartbeat`] frames (keepalive, unknown
-/// forward-compat event types) carry no model output but prove the server is
-/// alive: they reset the idle detector like codex-rs's frame-level timeout
-/// does. Without this, a long heartbeat-only phase (server-side tool
-/// execution on ChatGPT Codex) would be misclassified as an idle stall.
-///
 /// `doom_loop` is the collector returned alongside `raw_stream` by
 /// `SamplingClient::conversation_stream_responses`; any signals the SSE
 /// decoder recorded are drained onto the final `ConversationResponse`.
 /// `None` (check disabled) leaves the response untouched.
 pub fn stream_responses<'a>(
-    raw_stream: BoxStream<'a, Result<ResponsesStreamItem, SamplingError>>,
+    raw_stream: BoxStream<'a, Result<rs::ResponseStreamEvent, SamplingError>>,
     model_metadata: Option<ResponseModelMetadata>,
     request_id: RequestId,
     idle_timeout: Duration,
@@ -365,7 +228,7 @@ pub fn stream_responses<'a>(
 }
 
 pub(crate) fn stream_responses_tracked<'a>(
-    raw_stream: BoxStream<'a, Result<ResponsesStreamItem, SamplingError>>,
+    raw_stream: BoxStream<'a, Result<rs::ResponseStreamEvent, SamplingError>>,
     model_metadata: Option<ResponseModelMetadata>,
     request_id: RequestId,
     idle_timeout: Duration,
@@ -396,10 +259,6 @@ pub(crate) fn stream_responses_tracked<'a>(
         let mut message_chunk_count: u64 = 0;
         let mut first_token_emitted = false;
         let mut reasoning_acc = String::new();
-        // Visible assistant text streamed via `output_text.delta`. Used when
-        // ChatGPT Codex leaves `response.completed.output` empty (content only
-        // appears on `response.output_item.done` / deltas).
-        let mut text_acc = String::new();
         let mut last_content_chunk_at = Instant::now();
 
         // Maps Responses API `output_index` to our tool-only `tool_index`.
@@ -408,14 +267,6 @@ pub(crate) fn stream_responses_tracked<'a>(
         // look up `output_index` here to find the matching `tool_index`.
         let mut output_to_tool_index: BTreeMap<u32, u32> = BTreeMap::new();
         let mut next_tool_index: u32 = 0;
-        // Completed output items from `response.output_item.done`. ChatGPT
-        // Codex's terminal `response.completed` often has `output: []` even
-        // after full message items were streamed here — without this, we
-        // mis-classify as empty_response and retry forever while the UI
-        // already showed ChannelToken text.
-        let mut completed_output_items: Vec<rs::OutputItem> = Vec::new();
-        let mut active_backend_tools: BTreeMap<String, String> = BTreeMap::new();
-        let mut terminal_backend_tools: BTreeSet<String> = BTreeSet::new();
 
         let mut stream = raw_stream;
         loop {
@@ -426,14 +277,6 @@ pub(crate) fn stream_responses_tracked<'a>(
                     let err = SamplingError::IdleTimeout {
                         elapsed_secs: idle_timeout.as_secs(),
                     };
-                    for event in fail_active_backend_tools(
-                        &mut active_backend_tools,
-                        &mut terminal_backend_tools,
-                        &request_id,
-                        "backend request timed out",
-                    ) {
-                        yield event;
-                    }
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
@@ -442,34 +285,14 @@ pub(crate) fn stream_responses_tracked<'a>(
                 }
             };
 
-            let item = match event_result {
-                Ok(item) => item,
+            let event = match event_result {
+                Ok(event) => event,
                 Err(err) => {
-                    for event in fail_active_backend_tools(
-                        &mut active_backend_tools,
-                        &mut terminal_backend_tools,
-                        &request_id,
-                        &err.to_string(),
-                    ) {
-                        yield event;
-                    }
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
                     };
                     return;
-                }
-            };
-
-            // Heartbeat / forward-compat skip frames carry no model output
-            // but prove the server is alive: refresh the content-stall timer
-            // and continue. codex-rs's idle timeout lives at the raw frame
-            // level and behaves the same way.
-            let event = match item {
-                ResponsesStreamItem::Event(event) => event,
-                ResponsesStreamItem::Heartbeat => {
-                    last_content_chunk_at = Instant::now();
-                    continue;
                 }
             };
 
@@ -494,18 +317,24 @@ pub(crate) fn stream_responses_tracked<'a>(
             if !is_terminal_response
                 && let Some(triggers) = doom_loop.as_ref().and_then(|c| c.abort_triggers())
             {
+                let all_triggers = doom_loop
+                    .as_ref()
+                    .map(|collector| {
+                        collector
+                            .take()
+                            .into_iter()
+                            .map(|signal| signal.raw)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                yield SamplingEvent::DoomLoopSignals {
+                    request_id: request_id.clone(),
+                    triggers: all_triggers,
+                };
                 let err = SamplingError::DoomLoopDetected {
                     triggers,
                     aborted_at_chunk: Some(chunk_index),
                 };
-                for event in fail_active_backend_tools(
-                    &mut active_backend_tools,
-                    &mut terminal_backend_tools,
-                    &request_id,
-                    "backend request aborted after doom-loop detection",
-                ) {
-                    yield event;
-                }
                 yield SamplingEvent::Failed {
                     request_id: request_id.clone(),
                     error: SamplingErrorInfo::from(&err),
@@ -532,7 +361,6 @@ pub(crate) fn stream_responses_tracked<'a>(
                         chunk_timestamps.push(Instant::now());
                         chunk_index += 1;
                         message_chunk_count += 1;
-                        text_acc.push_str(&delta);
                         yield SamplingEvent::ChannelToken {
                             request_id: request_id.clone(),
                             channel: SamplingChannel::Text,
@@ -584,43 +412,18 @@ pub(crate) fn stream_responses_tracked<'a>(
                 // Start of a Responses FunctionCall — emit initial id+name
                 // and remember the output_index → tool_index mapping.
                 ResponseStreamEvent::ResponseOutputItemAdded(added_event) => {
-                    match added_event.item {
-                        rs::OutputItem::FunctionCall(fc) => {
-                            let tool_index = next_tool_index;
-                            next_tool_index += 1;
-                            output_to_tool_index.insert(added_event.output_index, tool_index);
+                    if let rs::OutputItem::FunctionCall(fc) = added_event.item {
+                        let tool_index = next_tool_index;
+                        next_tool_index += 1;
+                        output_to_tool_index.insert(added_event.output_index, tool_index);
 
-                            yield SamplingEvent::ToolCallDelta {
-                                request_id: request_id.clone(),
-                                tool_index,
-                                id: Some(fc.call_id),
-                                name: Some(fc.name),
-                                arguments_delta: None,
-                            };
-                        }
-                        rs::OutputItem::WebSearchCall(call) => {
-                            if let Some(event) = start_backend_tool(
-                                &mut active_backend_tools,
-                                &terminal_backend_tools,
-                                &request_id,
-                                call.id,
-                                "web_search",
-                            ) {
-                                yield event;
-                            }
-                        }
-                        rs::OutputItem::CustomToolCall(call) => {
-                            if let Some(event) = start_backend_tool(
-                                &mut active_backend_tools,
-                                &terminal_backend_tools,
-                                &request_id,
-                                call.id,
-                                "x_search",
-                            ) {
-                                yield event;
-                            }
-                        }
-                        _ => {}
+                        yield SamplingEvent::ToolCallDelta {
+                            request_id: request_id.clone(),
+                            tool_index,
+                            id: Some(fc.call_id),
+                            name: Some(fc.name),
+                            arguments_delta: None,
+                        };
                     }
                 }
 
@@ -648,14 +451,6 @@ pub(crate) fn stream_responses_tracked<'a>(
 
                 ResponseStreamEvent::ResponseIncomplete(incomplete_event) => {
                     final_response = Some(incomplete_event.response);
-                    for event in fail_active_backend_tools(
-                        &mut active_backend_tools,
-                        &mut terminal_backend_tools,
-                        &request_id,
-                        "response incomplete",
-                    ) {
-                        yield event;
-                    }
                     should_break = true;
                 }
 
@@ -668,7 +463,7 @@ pub(crate) fn stream_responses_tracked<'a>(
                         .unwrap_or_else(|| "Response failed with unknown error".to_string());
                     let err = SamplingError::Api {
                         status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                        message: error_message.clone(),
+                        message: error_message,
                         model_metadata: None,
                         retry_after_secs: None,
                         should_retry: None,
@@ -677,14 +472,6 @@ pub(crate) fn stream_responses_tracked<'a>(
                             .as_ref()
                             .map(|e| xai_grok_sampling_types::ApiErrorCode::parse(&e.code)),
                     };
-                    for event in fail_active_backend_tools(
-                        &mut active_backend_tools,
-                        &mut terminal_backend_tools,
-                        &request_id,
-                        &error_message,
-                    ) {
-                        yield event;
-                    }
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
@@ -700,7 +487,7 @@ pub(crate) fn stream_responses_tracked<'a>(
                     );
                     let err = SamplingError::Api {
                         status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                        message: error_message.clone(),
+                        message: error_message,
                         model_metadata: None,
                         retry_after_secs: None,
                         should_retry: None,
@@ -710,14 +497,6 @@ pub(crate) fn stream_responses_tracked<'a>(
                             .as_deref()
                             .map(xai_grok_sampling_types::ApiErrorCode::parse),
                     };
-                    for event in fail_active_backend_tools(
-                        &mut active_backend_tools,
-                        &mut terminal_backend_tools,
-                        &request_id,
-                        &error_message,
-                    ) {
-                        yield event;
-                    }
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
@@ -732,40 +511,16 @@ pub(crate) fn stream_responses_tracked<'a>(
 
                 // Web search
                 ResponseStreamEvent::ResponseWebSearchCallInProgress(ev) => {
-                    if let Some(event) = start_backend_tool(
-                        &mut active_backend_tools,
-                        &terminal_backend_tools,
-                        &request_id,
-                        ev.item_id,
-                        "web_search",
-                    ) {
-                        yield event;
-                    }
+                    yield SamplingEvent::BackendToolCallStarted {
+                        request_id: request_id.clone(),
+                        call_id: ev.item_id.clone(),
+                        name: "web_search".to_string(),
+                    };
                 }
-                ResponseStreamEvent::ResponseWebSearchCallSearching(ev) => {
-                    if let Some(event) = start_backend_tool(
-                        &mut active_backend_tools,
-                        &terminal_backend_tools,
-                        &request_id,
-                        ev.item_id,
-                        "web_search",
-                    ) {
-                        yield event;
-                    }
-                }
-                // This progress event carries no result. Keep the call open
-                // until output_item.done or terminal response reconciliation.
-                ResponseStreamEvent::ResponseWebSearchCallCompleted(ev) => {
-                    if let Some(event) = start_backend_tool(
-                        &mut active_backend_tools,
-                        &terminal_backend_tools,
-                        &request_id,
-                        ev.item_id,
-                        "web_search",
-                    ) {
-                        yield event;
-                    }
-                }
+                // Completed/Searching carry no data — the real payload
+                // arrives via ResponseOutputItemDone(WebSearchCall) below.
+                ResponseStreamEvent::ResponseWebSearchCallCompleted(_)
+                | ResponseStreamEvent::ResponseWebSearchCallSearching(_) => {}
 
                 // Code interpreter (server-side, like web/x search). Surface it
                 // the same way x_search is: a generic backend tool call that the
@@ -775,67 +530,70 @@ pub(crate) fn stream_responses_tracked<'a>(
                 // event fires on InProgress; the full payload (code + outputs)
                 // rides ResponseOutputItemDone(CodeInterpreterCall) below.
                 ResponseStreamEvent::ResponseCodeInterpreterCallInProgress(ev) => {
-                    if let Some(event) = start_backend_tool(
-                        &mut active_backend_tools,
-                        &terminal_backend_tools,
-                        &request_id,
-                        ev.item_id,
-                        "code_interpreter",
-                    ) {
-                        yield event;
-                    }
+                    yield SamplingEvent::BackendToolCallStarted {
+                        request_id: request_id.clone(),
+                        call_id: ev.item_id.clone(),
+                        name: "code_interpreter".to_string(),
+                    };
                 }
                 // Interpreting/Completed carry no payload — the result arrives
                 // via ResponseOutputItemDone(CodeInterpreterCall) below.
                 ResponseStreamEvent::ResponseCodeInterpreterCallInterpreting(_)
                 | ResponseStreamEvent::ResponseCodeInterpreterCallCompleted(_) => {}
 
-                // OutputItemDone carries the full result for backend tools
-                // and (on ChatGPT Codex) the completed assistant message /
-                // function_call items. Codex often leaves
-                // `response.completed.output` empty, so we also stash items
-                // for the final ConversationResponse.
+                // OutputItemDone carries the full result for backend tools.
                 // For WebSearchCall this includes the query and source URLs.
                 // For CustomToolCall this includes x_search results.
                 ResponseStreamEvent::ResponseOutputItemDone(done_event) => {
-                    if let Some((call_id, name, outcome)) = backend_tool_outcome(&done_event.item) {
-                        for event in finish_backend_tool(
-                            &mut active_backend_tools,
-                            &mut terminal_backend_tools,
-                            &request_id,
-                            call_id,
-                            name,
-                            outcome,
-                        ) {
-                            yield event;
+                    match &done_event.item {
+                        rs::OutputItem::WebSearchCall(ws) => {
+                            let result = serde_json::to_value(ws).ok();
+                            yield SamplingEvent::BackendToolCallCompleted {
+                                request_id: request_id.clone(),
+                                call_id: ws.id.clone(),
+                                name: "web_search".to_string(),
+                                result,
+                            };
                         }
+                        // X search results arrive as CustomToolCall with
+                        // names like x_keyword_search, x_semantic_search, etc.
+                        // Use "x_search" consistently (matching the Started event);
+                        // the specific sub-type is in the serialized result payload
+                        // and extracted by the pager from raw_output.name.
+                        rs::OutputItem::CustomToolCall(ct) => {
+                            let result = serde_json::to_value(ct).ok();
+                            yield SamplingEvent::BackendToolCallCompleted {
+                                request_id: request_id.clone(),
+                                call_id: ct.id.clone(),
+                                name: "x_search".to_string(),
+                                result,
+                            };
+                        }
+                        // Code interpreter: the full call (code + outputs) rides
+                        // the done item. Surfaced under the shared "code_interpreter"
+                        // name (matching the Started event); the shell renders it via
+                        // the client `tool_use` + `user` `tool_result` split.
+                        rs::OutputItem::CodeInterpreterCall(ci) => {
+                            let result = serde_json::to_value(ci).ok();
+                            yield SamplingEvent::BackendToolCallCompleted {
+                                request_id: request_id.clone(),
+                                call_id: ci.id.clone(),
+                                name: "code_interpreter".to_string(),
+                                result,
+                            };
+                        }
+                        _ => {}
                     }
-                    completed_output_items.push(done_event.item);
                 }
 
                 // CustomToolCallInputDelta is x_search in-progress streaming.
                 // Emit a started event on first delta per item_id.
-                ResponseStreamEvent::ResponseCustomToolCallInputDelta(ev) => {
-                    if let Some(event) = start_backend_tool(
-                        &mut active_backend_tools,
-                        &terminal_backend_tools,
-                        &request_id,
-                        ev.item_id,
-                        "x_search",
-                    ) {
-                        yield event;
-                    }
-                }
                 ResponseStreamEvent::ResponseCustomToolCallInputDone(ev) => {
-                    if let Some(event) = start_backend_tool(
-                        &mut active_backend_tools,
-                        &terminal_backend_tools,
-                        &request_id,
-                        ev.item_id,
-                        "x_search",
-                    ) {
-                        yield event;
-                    }
+                    yield SamplingEvent::BackendToolCallStarted {
+                        request_id: request_id.clone(),
+                        call_id: ev.item_id.clone(),
+                        name: "x_search".to_string(),
+                    };
                 }
 
                 // All other events (intermediate progress, annotations,
@@ -849,14 +607,6 @@ pub(crate) fn stream_responses_tracked<'a>(
                 let err = SamplingError::IdleTimeout {
                     elapsed_secs: idle_timeout.as_secs(),
                 };
-                for event in fail_active_backend_tools(
-                    &mut active_backend_tools,
-                    &mut terminal_backend_tools,
-                    &request_id,
-                    "backend request timed out",
-                ) {
-                    yield event;
-                }
                 yield SamplingEvent::Failed {
                     request_id: request_id.clone(),
                     error: SamplingErrorInfo::from(&err),
@@ -884,14 +634,6 @@ pub(crate) fn stream_responses_tracked<'a>(
                     // Synthesized client-side; no wire envelope to read.
                     error_code: None,
                 };
-                for event in fail_active_backend_tools(
-                    &mut active_backend_tools,
-                    &mut terminal_backend_tools,
-                    &request_id,
-                    "response stream ended before a terminal response",
-                ) {
-                    yield event;
-                }
                 yield SamplingEvent::Failed {
                     request_id: request_id.clone(),
                     error: SamplingErrorInfo::from(&err),
@@ -899,66 +641,6 @@ pub(crate) fn stream_responses_tracked<'a>(
                 return;
             }
         };
-
-        // ChatGPT Codex (`chatgpt.com/backend-api/codex`) may return an empty
-        // or only partially populated terminal `output`. Preserve its order,
-        // then append items seen only on `output_item.done`. Prefer type+id,
-        // fall back to type+call_id, and finally typed equality for identity.
-        let merged_output_items =
-            merge_completed_output_items(&mut response.output, completed_output_items);
-        if merged_output_items > 0 {
-            tracing::debug!(
-                request_id = %request_id,
-                n_items = merged_output_items,
-                "merged output_item.done items missing from terminal response"
-            );
-        }
-        if response.output.is_empty() && !text_acc.is_empty() {
-            // Fallback: only deltas were usable (no done items).
-            tracing::debug!(
-                request_id = %request_id,
-                text_len = text_acc.len(),
-                "Codex completed with empty output[]; synthesizing message from text deltas"
-            );
-            response.output = vec![rs::OutputItem::Message(rs::OutputMessage {
-                id: format!("msg_stream_{request_id}"),
-                role: rs::AssistantRole::Assistant,
-                status: rs::OutputStatus::Completed,
-                content: vec![rs::OutputMessageContent::OutputText(rs::OutputTextContent {
-                    text: text_acc.clone(),
-                    annotations: vec![],
-                    logprobs: None,
-                })],
-            })];
-        }
-
-        // Some compatible providers omit output_item.done and place the full
-        // hosted-tool item only in the terminal response. Reconcile it here.
-        for item in &response.output {
-            if let Some((call_id, name, outcome)) = backend_tool_outcome(item) {
-                for event in finish_backend_tool(
-                    &mut active_backend_tools,
-                    &mut terminal_backend_tools,
-                    &request_id,
-                    call_id,
-                    name,
-                    outcome,
-                ) {
-                    yield event;
-                }
-            }
-        }
-        // Last-resort compatibility for providers that send progress plus an
-        // empty successful completion and no output item.
-        for (call_id, name) in std::mem::take(&mut active_backend_tools) {
-            terminal_backend_tools.insert(call_id.clone());
-            yield SamplingEvent::BackendToolCallCompleted {
-                request_id: request_id.clone(),
-                call_id,
-                name,
-                result: None,
-            };
-        }
 
         // Billing fields (`prompt_tokens`, `completion_tokens`,
         // `cached_prompt_tokens`, `reasoning_tokens`) are the cumulative
@@ -988,8 +670,8 @@ pub(crate) fn stream_responses_tracked<'a>(
             .and_then(|s| s.parse::<i64>().ok());
 
         let status = response.status.clone();
-        // Wire reason for an incomplete response: "max_output_tokens" or
-        // "content_filter". Captured before `response` is consumed below.
+        // Wire reason for an incomplete response (the `INCOMPLETE_REASON_*`
+        // values above). Captured before `response` is consumed below.
         let incomplete_reason = response
             .incomplete_details
             .as_ref()
@@ -1007,41 +689,75 @@ pub(crate) fn stream_responses_tracked<'a>(
             _ => false,
         });
 
-        // NOTE: tool calls win even over an Incomplete status — opposite
-        // precedence from the Messages backend, where Length wins so
-        // `drive_l2` can refuse to salvage a possibly argument-truncated
-        // trailing call. Load-bearing; don't "fix" here.
-        let stop_reason = if has_tool_calls {
-            if matches!(status, Status::Incomplete)
-                && matches!(
-                    incomplete_reason.as_deref(),
-                    Some(INCOMPLETE_REASON_MAX_OUTPUT_TOKENS) | None
-                )
-            {
-                tracing::warn!(
-                    request_id = %request_id,
-                    "tool calls mask a length-truncated response; arguments may be truncated"
-                );
-            }
-            Some(StopReason::ToolCalls)
-        } else {
-            match status {
-                Status::Completed => Some(StopReason::Stop),
-                // A moderation cut ("content_filter") maps to ContentFilter,
-                // not Length: a filter-cut response must never be salvaged
-                // and continued by `LengthPolicy`.
-                Status::Incomplete => match incomplete_reason.as_deref() {
-                    Some(INCOMPLETE_REASON_CONTENT_FILTER) => Some(StopReason::ContentFilter),
-                    Some(INCOMPLETE_REASON_MAX_OUTPUT_TOKENS) | None => Some(StopReason::Length),
+        // The single classification of an Incomplete response: the collapsed
+        // [`StopReason`] plus the typed raw reason carried to consumers. The
+        // Responses wire strings never leave this module; the raw reason
+        // reuses the Messages wire strings so the shell speaks one vocabulary
+        // (same strings, not backend parity — the xAI Messages surface itself
+        // reports a context cut as `max_tokens`, only this mapping splits it).
+        let incomplete_classification: Option<(StopReason, Option<messages_types::StopReason>)> =
+            if matches!(status, Status::Incomplete) {
+                Some(match incomplete_reason.as_deref() {
+                    // A moderation cut ("content_filter") maps to
+                    // ContentFilter, not Length: a filter-cut response must
+                    // never be salvaged and continued by `LengthPolicy`.
+                    Some(INCOMPLETE_REASON_CONTENT_FILTER) => (StopReason::ContentFilter, None),
+                    Some(INCOMPLETE_REASON_MAX_OUTPUT_TOKENS) => (
+                        StopReason::Length,
+                        Some(messages_types::StopReason::MaxTokens),
+                    ),
+                    Some(INCOMPLETE_REASON_MAX_PROMPT_TOKENS) => (
+                        StopReason::Length,
+                        Some(messages_types::StopReason::ModelContextWindowExceeded),
+                    ),
+                    // A time-limit cut is a Length cut with no Messages
+                    // vocabulary word; log it because the truncation notice
+                    // the user sees says "output limit".
+                    Some(INCOMPLETE_REASON_MAX_TIME_LIMIT) => {
+                        tracing::info!(
+                            request_id = %request_id,
+                            "response cut by the server-side time limit"
+                        );
+                        (StopReason::Length, None)
+                    }
+                    // An Incomplete response without a reason is a length cut
+                    // with nothing to carry.
+                    None => (StopReason::Length, None),
                     Some(other) => {
                         tracing::warn!(
                             reason = %other,
                             "unknown incomplete reason; treating as Length"
                         );
-                        Some(StopReason::Length)
+                        (StopReason::Length, None)
                     }
+                })
+            } else {
+                None
+            };
+
+        // NOTE: tool calls win even over an Incomplete status — opposite
+        // precedence from the Messages backend, where Length wins so the
+        // `LengthPolicy` gate can refuse a possibly argument-truncated
+        // trailing call. Load-bearing; don't "fix" here.
+        let (stop_reason, raw_stop_reason) = if has_tool_calls {
+            if matches!(incomplete_classification, Some((StopReason::Length, _))) {
+                tracing::warn!(
+                    request_id = %request_id,
+                    "tool calls mask a length-truncated response; arguments may be truncated"
+                );
+            }
+            // Keep the pair coherent: a tool-bearing turn reports ToolCalls
+            // with no raw length reason (the warn above is the truncation
+            // signal), preserving the headless output's `tool_use`.
+            (Some(StopReason::ToolCalls), None)
+        } else {
+            match status {
+                Status::Completed => (Some(StopReason::Stop), None),
+                Status::Incomplete => match incomplete_classification {
+                    Some((stop, raw)) => (Some(stop), raw.map(|r| r.wire_str())),
+                    None => (None, None),
                 },
-                _ => None,
+                _ => (None, None),
             }
         };
 
@@ -1072,7 +788,7 @@ pub(crate) fn stream_responses_tracked<'a>(
             doom_loop_signals,
             stop_message: None, // not reported on the Responses API
             message_id: None,   // no provider message id on the Responses API
-            raw_stop_reason: None,
+            raw_stop_reason,
             stop_sequence: None,
         };
 
@@ -1093,19 +809,6 @@ mod tests {
 
     fn rid() -> RequestId {
         RequestId::from("resp-test")
-    }
-
-    /// Wrap typed rs events into the raw-stream item type the SSE decoder
-    /// emits in production.
-    fn raw_events(
-        events: Vec<Result<rs::ResponseStreamEvent, SamplingError>>,
-    ) -> BoxStream<'static, Result<ResponsesStreamItem, SamplingError>> {
-        stream::iter(
-            events
-                .into_iter()
-                .map(|r| r.map(ResponsesStreamItem::Event)),
-        )
-        .boxed()
     }
 
     /// Build a minimal `rs_types::Response` for use in `ResponseCompleted`
@@ -1176,278 +879,6 @@ mod tests {
         })
     }
 
-    fn message_item_done(text: &str) -> rs::ResponseStreamEvent {
-        message_item_done_with_id("msg_1", text)
-    }
-
-    fn message_item(id: &str, text: &str) -> rs::OutputItem {
-        rs::OutputItem::Message(rs::OutputMessage {
-            id: id.into(),
-            role: rs::AssistantRole::Assistant,
-            status: rs::OutputStatus::Completed,
-            content: vec![rs::OutputMessageContent::OutputText(
-                rs::OutputTextContent {
-                    text: text.into(),
-                    annotations: vec![],
-                    logprobs: None,
-                },
-            )],
-        })
-    }
-
-    fn message_item_done_with_id(id: &str, text: &str) -> rs::ResponseStreamEvent {
-        rs::ResponseStreamEvent::ResponseOutputItemDone(rs_types::ResponseOutputItemDoneEvent {
-            sequence_number: 0,
-            output_index: 0,
-            item: message_item(id, text),
-        })
-    }
-
-    fn web_search_item(id: &str, status: rs::WebSearchToolCallStatus) -> rs::OutputItem {
-        rs::OutputItem::WebSearchCall(rs::WebSearchToolCall {
-            id: id.into(),
-            status,
-            action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
-                query: "rust async traits".into(),
-                sources: Some(vec![]),
-            }),
-        })
-    }
-
-    fn web_search_added(id: &str) -> rs::ResponseStreamEvent {
-        rs::ResponseStreamEvent::ResponseOutputItemAdded(rs_types::ResponseOutputItemAddedEvent {
-            sequence_number: 0,
-            output_index: 0,
-            item: web_search_item(id, rs::WebSearchToolCallStatus::InProgress),
-        })
-    }
-
-    fn web_search_done(id: &str, status: rs::WebSearchToolCallStatus) -> rs::ResponseStreamEvent {
-        rs::ResponseStreamEvent::ResponseOutputItemDone(rs_types::ResponseOutputItemDoneEvent {
-            sequence_number: 1,
-            output_index: 0,
-            item: web_search_item(id, status),
-        })
-    }
-
-    fn web_search_progress(id: &str) -> rs::ResponseStreamEvent {
-        rs::ResponseStreamEvent::ResponseWebSearchCallInProgress(
-            rs_types::ResponseWebSearchCallInProgressEvent {
-                sequence_number: 0,
-                output_index: 0,
-                item_id: id.into(),
-            },
-        )
-    }
-
-    fn backend_lifecycle_counts(events: &[SamplingEvent]) -> (usize, usize, usize) {
-        let started = events
-            .iter()
-            .filter(|event| matches!(event, SamplingEvent::BackendToolCallStarted { .. }))
-            .count();
-        let completed = events
-            .iter()
-            .filter(|event| matches!(event, SamplingEvent::BackendToolCallCompleted { .. }))
-            .count();
-        let failed = events
-            .iter()
-            .filter(|event| matches!(event, SamplingEvent::BackendToolCallFailed { .. }))
-            .count();
-        (started, completed, failed)
-    }
-
-    #[tokio::test]
-    async fn web_search_done_only_synthesizes_started_once() {
-        let raw = raw_events(vec![
-            Ok(web_search_done(
-                "ws_done_only",
-                rs::WebSearchToolCallStatus::Completed,
-            )),
-            Ok(completed_event()),
-        ]);
-        let events = collect(stream_responses(
-            raw,
-            None,
-            rid(),
-            Duration::from_secs(60),
-            None,
-        ))
-        .await;
-
-        assert_eq!(backend_lifecycle_counts(&events), (1, 1, 0));
-    }
-
-    #[tokio::test]
-    async fn web_search_progress_added_and_done_are_deduplicated() {
-        let raw = raw_events(vec![
-            Ok(web_search_progress("ws_dedup")),
-            Ok(web_search_progress("ws_dedup")),
-            Ok(web_search_added("ws_dedup")),
-            Ok(web_search_done(
-                "ws_dedup",
-                rs::WebSearchToolCallStatus::Completed,
-            )),
-            Ok(completed_event()),
-        ]);
-        let events = collect(stream_responses(
-            raw,
-            None,
-            rid(),
-            Duration::from_secs(60),
-            None,
-        ))
-        .await;
-
-        assert_eq!(backend_lifecycle_counts(&events), (1, 1, 0));
-    }
-
-    #[tokio::test]
-    async fn failed_web_search_done_maps_to_failed_lifecycle() {
-        let raw = raw_events(vec![
-            Ok(web_search_done(
-                "ws_failed",
-                rs::WebSearchToolCallStatus::Failed,
-            )),
-            Ok(completed_event()),
-        ]);
-        let events = collect(stream_responses(
-            raw,
-            None,
-            rid(),
-            Duration::from_secs(60),
-            None,
-        ))
-        .await;
-
-        assert_eq!(backend_lifecycle_counts(&events), (1, 0, 1));
-    }
-
-    #[tokio::test]
-    async fn terminal_output_reconciles_missing_done_event() {
-        let mut response = empty_completed_response();
-        response.output.push(web_search_item(
-            "ws_terminal",
-            rs::WebSearchToolCallStatus::Completed,
-        ));
-        let terminal =
-            rs::ResponseStreamEvent::ResponseCompleted(rs_types::ResponseCompletedEvent {
-                response,
-                sequence_number: 0,
-            });
-        let events = collect(stream_responses(
-            raw_events(vec![Ok(terminal)]),
-            None,
-            rid(),
-            Duration::from_secs(60),
-            None,
-        ))
-        .await;
-
-        assert_eq!(backend_lifecycle_counts(&events), (1, 1, 0));
-    }
-
-    #[tokio::test]
-    async fn empty_success_closes_progress_only_search() {
-        let events = collect(stream_responses(
-            raw_events(vec![
-                Ok(web_search_progress("ws_progress_only")),
-                Ok(completed_event()),
-            ]),
-            None,
-            rid(),
-            Duration::from_secs(60),
-            None,
-        ))
-        .await;
-
-        assert_eq!(backend_lifecycle_counts(&events), (1, 1, 0));
-    }
-
-    #[tokio::test]
-    async fn response_failure_closes_active_search_as_failed() {
-        let failed = rs::ResponseStreamEvent::ResponseFailed(rs_types::ResponseFailedEvent {
-            response: failed_response_with_error("provider failed"),
-            sequence_number: 1,
-        });
-        let events = collect(stream_responses(
-            raw_events(vec![Ok(web_search_progress("ws_active")), Ok(failed)]),
-            None,
-            rid(),
-            Duration::from_secs(60),
-            None,
-        ))
-        .await;
-
-        assert_eq!(backend_lifecycle_counts(&events), (1, 0, 1));
-        assert!(matches!(events.last(), Some(SamplingEvent::Failed { .. })));
-    }
-
-    /// ChatGPT Codex: deltas + output_item.done with text, but completed.output=[].
-    /// Must not classify as empty (would spin retries while UI already showed text).
-    #[tokio::test]
-    async fn codex_empty_completed_output_adopts_output_item_done() {
-        let raw = raw_events(vec![
-            Ok(text_delta_event("Hi")),
-            Ok(text_delta_event("!")),
-            Ok(message_item_done("Hi!")),
-            Ok(completed_event()),
-        ]);
-        let events = collect(stream_responses(
-            raw,
-            None,
-            rid(),
-            Duration::from_secs(60),
-            None,
-        ))
-        .await;
-        let completed = events
-            .iter()
-            .find_map(|e| match e {
-                SamplingEvent::Completed { response, .. } => Some(response.as_ref()),
-                _ => None,
-            })
-            .expect("Completed event");
-        assert!(
-            completed.empty_reason().is_none(),
-            "must not be empty: {:?}",
-            completed.empty_reason()
-        );
-        assert_eq!(completed.assistant_text(), "Hi!");
-    }
-
-    #[tokio::test]
-    async fn codex_partial_terminal_output_merges_only_missing_done_items() {
-        let raw = raw_events(vec![
-            Ok(message_item_done_with_id("msg_terminal", "first")),
-            Ok(message_item_done_with_id("msg_done_only", " second")),
-            Ok({
-                let mut response = empty_completed_response();
-                response.output.push(message_item("msg_terminal", "first"));
-                rs::ResponseStreamEvent::ResponseCompleted(rs_types::ResponseCompletedEvent {
-                    response,
-                    sequence_number: 2,
-                })
-            }),
-        ]);
-        let events = collect(stream_responses(
-            raw,
-            None,
-            rid(),
-            Duration::from_secs(60),
-            None,
-        ))
-        .await;
-        let completed = events
-            .iter()
-            .find_map(|event| match event {
-                SamplingEvent::Completed { response, .. } => Some(response.as_ref()),
-                _ => None,
-            })
-            .expect("Completed event");
-
-        assert_eq!(completed.assistant_text(), "first\n second");
-    }
-
     async fn collect(s: impl Stream<Item = SamplingEvent>) -> Vec<SamplingEvent> {
         let mut out = Vec::new();
         let mut s = pin!(s);
@@ -1496,9 +927,7 @@ mod tests {
             // only the veto can empty the capture. The collector is armed
             // before the stream runs, so the abort lands on the tool frame.
             capture.record_reasoning_delta(0, 0, "reasoning-1".into(), "looping thought");
-            let raw = stream::iter(vec![Ok(tool_frame), Ok(completed_event())])
-                .map(|r: Result<rs::ResponseStreamEvent, _>| r.map(ResponsesStreamItem::Event))
-                .boxed();
+            let raw = stream::iter(vec![Ok(tool_frame), Ok(completed_event())]).boxed();
             let events = collect(stream_responses_tracked(
                 raw,
                 None,
@@ -1523,7 +952,8 @@ mod tests {
 
     #[tokio::test]
     async fn missing_completed_event_yields_failed() {
-        let raw = raw_events(Vec::new());
+        let raw =
+            stream::iter(Vec::<Result<rs::ResponseStreamEvent, SamplingError>>::new()).boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -1553,8 +983,14 @@ mod tests {
         })
     }
 
-    async fn stop_reason_for_incomplete(reason: &str) -> Option<StopReason> {
-        let raw = raw_events(vec![Ok(text_delta_event("cut")), Ok(incomplete_event(reason))]);
+    /// (collapsed stop reason, raw wire stop reason) for an Incomplete
+    /// response ending with the given `incomplete_details.reason`.
+    async fn stop_reasons_for_incomplete(reason: &str) -> (Option<StopReason>, Option<String>) {
+        let raw = stream::iter(vec![
+            Ok(text_delta_event("cut")),
+            Ok(incomplete_event(reason)),
+        ])
+        .boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -1564,17 +1000,48 @@ mod tests {
         ))
         .await;
         match events.last().unwrap() {
-            SamplingEvent::Completed { response, .. } => response.stop_reason,
+            SamplingEvent::Completed { response, .. } => {
+                (response.stop_reason, response.raw_stop_reason.clone())
+            }
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    async fn stop_reason_for_incomplete(reason: &str) -> Option<StopReason> {
+        stop_reasons_for_incomplete(reason).await.0
     }
 
     /// A token-budget cut maps to Length (the salvageable class)...
     #[tokio::test]
     async fn incomplete_max_output_tokens_maps_to_length() {
         assert_eq!(
-            stop_reason_for_incomplete("max_output_tokens").await,
-            Some(StopReason::Length)
+            stop_reasons_for_incomplete("max_output_tokens").await,
+            (Some(StopReason::Length), Some("max_tokens".to_string()))
+        );
+    }
+
+    /// Context-window exhaustion ("max_prompt_tokens", the xAI extension)
+    /// is also a Length cut, not the unknown-reason fallback — but keeps its
+    /// wire distinction in `raw_stop_reason`, in the Messages vocabulary.
+    #[tokio::test]
+    async fn incomplete_max_prompt_tokens_maps_to_length() {
+        assert_eq!(
+            stop_reasons_for_incomplete("max_prompt_tokens").await,
+            (
+                Some(StopReason::Length),
+                Some("model_context_window_exceeded".to_string())
+            )
+        );
+    }
+
+    /// A server time-limit cut ("max_time_limit", the xAI extension) is a
+    /// known Length cut, not the unknown-reason fallback; it carries no raw
+    /// reason (the Messages vocabulary has no word for it).
+    #[tokio::test]
+    async fn incomplete_max_time_limit_maps_to_length() {
+        assert_eq!(
+            stop_reasons_for_incomplete("max_time_limit").await,
+            (Some(StopReason::Length), None)
         );
     }
 
@@ -1598,7 +1065,7 @@ mod tests {
                 response: build_response(rs_types::Status::Incomplete),
                 sequence_number: 0,
             });
-        let raw = raw_events(vec![Ok(text_delta_event("cut")), Ok(event)]);
+        let raw = stream::iter(vec![Ok(text_delta_event("cut")), Ok(event)]).boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -1616,7 +1083,9 @@ mod tests {
     }
 
     /// Pins the tool-calls-beat-Incomplete precedence: a truncated response
-    /// that still carries a function call surfaces as ToolCalls, not Length.
+    /// that still carries a function call surfaces as ToolCalls, not Length —
+    /// and the pair stays coherent: no raw length reason rides along, so the
+    /// headless output keeps reporting `tool_use` for tool-bearing turns.
     #[tokio::test]
     async fn incomplete_with_tool_calls_maps_to_tool_calls() {
         let mut response = build_response(rs_types::Status::Incomplete);
@@ -1637,7 +1106,7 @@ mod tests {
                 response,
                 sequence_number: 0,
             });
-        let raw = raw_events(vec![Ok(event)]);
+        let raw = stream::iter(vec![Ok(event)]).boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -1649,14 +1118,26 @@ mod tests {
         match events.last().unwrap() {
             SamplingEvent::Completed { response, .. } => {
                 assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+                assert_eq!(response.raw_stop_reason, None);
             }
             other => panic!("expected Completed, got {other:?}"),
         }
     }
 
+    /// The unknown-reason arm is the forward-compatibility story: a wire
+    /// value this client has never seen collapses to Length (salvageable,
+    /// never a parse failure) and carries no raw reason.
+    #[tokio::test]
+    async fn incomplete_unknown_reason_maps_to_length() {
+        assert_eq!(
+            stop_reasons_for_incomplete("some_future_reason").await,
+            (Some(StopReason::Length), None)
+        );
+    }
+
     #[tokio::test]
     async fn text_delta_then_completed_yields_completed_with_stop() {
-        let raw = raw_events(vec![Ok(text_delta_event("hello")), Ok(completed_event())]);
+        let raw = stream::iter(vec![Ok(text_delta_event("hello")), Ok(completed_event())]).boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -1702,7 +1183,7 @@ mod tests {
             response: failed_response_with_error("boom"),
             sequence_number: 0,
         });
-        let raw = raw_events(vec![Ok(failed)]);
+        let raw = stream::iter(vec![Ok(failed)]).boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -1741,7 +1222,7 @@ mod tests {
             message: "could not decode image".into(),
             param: None,
         });
-        let raw = raw_events(vec![Ok(error_event)]);
+        let raw = stream::iter(vec![Ok(error_event)]).boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -1764,10 +1245,11 @@ mod tests {
 
     #[tokio::test]
     async fn mid_stream_transport_error_yields_failed() {
-        let raw = raw_events(vec![
+        let raw = stream::iter(vec![
             Ok(text_delta_event("hi")),
             Err(SamplingError::EventStreamError("conn reset".into())),
-        ]);
+        ])
+        .boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -1791,7 +1273,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn idle_timeout_when_stream_stalls() {
-        let raw = raw_events(vec![Ok(text_delta_event("hi"))])
+        let raw = stream::iter(vec![Ok(text_delta_event("hi"))])
             .chain(stream::pending())
             .boxed();
         let events = collect(stream_responses(
@@ -1811,74 +1293,9 @@ mod tests {
         }
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn heartbeat_frames_keep_long_silent_phases_alive() {
-        // 300s of heartbeat-only streaming (well past the 60s idle timeout),
-        // then real content: the stream must complete, not fail with
-        // IdleTimeout. Heartbeat gaps stay under the timeout — a gap longer
-        // than idle_timeout still fails (dead connection).
-        let raw = async_stream::stream! {
-            for _ in 0..10 {
-                yield Ok(ResponsesStreamItem::Heartbeat);
-                tokio::time::sleep(Duration::from_secs(30)).await;
-            }
-            yield Ok(ResponsesStreamItem::Event(text_delta_event("hi")));
-            yield Ok(ResponsesStreamItem::Event(completed_event()));
-        }
-        .boxed();
-        let events = collect(stream_responses(
-            raw,
-            None,
-            rid(),
-            Duration::from_secs(60),
-            None,
-        ))
-        .await;
-
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, SamplingEvent::Failed { .. })),
-            "heartbeat-kept-alive stream must not fail: {events:?}"
-        );
-        match events.last().unwrap() {
-            SamplingEvent::Completed { response, .. } => {
-                assert_eq!(response.stop_reason, Some(StopReason::Stop));
-            }
-            other => panic!("expected Completed, got {other:?}"),
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn heartbeat_gap_beyond_idle_timeout_still_fails() {
-        // One heartbeat, then silence longer than idle_timeout: liveness is
-        // disproven, so the transport timeout must fire.
-        let raw = async_stream::stream! {
-            yield Ok(ResponsesStreamItem::Heartbeat);
-            tokio::time::sleep(Duration::from_secs(300)).await;
-            yield Ok(ResponsesStreamItem::Event(completed_event()));
-        }
-        .boxed();
-        let events = collect(stream_responses(
-            raw,
-            None,
-            rid(),
-            Duration::from_secs(60),
-            None,
-        ))
-        .await;
-
-        match events.last().unwrap() {
-            SamplingEvent::Failed { error, .. } => {
-                assert_eq!(error.kind, crate::events::SamplingErrorKind::IdleTimeout);
-            }
-            other => panic!("expected Failed(IdleTimeout), got {other:?}"),
-        }
-    }
-
     #[tokio::test]
     async fn model_metadata_yielded_after_stream_started() {
-        let raw = raw_events(vec![Ok(completed_event())]);
+        let raw = stream::iter(vec![Ok(completed_event())]).boxed();
         let metadata = ResponseModelMetadata {
             context_window: Some(8192),
             ..Default::default()
@@ -1955,11 +1372,7 @@ mod tests {
                 content_index: 0,
                 delta: "no".into(),
             });
-        let raw = stream::iter(vec![
-            Ok(ResponsesStreamItem::Event(refusal)),
-            Ok(ResponsesStreamItem::Event(completed_event())),
-        ])
-        .boxed();
+        let raw = stream::iter(vec![Ok(refusal), Ok(completed_event())]).boxed();
         let _ = collect(stream_responses_tracked(
             raw,
             None,
@@ -2002,9 +1415,7 @@ mod tests {
                 ),
             },
         );
-        let raw = stream::iter(vec![Ok(in_progress), Ok(done), Ok(completed_event())])
-            .map(|event| event.map(ResponsesStreamItem::Event))
-            .boxed();
+        let raw = stream::iter(vec![Ok(in_progress), Ok(done), Ok(completed_event())]).boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -2097,7 +1508,7 @@ mod tests {
             Ok(function_call_args_delta_event(0, "1}")),
             Ok(completed_event()),
         ];
-        let raw = raw_events(events);
+        let raw = stream::iter(events).boxed();
         let evs = collect(stream_responses(
             raw,
             None,
@@ -2128,7 +1539,7 @@ mod tests {
             Ok(function_call_args_delta_event(7, "{\"oops\":1}")),
             Ok(completed_event()),
         ];
-        let raw = raw_events(events);
+        let raw = stream::iter(events).boxed();
         let evs = collect(stream_responses(
             raw,
             None,
@@ -2149,7 +1560,7 @@ mod tests {
             Ok(function_call_args_delta_event(1, "b-args")),
             Ok(completed_event()),
         ];
-        let raw = raw_events(events);
+        let raw = stream::iter(events).boxed();
         let evs = collect(stream_responses(
             raw,
             None,
@@ -2178,7 +1589,7 @@ mod tests {
         };
         let collector = crate::doom_loop::DoomLoopSignalCollector::default();
         assert!(collector.absorb(DOOM_LOOP_CHECK_EVENT_TYPE, SAMPLE_CHECK_EVENT_DATA));
-        let raw = raw_events(vec![Ok(text_delta_event("hello")), Ok(completed_event())]);
+        let raw = stream::iter(vec![Ok(text_delta_event("hello")), Ok(completed_event())]).boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -2201,15 +1612,15 @@ mod tests {
     }
 
     /// An armed collector holding a confident signal aborts the attempt with
-    /// a retryable doom-loop failure; disarmed, the same stream completes and
-    /// the signals ride the response instead.
+    /// a retryable doom-loop failure; all detector labels are emitted first.
+    /// Disarmed, the same stream completes and the signals ride the response.
     #[tokio::test]
     async fn confident_signal_aborts_stream_unless_disarmed() {
-        let confident = r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:8@thinking"]}}"#;
+        let confident = r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:8@thinking","exact_repetition:42x3@thinking"]}}"#;
 
         let collector = crate::doom_loop::DoomLoopSignalCollector::default();
         assert!(collector.absorb("response.doom_loop_check", confident));
-        let raw = raw_events(vec![Ok(text_delta_event("hi")), Ok(completed_event())]);
+        let raw = stream::iter(vec![Ok(text_delta_event("hi")), Ok(completed_event())]).boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -2218,6 +1629,14 @@ mod tests {
             Some(collector),
         ))
         .await;
+        assert!(matches!(
+            events.get(events.len().saturating_sub(2)),
+            Some(SamplingEvent::DoomLoopSignals { triggers, .. })
+                if triggers == &[
+                    "tail_repetition:8@thinking".to_string(),
+                    "exact_repetition:42x3@thinking".to_string(),
+                ]
+        ));
         match events.last().unwrap() {
             SamplingEvent::Failed { error, .. } => {
                 assert_eq!(
@@ -2241,7 +1660,7 @@ mod tests {
         let collector = crate::doom_loop::DoomLoopSignalCollector::default();
         assert!(collector.absorb("response.doom_loop_check", confident));
         collector.disarm_abort();
-        let raw = raw_events(vec![Ok(text_delta_event("hi")), Ok(completed_event())]);
+        let raw = stream::iter(vec![Ok(text_delta_event("hi")), Ok(completed_event())]).boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -2252,7 +1671,7 @@ mod tests {
         .await;
         match events.last().unwrap() {
             SamplingEvent::Completed { response, .. } => {
-                assert_eq!(response.doom_loop_signals.len(), 1);
+                assert_eq!(response.doom_loop_signals.len(), 2);
             }
             other => panic!("expected Completed after disarm, got {other:?}"),
         }
@@ -2260,7 +1679,7 @@ mod tests {
 
     #[tokio::test]
     async fn doom_loop_signals_empty_without_collector_or_triggers() {
-        let raw = raw_events(vec![Ok(completed_event())]);
+        let raw = stream::iter(vec![Ok(completed_event())]).boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -2277,7 +1696,7 @@ mod tests {
         }
 
         // A collector that never saw a trigger also leaves the field empty.
-        let raw = raw_events(vec![Ok(completed_event())]);
+        let raw = stream::iter(vec![Ok(completed_event())]).boxed();
         let events = collect(stream_responses(
             raw,
             None,

@@ -1,12 +1,10 @@
 //! Criterion benchmarks for scrollback search.
 //!
-//! - `scan` measures the raw regex scan over a large corpus — the work that ran
-//!   synchronously on the input thread on every keystroke before the background
-//!   daemon, and now runs off-thread.
-//! - `query_steady` / `query_cold` measure the UI-thread cost of `update_query`
-//!   after the daemon change: a steady keystroke only compiles the matcher and
-//!   enqueues the query (the scan is off-thread), while the cold path also
-//!   rebuilds and ships the corpus on a content change.
+//! - `scan` measures the raw regex scan over a large corpus.
+//!   That work ran synchronously on the input thread on every keystroke before the background daemon, and now runs off-thread.
+//! - `query_steady` / `query_cold` measure the UI-thread cost of `update_query` after the daemon change.
+//!   A steady keystroke only compiles the matcher and enqueues the query (the scan is off-thread).
+//!   The cold path also rebuilds and ships the corpus on a content change.
 
 use std::hint::black_box;
 use std::time::Duration;
@@ -21,12 +19,11 @@ use xai_grok_pager::search::{QueryKind, TextMatcher};
 /// Roughly the entry count of a long working session.
 const CORPUS_ENTRIES: usize = 30_000;
 
-/// Each measured iteration scans (or rebuilds) the whole corpus, so cap the
-/// sample count — criterion's default 100 would run for minutes.
+/// Each measured iteration scans (or rebuilds) the whole corpus, so cap the sample count; criterion's default 100 would run for minutes.
 const SAMPLE_SIZE: usize = 10;
 
-/// One paragraph of body text per entry, so the whole corpus is on the order of
-/// a long session's searchable text (tens of MB; the exact size is logged).
+/// One paragraph of body text per entry, so the whole corpus is on the order of a long session's searchable text.
+/// (Tens of MB; the exact size is logged.)
 fn entry_body(i: usize) -> String {
     let lorem = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do \
                  eiusmod tempor incididunt ut labore et dolore magna aliqua ut \
@@ -53,9 +50,8 @@ fn build_large_scrollback(entries: usize) -> ScrollbackState {
     state
 }
 
-/// The regex scan itself — the work the daemon now runs off the input thread
-/// (previously this ran synchronously per keystroke). `fox` appears in every
-/// entry, the worst case for match collection.
+/// The regex scan itself: the work the daemon now runs off the input thread (previously this ran synchronously per keystroke).
+/// `fox` appears in every entry, the worst case for match collection.
 fn bench_scan(c: &mut Criterion) {
     let state = build_large_scrollback(CORPUS_ENTRIES);
     let mut index = ScrollbackSearchIndex::new();
@@ -71,9 +67,8 @@ fn bench_scan(c: &mut Criterion) {
     g.finish();
 }
 
-/// Steady keystroke after the daemon: the corpus is already shipped, so
-/// `update_query` just compiles the matcher and enqueues the query, and `poll`
-/// picks up the async result — no scan on the UI thread.
+/// Steady keystroke after the daemon: the corpus is already shipped.
+/// `update_query` just compiles the matcher and enqueues the query, and `poll` picks up the async result; no scan on the UI thread.
 fn bench_query_steady(c: &mut Criterion) {
     let state = build_large_scrollback(CORPUS_ENTRIES);
     let mut search = ScrollbackSearchState::open();
@@ -96,8 +91,8 @@ fn bench_query_steady(c: &mut Criterion) {
     g.finish();
 }
 
-/// Cold path: a fresh session, so `update_query` also rebuilds and ships the
-/// corpus (the per-entry searchable-text cache) before enqueueing the query.
+/// Cold path: a fresh session, so `update_query` also rebuilds and ships the corpus before enqueueing the query.
+/// (The corpus is the per-entry searchable-text cache.)
 fn bench_query_cold(c: &mut Criterion) {
     let state = build_large_scrollback(CORPUS_ENTRIES);
     let mut g = c.benchmark_group("search");

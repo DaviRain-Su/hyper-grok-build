@@ -2,14 +2,11 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Bracketed-paste chip guard: a multi-line paste at or above the 4-line chip
-/// threshold renders as a compact `[Pasted: N lines]` element instead of
-/// inline text, and submitting expands the chip back to the FULL payload —
-/// first and last lines included — in the request sent to the model.
+/// A bracketed paste of 4 or more lines renders as a compact `[Pasted: N lines]` chip instead of inline text.
+/// Submitting expands the chip back to the full payload, first and last lines included, in the request sent to the model.
 ///
-/// Linux-hermetic (the bracketed clipboard probe is cfg(macos/windows)); on a
-/// macOS dev machine an incidental host-clipboard image chip may attach, so
-/// asserts are contains-style on unique sentinels only.
+/// The test is hermetic on Linux, where the bracketed clipboard probe is compiled out (it is cfg(macos/windows)).
+/// On a macOS dev machine an incidental host-clipboard image chip may attach, so the asserts only look for unique sentinel substrings.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn paste_bracketed_chip_text_sends_full_payload() {

@@ -2,14 +2,13 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// PTY: drag-select on a `Read {path}` tool header copies only the path
-/// (not the `Read ` label). Exercises the real pager + mouse selection + OSC 52.
+/// PTY: drag-select on a `Read {path}` tool header copies only the path (not the `Read ` label).
+/// Exercises the real pager, mouse selection, and OSC 52.
 ///
-/// `SSH_CONNECTION` is set deliberately: on macOS the clipboard route only
-/// emits OSC 52 when it believes the session is remote (see
-/// `resolve_clipboard_route`); the harness strips inherited SSH vars, so this
-/// test re-injects a dummy one for OSC 52 readback — same pattern as
-/// `recap_header_not_in_selection_pty`.
+/// `SSH_CONNECTION` is set deliberately.
+/// On macOS the clipboard route only emits OSC 52 when it believes the session is remote (see `resolve_clipboard_route`).
+/// The harness strips inherited SSH vars, so this test re-injects a dummy one for OSC 52 readback.
+/// `recap_header_not_in_selection_pty` does the same.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn read_tool_header_selection_copies_path_only_pty() {
@@ -20,7 +19,7 @@ async fn read_tool_header_selection_copies_path_only_pty() {
     std::fs::write(&target, "hello from read header selection test\n").expect("write target file");
     let abs_path = dunce::canonicalize(&target).unwrap_or(target.clone());
     let path_display = abs_path.to_string_lossy().into_owned();
-    // Filename alone is what the fish-shortened header may show; always present.
+    // The header may abbreviate directories the way the fish shell does; the filename is always present
     let path_tail = READ_HDR_FILE;
 
     let _read_turn = seed_read_file_tool_call(&content, &abs_path);
@@ -34,9 +33,8 @@ async fn read_tool_header_selection_copies_path_only_pty() {
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    // The invariant under test is the RAW `Read {path}` header's selectable
-    // span; with verb-group folding on (default), even a lone read folds into
-    // the aggregated "Read 1 file" label and the path row never renders.
+    // The invariant under test is the raw `Read {path}` header's selectable span
+    // With `group_tool_verbs` on (the default), even a lone read folds into the aggregated "Read 1 file" label and the path row never renders
     seed_ui_config(&content, "group_tool_verbs = false");
 
     let mut harness = PtyHarness::spawn_with_content_env_in_dir(
@@ -59,7 +57,7 @@ async fn read_tool_header_selection_copies_path_only_pty() {
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit prompt");
 
-    // Wait for the Read header (label + filename) to appear.
+    // Wait for the Read header (label and filename) to appear
     harness
         .wait_for_text(path_tail, Duration::from_secs(45))
         .unwrap_or_else(|_| {
@@ -69,13 +67,11 @@ async fn read_tool_header_selection_copies_path_only_pty() {
             )
         });
 
-    // Wait for the follow-up completion sentinel before selecting. The header
-    // renders mid-turn (while the tool call is still in flight); dragging then
-    // races the streaming turn — the tool block isn't committed into a stable
-    // scrollback selection model yet, so the drag's selectable hit-test misses
-    // and no OSC 52 is emitted. Waiting for READ_HDR_SENTINEL (the last text
-    // streamed after the tool result) settles the turn first, mirroring the
-    // sibling recap_header_not_in_selection_pty test.
+    // Wait for the follow-up completion sentinel before selecting
+    // The header renders mid-turn, while the tool call is still running, so dragging then races the streaming turn
+    // The tool block isn't committed into the scrollback selection model yet, so the drag's hit-test misses and no OSC 52 is emitted
+    // Waiting for READ_HDR_SENTINEL (the last text streamed after the tool result) settles the turn first
+    // The sibling recap_header_not_in_selection_pty test does the same
     harness
         .wait_for_text(READ_HDR_SENTINEL, Duration::from_secs(45))
         .unwrap_or_else(|_| {
@@ -87,9 +83,9 @@ async fn read_tool_header_selection_copies_path_only_pty() {
 
     // Focus scrollback so mouse selection targets the tool header, not the prompt.
     harness.inject_keys(b"\t").expect("focus scrollback");
-    // Gate on the scrollback-focused footer instead of a fixed sleep: it only
-    // appears once scrollback actually owns focus, so the drag below can't race
-    // a still-prompt-focused frame under host load.
+    // Gate on the scrollback-focused footer instead of a fixed sleep
+    // The footer only appears once scrollback actually owns focus
+    // The drag below therefore can't hit a frame where the prompt still has focus under host load
     harness
         .wait_for_text("Space:prompt", Duration::from_secs(10))
         .expect("scrollback focused (Space:prompt hint) after Tab");

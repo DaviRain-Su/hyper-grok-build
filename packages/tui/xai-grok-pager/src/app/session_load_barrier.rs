@@ -1,22 +1,15 @@
-//! Defers `SessionLoaded` / `SessionLoadFailed` until ACP replay already in
-//! the pager queue has been applied — without blocking unrelated JoinSet tasks.
+//! Defers `SessionLoaded` / `SessionLoadFailed` until ACP replay already in the pager queue is applied, without blocking unrelated JoinSet tasks.
 //!
-//! This-session [`AcpLoadBacklog::LiveHead`] releases immediately: it means
-//! unicast replay has finished. Leader mode buffers live notifications for the
-//! loading client until after the `session/load` RESPONSE (`load_live_buffer` in
-//! `xai-grok-shell` leader), so another client's live event cannot land on this
-//! pager's socket mid-replay even though agent-side replay now awaits between
-//! lines. The client wire order is `[unicast replay] → [load response] →
-//! [buffered live]`. Overflow of that buffer forwards live mid-replay and is
-//! already warned at the leader; it is not the common path. Direct-spawn has no
-//! second client on the same socket.
+//! This-session [`AcpLoadBacklog::LiveHead`] releases immediately: it means unicast replay has finished.
+//! Leader mode buffers live notifications for the loading client until after the `session/load` RESPONSE (`load_live_buffer` in the shell leader).
+//! Another client's live event therefore cannot land on this pager's socket mid-replay even though agent-side replay now awaits between lines.
+//! The client wire order is `[unicast replay] → [load response] → [buffered live]`.
+//! Overflow of that buffer forwards live mid-replay and is already warned at the leader; it is not the common path.
+//! Direct-spawn has no second client on the same socket.
 //!
-//! [`AcpLoadBacklog::Unrelated`] still times out after
-//! [`SESSION_LOADED_ACP_BARRIER`] of draining: a shared `acp_rx` can show
-//! another session's traffic forever, and waiting for `Empty` would stall
-//! resume. Remaining this-session `isReplay` behind that head is still applied
-//! after dispatch via the post-load late-replay grace on
-//! `drop_unexpected_replay`.
+//! [`AcpLoadBacklog::Unrelated`] still times out after [`SESSION_LOADED_ACP_BARRIER`] of draining.
+//! A shared `acp_rx` can show another session's traffic forever, and waiting for `Empty` would stall resume.
+//! Remaining this-session `isReplay` behind that head is applied after dispatch via the post-load late-replay grace on `drop_unexpected_replay`.
 
 use std::time::{Duration, Instant};
 
@@ -28,8 +21,8 @@ use super::actions::TaskResult;
 use super::agent::AgentId;
 use crate::acp::meta::NotificationMeta;
 
-/// Firehose escape when the ACP head is unrelated to this load.
-/// Does not accrue on this-session `ReplayHead` or while input-starved.
+/// How long an unrelated ACP head may keep deferring the load before it dispatches anyway.
+/// The clock does not accrue on this-session `ReplayHead` or while input-starved.
 pub(super) const SESSION_LOADED_ACP_BARRIER: Duration = Duration::from_secs(2);
 
 /// Head of the pager ACP queue, classified against one deferred load's session.
@@ -58,7 +51,7 @@ impl AcpDrainArm {
     }
 }
 
-/// One barrier observation: ACP peek + whether the ACP arm can drain.
+/// One barrier observation: the ACP peek and whether the ACP arm can drain.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SessionLoadAcpTick<'a> {
     pub head: Option<&'a AcpClientMessage>,
@@ -163,8 +156,7 @@ pub(super) struct SessionLoadDeferState {
     pub unrelated_drain_elapsed: Duration,
 }
 
-/// Whether this JoinSet result should wait for ACP already queued for this
-/// agent's in-flight `session/load` replay.
+/// Whether this JoinSet result should wait for ACP already queued for this agent's in-flight `session/load` replay.
 pub(super) fn should_defer_session_load(
     result: &TaskResult,
     agent_loading_replay: bool,
@@ -560,8 +552,7 @@ mod tests {
 
     #[test]
     fn this_session_live_head_releases_session_loaded() {
-        // LiveHead means unicast replay is done (leader held live until after
-        // the load response); remaining this-session live must not block.
+        // LiveHead means unicast replay is done (leader held live until after the load response); remaining this-session live must not block
         let now = Instant::now();
         let mut barrier = SessionLoadBarrier::new();
         let replay = session_notif("s", true);

@@ -180,7 +180,7 @@ pub struct AuthChannels {
 }
 /// Sets no `GROK_AUTH_EXPIRED`: operator binaries, which live outside this
 /// repo, read that variable as "headless, don't prompt" and decline the run.
-async fn run_external_auth_provider(
+pub(crate) async fn run_external_auth_provider(
     command: &str,
     auth_manager: &Arc<AuthManager>,
     over_stale_credential: bool,
@@ -762,7 +762,7 @@ async fn persist_or_use_minted(auth_manager: &AuthManager, new_auth: GrokAuth) -
     }
 }
 /// Print the CLI "signed in" confirmation, clearing the spinner line first.
-fn report_signed_in(auth: &GrokAuth) {
+pub(crate) fn report_signed_in(auth: &GrokAuth) {
     eprint!("\r\x1b[K");
     match auth.email {
         Some(ref email) => eprintln!("✓ Signed in as {email}"),
@@ -916,7 +916,7 @@ async fn run_cli_login_steps(
 /// Sync this principal's config now rather than waiting for the background
 /// tick. Stay quiet about absence/failure during login — confirm only when
 /// config was actually applied; `grok setup` reports the no-config case.
-async fn apply_post_login_config(authenticated: GrokAuth) -> anyhow::Result<()> {
+pub(crate) async fn apply_post_login_config(authenticated: GrokAuth) -> anyhow::Result<()> {
     let outcome = crate::managed_config::post_login_sync(Some(authenticated)).await;
     match outcome {
         crate::managed_config::ManagedConfigSync::Updated { is_team: true } => {

@@ -5,9 +5,8 @@ use super::common::*;
 /// Title used for the manual `/rename`; unique so screen scans are unambiguous.
 const RENAME_TITLE: &str = "PTYRENAMETITLE";
 
-/// The prompt-box top-border row carrying the inline title: the line holding
-/// both the title and the `╮` corner. Line-oriented on purpose — never
-/// byte-slice box-drawing rows (char-boundary panics).
+/// The prompt-box top-border row carrying the inline title: the line holding both the title and the `╮` corner.
+/// It works on whole lines on purpose: byte-slicing box-drawing rows panics on char boundaries.
 fn title_border_row(screen: &str, title: &str) -> Option<String> {
     screen
         .lines()
@@ -15,8 +14,7 @@ fn title_border_row(screen: &str, title: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Poll until the border title renders (the rename lands asynchronously),
-/// then return its row.
+/// Poll until the border title renders (the rename lands asynchronously), then return its row.
 fn wait_for_title_row(harness: &mut PtyHarness, title: &str, timeout: Duration) -> String {
     let deadline = Instant::now() + timeout;
     loop {
@@ -31,10 +29,8 @@ fn wait_for_title_row(harness: &mut PtyHarness, title: &str, timeout: Duration) 
     }
 }
 
-/// The top-border row of the live prompt box: the `╮` row whose successor is
-/// the prompt's text row (`│ ❯ …` — side border and/or prefix). Anchoring to
-/// the prompt keeps the negative (no-title) assert honest even if some other
-/// widget ever draws a plain top border.
+/// The top-border row of the live prompt box: the `╮` row whose successor is the prompt's text row (`│ ❯ …`, side border and/or prefix).
+/// Anchoring to the prompt keeps the negative (no-title) assert honest even if some other widget ever draws a plain top border.
 fn prompt_top_border_row(screen: &str) -> Option<String> {
     let lines: Vec<&str> = screen.lines().collect();
     lines.windows(2).find_map(|pair| {
@@ -54,10 +50,9 @@ fn is_plain_border_row(row: &str) -> bool {
         && chars.all(|c| c == '\u{2500}')
 }
 
-/// Assert the title run on the border row carries the info-line text
-/// treatment: not inverse, not bold, same background as the plain border
-/// cells (no chip), and a foreground differing from the border rule (deltas,
-/// not exact theme hex).
+/// Assert the title run on the border row carries the info-line text treatment.
+/// That means not inverse, not bold, the same background as the plain border cells (no chip), and a foreground differing from the border rule.
+/// The checks compare deltas, not exact theme hex.
 fn assert_title_styled(harness: &mut PtyHarness, title: &str) {
     let styled = harness.screen_styled();
     let title_line = styled
@@ -100,10 +95,9 @@ fn assert_title_styled(harness: &mut PtyHarness, title: &str) {
     );
 }
 
-/// Graceful quit via the full-TUI chord: double Ctrl+Q, 200ms apart (the
-/// prompt owns plain keys and Ctrl+C is a no-op outside minimal mode — see
-/// `continue_resumes_session_with_history`), then reap and assert exit 0 so
-/// the shell finishes teardown before a respawn reuses the same HOME.
+/// Graceful quit via the full-TUI chord: double Ctrl+Q, 200ms apart.
+/// The prompt owns plain keys and Ctrl+C is a no-op outside minimal mode; see `continue_resumes_session_with_history`.
+/// Then reap and assert exit 0 so the shell finishes teardown before a respawn reuses the same HOME.
 fn quit_gracefully(mut harness: PtyHarness) {
     harness.update(Duration::from_millis(300));
     harness.inject_keys(b"\x11").expect("ctrl-q arm");
@@ -139,15 +133,13 @@ fn spawn_settled_session(content: &ContentController, project: &Path) -> PtyHarn
     harness
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("turn rendered");
-    harness.update(Duration::from_millis(1000)); // let the short turn settle
+    harness.update(Duration::from_millis(1000)); // Let the short turn settle
     harness
 }
 
-/// Type `/rename <title>` (paced — bulk injects paste-coalesce post-turn),
-/// submit it, and wait for the durable-write ack: the border title itself
-/// renders from the optimistic local `display_name`, but the "Session renamed
-/// to" block only lands after the shell's locked `summary.json` write
-/// round-trips.
+/// Type `/rename <title>` paced (bulk injection coalesces into a paste right after a turn), submit it, and wait for the durable-write ack.
+/// The border title itself renders from the optimistic local `display_name`.
+/// The "Session renamed to" block only lands after the shell's locked `summary.json` write round-trips.
 fn submit_rename(harness: &mut PtyHarness, title: &str) {
     inject_keys_paced(harness, format!("/rename {title}").as_bytes());
     harness.inject_keys(b"\r").expect("submit /rename");
@@ -156,9 +148,8 @@ fn submit_rename(harness: &mut PtyHarness, title: &str) {
         .expect("rename durable-write ack");
 }
 
-/// A manual `/rename` renders the session title inline on the prompt box's
-/// top border (info-line dim text treatment), right-aligned before the `╮`
-/// corner.
+/// A manual `/rename` renders the session title inline on the prompt box's top border (info-line dim text treatment).
+/// It is right-aligned before the `╮` corner.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn rename_title_shows_in_prompt_border() {
@@ -186,10 +177,9 @@ async fn rename_title_shows_in_prompt_border() {
     quit_gracefully(harness);
 }
 
-/// The border title survives quit → `--continue`: manual-ness is persisted in
-/// `summary.json` (`title_is_manual`) and re-hydrated into `display_name` on
-/// resume. The inverse holds too: a session that was never renamed resumes
-/// with a plain top border (auto titles never show on the border).
+/// The border title survives quit then `--continue`.
+/// The manual flag is persisted in `summary.json` (`title_is_manual`) and re-hydrated into `display_name` on resume.
+/// The inverse holds too: a session that was never renamed resumes with a plain top border (auto titles never show on the border).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn rename_title_survives_resume_and_stays_absent_without_rename() {
@@ -265,9 +255,8 @@ async fn rename_title_survives_resume_and_stays_absent_without_rename() {
     quit_gracefully(plain_resumed);
 }
 
-/// `/rename --auto` clears the prompt-border title. Followers / picker
-/// converge later when a regenerated auto title is adopted; this test
-/// pins the initiating pager's optimistic clear.
+/// `/rename --auto` clears the prompt-border title.
+/// Followers and the picker converge later when a regenerated auto title is adopted; this test pins the initiating pager's optimistic clear.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn rename_auto_clears_prompt_border_title() {

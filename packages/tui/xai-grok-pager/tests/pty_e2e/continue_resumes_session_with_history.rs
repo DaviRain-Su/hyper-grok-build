@@ -3,8 +3,7 @@
 use super::common::*;
 
 /// 16. **`--continue` resumes the latest session.**
-/// History must render exactly once (duplicate replay and empty pane both
-/// fail) and the resumed session must accept a follow-up turn.
+/// History must render exactly once (duplicate replay and empty pane both fail) and the resumed session must accept a follow-up turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn continue_resumes_session_with_history() {

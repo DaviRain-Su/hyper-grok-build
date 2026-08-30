@@ -1,7 +1,6 @@
-//! PTY, flag-file driven like `endline_park_is_markerless`: a short wait that
-//! expires (park #1), foreground work between the parks, then a long wait on
-//! the same still-running task (park #2). Asserts neither park writes a
-//! transcript row and only the real turn end pushes the single "Worked for X".
+//! PTY, flag-file driven like `endline_park_is_markerless`.
+//! The script: a short wait that expires (park #1), foreground work between the parks, then a long wait on the same task (park #2).
+//! Asserts neither park writes a transcript row and only the real turn end pushes the single "Worked for X".
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -9,8 +8,7 @@ use super::common::*;
 #[cfg(unix)]
 const CANCEL_HINT: &str = "Esc:cancel";
 
-/// Between-parks sentinel: collapsed execute blocks render "Run
-/// <description>", not the command's stdout.
+/// Between-parks sentinel: collapsed execute blocks render "Run <description>", not the command's stdout.
 #[cfg(unix)]
 const MIDWORK: &str = "between-parks content";
 
@@ -76,8 +74,7 @@ async fn reparked_wait_stays_markerless() {
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit prompt");
 
-    // The runtime task id rides in the follow-up request's tool result
-    // (<task-id>…</task-id>) — a UUID minted by the terminal actor.
+    // The runtime task id rides in the follow-up request's tool result (<task-id>…</task-id>), a UUID minted by the terminal actor
     let task_id = poll_for(Duration::from_secs(60), || {
         content
             .request_bodies()
@@ -92,7 +89,7 @@ async fn reparked_wait_stays_markerless() {
         )
     });
 
-    // Tool call 3 — park #1: a short wait that expires with the task still running.
+    // Tool call 3, park #1: a short wait that expires with the task still running
     let short_wait_args = json!({
         "task_ids": [task_id],
         "timeout_ms": 4_000
@@ -118,7 +115,7 @@ async fn reparked_wait_stays_markerless() {
         midwork_args,
     );
 
-    // Tool call 5 — park #2: the long wait on the same still-running task.
+    // Tool call 5, park #2: the long wait on the same still-running task
     let long_wait_args = json!({
         "task_ids": [task_id],
         "timeout_ms": 600_000
@@ -131,7 +128,7 @@ async fn reparked_wait_stays_markerless() {
         long_wait_args,
     );
 
-    // Everything downstream is scripted — release the id-extraction hold.
+    // Everything downstream is scripted; release the id-extraction hold
     std::fs::write(&id_ready_flag, b"ready").expect("release id-extraction hold");
 
     let park_one = wait_until(Duration::from_secs(90), || {
@@ -179,7 +176,7 @@ async fn reparked_wait_stays_markerless() {
         harness.screen_contents()
     );
     let screen = harness.screen_contents();
-    // U+2800–U+28FF = the braille spinner glyphs.
+    // U+2800 through U+28FF are the braille spinner glyphs
     let midwork_at = screen
         .rfind(MIDWORK)
         .expect("between-parks content on screen");

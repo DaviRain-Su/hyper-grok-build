@@ -246,6 +246,52 @@ async fn oversize_bytes_becomes_jpeg_under_limit() {
         other => panic!("expected Compressed, got {other:?}"),
     }
 }
+/// Regression: a byte-efficient image over the 2000px side clamp (e.g. a
+/// 2048px export) whose downscale is not smaller in bytes. The old
+/// keep-original branch returned the still-oversized original, which the
+/// API rejects on many-image requests (400). Normalize must clamp the side
+/// regardless of byte size.
+#[tokio::test]
+async fn oversize_dimension_but_byte_efficient_is_still_downscaled() {
+    use image::{ImageBuffer, Rgb};
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(2048, 1000, |x, y| {
+        Rgb([
+            (x.wrapping_mul(17).wrapping_add(y)) as u8,
+            (x.wrapping_mul(31).wrapping_add(y.wrapping_mul(7))) as u8,
+            (x.wrapping_add(y).wrapping_mul(13)) as u8,
+        ])
+    });
+    let mut raw = Vec::new();
+    JpegEncoder::new_with_quality(&mut raw, 20)
+        .encode_image(&DynamicImage::ImageRgb8(img))
+        .expect("encode test JPEG");
+    assert!(
+        raw.len() <= MAX_IMAGE_BYTES,
+        "fixture must be under the byte cap to isolate the dimension path ({} B)",
+        raw.len()
+    );
+    let content = ImageContent::new(
+        base64::engine::general_purpose::STANDARD.encode(&raw),
+        "image/jpeg",
+    );
+    let cache = fresh_cache();
+    let out = match normalize_one_in(content, 1, false, &cache).await {
+        Outcome::Unchanged(c) | Outcome::Compressed { content: c, .. } => c,
+        other => panic!("expected a sendable image, got {other:?}"),
+    };
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&out.data)
+        .unwrap();
+    let (w, h) = image::ImageReader::new(std::io::Cursor::new(&decoded))
+        .with_guessed_format()
+        .unwrap()
+        .into_dimensions()
+        .unwrap();
+    assert!(
+        w <= MAX_ENCODE_SIDE_PX && h <= MAX_ENCODE_SIDE_PX,
+        "normalized image must fit the {MAX_ENCODE_SIDE_PX}px clamp, got {w}x{h}"
+    );
+}
 #[tokio::test]
 async fn bad_base64_fails() {
     let img = ImageContent::new(String::from("!!!"), "image/png");

@@ -1,12 +1,11 @@
-//! `/memory` browser modal -- view-state, rendering, and input handling.
+//! `/memory` browser modal: view-state, rendering, and input handling.
 //!
-//! A centered popup with ModalWindow chrome, horizontally split into a
-//! searchable file list (left, ~40%) and a read-only content preview
-//! pane (right, ~60%). File list shows all memory files grouped by source
-//! (Global, Workspace, Sessions) with session logs in reverse chronological
-//! order. Selecting a file loads its content into the preview pane.
+//! A centered popup with ModalWindow chrome.
+//! Horizontally split into a searchable file list (left, ~40%) and a read-only content preview pane (right, ~60%).
+//! File list shows all memory files grouped by source (Global, Workspace, Sessions) with session logs in reverse chronological order.
+//! Selecting a file loads its content into the preview pane.
 //!
-//! Layout collapses to single-pane (list only) on narrow terminals (< 80 cols).
+//! Layout collapses to single-pane (list only) on narrow terminals (under 80 cols).
 //!
 //! `/` enters filter mode (type to search, Escape to exit).
 //! `x` deletes with double-press confirmation (session logs only).
@@ -53,7 +52,7 @@ pub struct MemoryFileEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryModalMode {
     Browse,
-    /// Filter input is focused — all single-char keys go to the filter.
+    /// Filter input is focused: all single-char keys go to the filter.
     /// Only Escape (exit filter) and Enter (no-op / stay) remain active.
     FilterFocused,
     ConfirmingDelete {
@@ -75,7 +74,8 @@ pub struct MemoryModalState {
     pub memory_enabled: bool,
     /// Whether the modal is rendered in fullscreen mode (persisted to config).
     pub fullscreen: bool,
-    /// Cached filtered indices. Recomputed when `query` or `entries` change.
+    /// Cached filtered indices.
+    /// Recomputed when `query` or `entries` change.
     filtered_cache: Vec<usize>,
     /// Cached total lines in the preview (for scrollbar rendering).
     preview_total_lines: usize,
@@ -172,8 +172,8 @@ impl MemoryModalState {
         }
     }
 
-    /// Move `selected` forward to the next non-header entry without
-    /// loading preview. Returns `true` if the selection changed.
+    /// Move `selected` forward to the next non-header entry without loading preview.
+    /// Returns `true` if the selection changed.
     fn advance_next(&mut self) -> bool {
         let filtered = &self.filtered_cache;
         let mut next = self.selected + 1;
@@ -187,8 +187,8 @@ impl MemoryModalState {
         false
     }
 
-    /// Move `selected` backward to the previous non-header entry without
-    /// loading preview. Returns `true` if the selection changed.
+    /// Move `selected` backward to the previous non-header entry without loading preview.
+    /// Returns `true` if the selection changed.
     fn advance_prev(&mut self) -> bool {
         if self.selected == 0 {
             return false;
@@ -209,7 +209,8 @@ impl MemoryModalState {
     }
 
     /// Select the entry at a given filtered index (used by mouse click).
-    /// Skips headers. Returns `true` if the selection changed.
+    /// Skips headers.
+    /// Returns `true` if the selection changed.
     pub fn select_at(&mut self, filt_idx: usize) -> bool {
         let filtered = &self.filtered_cache;
         if filt_idx >= filtered.len() {
@@ -275,8 +276,8 @@ impl MemoryModalState {
     }
 }
 
-/// Compute filtered indices from entries and query. Section headers are
-/// preserved only when at least one entry in the section matches.
+/// Compute filtered indices from entries and query.
+/// Section headers are preserved only when at least one entry in the section matches.
 fn compute_filtered(entries: &[MemoryFileEntry], query: &str) -> Vec<usize> {
     if query.is_empty() {
         return (0..entries.len()).collect();
@@ -287,10 +288,9 @@ fn compute_filtered(entries: &[MemoryFileEntry], query: &str) -> Vec<usize> {
     let mut section_has_match = false;
     for (i, entry) in entries.iter().enumerate() {
         if entry.is_header {
-            // Note: `pending_header` is `Some` here only when the previous
-            // section had zero matches (`.take()` clears it on first match),
-            // so `section_has_match` is always false — this guard is a
-            // defensive no-op. Kept for safety.
+            // `pending_header` is `Some` here only when the previous section had zero matches (`.take()` clears it on first match)
+            // `section_has_match` is then always false; this guard is a defensive no-op
+            // Kept for safety
             if let Some(h) = pending_header
                 && section_has_match
             {
@@ -645,8 +645,7 @@ fn render_preview(buf: &mut Buffer, area: Rect, state: &mut MemoryModalState, th
     }
 
     // Reserve scrollbar column if needed (computed after first pass).
-    // We do a two-pass approach: first compute total at full width to decide
-    // if scrollbar is needed, then re-compute at narrowed width if so.
+    // We do a two-pass approach: first compute total at full width to decide if scrollbar is needed, then re-compute at narrowed width if so
     let full_width = area.width as usize;
     if full_width == 0 {
         return;
@@ -714,8 +713,7 @@ pub fn handle_memory_key(state: &mut MemoryModalState, key: &KeyEvent) -> InputO
         return InputOutcome::Unchanged;
     }
 
-    // ConfirmingDelete has an "any key cancel" contract — handle it first
-    // so no other handler can silently swallow the key.
+    // ConfirmingDelete has an "any key cancel" contract; handle it first so no other handler can silently swallow the key
     if let MemoryModalMode::ConfirmingDelete { idx } = state.mode {
         if key.code == KeyCode::Char('x') {
             let filtered = state.filtered_indices();
@@ -753,9 +751,8 @@ fn sat_u16(v: usize) -> u16 {
     v.min(u16::MAX as usize) as u16
 }
 
-/// After a list scrollbar jump, select the first visible non-header entry
-/// so that `render_file_list`'s scroll-clamping doesn't snap `scroll_offset`
-/// back to the old selection.
+/// After a list scrollbar jump, select the first visible non-header entry.
+/// `render_file_list`'s scroll-clamping then doesn't snap `scroll_offset` back to the old selection.
 fn select_first_visible(state: &mut MemoryModalState) {
     let filtered = state.filtered_indices();
     let visible_start = state.scroll_offset;
@@ -825,7 +822,7 @@ pub fn handle_memory_mouse(
     match kind {
         MouseEventKind::Down(crossterm::event::MouseButton::Left)
         | MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-            // Click/drag on list scrollbar → jump-scroll + select nearest entry.
+            // Click/drag on list scrollbar: jump-scroll and select nearest entry
             if on_list_sb {
                 let sb = state.list_scrollbar_area.unwrap();
                 let total = sat_u16(state.filtered_indices().len());
@@ -835,7 +832,7 @@ pub fn handle_memory_mouse(
                 return InputOutcome::Changed;
             }
 
-            // Click/drag on preview scrollbar → jump-scroll.
+            // Click/drag on preview scrollbar: jump-scroll
             if on_preview_sb {
                 let sb = state.preview_scrollbar_area.unwrap();
                 let total = sat_u16(state.preview_total_lines);
@@ -902,8 +899,8 @@ pub fn handle_memory_mouse(
     }
 }
 
-/// Keys while the filter input is focused: all chars go to the filter,
-/// only Escape exits filter mode. Arrow keys still navigate the list.
+/// Keys while the filter input is focused: all chars go to the filter, only Escape exits filter mode.
+/// Arrow keys still navigate the list.
 fn handle_filter_focused(state: &mut MemoryModalState, key: &KeyEvent) -> InputOutcome {
     match key.code {
         KeyCode::Esc => {
@@ -938,8 +935,7 @@ fn finish_filter_edit(state: &mut MemoryModalState, outcome: LineEditOutcome) ->
     }
 }
 
-/// Keys in normal browse mode: single-char hotkeys active, `/` enters
-/// filter mode.
+/// Keys in normal browse mode: single-char hotkeys active, `/` enters filter mode.
 fn handle_browse(state: &mut MemoryModalState, key: &KeyEvent) -> InputOutcome {
     if key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL) {
         state.fullscreen = !state.fullscreen;
@@ -1001,9 +997,8 @@ fn handle_browse(state: &mut MemoryModalState, key: &KeyEvent) -> InputOutcome {
             } else {
                 "/memory on"
             };
-            // Optimistic update — the shortcut bar reflects the new state
-            // immediately. The shell re-syncs via the next MemoryFiles
-            // notification if the command fails.
+            // Optimistic update: the shortcut bar reflects the new state immediately
+            // The shell re-syncs via the next MemoryFiles notification if the command fails
             state.memory_enabled = !state.memory_enabled;
             InputOutcome::Action(Action::SendSlashCommandPreservingDraft(cmd.to_owned()))
         }
@@ -1078,8 +1073,7 @@ fn build_shortcuts(
                     id: 0,
                 },
             ];
-            // Browse is nav mode (filter inactive), so append `i search` last
-            // (matching the shared pickers).
+            // Browse is nav mode (filter inactive), so append `i search` last (matching the shared pickers)
             modal_window::push_vim_nav_search_hint(&mut shortcuts, false);
             shortcuts
         }
@@ -1111,8 +1105,7 @@ fn build_shortcuts(
 }
 
 /// Truncate a string to fit within `max_width` display columns.
-/// Delegates to `render::line_utils::byte_offset_at_width` to avoid
-/// duplicating the Unicode-width scanning logic.
+/// Delegates to `render::line_utils::byte_offset_at_width` to avoid duplicating the Unicode-width scanning logic.
 fn truncate_to_width(s: &str, max_width: usize) -> &str {
     let offset = crate::render::line_utils::byte_offset_at_width(s, max_width);
     &s[..offset]
@@ -1149,7 +1142,8 @@ fn format_modified(epoch_secs: Option<u64>, now_secs: u64) -> String {
 }
 
 fn load_fullscreen_pref() -> bool {
-    let path = xai_grok_tools::util::grok_home::grok_home().join("config.toml");
+    let path =
+        xai_grok_tools::util::grok_home::grok_home().join(xai_grok_config::USER_CONFIG_FILENAME);
     let Some(doc) = crate::config_toml_edit::read_config_document_for_edit(&path) else {
         return false;
     };
@@ -1223,7 +1217,7 @@ mod tests {
     fn new_selects_first_non_header() {
         let entries = build_test_entries();
         let state = MemoryModalState::new(entries);
-        // Index 0 is a header; selected should skip to index 1.
+        // Index 0 is a header, so selection starts at index 1
         assert_eq!(state.selected, 1);
         let sel = state.selected_entry().unwrap();
         assert!(!sel.is_header);
@@ -1248,7 +1242,7 @@ mod tests {
         let mut state = MemoryModalState::new(entries);
         // Select the global entry (index 1 in filtered, which is "MEMORY.md" source="global")
         state.selected = 1;
-        // Try to delete — should NOT enter confirming mode because source is "global".
+        // Try to delete: source "global" must NOT enter confirming mode
         let key = crossterm::event::KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
         let outcome = handle_memory_key(&mut state, &key);
         assert!(matches!(outcome, InputOutcome::Unchanged));
@@ -1264,8 +1258,7 @@ mod tests {
         ));
     }
 
-    /// `i` aliases `/` without modifiers: from Browse it enters FilterFocused
-    /// exactly like `/` (vim-nav "press i to search").
+    /// `i` aliases `/` without modifiers: from Browse it enters FilterFocused exactly like `/` (vim-nav "press i to search").
     #[test]
     fn i_key_enters_filter_like_slash() {
         let mut state = MemoryModalState::new(build_test_entries());
@@ -1292,12 +1285,10 @@ mod tests {
         }
     }
 
-    /// Wiring check: the Browse footer carries the shared `i search` hint under
-    /// vim nav mode. The gate is covered centrally by `modal_window`'s
-    /// `vim_nav_search_hint_only_in_vim_nav_mode`. The explicit `set_vim_mode`
-    /// pin (a thread-local that, once set, blocks disk-seeding) keeps this
-    /// independent of the dev's on-disk `[ui].vim_mode`; reset afterward since
-    /// libtest reuses worker threads.
+    /// Wiring check: the Browse footer carries the shared `i search` hint under vim nav mode.
+    /// The gate is covered centrally by `modal_window`'s `vim_nav_search_hint_only_in_vim_nav_mode`.
+    /// The `set_vim_mode` pin (a thread-local that, once set, blocks disk-seeding) keeps this independent of the dev's on-disk `[ui].vim_mode`.
+    /// Reset afterward since libtest reuses worker threads.
     #[test]
     fn browse_footer_advertises_i_search_under_vim() {
         crate::appearance::cache::set_vim_mode(true);
@@ -1319,10 +1310,10 @@ mod tests {
     #[test]
     fn truncate_to_width_handles_multibyte() {
         // CJK characters are 2 columns wide.
-        let s = "\u{4F60}\u{597D}world"; // 你好world — 2+2+5 = 9 cols
-        assert_eq!(truncate_to_width(s, 4), "\u{4F60}\u{597D}"); // 2+2 = 4
-        assert_eq!(truncate_to_width(s, 3), "\u{4F60}"); // 2, next char is 2 → exceeds 3
-        assert_eq!(truncate_to_width(s, 9), s); // fits
+        let s = "\u{4F60}\u{597D}world"; // 你好world: 2+2+5 = 9 cols
+        assert_eq!(truncate_to_width(s, 4), "\u{4F60}\u{597D}"); // Both CJK chars fit exactly in 4 columns
+        assert_eq!(truncate_to_width(s, 3), "\u{4F60}"); // 2 cols; the next char adds 2 and exceeds 3
+        assert_eq!(truncate_to_width(s, 9), s); // All 9 columns fit
     }
 
     #[test]
@@ -1333,7 +1324,7 @@ mod tests {
 
         state.set_query("session");
         state.invalidate_filter();
-        // Only the Sessions header + session-log.md should match.
+        // Only the Sessions header and session-log.md match
         assert_eq!(state.filtered_indices().len(), 2);
 
         state.set_query("");
@@ -1354,11 +1345,11 @@ mod tests {
         let sel = state.selected_entry().unwrap();
         assert_eq!(sel.label, "session-log.md");
 
-        // Selecting a header should fail.
+        // Selecting a header fails
         assert!(!state.select_at(0));
         assert_eq!(state.selected, 3);
 
-        // Selecting the same index again should return false.
+        // Selecting the already-selected index returns false
         assert!(!state.select_at(3));
     }
 
@@ -1378,7 +1369,7 @@ mod tests {
         state.list_area = Rect::new(5, 10, 30, 20);
         state.scroll_offset = 0;
 
-        // Click on row corresponding to filtered index 3 (entries_start_y = 11, row 3 → y=14).
+        // Click on row corresponding to filtered index 3 (entries_start_y = 11, row 3 is y=14)
         let result = handle_memory_mouse(
             &mut state,
             MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -1464,13 +1455,13 @@ mod tests {
         let mut state = MemoryModalState::new(entries);
         state.preview_scroll = 5;
 
-        // Ctrl+D should NOT scroll preview (removed hotkey).
+        // Ctrl+D does NOT scroll the preview (removed hotkey)
         let key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
         let result = handle_memory_key(&mut state, &key);
         assert!(matches!(result, InputOutcome::Unchanged));
         assert_eq!(state.preview_scroll, 5);
 
-        // Ctrl+U should NOT scroll preview (removed hotkey).
+        // Ctrl+U does NOT scroll the preview either (removed hotkey)
         let key = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
         let result = handle_memory_key(&mut state, &key);
         assert!(matches!(result, InputOutcome::Unchanged));
@@ -1617,11 +1608,11 @@ mod tests {
     #[test]
     fn apply_scrollbar_jump_edges() {
         let mut offset = 50;
-        // Top click → offset 0.
+        // Top click gives offset 0
         apply_scrollbar_jump(10, Rect::new(0, 10, 1, 20), 100, 10, &mut offset);
         assert_eq!(offset, 0);
 
-        // Bottom click → max offset.
+        // Bottom click gives max offset
         apply_scrollbar_jump(29, Rect::new(0, 10, 1, 20), 100, 10, &mut offset);
         assert_eq!(offset, 90);
     }

@@ -540,8 +540,7 @@ pub fn render_workflows(
     let selected_run = detail_run.or_else(|| runs.get(state.selected_run).copied());
     let (shortcuts, sizing) = modal_config(in_detail, has_run_list, selected_run);
     let config = ModalWindowConfig {
-        // "Workflow Runs", not "Workflows": that name belongs to the
-        // extensions-modal catalog tab.
+        // "Workflow Runs", not "Workflows": that name belongs to the extensions-modal catalog tab
         title: "Workflow Runs",
         tabs: None,
         shortcuts: &shortcuts,

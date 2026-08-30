@@ -2,19 +2,15 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// Overlay host: growing the live viewport for an overlay must
-/// scroll committed rows up into native scrollback (the `set_viewport_height`
-/// grow fix) rather than clobbering them, and shrinking it back when the overlay
-/// closes must leave them intact. Commit a tall response into scrollback, open
-/// the slash dropdown (grows the viewport over committed rows), close it
-/// (shrinks + re-anchors), and assert the committed head survived in scrollback.
+/// Growing the live viewport for an overlay (`set_viewport_height`) must scroll committed rows into native scrollback rather than clobbering them.
+/// Shrinking it back when the overlay closes must leave them intact.
+/// The test commits a tall response, opens the slash dropdown over the committed rows, closes it, and asserts the head survived in scrollback.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_committed_content_survives_overlay_grow() {
     let content = ContentController::start().await.expect("start content");
-    // Sentinel on the first rendered row; 80 code-block rows overflow the screen
-    // so the head reaches native scrollback (prose would reflow to fit on screen
-    // and never scroll — see `tall_response`).
+    // The sentinel sits on the first rendered row; 80 code-block rows overflow the screen so the head reaches native scrollback
+    // Prose would reflow to fit on screen and never scroll; see `tall_response`
     content.set_response(tall_response(MOCK_RESPONSE_SENTINEL, 80));
 
     let mut harness = spawn_minimal(&content);
@@ -35,7 +31,7 @@ async fn minimal_committed_content_survives_overlay_grow() {
         harness.scrollback_text()
     );
 
-    // Open the slash dropdown → grows the live viewport over committed rows.
+    // Open the slash dropdown, which grows the live viewport over committed rows
     inject_keys_paced(&mut harness, b"/mod");
     let dropdown_deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < dropdown_deadline
@@ -54,12 +50,11 @@ async fn minimal_committed_content_survives_overlay_grow() {
         harness.screen_contents(),
         harness.scrollback_text(),
     );
-    // Close it → shrinks + re-anchors to the bottom.
+    // Close it, which shrinks the viewport and re-anchors to the bottom
     harness.inject_keys(keys::ESC).expect("close dropdown");
     harness.update(Duration::from_millis(400));
 
-    // The committed head must still be readable in scrollback: the grow/shrink
-    // cycle must neither clobber nor lose it.
+    // The committed head must still be readable in scrollback: the grow/shrink cycle must neither clobber nor lose it
     assert!(
         harness.scrollback_text().contains(MOCK_RESPONSE_SENTINEL),
         "committed block must survive the overlay grow/shrink cycle\nscrollback:\n{}",

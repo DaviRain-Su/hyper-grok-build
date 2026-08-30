@@ -1,7 +1,7 @@
-//! Recognition and presentation mapping for `send_subagent_message` calls.
+//! Recognizes `send_subagent_message` tool calls and maps them to scrollback blocks.
 //!
-//! The display consumes deserialized wire arguments without repeating admission
-//! validation, so rejected attempts retain the exact destination and text.
+//! The block takes the subagent id and text straight from the deserialized input, with no re-validation.
+//! A rejected send therefore still shows the exact destination and text that was attempted.
 
 use agent_client_protocol as acp;
 use xai_grok_tools::implementations::grok_build::send_subagent_message::{

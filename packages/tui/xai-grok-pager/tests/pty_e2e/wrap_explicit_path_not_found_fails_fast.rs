@@ -2,11 +2,9 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Fail-fast e2e: an explicit path (contains `/`) never routes through the
-/// shell, so a nonexistent one must keep the old precise failure — PTY spawn
-/// fails, the exec fallback engages ("wrapped mode failed"), exec ENOENTs
-/// ("failed to exec"), and grok exits 1. Guards against the shell route ever
-/// swallowing path typos into a confusing shell error.
+/// Fail-fast e2e: an explicit path (contains `/`) never routes through the shell, so a nonexistent one must keep the old precise failure.
+/// PTY spawn fails, the exec fallback engages ("wrapped mode failed"), exec ENOENTs ("failed to exec"), and grok exits 1.
+/// Guards against the shell route ever swallowing path typos into a confusing shell error.
 #[test]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 #[cfg(unix)]

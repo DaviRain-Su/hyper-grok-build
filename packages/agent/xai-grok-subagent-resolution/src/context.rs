@@ -8,45 +8,37 @@ use std::fmt::Write;
 
 use xai_grok_sampling_types::conversation::ConversationItem;
 
-/// Maximum number of complete turns to render verbatim in the background
-/// context. Turns beyond this threshold (counting from the end) are
-/// summarized as metadata (message counts and tools used).
+/// Maximum number of complete turns to render verbatim in the background context.
+/// Turns beyond this threshold (counting from the end) are summarized as metadata (message counts and tools used).
 const MAX_VERBATIM_TURNS: usize = 3;
 
-/// XML tags whose content is stripped from user messages during fork
-/// context normalization. These blocks are re-injected by the child
-/// session's system prompt builder, so including them in the background
-/// context is pure duplication.
+/// XML tags whose content is stripped from user messages during fork context normalization.
+/// The child session's system prompt builder re-injects these blocks, so keeping them in the background context duplicates them.
 ///
-/// See also: `xai-chat-state::compaction_utils::strip_system_tags` which
-/// strips a related (but different) tag set for compaction.
+/// See also: `xai-chat-state::compaction_utils::strip_system_tags`, which strips a related (but different) tag set for compaction.
 const FORK_NOISE_TAGS: &[&str] = &[
     "system-reminder",
     "system_reminder", // Cursor wire format uses underscore
     "user_info",
     "git_status",
     "project_layout",
-    "attached_files", // Alternate-agent file context; child reads files itself
+    "attached_files", // File context attached by an alternate agent; the child reads files itself
 ];
 
-/// Normalize a forked parent conversation into the shape:
-/// `[System(placeholder), User(<background_context>)]`
+/// Normalize a forked parent conversation into the shape `[System(placeholder), User(<background_context>)]`.
 ///
 /// The System item is kept as-is (replaced later by `spawn_session_actor`).
-/// Parent conversation items (excluding System) are rendered into a single
-/// `<background_context>` User message. If there are [`MAX_VERBATIM_TURNS`]
-/// or fewer complete turns, all are included verbatim. If more, the last
-/// [`MAX_VERBATIM_TURNS`] are verbatim and earlier turns are summarized.
+/// Parent conversation items (excluding System) are rendered into a single `<background_context>` User message.
+/// If there are [`MAX_VERBATIM_TURNS`] or fewer complete turns, all are included verbatim.
+/// If more, the last [`MAX_VERBATIM_TURNS`] are verbatim and earlier turns are summarized.
 ///
-/// The task prompt is NOT included here: it arrives via the normal Prompt
-/// command and becomes the **last** user message (position [2]). This gives
-/// the task maximum recency-based attention from the model.
+/// The task prompt is NOT included here: it arrives via the normal Prompt command and becomes the **last** user message (position [2]).
+/// The model attends most to the most recent message, so the task benefits from arriving last.
 ///
-/// Returns `(normalized_items, inherited_prefix_len)` where
-/// `inherited_prefix_len` is the number of items the child should treat as
-/// pre-existing context (typically 2 for `[System, BackgroundContext]`).
+/// Returns `(normalized_items, inherited_prefix_len)`.
+/// `inherited_prefix_len` is the number of items the child should treat as pre-existing context (typically 2 for `[System, BackgroundContext]`).
 pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<ConversationItem>, usize) {
-    // Extract system prompt (position 0) - kept as placeholder for spawn_session_actor.
+    // Extract the system prompt (position 0), kept as a placeholder for spawn_session_actor
     let system = items
         .first()
         .filter(|i| matches!(i, ConversationItem::System(_)))
@@ -64,7 +56,7 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
         return (vec![system], 1);
     }
 
-    // Count complete turns (User -> Assistant [-> ToolResult*] cycles).
+    // Count complete turns (a User message, then an Assistant message, then any ToolResults)
     let turns = count_complete_turns(&parent_items);
 
     let mut background = String::from("<background_context>\n");
@@ -74,7 +66,7 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
     );
 
     if turns.len() <= MAX_VERBATIM_TURNS {
-        // All turns fit - render verbatim.
+        // All turns fit, so render them verbatim
         for item in &parent_items {
             render_item_to_background(&mut background, item);
         }
@@ -97,18 +89,14 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
 /// Count complete turns in a slice of non-System conversation items.
 ///
 /// Returns a vec of indices where each complete turn ends (exclusive).
-/// A turn is: one or more consecutive User messages, followed by an
-/// Assistant message, followed by zero or more ToolResult messages.
-/// Real histories interleave `Reasoning` (and `BackendToolCall`) siblings,
-/// so those are skipped both before the Assistant and within the
-/// post-assistant tool-result run — otherwise long forked histories would
-/// register zero turns and never summarize, blowing up token usage.
+/// A turn is one or more consecutive User messages, then an Assistant message, then zero or more ToolResult messages.
+/// Real histories interleave `Reasoning` (and `BackendToolCall`) siblings.
+/// The scan skips those, both before the Assistant and inside the ToolResult run that follows it.
+/// Otherwise long forked histories would register zero turns and never summarize, blowing up token usage.
 ///
-/// NOTE: this is one of two reasoning-aware turn-boundary scanners that must move
-/// together — the other is `fork_filter_chat` in
-/// `xai-grok-shell/src/session/storage/jsonl.rs` (it truncates to the last
-/// complete turn before this counts them). Keep their notions of a "complete
-/// turn" in sync if the turn item model changes.
+/// NOTE: two scanners walk turn boundaries while skipping `Reasoning` items, and they must move together.
+/// The other is `fork_filter_chat` in `xai-grok-shell/src/session/storage/jsonl.rs`; it truncates to the last complete turn before this counts them.
+/// Keep their notions of a "complete turn" in sync if the set of items that makes up a turn changes.
 fn count_complete_turns(items: &[&ConversationItem]) -> Vec<usize> {
     let mut turn_ends = Vec::new();
     let mut i = 0;
@@ -136,8 +124,7 @@ fn count_complete_turns(items: &[&ConversationItem]) -> Vec<usize> {
             break;
         }
         i += 1; // skip past Assistant
-        // Consume the post-assistant run: ToolResults plus interleaved
-        // Reasoning / BackendToolCall siblings, until the next User/Assistant.
+        // Consume the post-assistant run: ToolResults plus interleaved Reasoning / BackendToolCall siblings, until the next User/Assistant
         while i < items.len()
             && matches!(
                 items[i],
@@ -153,14 +140,11 @@ fn count_complete_turns(items: &[&ConversationItem]) -> Vec<usize> {
     turn_ends
 }
 
-/// Strip content from user message text that is redundant in a forked
-/// child context. The child session gets its own system reminders, user
-/// info, git status, and project layout via the system prompt builder,
-/// so including these in the background context wastes tokens.
+/// Strip content from user message text that is redundant in a forked child context.
+/// The child session gets its own system reminders, user info, git status, and project layout via the system prompt builder.
+/// Including them in the background context wastes tokens.
 ///
-/// Also strips skill instruction blocks that follow `</command-args>` tags,
-/// since these are orchestration instructions for the parent session's
-/// skill execution, not relevant context for the child.
+/// Also strips the skill body that follows a `</command-args>` tag; those instructions drove the parent's skill run and mean nothing to the child.
 fn strip_fork_noise(text: &str) -> String {
     if !text.contains('<') {
         let mut result = collapse_blank_lines(text);
@@ -185,12 +169,10 @@ fn strip_fork_noise(text: &str) -> String {
 
 /// Remove all occurrences of `<tag...>...</tag>` from the input string.
 /// Handles tags with attributes (e.g., `<tag attr="val">`).
-/// Unclosed tags are left untouched -- stripping to end-of-string would
-/// silently eat meaningful content on malformed input.
+/// Unclosed tags are left untouched; stripping to end-of-string would silently eat meaningful content on malformed input.
 /// Same-name nesting is not supported: matches the first closing tag.
 ///
-/// See also: `xai-chat-state::compaction_utils::strip_system_tags` which
-/// uses the same leave-unclosed-untouched semantics for a different tag set.
+/// See also: `xai-chat-state::compaction_utils::strip_system_tags`, which also leaves unclosed tags untouched for a different tag set.
 fn strip_xml_block<'a>(text: &'a str, tag: &str) -> Cow<'a, str> {
     let open_prefix = format!("<{tag}");
     if !text.contains(&*open_prefix) {
@@ -228,10 +210,9 @@ fn strip_xml_block<'a>(text: &'a str, tag: &str) -> Cow<'a, str> {
 
 /// Strip skill instruction content from user query blocks.
 ///
-/// Preserves the command metadata tags (`<command-name>`, `<command-message>`,
-/// `<command-args>`) but removes the skill body that follows `</command-args>`.
-/// The child sees the command name and args (useful context) without the
-/// full orchestration instructions (pure noise).
+/// Preserves the command metadata tags (`<command-name>`, `<command-message>`, `<command-args>`).
+/// Removes the skill body that follows `</command-args>`.
+/// The child sees the command name and args but not the skill body, which only told the parent how to run the skill.
 fn strip_skill_instructions<'a>(text: &'a str) -> Cow<'a, str> {
     let marker = "</command-args>";
     let Some(marker_pos) = text.find(marker) else {
@@ -329,10 +310,8 @@ fn render_item_to_background(out: &mut String, item: &ConversationItem) {
         ConversationItem::BackendToolCall(b) => {
             let _ = writeln!(out, "[Backend Tool]: {}", b.text_summary());
         }
-        // Reasoning siblings don't enter the fork-background rendering —
-        // they're rendered (when needed) inline with the surrounding
-        // assistant turn elsewhere.
-        ConversationItem::Reasoning(_) | ConversationItem::Compaction(_) => {}
+        // Reasoning siblings do not enter the background text; they render inline with the surrounding assistant turn elsewhere, when needed
+        ConversationItem::Reasoning(_) => {}
     }
 }
 
@@ -367,14 +346,12 @@ fn render_summary(out: &mut String, items: &[&ConversationItem]) {
 
 /// Truncate a string to at most `max_chars` Unicode characters.
 ///
-/// Uses `char_indices` to find the byte offset of the Nth character,
-/// ensuring correct behavior with multi-byte UTF-8 content (e.g. emoji,
-/// CJK characters). Returns the full string if it has `max_chars` or
-/// fewer characters.
+/// `char_indices` finds the byte offset of the Nth character, so multi-byte UTF-8 content (emoji, CJK) never splits mid-character.
+/// Returns the full string if it has `max_chars` or fewer characters.
 fn truncate_str(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
         Some((byte_offset, _)) => &s[..byte_offset],
-        None => s, // string has <= max_chars characters
+        None => s, // string has at most max_chars characters
     }
 }
 
@@ -410,7 +387,6 @@ mod tests {
         ConversationItem::ToolResult(ToolResultItem {
             tool_call_id: "tc-1".to_string(),
             content: content.into(),
-            is_error: false,
             images: Vec::new(),
         })
     }
@@ -477,7 +453,6 @@ mod tests {
             assert!(text.contains("[User]: Hello"));
             assert!(text.contains("[Assistant]: Hi there"));
             assert!(text.contains("</background_context>"));
-            // Should NOT contain summarized section
             assert!(!text.contains("=== Earlier context"));
         } else {
             panic!("Expected User item");
@@ -514,7 +489,6 @@ mod tests {
             assert!(text.contains("[User]: Turn 1"));
             assert!(text.contains("[User]: Turn 2"));
             assert!(text.contains("[User]: Turn 3"));
-            // No summary section
             assert!(!text.contains("=== Earlier context"));
         } else {
             panic!("Expected User item");
@@ -555,7 +529,7 @@ mod tests {
             // early_end = turns[turns.len()-3] = turns[1] = end of turn 2.
             // So turns 1-2 are summarized, turns 3-4 are verbatim.
             assert!(text.contains("=== Earlier context (summarized) ==="));
-            // Turns 1 + 2 are summarized: 2 user msgs, 2 assistant msgs
+            // Turns 1 and 2 are summarized: 2 user msgs, 2 assistant msgs
             assert!(
                 text.contains("Messages: 2 user, 2 assistant"),
                 "Expected summary of turns 1-2. Full text:\n{text}"
@@ -575,8 +549,8 @@ mod tests {
 
     #[test]
     fn normalize_forked_context_with_reasoning_keeps_marker_drops_reasoning() {
-        // Multi-turn parent with Reasoning interleaved each turn. The distinctive
-        // marker must reach the background; reasoning noise must not.
+        // Multi-turn parent with Reasoning interleaved each turn
+        // The distinctive marker must reach the background; reasoning noise must not
         let items = vec![
             system_item("System"),
             user_item("Turn 1 UNIQUE_FORK_MARKER_TEST"),
@@ -640,13 +614,11 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
                 .join("");
-            // Should contain exactly 200 x's followed by "..."
             let expected_truncated = format!("{}...", "x".repeat(200));
             assert!(
                 text.contains(&expected_truncated),
                 "Expected tool result truncated to 200 chars + '...'"
             );
-            // Should not contain the full 300 chars
             assert!(!text.contains(&"x".repeat(300)));
         } else {
             panic!("Expected User item");
@@ -659,7 +631,6 @@ mod tests {
         let items = vec![user_item("Hello"), assistant_item("Hi")];
         let (result, prefix_len) = normalize_forked_context(items);
         assert_eq!(prefix_len, 2);
-        // Should synthesize an empty System item
         if let ConversationItem::System(s) = &result[0] {
             assert!(s.content.is_empty());
         } else {
@@ -693,13 +664,11 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
                 .join("");
-            // Should contain exactly 100 a's followed by "..."
             let expected = format!("{}...", "a".repeat(100));
             assert!(
                 text.contains(&expected),
                 "Expected tool call args truncated to 100 chars + '...'"
             );
-            // Should not contain the full 150 chars
             assert!(!text.contains(&long_args));
         } else {
             panic!("Expected User item");
@@ -753,8 +722,8 @@ mod tests {
 
     #[test]
     fn count_complete_turns_with_reasoning() {
-        // Reasoning siblings sit between the user query and the assistant; the
-        // counter must see through them or long forked histories never summarize.
+        // Reasoning siblings sit between the user query and the assistant
+        // The counter must see through them or long forked histories never summarize
         let items = [
             user_item("U1"),
             reasoning_item("think 1"),
@@ -766,8 +735,8 @@ mod tests {
         let refs: Vec<&ConversationItem> = items.iter().collect();
         let turns = count_complete_turns(&refs);
         assert_eq!(turns.len(), 2);
-        assert_eq!(turns[0], 3); // after reasoning + A1
-        assert_eq!(turns[1], 6); // after reasoning + A2
+        assert_eq!(turns[0], 3); // after reasoning and A1
+        assert_eq!(turns[1], 6); // after reasoning and A2
     }
 
     #[test]
@@ -971,7 +940,7 @@ mod tests {
 
     #[test]
     fn strip_fork_noise_realistic_trace() {
-        // Synthetic fixture only — keep content generic (no real project docs).
+        // Synthetic fixture only: keep content generic (no real project docs)
         let input = "\
 <system-reminder>\n\
 As you answer the user's questions, you can use the following context:\n\n\

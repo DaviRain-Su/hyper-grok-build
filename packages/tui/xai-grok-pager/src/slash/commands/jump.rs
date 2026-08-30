@@ -1,30 +1,18 @@
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 use crate::slash::{ModeSupport, Remedy};
 
 pub struct JumpCommand;
 
 impl SlashCommand for JumpCommand {
-    fn name(&self) -> &str {
-        "jump"
-    }
-
-    fn description(&self) -> &str {
-        "Jump to a turn in the conversation"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    fn mode_support(&self) -> ModeSupport {
-        ModeSupport::FullscreenOnly(Remedy::SwitchMode {
+    slash_meta! {
+        name: "jump",
+        description: "Jump to a turn in the conversation",
+        usage: "/jump",
+        session_scoped: true,
+        mode_support: ModeSupport::FullscreenOnly(Remedy::SwitchMode {
             why: "minimal scrolls with your terminal's native scrollback",
-        })
-    }
-
-    fn usage(&self) -> &str {
-        "/jump"
+        }),
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {

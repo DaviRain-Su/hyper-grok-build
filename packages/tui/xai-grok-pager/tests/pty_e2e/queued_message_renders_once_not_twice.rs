@@ -1,7 +1,6 @@
-//! PTY, flag-file driven like `endline_park_is_markerless`: the "queued
-//! message appears 2x" regression. A message queued mid-turn holds through
-//! the turn's sendable wait, then drains as its own turn — asserting it
-//! renders exactly once as a queue row and exactly once as a "❯ " block.
+//! PTY, flag-file driven like `endline_park_is_markerless`: the "queued message appears twice" regression.
+//! A message queued mid-turn holds through the turn's sendable wait, then drains as its own turn.
+//! The test asserts it renders exactly once as a queue row and exactly once as a "❯ " block.
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -29,8 +28,7 @@ async fn queued_message_renders_once_not_twice() {
     let _background_turn =
         expect_tool_turn(&content, "call_qonce_bg", "run_terminal_command", bg_args);
 
-    // Tool call 2: the flag-gated foreground hold — the mid-turn window
-    // where the follow-up is queued.
+    // Tool call 2: the flag-gated foreground hold, the mid-turn window where the follow-up is queued
     let id_hold_args = json!({
         "command": gated_loop(&id_ready_flag),
         "description": "hold for id extraction"
@@ -43,8 +41,7 @@ async fn queued_message_renders_once_not_twice() {
         id_hold_args,
     );
 
-    // Fallback for both post-wait turns (the parked turn's wrap-up and the
-    // drained follow-up's own turn).
+    // Fallback for both post-wait turns (the parked turn's wrap-up and the drained follow-up's own turn)
     content.set_response("QONCE_WRAPUP done.");
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -79,8 +76,7 @@ async fn queued_message_renders_once_not_twice() {
         )
     });
 
-    // Queue the follow-up while the id-hold tool is still running (a plain
-    // mid-turn queue — NOT during the wait, where Enter would deliver it).
+    // Queue the follow-up while the id-hold tool is still running (a plain mid-turn queue, NOT during the wait, where Enter would deliver it)
     harness
         .inject_keys(format!("{QUEUED_TEXT}\r").as_bytes())
         .expect("queue follow-up mid-turn");
@@ -88,8 +84,7 @@ async fn queued_message_renders_once_not_twice() {
         .wait_for_text(QUEUED_TEXT, Duration::from_secs(10))
         .expect("queued row visible");
 
-    // Tool call 3: block on the REAL task — the sendable wait the row holds
-    // through.
+    // Tool call 3: block on the REAL task, the sendable wait the row holds through
     let wait_args = json!({
         "task_ids": [task_id],
         "timeout_ms": 600_000
@@ -103,9 +98,8 @@ async fn queued_message_renders_once_not_twice() {
     );
     std::fs::write(&id_ready_flag, b"ready").expect("release id-extraction hold");
 
-    // The wait parks the turn with the row HELD: the status row explains the
-    // hold ("1 queued, Enter to send now"; the top row is a sendable server
-    // row), the park writes no marker, and the row renders exactly once.
+    // The wait parks the turn with the row HELD
+    // The status row explains the hold ("1 queued, Enter to send now"; the top row is a sendable server row)
     harness
         .wait_for_text("1 queued, Enter to send now", Duration::from_secs(60))
         .unwrap_or_else(|_| {
@@ -130,15 +124,14 @@ async fn queued_message_renders_once_not_twice() {
         "held queued message must render exactly once\nscreen:\n{}",
         harness.screen_contents()
     );
-    // Held means held: nothing with the queued text has hit the model yet.
+    // While the row is held, nothing with the queued text may reach the model
     let users = all_user_message_blobs(&content);
     assert!(
         !users.iter().any(|u| u.contains(QUEUED_TEXT)),
         "held queued message must not reach the wire during the wait: {users:#?}"
     );
 
-    // Let the wait return: the parked turn wraps up, then the held row
-    // drains as its own turn.
+    // Let the wait return: the parked turn wraps up, then the held row drains as its own turn
     std::fs::write(&park_flag, b"done").expect("release flag");
     harness
         .wait_for_text(&format!("\u{276F} {QUEUED_TEXT}"), Duration::from_secs(60))

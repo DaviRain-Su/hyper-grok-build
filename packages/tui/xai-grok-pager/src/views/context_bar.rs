@@ -1,11 +1,9 @@
-//! Context usage bar — shows token usage in the status bar.
+//! Context usage bar: shows token usage in the status bar.
 //!
-//! Default builds a `Line<'static>` of styled spans: `8.5K / 1.0M` (actual tokens,
-//! colored by usage percentage). On hover, replaces the tokens with a progress
-//! bar + percentage, e.g. `█████ 42.0%`. The bar width is derived from the
-//! default string length so the hover line is the same total width — no layout
-//! shift on hover. The default is right-padded to a minimum of 6 columns so the
-//! width invariant holds even for degenerate inputs like `0 / 9`.
+//! Default builds a `Line<'static>` of styled spans: `8.5K / 1.0M` (actual tokens, colored by usage percentage).
+//! On hover, replaces the tokens with a progress bar and percentage, e.g. `█████ 42.0%`.
+//! The bar width is derived from the default string length so the hover line is the same total width; no layout shift on hover.
+//! The default is right-padded to a minimum of 6 columns so the width invariant holds even for degenerate inputs like `0 / 9`.
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -64,11 +62,10 @@ pub struct ColorBreakpoint {
     pub color: Color,
 }
 
-/// Default breakpoints: text_primary → accent_user → warning → accent_error.
+/// Default breakpoints: text_primary, then accent_user, then warning, then accent_error.
 ///
-/// Breakpoint colors are raw RGB. The final color produced by [`blend_color`]
-/// is quantized by the caller (see [`context_bar_line`]) so the output always
-/// matches the terminal's capability level.
+/// Breakpoint colors are raw RGB.
+/// The final color from [`blend_color`] is quantized by the caller (see [`context_bar_line`]) so the output matches the terminal's capability level.
 pub fn default_breakpoints(theme: &Theme) -> Vec<ColorBreakpoint> {
     vec![
         ColorBreakpoint {
@@ -117,8 +114,7 @@ pub fn blend_color(pct: f64, breakpoints: &[ColorBreakpoint]) -> Color {
 
 /// Linear interpolation between two colors.
 ///
-/// When either input is `Color::Indexed`, the result is quantized back to
-/// the nearest indexed color so the output stays terminal-compatible.
+/// When either input is `Color::Indexed`, the result is quantized back to the nearest indexed color so the output stays terminal-compatible.
 fn lerp_color(a: Color, b: Color, t: f32) -> Color {
     let (ar, ag, ab) = color_to_rgb(a);
     let (br, bg, bb) = color_to_rgb(b);
@@ -136,13 +132,10 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
 
 /// RGB for any color variant, using a neutral fallback for `Reset`.
 ///
-/// Necessary so a gradient that lerps across named breakpoints (after
-/// the theme has quantized to ANSI on lower-color terminals) still
-/// produces meaningful intermediate colors instead of collapsing all
-/// inputs onto one fallback.
+/// Needed for gradients that lerp across named breakpoints after the theme quantized to ANSI on lower-color terminals.
+/// Those still produce meaningful intermediate colors instead of collapsing all inputs onto one fallback.
 fn color_to_rgb(c: Color) -> (u8, u8, u8) {
-    // (198, 198, 198) matches the FG-equivalent used elsewhere when the
-    // terminal owns the actual default fg color.
+    // (198, 198, 198) matches the FG-equivalent used elsewhere when the terminal owns the actual default fg color
     crate::render::color::resolve_to_rgb(c).unwrap_or((198, 198, 198))
 }
 
@@ -162,27 +155,20 @@ const PCT_WIDTH: u16 = 5;
 /// Width of the gap between the progress bar and the percentage on hover.
 const BAR_PCT_GAP: u16 = 1;
 
-// BAR_BG removed — use theme.bg_highlight directly (already quantized).
-
 /// Build the context usage bar as a `Line<'static>`.
 ///
-/// Normal: `8.5K / 1.0M` — actual token usage, colored by the same percentage
-/// gradient the hover bar uses so the urgency signal stays visible at a glance.
-/// Hovered: `█████ 42.0%` — progress bar + colored percentage, sized to match.
+/// Normal: `8.5K / 1.0M`, actual token usage, colored by the same percentage gradient the hover bar uses so the urgency stays visible at a glance.
+/// Hovered: `█████ 42.0%`, a progress bar and colored percentage, sized to match.
 ///
-/// The bar width is derived from the default token string length so the
-/// hovered line has the same total width as the default (no layout shift on
-/// hover). The default is right-padded to a minimum of 6 columns
-/// (`BAR_PCT_GAP + PCT_WIDTH`) so the invariant holds for every input — without
-/// the pad, degenerate cases like `0 / 9` (5 chars) would mismatch the hovered
-/// line, which always rounds up to 6 (zero-width bar + gap + percentage).
+/// The bar width is derived from the default token string length so the hovered line has the same total width as the default (no layout shift).
+/// The default is right-padded to a minimum of 6 columns (`BAR_PCT_GAP + PCT_WIDTH`) so the invariant holds for every input.
+/// Without the pad, degenerate cases like `0 / 9` (5 chars) would mismatch the hovered line, which rounds up to 6 (zero-width bar, gap, percentage).
 ///
 /// Returns `None` if token data is unavailable.
 ///
-/// Gateway light-frontend (`kind: "chat"`) sessions must not display Build /
-/// local sampler context usage — call with `gateway_chat = true` to suppress
-/// the bar entirely (remote owns context; no mapped totals yet). remote settings
-/// opt-in for chat entry can reuse the same gate later.
+/// Gateway light-frontend (`kind: "chat"`) sessions must not display Build / local sampler context usage.
+/// Call with `gateway_chat = true` to suppress the bar entirely (remote owns context; no mapped totals yet).
+/// Remote settings opt-in for chat entry can reuse the same gate later.
 pub fn context_bar_line(
     used_tokens: Option<u64>,
     total_tokens: Option<u64>,
@@ -207,8 +193,7 @@ pub fn context_bar_line_for_session(
     let total = total_tokens.filter(|&t| t > 0)?;
     let pct = xai_token_estimation::usage_percentage(used, total);
 
-    // Default form drives the line width: `used / total`, right-padded to the
-    // minimum hover width so the two states always render at the same width.
+    // Default form drives the line width: `used / total`, right-padded to the minimum hover width so both states render at the same width
     let mut token_str = format!("{} / {}", fmt_tokens(used), fmt_tokens(total));
     let natural_width = token_str.chars().count() as u16;
     let min_width = BAR_PCT_GAP + PCT_WIDTH;
@@ -217,15 +202,13 @@ pub fn context_bar_line_for_session(
     }
     let total_width = natural_width.max(min_width);
 
-    // Urgency color shared by both branches so the default still surfaces
-    // high-usage warnings without requiring the user to hover.
+    // Urgency color shared by both branches so the default still shows high-usage warnings without requiring the user to hover
     let breakpoints = default_breakpoints(theme);
     let color = crate::theme::quantize(blend_color(pct, &breakpoints));
 
     if hovered {
-        // Bar fills the space the default tokens would occupy, minus the gap
-        // and the percentage. `total_width >= min_width` by construction, so
-        // this subtraction is safe.
+        // Bar fills the space the default tokens would occupy, minus the gap and the percentage
+        // `total_width >= min_width` by construction, so this subtraction is safe
         let bar_width = total_width - min_width;
         let mut spans =
             progress_bar_spans(bar_width, pct as f32 / 100.0, color, theme.bg_highlight);
@@ -315,13 +298,11 @@ mod tests {
 
     #[test]
     fn test_blend_color_at_breakpoints() {
-        // Use unquantized theme — blend_color needs raw RGB values for lerp math.
+        // Use the unquantized theme; blend_color needs raw RGB values for lerp math
         let theme = Theme::default();
         let bps = default_breakpoints(&theme);
-        // At 0%, should be theme.text_primary
         let c0 = blend_color(0.0, &bps);
         assert_eq!(c0, theme.text_primary);
-        // At 95%, should be theme.accent_error
         let c95 = blend_color(95.0, &bps);
         assert_eq!(c95, theme.accent_error);
     }
@@ -356,8 +337,7 @@ mod tests {
 
     #[test]
     fn test_context_bar_hover_width_matches_default() {
-        // For each (used, total) combo, the hovered line must be the same
-        // width as the default — toggling hover should never shift layout.
+        // For each (used, total) combo, the hovered line must be the same width as the default; toggling hover must never shift layout
         let theme = Theme::default();
         for (used, total) in [
             (8_500u64, 1_000_000u64),
@@ -365,8 +345,7 @@ mod tests {
             (123_456, 1_000_000),
             (999_999, 999_999),
             (12_000_000, 12_000_000),
-            // Degenerate sub-min-width case: default natural width is 5
-            // ("0 / 9"), padded to 6 so the hover line still matches.
+            // Degenerate sub-min-width case: default natural width is 5 ("0 / 9"), padded to 6 so the hover line still matches
             (0, 9),
         ] {
             let default_line = context_bar_line(Some(used), Some(total), false, &theme)
@@ -386,9 +365,9 @@ mod tests {
 
     #[test]
     fn test_context_bar_hover_bar_grows_with_token_string() {
-        // The bar size should scale with the default string length.
-        // `500 / 1.0M` (10 chars) → bar = 10 - 6 = 4 chars.
-        // `8.5K / 1.0M` (11 chars) → bar = 11 - 6 = 5 chars.
+        // The bar scales with the default string length
+        // `500 / 1.0M` (10 chars) gives bar = 10 - 6 = 4 chars
+        // `8.5K / 1.0M` (11 chars) gives bar = 11 - 6 = 5 chars
         let theme = Theme::default();
         let short = context_bar_line(Some(500), Some(1_000_000), true, &theme).unwrap();
         let long = context_bar_line(Some(8_500), Some(1_000_000), true, &theme).unwrap();
@@ -405,9 +384,7 @@ mod tests {
 
     #[test]
     fn test_context_bar_returns_none_without_tokens() {
-        // Mirror across hover states so a future refactor that moves the
-        // unavailability checks into per-branch arms can't silently regress
-        // one path.
+        // Mirror across hover states so a future refactor that moves the unavailability checks into per-branch arms can't silently regress one path
         let theme = Theme::default();
         for hovered in [false, true] {
             assert!(context_bar_line(None, Some(1_000_000), hovered, &theme).is_none());

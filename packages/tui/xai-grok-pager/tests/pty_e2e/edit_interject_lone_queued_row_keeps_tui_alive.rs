@@ -2,34 +2,24 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// **Edit-interject of the lone queued row must not brick the TUI.**
+/// Regression e2e for the orphaned invisible `EditConfirm`.
+/// Interjecting (Ctrl+Enter) a DIRTY edit of a LOCAL queue row that is also the LAST visible row empties the queue mid-flow.
+/// The pane auto-hide used to switch panes while still in `EditingQueued`, leaving a confirm modal that never renders but consumes every later key.
+/// The interjection itself still went out (toast and drain both looked healthy), so only an after-the-fact liveness probe catches the dead TUI.
+/// On a broken binary the probe text never echoes and step 7 times out.
 ///
-/// Regression e2e for the orphaned invisible `EditConfirm`: interjecting
-/// (Ctrl+Enter) a DIRTY edit of a LOCAL queue row that is also the LAST
-/// visible row empties the queue mid-flow — the pane auto-hide used to run
-/// its pane switch while still in `EditingQueued`, arming a confirm modal
-/// that never renders but consumes every subsequent key. The interjection
-/// itself still went out (toast + drain both looked healthy), so only an
-/// after-the-fact liveness probe catches the brick: on a broken binary the
-/// probe text never echoes and step 7 times out.
-///
-/// The queued message carries a pasted image (as in the original report) —
-/// that is also what forces it onto the LOCAL queue: mid-turn plain text
-/// takes the server-authoritative immediate-send path instead
-/// (`immediate_server_send_eligible`), which never hits the fixed code.
+/// The queued message carries a pasted image (as in the original report), which is what forces it onto the LOCAL queue.
+/// Mid-turn plain text takes the server-authoritative immediate-send path instead (`immediate_server_send_eligible`) and never reaches the code path under test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn edit_interject_lone_queued_row_keeps_tui_alive() {
     let content = ContentController::start().await.expect("start content");
     content.set_chunk_delay(Some(Duration::from_millis(150)));
-    // Turn 1 must stay open long enough for the ENTIRE mid-turn setup — type
-    // the queued text, paste the image path, queue it, focus the queue pane,
-    // enter edit, dirty it, Ctrl+Enter — to land WHILE it is still streaming.
-    // Only then does the edit-interject drain into turn 1 (→ STEPTWO). Under
-    // the ~60-way-parallel suite a short stream can collapse before the
-    // interject lands (same flake class the lifecycle test documents), so
-    // stream ~150 tokens (~22s) while STEPTWO still drains well inside its
-    // 40s wait below.
+    // Turn 1 must stay open long enough for the ENTIRE mid-turn setup to land WHILE it is still streaming
+    // That setup: type the queued text, paste the image path, queue it, focus the queue pane, enter edit, dirty it, Ctrl+Enter
+    // Only then does the edit-interject drain into turn 1 (STEPTWO)
+    // Under the ~60-way-parallel suite a short stream can collapse before the interject lands (the lifecycle test documents the same flake)
+    // So stream ~150 tokens (~22s), while STEPTWO still drains well inside its 40s wait below
     let step_one = {
         let mut s = String::from("STEPONE");
         for i in 0..150 {
@@ -47,8 +37,8 @@ async fn edit_interject_lone_queued_row_keeps_tui_alive() {
         "STEPTHREE liveness prompt handled.",
     );
 
-    // Image fixture under the isolated HOME; the pasted absolute path becomes
-    // an `[Image #1]` composer chip (path-paste detection reads + decodes it).
+    // Write the image fixture under the isolated HOME
+    // The pasted absolute path becomes an `[Image #1]` composer chip (path-paste detection reads and decodes it)
     let png_path = content.home().join("queue-edit-fixture.png");
     std::fs::write(&png_path, PNG_32X32_GRAY).expect("write png fixture");
 
@@ -67,13 +57,12 @@ async fn edit_interject_lone_queued_row_keeps_tui_alive() {
         .wait_for_text("STEPONE", Duration::from_secs(30))
         .expect("step 1: turn streaming");
 
-    // Queue ONE image-bearing message → the lone LOCAL queue row. The prose
-    // and the path must reach the pager as SEPARATE events: back-to-back
-    // injects can land in one EventStream batch and get paste-coalesced,
-    // merging the prose into the paste payload — and the paste pipeline is
-    // whole-paste-or-nothing (`try_read_dropped_paths`), so a mixed
-    // prose+path payload falls back to plain text instead of a chip. Gate
-    // on the typed prose rendering before pasting the bare path alone.
+    // Queue ONE image-bearing message, the lone LOCAL queue row
+    // The prose and the path must reach the pager as SEPARATE events
+    // Back-to-back injects can land in one EventStream batch and get coalesced into one paste, merging the prose into the paste payload
+    // The paste pipeline takes the whole payload or none of it (`try_read_dropped_paths`)
+    // A payload mixing prose and a path therefore falls back to plain text instead of a chip
+    // So wait for the typed prose to render before pasting the bare path alone
     harness
         .inject_keys(b"brick repro payload ")
         .expect("type queued text");
@@ -88,15 +77,13 @@ async fn edit_interject_lone_queued_row_keeps_tui_alive() {
         .wait_for_text("[Image #", Duration::from_secs(10))
         .expect("step 2b: image chip attached");
     harness.inject_keys(b"\r").expect("queue the message");
-    // The `#1 ` row prefix is queue-pane-only chrome — the composer echo
-    // (on screen since step 2a) can never match it, so this proves the
-    // Enter actually queued the row.
+    // Only the queue pane renders the `#1 ` row prefix, so the composer echo (on screen since step 2a) can never match it
+    // Matching it proves the Enter actually queued the row
     harness
         .wait_for_text("#1 brick repro payload", Duration::from_secs(10))
         .expect("step 3: message queued as row #1 in the queue pane");
 
-    // Edit the row (prompt info row flips to "editing queued #1"), dirty it,
-    // then force-interject the edit.
+    // Edit the row (prompt info row flips to "editing queued #1"), dirty it, then force-interject the edit
     harness
         .inject_keys(CTRL_SEMICOLON)
         .expect("focus queue pane");
@@ -115,12 +102,11 @@ async fn edit_interject_lone_queued_row_keeps_tui_alive() {
         .wait_for_text("STEPTWO", Duration::from_secs(40))
         .expect("step 6: interjection drained into turn 1");
 
-    // THE regression assertion — liveness probe. Both prior steps pass on a
-    // broken binary too (the interjection dispatch is not gated by the agent
-    // modal); what breaks is everything AFTER: the orphaned EditConfirm eats
-    // all input. Space first: the queue-pane auto-hide left focus on the
-    // scrollback, where Space focuses the prompt (on a broken binary the
-    // modal eats the Space as well, so the probe below never echoes).
+    // THE regression assertion: the liveness probe
+    // Both prior steps pass on a broken binary too, since the agent modal does not gate the interjection dispatch
+    // What breaks is everything AFTER: the orphaned EditConfirm eats all input
+    // Space first: the queue-pane auto-hide left focus on the scrollback, where Space focuses the prompt
+    // On a broken binary the modal eats the Space as well, so the probe below never echoes
     harness
         .inject_keys(b" ")
         .expect("focus prompt from scrollback");
@@ -136,14 +122,11 @@ async fn edit_interject_lone_queued_row_keeps_tui_alive() {
         .wait_for_text("STEPTHREE", Duration::from_secs(40))
         .expect("step 8: liveness prompt round-trips input, dispatch, and wire");
 
-    // Wire checks: final request's user_query sequence is exactly
-    // [prompt, edited interjection (with wire prefix), liveness probe].
+    // Wire checks: the final request's user_query sequence is exactly [prompt, edited interjection (with wire prefix), liveness probe]
     let bodies = content.request_bodies();
     let last = bodies.last().expect("final request recorded");
-    // User-role context preambles (user_info, skill reminders) don't carry
-    // <user_query>; real prompts and interjections do. Content is a plain
-    // string OR a parts array (the image-bearing interjection), so extract
-    // text parts-aware instead of `as_str`.
+    // User-role context preambles (user_info, skill reminders) don't carry <user_query>; real prompts and interjections do
+    // Content is a plain string OR a parts array (the image-bearing interjection), so `message_text` handles parts instead of a bare `as_str`
     let finals: Vec<String> = last["messages"]
         .as_array()
         .expect("messages array")
@@ -164,7 +147,7 @@ async fn edit_interject_lone_queued_row_keeps_tui_alive() {
         finals[2].contains("liveness-probe-xyz"),
         "third: {finals:#?}"
     );
-    // The queued row's stored image must ride the interjection to the wire.
+    // The queued row's stored image must reach the wire with the interjection
     let interjection_bodies: Vec<&serde_json::Value> = bodies
         .iter()
         .filter(|b| b.to_string().contains("EDITED"))
@@ -186,8 +169,7 @@ async fn edit_interject_lone_queued_row_keeps_tui_alive() {
     harness.quit().expect("clean quit");
 }
 
-/// A user message's text: plain-string content verbatim, parts-array content
-/// (image-bearing messages) as the joined `text` parts.
+/// A user message's text: plain-string content verbatim, parts-array content (image-bearing messages) as the joined `text` parts.
 fn message_text(m: &serde_json::Value) -> String {
     match &m["content"] {
         serde_json::Value::String(s) => s.clone(),
@@ -200,9 +182,8 @@ fn message_text(m: &serde_json::Value) -> String {
     }
 }
 
-/// Whether any nested object is an image content part — same shape the
-/// harness's scenario assertions accept: a `type` containing "image"
-/// (`image_url`, `input_image`, …) or inline `mime_type` + `data`.
+/// Whether any nested object is an image content part, in the same shape the harness's scenario assertions accept.
+/// That shape: a `type` containing "image" (`image_url`, `input_image`, …) or inline `mime_type` and `data` keys.
 fn contains_image_part(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => {
@@ -218,12 +199,10 @@ fn contains_image_part(value: &serde_json::Value) -> bool {
     }
 }
 
-/// Valid 32×32 8-bit grayscale PNG (signature + IHDR + IDAT + IEND, CRCs
-/// correct, IDAT zlib round-trips). Hardcoded rather than encoded via the
-/// `image` dep so the fixture is byte-stable and encoder-independent.
-/// 32×32 = 1024 total pixels clears the API/client 512-total-pixel floor
-/// (`MIN_VISION_TOTAL_PX`) so the image rides the interjection to the wire
-/// instead of being replaced by an `image_dropped_notice`.
+/// Valid 32×32 8-bit grayscale PNG (signature, IHDR, IDAT, IEND; CRCs correct; the IDAT zlib round-trips).
+/// Hardcoded rather than encoded via the `image` dep so the fixture is byte-stable and encoder-independent.
+/// 32×32 = 1024 total pixels clears the API/client 512-total-pixel floor (`MIN_VISION_TOTAL_PX`).
+/// Clearing it means the image reaches the wire with the interjection instead of being replaced by an `image_dropped_notice`.
 const PNG_32X32_GRAY: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x20, 0x08, 0x00, 0x00, 0x00, 0x00, 0x56, 0x11, 0x25,

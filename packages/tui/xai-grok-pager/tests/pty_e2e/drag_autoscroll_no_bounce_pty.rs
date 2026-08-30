@@ -4,18 +4,16 @@ use super::common::*;
 #[allow(unused_imports)]
 use super::scroll::*;
 
-/// PTY: drag-autoscroll must not bounce. Over tall content scrolled off the
-/// bottom, a drag held past the pane's bottom edge autoscrolls down; the
-/// topmost visible marker, sampled every ~100ms, must be monotonically
-/// non-decreasing (never a regression to an earlier marker = no direction
-/// flip, no offset jitter) and must settle back at the bottom clamp.
+/// PTY: drag-autoscroll must not bounce.
+/// Over tall content scrolled off the bottom, a drag held past the pane's bottom edge autoscrolls down.
+/// The topmost visible marker, sampled every ~100ms, must never regress to an earlier marker (no direction flip, no offset jitter).
+/// It must settle back at the bottom clamp.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn drag_autoscroll_no_bounce_pty() {
     let (mut harness, _content, baseline_topmost) = spawn_bottom_pinned_marker_scrollback(60).await;
 
-    // Wheel up (back-to-back reports classify as wheel) so the autoscroll
-    // has room to move back down to the clamp.
+    // Wheel up (back-to-back reports classify as wheel) so the autoscroll has room to move back down to the clamp
     let mut wheel = String::new();
     for _ in 0..12 {
         wheel.push_str(&sgr_mouse(SGR_SCROLL_UP, WHEEL_ROW, WHEEL_COL, 'M'));
@@ -29,8 +27,7 @@ async fn drag_autoscroll_no_bounce_pty() {
         harness.screen_contents()
     );
 
-    // Press on a visible marker line (text anchor), then drag to the strip
-    // row above the prompt box — past the pane's bottom edge — and HOLD.
+    // Press on a visible marker line (text anchor), then drag to the strip row above the prompt box, past the pane's bottom edge, and hold
     let screen = harness.screen_contents();
     let marker_text = format!("MARKER-{:04}", scrolled_topmost + 3);
     let (press_row, press_col) = locate_screen_text(&screen, &marker_text)
@@ -40,9 +37,8 @@ async fn drag_autoscroll_no_bounce_pty() {
     let hold_row = placeholder_row - 2;
     assert!(hold_row > press_row, "setup: hold point below the press");
 
-    // Two motion samples, as any real drag emits: the first promotes the
-    // pending drag, the second (at the held position) arms the autoscroll —
-    // promotion itself deliberately arms nothing.
+    // Two motion samples, as any real drag emits: the first promotes the pending drag, the second (at the held position) starts the autoscroll
+    // Promotion by itself deliberately starts nothing
     let mut drag = String::new();
     drag.push_str(&sgr_mouse(0, press_row, press_col, 'M'));
     drag.push_str(&sgr_mouse(32, press_row + 1, press_col, 'M'));
@@ -51,8 +47,7 @@ async fn drag_autoscroll_no_bounce_pty() {
         .inject_keys(drag.as_bytes())
         .expect("press a marker, drag past the bottom edge");
 
-    // Sample the viewport every ~100ms with the pointer held: the topmost
-    // marker must never regress (bounce) and must settle at the clamp.
+    // Sample the viewport every ~100ms with the pointer held: the topmost marker must never regress (bounce) and must settle at the clamp
     let mut samples = Vec::new();
     for _ in 0..25 {
         harness.update(Duration::from_millis(100));

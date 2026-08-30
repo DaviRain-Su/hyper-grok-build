@@ -1,21 +1,16 @@
 //! One-child supervisor for the in-sandbox preview-proxy.
 //!
-//! After the workspace-server self-daemonizes (see [`crate::daemonize`]) it
-//! spawns the unchanged `/usr/local/bin/xai-grok-preview-proxy` binary as a
-//! child process and supervises exactly that one child: fork/exec → `wait` →
-//! restart-on-exit with capped backoff that resets after a healthy run.
+//! After the workspace-server self-daemonizes (see [`crate::daemonize`]) it spawns the unchanged `/usr/local/bin/xai-grok-preview-proxy` binary.
+//! It supervises exactly that one child: fork/exec, `wait`, then restart on exit with a capped backoff that resets after a healthy run.
 //!
 //! Two properties depend on *where* this runs:
-//! - The child is spawned only from [`supervise_preview`], which the bin invokes
-//!   **after** daemonize. The child therefore inherits the daemon's new
-//!   session/pgid and escapes the launcher's process-group reap — one daemonize
-//!   protects both processes.
-//! - `PR_SET_PDEATHSIG(SIGKILL)` binds the child's lifetime to the
-//!   workspace-server so a WS crash cannot orphan the proxy holding the ports.
-//!   PDEATHSIG keys off the *spawning thread*, so the fork→exec race (WS dies
-//!   before the child arms `prctl`) is closed by re-checking `getppid()` in
-//!   `pre_exec`, and the supervise task is spawned on tokio's long-lived
-//!   `multi_thread` workers to avoid a spurious worker-thread-death kill.
+//! - The child is spawned only from [`supervise_preview`], which the bin invokes **after** daemonize.
+//!   The child therefore inherits the daemon's new session/pgid and escapes the launcher's process-group reap.
+//!   One daemonize protects both processes.
+//! - `PR_SET_PDEATHSIG(SIGKILL)` binds the child's lifetime to the workspace-server so a WS crash cannot orphan the proxy holding the ports.
+//!   PDEATHSIG keys off the *spawning thread*.
+//!   The race between fork and exec (the WS dies before the child's `prctl` runs) is closed by re-checking `getppid()` in `pre_exec`.
+//!   The supervise task is spawned on tokio's long-lived `multi_thread` workers so a worker thread's death cannot kill the child spuriously.
 
 use std::fs::{self, File};
 use std::io;
@@ -30,25 +25,22 @@ use tokio::sync::watch;
 /// Absolute path of the preview-proxy binary the supervisor execs.
 pub const PREVIEW_PROXY_BIN_PATH: &str = "/usr/local/bin/xai-grok-preview-proxy";
 
-/// WS-owned, per-restart-truncated log capturing the proxy's stdout+stderr. A
-/// sibling of `WORKSPACE_SERVER_LOG_PATH` on the snapshot-excluded `/var/tmp`
-/// overlay (NOT `/tmp`, which is the in-namespace tmpfs rebind), so it persists
-/// and is retrievable via the sandbox session log retrieval path.
+/// The workspace-server owns this log; it captures the proxy's stdout and stderr and is truncated on every restart.
+/// It sits beside `WORKSPACE_SERVER_LOG_PATH` on the snapshot-excluded `/var/tmp` overlay (NOT `/tmp`, which is the in-namespace tmpfs rebind).
+/// It therefore persists and is retrievable via the sandbox's session-log retrieval path.
 pub const PREVIEW_PROXY_LOG_PATH: &str = "/var/tmp/workspace-server/tmp/preview-proxy.log";
 
-/// A child that ran at least this long is treated as a healthy run, resetting
-/// the restart backoff.
+/// A child that ran at least this long is treated as a healthy run, resetting the restart backoff.
 pub const PREVIEW_PROXY_HEALTHY_RUN_SECS: u64 = 30;
 
-/// First/base restart delay; doubled on each consecutive unhealthy restart.
+/// The first (base) restart delay; it doubles on each consecutive unhealthy restart.
 pub const PREVIEW_PROXY_RESTART_BACKOFF_BASE_SECS: u64 = 1;
 
-/// Ceiling on the restart backoff so a crash-loop pins at this interval rather
-/// than growing unbounded.
+/// The restart backoff caps here so a crash-loop pins at this interval rather than growing unbounded.
 pub const PREVIEW_PROXY_RESTART_BACKOFF_CAP_SECS: u64 = 30;
 
-/// `grok_workspace_preview_proxy_restart_total{reason}` — (re)start events the
-/// in-sandbox supervisor emits, by reason; tracks preview-proxy restart pressure.
+/// `grok_workspace_preview_proxy_restart_total{reason}` counts the (re)start events the in-sandbox supervisor emits, by reason.
+/// It shows how often the preview-proxy is being restarted.
 static PREVIEW_PROXY_RESTART_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         "grok_workspace_preview_proxy_restart_total",
@@ -79,10 +71,9 @@ fn record_restart(reason: RestartReason) {
         .inc();
 }
 
-/// Access policy forwarded to the proxy's `--visibility`. Mirrors the proxy's
-/// own enum values (`owner` | `public`) without depending on its crate, and
-/// constrains the workspace-server CLI so a bad value fails fast at startup
-/// rather than crash-looping the proxy.
+/// Access policy forwarded to the proxy's `--visibility`.
+/// It mirrors the proxy's own enum values (`owner` | `public`) without depending on its crate.
+/// It also constrains the workspace-server CLI so a bad value fails fast at startup rather than crash-looping the proxy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum PreviewVisibility {
     Owner,
@@ -98,41 +89,40 @@ impl PreviewVisibility {
     }
 }
 
-/// Supervisor config forwarded to the proxy child. `Option` fields are omitted
-/// from argv when absent (the proxy applies its own defaults); per-session
-/// secrets stay in the inherited env, never argv.
+/// The supervisor forwards this config to the proxy child.
+/// `Option` fields are omitted from argv when absent; the proxy applies its own defaults.
+/// Per-session secrets stay in the inherited env, never argv.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviewArgs {
-    /// Gate: the supervisor is started only when this is true. Not forwarded —
-    /// the proxy has no such flag.
+    /// Gate: the supervisor is started only when this is true.
+    /// It is not forwarded; the proxy has no such flag.
     pub enabled: bool,
-    /// → proxy `--preview-port`.
+    /// Forwarded as proxy `--preview-port`.
     pub port: Option<u16>,
-    /// → proxy `--control-port`.
+    /// Forwarded as proxy `--control-port`.
     pub control_port: Option<u16>,
-    /// → proxy `--visibility` (`owner` | `public`).
+    /// Forwarded as proxy `--visibility` (`owner` | `public`).
     pub visibility: Option<PreviewVisibility>,
-    /// → proxy `--instance-suffix`.
+    /// Forwarded as proxy `--instance-suffix`.
     pub instance_suffix: Option<String>,
-    /// → proxy `--auth-redirect` (URL the unauthenticated handshake redirects
-    /// to). Without it the owner gate denies instead of redirecting.
+    /// Forwarded as proxy `--auth-redirect`, the URL the unauthenticated handshake redirects to.
+    /// Without it the owner gate denies instead of redirecting.
     pub auth_redirect: Option<String>,
-    /// → proxy `--allow-public` (a bare flag, emitted only when true).
+    /// Forwarded as proxy `--allow-public` (a bare flag, emitted only when true).
     pub allow_public: bool,
-    /// → proxy `--workspace-server-port`.
+    /// Forwarded as proxy `--workspace-server-port`.
     pub workspace_server_port: Option<u16>,
-    /// → proxy `--discovery-refresh-ms` (candidate-scan cadence). `None` omits
-    /// the flag — a proxy binary predating it rejects the unknown flag and
-    /// would crash-loop — so the env stays unset until the proxy release rolls.
+    /// Forwarded as proxy `--discovery-refresh-ms`, how often the proxy runs its candidate scan.
+    /// `None` omits the flag: a proxy binary predating it would reject the unknown flag and crash-loop.
+    /// The env therefore stays unset until the proxy release rolls out.
     pub discovery_refresh_ms: Option<u64>,
-    /// `current_dir` for the spawned child. Not forwarded as an arg.
+    /// `current_dir` for the spawned child; not forwarded as an arg.
     pub workspace_dir: PathBuf,
 }
 
 impl PreviewArgs {
-    /// Map the forwarded fields to the proxy's exact CLI flag names (see
-    /// `xai-grok-preview-proxy/src/cli.rs`). Absent options and a false
-    /// `allow_public` contribute nothing; the `enabled` gate is never emitted.
+    /// Map the forwarded fields to the proxy's exact CLI flag names (see `xai-grok-preview-proxy/src/cli.rs`).
+    /// Absent options and a false `allow_public` contribute nothing; the `enabled` gate is never emitted.
     pub fn to_argv(&self) -> Vec<String> {
         let mut argv = Vec::new();
         if let Some(port) = self.port {
@@ -170,8 +160,8 @@ impl PreviewArgs {
     }
 }
 
-/// Exponential restart backoff with a hard ceiling. The step counter is the
-/// number of consecutive unhealthy restarts; a healthy run resets it.
+/// Exponential restart backoff with a hard ceiling.
+/// The step counter is the number of consecutive unhealthy restarts; a healthy run resets it.
 #[derive(Clone, Copy, Debug)]
 struct BackoffPolicy {
     base: Duration,
@@ -183,7 +173,7 @@ impl BackoffPolicy {
         Self { base, cap }
     }
 
-    /// `base * 2^step`, saturating to `cap` (overflow ⇒ cap).
+    /// `base * 2^step`, saturating to `cap` (an overflow returns `cap`).
     fn delay(self, step: u32) -> Duration {
         let factor = 2u32.saturating_pow(step);
         self.base
@@ -193,8 +183,8 @@ impl BackoffPolicy {
     }
 }
 
-/// Delay before the next spawn and the next step counter: a healthy run resets to
-/// the base delay; an unhealthy run (or spawn failure) advances the backoff.
+/// Returns the delay before the next spawn and the next step counter.
+/// A healthy run resets to the base delay; an unhealthy run (or spawn failure) advances the backoff.
 fn next_step(policy: BackoffPolicy, healthy: bool, step: u32) -> (Duration, u32) {
     if healthy {
         (policy.delay(0), 0)
@@ -203,15 +193,13 @@ fn next_step(policy: BackoffPolicy, healthy: bool, step: u32) -> (Duration, u32)
     }
 }
 
-/// Healthy once the run reached `healthy_run` (inclusive); resets the backoff.
+/// A run is healthy once it lasted `healthy_run` (inclusive); a healthy run resets the backoff.
 fn is_healthy(elapsed: Duration, healthy_run: Duration) -> bool {
     elapsed >= healthy_run
 }
 
-/// Open the WS-owned proxy log, truncating it on every (re)start so a crash-loop
-/// pinned at the backoff cap cannot grow it unbounded. Reuses the daemon file
-/// options (`O_NOFOLLOW` + mode `0600` on Unix) for the same symlink/permission
-/// defense as the workspace-server log.
+/// Open the WS-owned proxy log, truncating it on every (re)start so a crash-loop pinned at the backoff cap cannot grow it unbounded.
+/// It reuses the daemon file options (`O_NOFOLLOW` and mode `0600` on Unix) for the same symlink and permission defense as the workspace-server log.
 fn open_truncated_log(path: &Path) -> io::Result<File> {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -224,9 +212,8 @@ fn open_truncated_log(path: &Path) -> io::Result<File> {
 }
 
 /// Async-signal-safe write of a fixed `oom_score_adj` for use inside `pre_exec`.
-/// Always returns `Ok(())`: missing procfs and short/failed writes must not
-/// block proxy spawn. On a short or failed write after a successful open,
-/// logs a static warning to stderr (async-signal-safe).
+/// Always returns `Ok(())`: missing procfs and short or failed writes must not block proxy spawn.
+/// A short or failed write after a successful open logs a static warning to stderr (async-signal-safe).
 #[cfg(target_os = "linux")]
 fn write_oom_score_adj_raw(value: &'static [u8]) -> io::Result<()> {
     const PATH: &[u8] = b"/proc/self/oom_score_adj\0";
@@ -247,8 +234,8 @@ fn write_oom_score_adj_raw(value: &'static [u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Build the unspawned proxy command. Secrets (`GROK_SERVER_KEY` /
-/// `GROK_SESSION_ID`) reach the proxy by env inheritance — never argv.
+/// Build the unspawned proxy command.
+/// Secrets (`GROK_SERVER_KEY` / `GROK_SESSION_ID`) reach the proxy by env inheritance, never argv.
 fn build_preview_command(cfg: &PreviewArgs) -> io::Result<tokio::process::Command> {
     use std::process::Stdio;
 
@@ -262,25 +249,22 @@ fn build_preview_command(cfg: &PreviewArgs) -> io::Result<tokio::process::Comman
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
 
-    // Linux-only: PDEATHSIG (prctl) does not exist on macOS/other unixes, so this
-    // parent-death binding is gated to Linux. The proxy simply runs without the
-    // binding elsewhere.
+    // Linux-only: PDEATHSIG (prctl) does not exist on macOS or other unixes, so this parent-death binding is gated to Linux
+    // The proxy runs without the binding elsewhere
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
 
-        // Raw pre_exec, NOT xai_tty_utils::detach_command: the proxy must stay in
-        // the workspace-server's session/pgid to share its reap-escape, so the
-        // setsid that detach_command performs would be actively wrong here (and
-        // the daemonized server owns no controlling TTY, so the detach rationale
-        // does not apply). This raw path is also deliberately exempt from the
-        // shared child OOM reset: the proxy sets -500 (or resets to 0) below.
+        // Raw pre_exec, NOT xai_tty_utils::detach_command
+        // The proxy must stay in the workspace-server's session/pgid to share its escape from the launcher's process-group reap
+        // The setsid that detach_command performs would be actively wrong here
+        // The daemonized server also owns no controlling TTY, so the detach rationale does not apply
+        // This raw path is also deliberately exempt from the shared child OOM reset: the proxy sets -500 (or resets to 0) below
         //
-        // PDEATHSIG keys off the spawning thread, so capture our PID to also
-        // close the fork→exec race in the child.
+        // PDEATHSIG keys off the spawning thread, so capture our PID to also close the race between fork and exec in the child
         let parent_pid = std::process::id();
         // Read env pre-fork: env access is not async-signal-safe inside pre_exec.
-        // Armed when always-on protect succeeds and/or `--oom-protect` forces it.
+        // It is set when the always-on protect succeeds and/or `--oom-protect` forces it
         let oom_protect = std::env::var_os(xai_tty_utils::RESET_CHILD_OOM_ENV).is_some();
         // SAFETY: the closure runs in the forked child between fork and exec, so
         // it calls only async-signal-safe libc functions (`prctl`, `getppid`,
@@ -290,26 +274,22 @@ fn build_preview_command(cfg: &PreviewArgs) -> io::Result<tokio::process::Comman
         // `io::Error::new`/`other` here, as they allocate.
         unsafe {
             cmd.pre_exec(move || {
-                // Bind the proxy's lifetime to the workspace-server: a WS crash
-                // makes the kernel SIGKILL the proxy so it can't orphan and hold
-                // the preview/control ports. This binding survives the proxy's
-                // own execve only because that binary is non-setuid and carries
-                // no file capabilities (the kernel clears PDEATHSIG across a
-                // privileged exec).
+                // Bind the proxy's lifetime to the workspace-server
+                // A WS crash makes the kernel SIGKILL the proxy so it can't orphan and hold the preview/control ports
+                // This binding survives the proxy's own execve only because that binary is non-setuid and carries no file capabilities
+                // The kernel clears PDEATHSIG across a privileged exec
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) == -1 {
                     return Err(io::Error::last_os_error());
                 }
-                // If the WS already exited (PDEATHSIG won't fire), bail before
-                // exec rather than orphan.
+                // If the WS already exited (PDEATHSIG won't fire), exit before exec rather than orphan
                 if libc::getppid() as u32 != parent_pid {
                     libc::_exit(0);
                 }
-                // OOM score: when protect env is on, raise inherited -900 to -500
-                // (no CAP_SYS_RESOURCE). Reset-to-0 then lower would fail in nested
-                // userns. When env is off, reset to 0 so we never inherit -900.
+                // OOM score: when the protect env is on, raise the inherited -900 to -500 (needs no CAP_SYS_RESOURCE)
+                // Resetting to 0 and then lowering would fail in a nested userns
+                // When the env is off, reset to 0 so we never inherit -900
                 if oom_protect {
-                    // "-500\n" matches PREVIEW_PROXY_OOM_SCORE_ADJ; static for
-                    // async-signal-safety (no formatting/allocation in pre_exec).
+                    // "-500\n" matches PREVIEW_PROXY_OOM_SCORE_ADJ; the bytes are static because pre_exec allows no formatting or allocation
                     write_oom_score_adj_raw(b"-500\n")?;
                 } else {
                     xai_tty_utils::reset_oom_score_adj()?;
@@ -322,8 +302,8 @@ fn build_preview_command(cfg: &PreviewArgs) -> io::Result<tokio::process::Comman
     Ok(tokio::process::Command::from(cmd))
 }
 
-/// Supervise the preview-proxy child until `shutdown` flips. Spawn this **after**
-/// daemonize (see module docs) so the child inherits the new session/pgid.
+/// Supervise the preview-proxy child until `shutdown` flips.
+/// Spawn this **after** daemonize (see module docs) so the child inherits the new session/pgid.
 pub async fn supervise_preview(cfg: PreviewArgs, shutdown: watch::Receiver<bool>) {
     tracing::info!(
         bin = PREVIEW_PROXY_BIN_PATH,
@@ -345,8 +325,7 @@ pub async fn supervise_preview(cfg: PreviewArgs, shutdown: watch::Receiver<bool>
     .await;
 }
 
-/// Core supervise loop, generic over the command factory so tests can drive a
-/// fake child without the real proxy binary.
+/// Core supervise loop, generic over the command factory so tests can drive a fake child without the real proxy binary.
 async fn supervise_loop<F>(
     mut make_command: F,
     policy: BackoffPolicy,
@@ -363,7 +342,7 @@ async fn supervise_loop<F>(
         let mut child = match spawned {
             Ok(child) => child,
             Err(e) => {
-                // Spawn/log-open failure must back off and retry — never drop the task.
+                // A spawn or log-open failure must back off and retry, never drop the task
                 tracing::error!(error = %e, bin = PREVIEW_PROXY_BIN_PATH, "preview-proxy spawn failed; backing off");
                 record_restart(RestartReason::SpawnError);
                 let (delay, next) = next_step(policy, false, step);
@@ -398,8 +377,7 @@ async fn supervise_loop<F>(
                     return;
                 }
             }
-            // SIGKILL on teardown: preview is best-effort and the container is
-            // going away.
+            // SIGKILL on teardown: preview is best-effort and the container is going away
             _ = shutdown.changed() => {
                 let _ = child.kill().await;
                 tracing::info!("supervisor received shutdown; killed preview-proxy");
@@ -409,8 +387,8 @@ async fn supervise_loop<F>(
     }
 }
 
-/// Sleep for `delay`, returning early with `true` if `shutdown` flips (or all
-/// senders drop) during the wait — the caller then tears down and returns.
+/// Sleep for `delay`, returning early with `true` if `shutdown` flips (or all senders drop) during the wait.
+/// The caller then tears down and returns.
 async fn sleep_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>) -> bool {
     tokio::select! {
         _ = tokio::time::sleep(delay) => false,
@@ -420,44 +398,36 @@ async fn sleep_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>
 
 // ── Preview-activity scraper ───────────────────────────────────────────────
 //
-// Polls the proxy's loopback `/__control/activity` and reports through
-// `PreviewActivitySink` so in-sandbox preview traffic withholds idle.
+// Polls the proxy's loopback `/__control/activity` and reports through `PreviewActivitySink` so in-sandbox preview traffic withholds idle
 
-/// Proxy control path exposing the last-activity stamp (mirrors
-/// `xai-grok-preview-proxy`'s `/__control/activity` route).
+/// The proxy's control path for the last-activity stamp; mirrors `xai-grok-preview-proxy`'s `/__control/activity` route.
 const PREVIEW_ACTIVITY_PATH: &str = "/__control/activity";
 
-/// Effective proxy `--control-port` when the supervisor didn't pin one (mirrors
-/// the default in `xai-grok-preview-proxy/src/cli.rs`).
+/// Effective proxy `--control-port` when the supervisor didn't set one (mirrors the default in `xai-grok-preview-proxy/src/cli.rs`).
 pub const DEFAULT_PREVIEW_CONTROL_PORT: u16 = 6015;
 
 /// Where the scraper reports what it read off the proxy.
 ///
-/// The workspace-server implements this over its `ActivityTracker`, whose
-/// idle-withhold accounting is the only consumer today. It is a trait rather
-/// than the concrete tracker so this crate stays free of `xai-grok-workspace`:
-/// the daemon machinery is used by the server binary alone, and a dependency
-/// on the library would put it back into every downstream build.
+/// The workspace-server implements this over its `ActivityTracker`, whose idle-withhold accounting is the only consumer today.
+/// It is a trait rather than the concrete tracker so this crate stays free of `xai-grok-workspace`.
+/// The daemon code is used by the server binary alone, and a dependency on the library would put it back into every downstream build.
 pub trait PreviewActivitySink: Send + Sync + 'static {
     /// A request was routed through the proxy since the previous scrape.
     fn note_preview_routed_activity(&self);
-    /// The proxy's generic activity stamp advanced without a routed request
-    /// (a status poll, a handshake).
+    /// The proxy's generic activity stamp advanced without a routed request (a status poll, a handshake).
     fn note_preview_status_activity(&self);
-    /// Absolute mirror of the proxy's attached-client counters, republished on
-    /// every scrape that returned trustworthy data.
+    /// Mirrors the proxy's attached-client counters as absolute values, republished on every scrape that returned trustworthy data.
     fn set_preview_attached(&self, ws_tunnels_open: u64, routed_in_flight: u64);
-    /// How long a stamp keeps withholding idle. Doubles as the staleness grace
-    /// for the mirrored attached counters, so both holds expire on one clock.
+    /// How long a stamp keeps withholding idle.
+    /// It doubles as the staleness grace for the mirrored attached counters, so both holds expire on one clock.
     fn preview_activity_window_ms(&self) -> u64;
 }
 
-/// Per-scrape budget. The endpoint is loopback and trivial, so a small bound is
-/// ample and a wedged proxy can't stall the scraper.
+/// Per-scrape budget: the endpoint is loopback and trivial, so a small bound is ample and a wedged proxy can't stall the scraper.
 const PREVIEW_ACTIVITY_SCRAPE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The proxy's loopback activity URL for `control_port`. Shared by the scrape
-/// loop and its tests so a URL-shape change can't drift between them.
+/// The proxy's loopback activity URL for `control_port`.
+/// It is shared by the scrape loop and its tests so a change to the URL shape can't drift between them.
 fn activity_url(control_port: u16) -> String {
     format!(
         "http://{}:{control_port}{PREVIEW_ACTIVITY_PATH}",
@@ -465,9 +435,9 @@ fn activity_url(control_port: u16) -> String {
     )
 }
 
-/// One scrape of the proxy's activity endpoint. `last_activity_ms` is the only
-/// required field; the rest default to zero, so a workspace-server running
-/// ahead of the proxy binary degrades to the old behaviour rather than failing.
+/// One scrape of the proxy's activity endpoint.
+/// `last_activity_ms` is the only required field; the rest default to zero.
+/// A workspace-server running ahead of the proxy binary therefore degrades to the old behaviour rather than failing.
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy, serde::Deserialize)]
 struct ActivitySample {
     last_activity_ms: u64,
@@ -479,20 +449,19 @@ struct ActivitySample {
     routed_requests_in_flight: u64,
 }
 
-/// Classified result of one scrape, so a missing proxy (quiet no-op) is never
-/// confused with a genuine error response or with real activity.
+/// The classified result of one scrape: a missing proxy (a quiet no-op) is never confused with a genuine error response or real activity.
 #[derive(Debug, PartialEq, Eq)]
 enum ScrapeOutcome {
     /// The proxy answered with a parseable activity sample.
     Stamp(ActivitySample),
-    /// The proxy isn't reachable (connection refused / not up yet): quiet no-op.
+    /// The proxy isn't reachable (connection refused / not up yet); treated as a quiet no-op.
     Absent,
     /// The proxy answered but the response was unusable (error status / bad body).
     BadResponse,
 }
 
-/// Parse an activity body; `None` for a malformed body or a missing/non-integer
-/// `last_activity_ms`. Unknown fields are ignored so the proxy can add more.
+/// Parse an activity body; `None` for a malformed body or a missing or non-integer `last_activity_ms`.
+/// Unknown fields are ignored so the proxy can add more.
 fn parse_activity_body(body: &str) -> Option<ActivitySample> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     // Required, and must be an integer.
@@ -500,8 +469,8 @@ fn parse_activity_body(body: &str) -> Option<ActivitySample> {
     serde_json::from_value(value).ok()
 }
 
-/// Classify a completed response by status + body (transport failures are
-/// classified by the caller). Only a 2xx carrying a parseable stamp is data.
+/// Classify a completed response by status and body (transport failures are classified by the caller).
+/// Only a 2xx carrying a parseable stamp is data.
 fn classify_activity_response(status: u16, body: &str) -> ScrapeOutcome {
     if !(200..300).contains(&status) {
         return ScrapeOutcome::BadResponse;
@@ -512,16 +481,14 @@ fn classify_activity_response(status: u16, body: &str) -> ScrapeOutcome {
     }
 }
 
-/// Whether a scraped stamp is strictly newer than the last seen — i.e. the proxy
-/// recorded preview traffic since. A non-increasing value (incl. a proxy
-/// restart-to-zero) is not an advance.
+/// Whether a scraped stamp is strictly newer than the last seen, meaning the proxy recorded preview traffic since.
+/// A non-increasing value (including a proxy restart back to zero) is not an advance.
 fn preview_activity_advanced(last_seen: u64, current: u64) -> bool {
     current > last_seen
 }
 
-/// One scrape, classified fail-open: a connect/timeout failure (proxy absent or
-/// still starting) is `Absent` (quiet), kept distinct from a genuine error
-/// response so neither is ever read as activity.
+/// One scrape, classified so failure is quiet: a connect or timeout failure (proxy absent or still starting) is `Absent`.
+/// That is kept distinct from a genuine error response so neither is ever read as activity.
 async fn scrape_activity(client: &reqwest::Client, url: &str) -> ScrapeOutcome {
     match client.get(url).send().await {
         Ok(resp) => {
@@ -536,8 +503,8 @@ async fn scrape_activity(client: &reqwest::Client, url: &str) -> ScrapeOutcome {
     }
 }
 
-/// Clear the mirrored attached-client counters once we have been without
-/// trustworthy data for `grace`. Starts the clock on the first bad scrape.
+/// Clear the mirrored attached-client counters once we have been without trustworthy data for `grace`.
+/// The clock starts on the first bad scrape.
 fn clear_attached_if_stale(
     tracker: &dyn PreviewActivitySink,
     stale_since: &mut Option<Instant>,
@@ -549,12 +516,10 @@ fn clear_attached_if_stale(
     }
 }
 
-/// Poll the proxy's loopback activity endpoint until `shutdown` flips, feeding
-/// the sink on each advance. Spawn after the sink's tracker exists (post
-/// hub-connect), gated on preview being enabled. `control_port` is the proxy's
-/// loopback control port; `None` falls back to [`DEFAULT_PREVIEW_CONTROL_PORT`].
-/// `scrape_interval` comes from `StatusConfig` (kept strictly below the withhold
-/// window by `StatusConfig::validate`).
+/// Poll the proxy's loopback activity endpoint until `shutdown` flips, feeding the sink on each advance.
+/// Spawn this after the sink's tracker exists (after hub connect), and only when preview is enabled.
+/// `control_port` is the proxy's loopback control port; `None` falls back to [`DEFAULT_PREVIEW_CONTROL_PORT`].
+/// `scrape_interval` comes from `StatusConfig` (kept strictly below the withhold window by `StatusConfig::validate`).
 pub async fn supervise_preview_activity(
     control_port: Option<u16>,
     tracker: Arc<dyn PreviewActivitySink>,
@@ -581,8 +546,7 @@ async fn scrape_activity_loop(
         return;
     }
     let url = activity_url(control_port);
-    // A fixed loopback control endpoint never redirects, so a 3xx is anomalous —
-    // don't follow it; it classifies as `BadResponse`.
+    // A fixed loopback control endpoint never redirects, so a 3xx is anomalous: don't follow it; it classifies as `BadResponse`
     #[allow(clippy::disallowed_methods)] // localhost preview server; TLS policy N/A
     let client = match reqwest::Client::builder()
         .timeout(PREVIEW_ACTIVITY_SCRAPE_TIMEOUT)
@@ -597,17 +561,15 @@ async fn scrape_activity_loop(
     };
     tracing::info!(%url, "starting preview-activity scraper");
 
-    // `None` until the first successful scrape establishes a baseline. Baselining
-    // (rather than starting at 0) avoids a spurious withhold when a workspace-server
-    // restart meets a proxy whose stamp is already non-zero but stale.
+    // `None` until the first successful scrape establishes a baseline
+    // Baselining rather than starting at 0 avoids a spurious withhold
+    // A workspace-server restart can meet a proxy whose stamp is already non-zero but stale
     let mut last_seen: Option<ActivitySample> = None;
-    // When we last had trustworthy attached-client data. The counters are the
-    // ONLY hold a WS-only client has — a tunnel writes no stamps — so one bad
-    // scrape must not clear them; but unlike the stamps they do not decay, so a
-    // sustained loss must, or a proxy that dies mid-tunnel holds the sandbox to
-    // the TTL. `Absent` and `BadResponse` both count as loss: one cannot reach
-    // the proxy, the other cannot understand it. The threshold is the stamp
-    // window, so both hold mechanisms expire on the same clock.
+    // When we last had trustworthy attached-client data
+    // The counters are the ONLY hold a WS-only client has (a tunnel writes no stamps), so one bad scrape must not clear them
+    // Unlike the stamps they do not decay, so a sustained loss must clear them, or a proxy that dies mid-tunnel holds the sandbox to the TTL
+    // `Absent` and `BadResponse` both count as loss: one cannot reach the proxy, the other cannot understand it
+    // The threshold is the stamp window, so both hold mechanisms expire on the same clock
     let attached_grace = Duration::from_millis(tracker.preview_activity_window_ms());
     let mut attached_stale_since: Option<Instant> = None;
     loop {
@@ -617,9 +579,8 @@ async fn scrape_activity_loop(
         match scrape_activity(&client, &url).await {
             ScrapeOutcome::Stamp(current) => {
                 if let Some(prev) = last_seen {
-                    // The routed stamp is a subset of the generic one, so check
-                    // it first and attribute only the remainder to a poll —
-                    // otherwise one routed request would report as both.
+                    // The routed stamp is a subset of the generic one, so check it first and attribute only the remainder to a poll
+                    // Otherwise one routed request would report as both
                     if preview_activity_advanced(prev.last_routed_ms, current.last_routed_ms) {
                         tracker.note_preview_routed_activity();
                     } else if preview_activity_advanced(
@@ -629,8 +590,7 @@ async fn scrape_activity_loop(
                         tracker.note_preview_status_activity();
                     }
                 }
-                // Absolute counters, republished every tick: a mirror of the
-                // proxy's state, not an edge.
+                // Absolute counters, republished every tick: a mirror of the proxy's state, not a change event
                 tracker.set_preview_attached(
                     current.ws_tunnels_open,
                     current.routed_requests_in_flight,
@@ -638,15 +598,13 @@ async fn scrape_activity_loop(
                 last_seen = Some(current);
                 attached_stale_since = None;
             }
-            // Proxy absent (preview disabled / starting / restarting): leave
-            // the stamps, and age the attached counters out. See above.
+            // Proxy absent (preview disabled / starting / restarting): leave the stamps, and age the attached counters out (see above)
             ScrapeOutcome::Absent => {
                 clear_attached_if_stale(&*tracker, &mut attached_stale_since, attached_grace);
             }
-            // Answering, but unusably. Same staleness clock: an error status or
-            // an unparseable body tells us nothing about attached clients, and
-            // leaving them untouched would let a persistently broken proxy hold
-            // the withhold open forever.
+            // The proxy answered, but unusably; the same staleness clock applies
+            // An error status or an unparseable body tells us nothing about attached clients
+            // Leaving them untouched would let a persistently broken proxy hold the withhold open forever
             ScrapeOutcome::BadResponse => {
                 tracing::debug!(%url, "preview-activity scrape returned an unusable response");
                 clear_attached_if_stale(&*tracker, &mut attached_stale_since, attached_grace);
@@ -668,7 +626,7 @@ fn metrics_url(control_port: u16) -> String {
     )
 }
 
-/// Scrapes the proxy's loopback-only metrics and donates them via the hub pump.
+/// Scrapes the proxy's loopback-only metrics and donates them through the hub's active metrics sink.
 pub async fn supervise_preview_metrics(control_port: Option<u16>, shutdown: watch::Receiver<bool>) {
     scrape_metrics_loop(
         control_port.unwrap_or(DEFAULT_PREVIEW_CONTROL_PORT),
@@ -740,11 +698,10 @@ mod tests {
 
     use super::*;
 
-    /// Stand-in for the workspace-server's `ActivityTracker`. Records exactly
-    /// what the scraper reported, so these tests assert the scraper's contract
-    /// without linking the workspace library; the tracker's own idle-withhold
-    /// accounting is covered by `xai_grok_workspace::activity`, and the wiring
-    /// between the two by the `xai-workspace-server` binary's own tests.
+    /// Stand-in for the workspace-server's `ActivityTracker`.
+    /// It records exactly what the scraper reported, so these tests assert the scraper's contract without linking the workspace library.
+    /// The tracker's own idle-withhold accounting is covered by `xai_grok_workspace::activity`.
+    /// The wiring between the two is covered by the `xai-workspace-server` binary's own tests.
     struct TestSink {
         window_ms: u64,
         routed_notes: AtomicU64,
@@ -764,14 +721,13 @@ mod tests {
             })
         }
 
-        /// Default window, matching `ActivityTracker::new()`'s posture for the
-        /// tests that never exercise the staleness grace.
+        /// The default window, matching `ActivityTracker::new()`, for tests that never exercise the staleness grace.
         fn new() -> Arc<Self> {
             Self::with_window_ms(60_000)
         }
 
-        /// Any advance the scraper attributed, routed or status. Non-zero is the
-        /// sink-side equivalent of "the tracker is withholding idle".
+        /// Any advance the scraper attributed, routed or status.
+        /// Non-zero is the sink-side equivalent of "the tracker is withholding idle".
         fn activity_notes(&self) -> u64 {
             self.routed_notes.load(SeqCst) + self.status_notes.load(SeqCst)
         }
@@ -791,8 +747,7 @@ mod tests {
 
     /// Erase a `TestSink` to the trait object the scrape loop takes.
     fn sink_of(sink: &Arc<TestSink>) -> Arc<dyn PreviewActivitySink> {
-        // Annotated so `Arc::clone` resolves against `TestSink`, not the
-        // trait-object return type; the unsizing happens on the return.
+        // Annotated so `Arc::clone` resolves against `TestSink`, not the trait-object return type; the unsizing happens on the return
         let concrete: Arc<TestSink> = Arc::clone(sink);
         concrete
     }
@@ -879,8 +834,7 @@ mod tests {
 
     #[test]
     fn to_argv_never_emits_the_enabled_gate() {
-        // `enabled` gates whether the supervisor runs; it is not a proxy flag and
-        // must never leak into argv, regardless of its value.
+        // `enabled` gates whether the supervisor runs; it is not a proxy flag and must never leak into argv, regardless of its value
         let mut cfg = sample_cfg();
         cfg.enabled = true;
         let enabled_argv = cfg.to_argv();
@@ -907,8 +861,7 @@ mod tests {
     fn backoff_doubles_caps_at_30s_and_resets_after_a_healthy_run() {
         let policy = BackoffPolicy::new(Duration::from_secs(1), Duration::from_secs(30));
 
-        // Consecutive unhealthy restarts: 1, 2, 4, 8, 16, then pinned at the 30s
-        // cap (32 → 30, 64 → 30).
+        // Consecutive unhealthy restarts: 1, 2, 4, 8, 16, then pinned at the 30s cap (32 and 64 both cap to 30)
         let mut step = 0u32;
         for want in [1u64, 2, 4, 8, 16, 30, 30] {
             let (delay, next) = next_step(policy, false, step);
@@ -972,8 +925,7 @@ mod tests {
         }
     }
 
-    /// The proxy uses a raw `pre_exec`, not `detach_pre_exec_hook`, so the
-    /// shared child-OOM reset never runs on it. Documented by construction:
+    /// The proxy uses a raw `pre_exec`, not `detach_pre_exec_hook`, so the shared child-OOM reset never runs on it.
     /// `build_preview_command` is the only spawn path and is the raw path.
     #[cfg(target_os = "linux")]
     #[test]
@@ -987,16 +939,16 @@ mod tests {
         write_oom_score_adj_raw(b"-500\n").unwrap();
         let after = std::fs::read_to_string("/proc/self/oom_score_adj").unwrap();
         if after.trim() == "-500" {
-            // success under CAP_SYS_RESOURCE
+            // Success under CAP_SYS_RESOURCE
         } else {
-            // without CAP the open/write is best-effort Ok and score stays put
+            // Without CAP the open/write is best-effort Ok and the score stays put
             assert_eq!(after.trim(), restore);
         }
         let _ = std::fs::write("/proc/self/oom_score_adj", format!("{restore}\n"));
     }
 
-    /// Nested userns path: parent is already at -900; raise to -500 needs no CAP.
-    /// Reset-then-lower would fail there (cannot re-lower from 0 without CAP).
+    /// Nested userns path: the parent is already at -900, and raising to -500 needs no CAP.
+    /// Resetting to 0 and then lowering would fail there (nothing can re-lower from 0 without CAP).
     #[cfg(target_os = "linux")]
     #[test]
     fn raise_preview_score_from_workspace_score() {
@@ -1005,7 +957,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let own = std::fs::read_to_string("/proc/self/oom_score_adj").expect("read");
         let restore = own.trim().to_owned();
-        // Plant workspace score first (needs CAP); skip when unavailable.
+        // Plant the workspace score first (needs CAP); skip when unavailable
         if crate::daemonize::set_oom_score_adj(crate::daemonize::WORKSPACE_SERVER_OOM_SCORE_ADJ)
             .is_err()
         {
@@ -1023,12 +975,11 @@ mod tests {
 
     #[test]
     fn record_restart_increments_the_labeled_counter() {
-        // The reason → label wiring must be exact (no cross-wiring).
+        // The mapping from reason to label must be exact (no cross-wiring)
         assert_eq!(RestartReason::Exit.as_str(), "exit");
         assert_eq!(RestartReason::SpawnError.as_str(), "spawn_error");
 
-        // Concurrency-safe: assert a strict increase (other tests may also bump
-        // these labels), matching the crate's metric-test convention.
+        // Concurrency-safe: assert a strict increase (other tests may also bump these labels), matching the crate's metric-test convention
         let exit_before = PREVIEW_PROXY_RESTART_TOTAL
             .with_label_values(&["exit"])
             .get();
@@ -1185,8 +1136,7 @@ mod tests {
         assert_eq!(parse_activity_body(""), None);
     }
 
-    /// The binaries are version-pinned per session, but a restore can repin, so
-    /// this skew is real rather than theoretical.
+    /// The binaries are version-pinned per session, but a restore can repin, so this skew is real rather than theoretical.
     #[test]
     fn parse_activity_body_tolerates_a_proxy_without_the_new_fields() {
         let old = parse_activity_body(r#"{"last_activity_ms":5,"status_holds_in_use":2}"#)
@@ -1199,9 +1149,8 @@ mod tests {
         );
     }
 
-    /// A WS-only client has no stamps, so the attached counters are its only
-    /// hold. One unreachable scrape — a proxy restart, a loopback hiccup — must
-    /// not drop it and publish idle; a sustained absence still must.
+    /// A WS-only client has no stamps, so the attached counters are its only hold.
+    /// One unreachable scrape (a proxy restart, a loopback hiccup) must not drop it and publish idle; a sustained absence still must.
     #[tokio::test]
     async fn one_absent_scrape_does_not_drop_an_attached_client() {
         let tracker = TestSink::with_window_ms(10_000);
@@ -1229,15 +1178,14 @@ mod tests {
         let _ = loop_handle.await;
     }
 
-    /// A proxy that answers unusably tells us nothing about attached clients
-    /// either, and the mirrored counters do not decay on their own — so an
-    /// endless run of error statuses must not pin `PreviewAttached` forever.
+    /// A proxy that answers unusably tells us nothing about attached clients either, and the mirrored counters do not decay on their own.
+    /// An endless run of error statuses must therefore not pin `PreviewAttached` forever.
     #[tokio::test]
     async fn a_persistently_broken_proxy_does_not_pin_attached_forever() {
         let tracker = TestSink::with_window_ms(50);
         tracker.set_preview_attached(1, 0);
 
-        // Answers every time, always with a 500 => BadResponse, never Absent.
+        // The server answers every time, always with a 500, so every scrape classifies as BadResponse, never Absent
         let port = serve_canned("HTTP/1.1 500 Internal Server Error", "boom", true).await;
         let (tx, rx) = watch::channel(false);
         let loop_handle = tokio::spawn(scrape_activity_loop(
@@ -1260,8 +1208,7 @@ mod tests {
         let _ = loop_handle.await;
     }
 
-    /// The other half: a proxy that stays gone must eventually release, or a
-    /// tunnel that died with it would hold the sandbox to the TTL.
+    /// The other half: a proxy that stays gone must eventually release, or a tunnel that died with it would hold the sandbox to the TTL.
     #[tokio::test]
     async fn a_sustained_absence_clears_the_attached_client() {
         let tracker = TestSink::with_window_ms(50);
@@ -1344,10 +1291,10 @@ mod tests {
             .expect("build client")
     }
 
-    /// Bind an ephemeral loopback port without `listen`. Connects are refused
-    /// and no sibling test can steal the port — dropping a listener and racing
-    /// `scrape_activity` previously let `serve_incrementing_stamp` take it and
-    /// yield `Stamp { last_activity_ms: 1 }` instead of `Absent`.
+    /// Bind an ephemeral loopback port without `listen`.
+    /// Connects are refused and no sibling test can steal the port.
+    /// Dropping a listener and racing `scrape_activity` previously let `serve_incrementing_stamp` take the port.
+    /// The scrape then yielded `Stamp { last_activity_ms: 1 }` instead of `Absent`.
     struct ReservedRefusedPort {
         port: u16,
         _socket: TcpSocket,
@@ -1582,8 +1529,7 @@ mod tests {
         cmd
     }
 
-    /// A long-lived child that records its own (post-`exec`) PID to `pid_path`
-    /// then blocks, so the test can assert the process is actually killed.
+    /// A long-lived child that records its own (post-`exec`) PID to `pid_path` then blocks, so the test can assert the process is actually killed.
     #[cfg(unix)]
     fn fake_pid_recording_command(pid_path: &Path) -> tokio::process::Command {
         use std::process::Stdio;
@@ -1614,7 +1560,7 @@ mod tests {
         }
     }
 
-    /// `kill(pid, 0)` existence probe (sends no signal).
+    /// Probe process existence with `kill(pid, 0)`; it sends no signal.
     #[cfg(unix)]
     fn process_alive(pid: i32) -> bool {
         // SAFETY: signal 0 only checks for the process's existence/permission.
@@ -1646,7 +1592,7 @@ mod tests {
                 Ok(fake_exit_command(1))
             }
         };
-        // healthy_run far above the child's lifetime ⇒ every exit is unhealthy.
+        // healthy_run is far above the child's lifetime, so every exit is unhealthy
         let handle = tokio::spawn(supervise_loop(
             factory,
             fast_policy(),
@@ -1654,9 +1600,9 @@ mod tests {
             rx,
         ));
 
-        // The child is re-spawned after it exits (≥2 spawns ⇒ at least one
-        // restart). Kept low to minimize fork churn in the parallel test runner;
-        // the backoff progression itself is covered by the pure `next_step` test.
+        // The child is re-spawned after it exits: two or more spawns prove at least one restart
+        // The bound is kept low to minimize fork churn in the parallel test runner
+        // The backoff progression itself is covered by the pure `next_step` test
         tokio::time::timeout(Duration::from_secs(5), wait_until(&spawns, 2))
             .await
             .expect("supervisor should restart the child after it exits");
@@ -1673,12 +1619,11 @@ mod tests {
 
     #[tokio::test]
     async fn supervisor_returns_cleanly_when_shutdown_races_a_child_exit() {
-        // Best-effort guard for the post-`wait()` shutdown re-check: with a
-        // fast-exiting child and shutdown flipped right after a spawn, the exit
-        // and the shutdown land close together. `select!` is random, so we can't
-        // deterministically force the re-check branch over the `changed()` arm,
-        // but both must yield a prompt, panic-free return with no hang or leak.
-        // Repeated to cover the timing window.
+        // Best-effort guard for the post-`wait()` shutdown re-check
+        // With a fast-exiting child and shutdown flipped right after a spawn, the exit and the shutdown land close together
+        // `select!` is random, so we can't deterministically force the re-check branch over the `changed()` arm
+        // Both branches must yield a prompt, panic-free return with no hang or leak
+        // The loop repeats to cover the timing window
         for _ in 0..8 {
             let (tx, rx) = watch::channel(false);
             let spawns = Arc::new(AtomicUsize::new(0));
@@ -1745,8 +1690,7 @@ mod tests {
             "a live child is killed on shutdown, never restarted"
         );
 
-        // Positively assert the child process is gone (SIGKILL + reap on the
-        // shutdown path), not merely that the supervise task returned.
+        // Positively assert the child process is gone (the shutdown path SIGKILLs and reaps it), not merely that the supervise task returned
         let deadline = Instant::now() + Duration::from_secs(5);
         while process_alive(pid) {
             assert!(Instant::now() < deadline, "child {pid} survived shutdown");
@@ -1788,51 +1732,44 @@ mod tests {
             .expect("task should not panic");
     }
 
-    /// Helper-process env switch and the success exit code for the PDEATHSIG
-    /// test below. A distinct (non-zero) success code so a filter that matched
-    /// no test (libtest would exit 0) can't masquerade as a pass.
+    /// The env var that switches the helper process on, and the success exit code, for the PDEATHSIG test below.
+    /// The success code is distinct and non-zero so a filter that matched no test (libtest would exit 0) can't pass by accident.
     #[cfg(target_os = "linux")]
     const PDEATHSIG_HELPER_ENV: &str = "GROK_PDEATHSIG_HELPER";
     #[cfg(target_os = "linux")]
     const PDEATHSIG_HELPER_OK: i32 = 42;
 
-    /// End-to-end PDEATHSIG guard: a grandchild armed exactly like the proxy
-    /// child (`PR_SET_PDEATHSIG(SIGKILL)` + `getppid` race-close) must not
-    /// outlive its parent. Validates the actual kernel mechanism, not just
-    /// wiring. (The "parent lives ⇒ child lives" direction is covered by
-    /// `supervisor_shutdown_kills_running_child_without_restart`, where a child
-    /// runs until the still-alive parent flips shutdown.)
+    /// End-to-end PDEATHSIG guard.
+    /// A grandchild set up exactly like the proxy child (`PR_SET_PDEATHSIG(SIGKILL)` plus the `getppid` re-check) must not outlive its parent.
+    /// This validates the actual kernel mechanism, not just the wiring.
+    /// The reverse direction, the child living while the parent lives, is covered by `supervisor_shutdown_kills_running_child_without_restart`.
+    /// There a child runs until the still-alive parent flips shutdown.
     ///
-    /// The fork(P)/fork(G) scenario runs in a freshly **re-exec'd** helper
-    /// process, not the test process: the test binary's descriptors are
-    /// `O_CLOEXEC`, so the helper's exec closes them all (including other
-    /// concurrent tests' `flock`'d pidfiles). Forking only that isolated process
-    /// therefore can't pin a lock another test holds — the hazard of forking the
-    /// multi-threaded test runner directly.
+    /// The fork(P)/fork(G) scenario runs in a freshly **re-exec'd** helper process, not the test process.
+    /// The test binary's descriptors are `O_CLOEXEC`, so the helper's exec closes them all (including other concurrent tests' `flock`'d pidfiles).
+    /// Forking only that isolated process therefore can't pin a lock another test holds.
+    /// That pinning is the hazard of forking the multi-threaded test runner directly.
     #[cfg(target_os = "linux")]
     #[test]
     fn pdeathsig_does_not_let_a_child_outlive_its_parent() {
-        // Helper mode: run the scenario in this isolated process and exit with
-        // the verdict.
+        // Helper mode: run the scenario in this isolated process and exit with the verdict
         if std::env::var_os(PDEATHSIG_HELPER_ENV).is_some() {
             std::process::exit(run_pdeathsig_scenario());
         }
 
-        // Driver mode: launch the helper and assert its verdict. stdio is
-        // silenced so the nested libtest banner doesn't pollute this run's output.
+        // Driver mode: launch the helper and assert its verdict
+        // The helper's stdio is silenced so the nested libtest banner doesn't pollute this run's output
         let exe = std::env::current_exe().expect("current_exe");
         let status = std::process::Command::new(exe)
             .arg("pdeathsig_does_not_let_a_child_outlive_its_parent") // unique substring filter
             .arg("--nocapture")
             .env(PDEATHSIG_HELPER_ENV, "1")
             // The helper is a fresh libtest run of exactly the one filtered test.
-            // Strip Bazel's per-shard test env so that when this target is built
-            // with `shard_count > 1`, the re-exec'd helper does not re-apply
-            // sharding to its single filtered test — otherwise the test could be
-            // partitioned into a shard other than the inherited TEST_SHARD_INDEX,
-            // run zero tests, and exit 0 instead of PDEATHSIG_HELPER_OK, failing
-            // the driver's verdict assertion. Also drop the inherited test filter
-            // so only our positional filter selects the test.
+            // Strip Bazel's per-shard test env
+            // When this target is built with `shard_count > 1`, the re-exec'd helper must not re-apply sharding to its single filtered test
+            // Otherwise sharding could partition the test into a shard other than the inherited TEST_SHARD_INDEX
+            // The helper would then run zero tests and exit 0 instead of PDEATHSIG_HELPER_OK, failing the driver's verdict assertion
+            // Also drop the inherited test filter so only our positional filter selects the test
             .env_remove("TEST_SHARD_INDEX")
             .env_remove("TEST_TOTAL_SHARDS")
             .env_remove("TEST_SHARD_STATUS_FILE")
@@ -1848,9 +1785,9 @@ mod tests {
         );
     }
 
-    /// fork P; P forks the armed grandchild G then dies; assert G terminates.
-    /// Returns [`PDEATHSIG_HELPER_OK`] on success, `1` otherwise. Runs only in
-    /// the isolated helper process (no concurrent tests, no inherited locks).
+    /// fork P; P forks grandchild G (with PDEATHSIG set) then dies; assert G terminates.
+    /// Returns [`PDEATHSIG_HELPER_OK`] on success, `1` otherwise.
+    /// It runs only in the isolated helper process (no concurrent tests, no inherited locks).
     #[cfg(target_os = "linux")]
     fn run_pdeathsig_scenario() -> i32 {
         const FAIL: i32 = 1;
@@ -1858,7 +1795,7 @@ mod tests {
         // libc functions (`prctl`, `getppid`, `pause`, `close`, `write`,
         // `_exit`); no allocation and no locks.
         unsafe {
-            // Subreaper so G reparents to us when P dies, letting us reap it.
+            // Become a subreaper so G reparents to us when P dies, letting us reap it
             libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1 as libc::c_ulong);
 
             let mut fds = [0i32; 2];
@@ -1872,19 +1809,19 @@ mod tests {
                 return FAIL;
             }
             if intermediate == 0 {
-                // Intermediate parent P — stand-in for the workspace-server.
+                // Intermediate parent P, the stand-in for the workspace-server
                 libc::close(rfd);
                 let p_pid = libc::getpid();
                 let grandchild = libc::fork();
                 if grandchild == 0 {
-                    // Grandchild G — stand-in for the proxy child.
+                    // Grandchild G, the stand-in for the proxy child
                     libc::close(wfd);
                     libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong);
                     if libc::getppid() != p_pid {
-                        libc::_exit(0); // race-close: P already gone.
+                        libc::_exit(0); // P is already gone, so exit; PDEATHSIG may never fire.
                     }
                     loop {
-                        libc::pause(); // wait for the PDEATHSIG SIGKILL.
+                        libc::pause(); // Wait for the PDEATHSIG SIGKILL.
                     }
                 }
                 // P: report G's pid, then die so PDEATHSIG fires on G.
@@ -1910,11 +1847,10 @@ mod tests {
             }
 
             let mut status = 0i32;
-            libc::waitpid(intermediate, &mut status, 0); // reap P
+            libc::waitpid(intermediate, &mut status, 0); // Reap P
 
-            // Once P dies G must terminate (SIGKILL via PDEATHSIG, or exit(0)
-            // via the race-close). We reap it as the subreaper, or — if it
-            // reparented to init — `kill(_, 0)` reports `ESRCH`.
+            // Once P dies G must terminate: SIGKILL via PDEATHSIG, or exit(0) via the getppid re-check
+            // We reap it as the subreaper, or, if it reparented to init, `kill(_, 0)` reports `ESRCH`
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 if libc::waitpid(grandchild, &mut status, libc::WNOHANG) == grandchild {

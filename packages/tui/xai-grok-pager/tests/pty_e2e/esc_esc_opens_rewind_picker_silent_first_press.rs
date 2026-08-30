@@ -2,19 +2,15 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Esc double-press policy (idle, empty prompt, conversation has a user turn):
-/// **Esc Esc opens the rewind picker**, and the **first Esc is silent** — no
-/// "press again" hint, no toast (unlike the idle clear arm). Proves the
-/// rewind arm of `try_handle_esc_policy` (gated on `scrollback.turn_count() > 0`)
-/// with a `label: None` silent pending, end-to-end.
+/// Idle, empty prompt, conversation has a user turn: **Esc Esc opens the rewind picker**, and the **first Esc is silent**.
+/// Silent means no "press again" hint and no toast, unlike the idle clear arm.
+/// Proves the rewind arm of `try_handle_esc_policy` (gated on `scrollback.turn_count() > 0`) with a `label: None` silent pending, end-to-end.
 ///
-/// Phase 2 repeats the gesture with the SCROLLBACK pane focused (Tab, footer
-/// shows "Space:prompt"): the rewind arm is either-pane, so double-Esc must
-/// open the picker from there too — through the scrollback key routing, where
-/// the prompt-only regression would hide.
+/// Phase 2 repeats the gesture with the SCROLLBACK pane focused (Tab, footer shows "Space:prompt").
+/// The rewind arm works from either pane, so double-Esc must open the picker from there too, through the scrollback key routing.
+/// A bug that only wired the prompt pane would hide in that routing.
 ///
-/// Uses [`spawn_esc_double_press_pager`] so a slow inter-press round-trip
-/// can't expire the arm.
+/// Uses [`spawn_esc_double_press_pager`] so a slow inter-press round-trip can't expire the arm.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn esc_esc_opens_rewind_picker_silent_first_press() {
@@ -27,8 +23,8 @@ async fn esc_esc_opens_rewind_picker_silent_first_press() {
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
 
-    // One real turn → one user-prompt block → turn_count() > 0, so the rewind
-    // arm is eligible. The prompt is empty and idle afterwards.
+    // One real turn commits one user-prompt block, so turn_count() > 0 and the rewind arm is eligible
+    // The prompt is empty and idle afterwards
     harness
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit prompt");
@@ -39,9 +35,8 @@ async fn esc_esc_opens_rewind_picker_silent_first_press() {
         .wait_for_turn_idle(Duration::from_secs(15))
         .expect("turn idle");
 
-    // First Esc: arm the rewind picker SILENTLY — no clear/rewind confirm hint.
-    // Settle between the presses: a single `ESC ESC` byte pair collapses to
-    // one `Esc` in crossterm.
+    // First Esc: arm the rewind picker SILENTLY, with no clear/rewind confirm hint
+    // Settle between the presses: a single `ESC ESC` byte pair collapses to one `Esc` in crossterm
     harness.inject_keys(keys::ESC).expect("first esc");
     harness.update(Duration::from_millis(200));
     let after_first = harness.screen_contents();
@@ -71,9 +66,8 @@ async fn esc_esc_opens_rewind_picker_silent_first_press() {
     harness.update(Duration::from_millis(200));
 
     // Phase 2: the same double-Esc must arm and open from the SCROLLBACK pane.
-    // Single Tab leaves the prompt; the "Space:prompt" footer proves the
-    // scrollback owns keys (Tab toggles, so poll the render instead of
-    // re-pressing).
+    // Single Tab leaves the prompt; the "Space:prompt" footer proves the scrollback owns keys
+    // Tab toggles, so poll the render instead of re-pressing
     harness.inject_keys(b"\t").expect("tab to scrollback");
     harness
         .wait_for_text("Space:prompt", Duration::from_secs(10))

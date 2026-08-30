@@ -1,9 +1,8 @@
 //! Bundle status state and response types.
 //!
-//! Pager-side cache of what `xai-grok-shell` reports from
-//! `x.ai/bundle/status`. The shell now performs the actual bundle download in
-//! the background post-auth; the pager only reads the resulting on-disk
-//! catalog so it can populate the welcome-screen subagent pane.
+//! Pager-side cache of what `xai-grok-shell` reports from `x.ai/bundle/status`.
+//! The shell downloads the bundle in the background after auth.
+//! The pager only reads the resulting on-disk catalog so it can populate the welcome-screen subagent pane.
 
 use serde::Deserialize;
 

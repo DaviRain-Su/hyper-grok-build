@@ -48,8 +48,7 @@ fn open_block_viewer_on_group_header_toggles_group() {
         assert!(agent.scrollback.is_selected_group_header());
     }
 
-    // Enter on the "N more" header expands the group instead of opening
-    // the hidden first entry in the block viewer.
+    // Enter on the "N more" header expands the group instead of opening the hidden first entry in the block viewer
     dispatch(Action::OpenBlockViewer, &mut app);
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -160,8 +159,7 @@ fn open_block_viewer_prefers_markdown_viewer_over_image_refs() {
         )));
     agent.scrollback.set_selected(Some(0));
 
-    // Need a graphics protocol so the top-level media guard doesn't
-    // short-circuit before reaching the block viewer.
+    // Without a graphics protocol the top-level media guard returns early before the block viewer is reached
     let _guard = set_protocol_for_test(GraphicsProtocol::Kitty);
     let effects = dispatch(Action::OpenBlockViewer, &mut app);
 
@@ -195,8 +193,7 @@ fn open_block_viewer_uses_markdown_viewer_for_agent_message_with_image_ref() {
 
     assert!(effects.is_empty());
     let agent = app.agents.get(&id).unwrap();
-    // Agent messages with image refs now open the normal markdown viewer
-    // (inline media rendering moved to the tool call block).
+    // Agent messages with image refs now open the normal markdown viewer (inline media rendering moved to the tool call block)
     assert!(agent.block_viewer.is_some());
 }
 
@@ -223,15 +220,12 @@ fn open_block_viewer_opens_image_only_blocks_natively() {
     assert!(entry.block.supports_fullscreen());
     assert!(!entry.block.has_normal_fullscreen_viewer());
 
-    // Pretend the host terminal speaks Kitty graphics so the media
-    // short-circuit guard (`guard_image_support`) doesn't fire and the
-    // dispatch reaches the image branch, which opens the file natively
-    // rather than an in-app viewer.
+    // Pretend the host terminal speaks Kitty graphics so `guard_image_support` doesn't return early
+    // The dispatch then reaches the image branch, which opens the file natively rather than in an in-app viewer
     let _guard = set_protocol_for_test(GraphicsProtocol::Kitty);
     let effects = dispatch(Action::OpenBlockViewer, &mut app);
 
-    // Generated media now opens in the OS-native viewer (fire-and-forget),
-    // so neither the in-app block viewer nor image viewer is shown.
+    // Generated media now opens in the OS-native viewer without being tracked, so neither the in-app block viewer nor the image viewer is shown
     assert!(effects.is_empty());
     let agent = app.agents.get(&id).unwrap();
     assert!(agent.block_viewer.is_none());
@@ -310,7 +304,7 @@ fn plugins_list_delivery_seeds_once_then_always_preserves() {
     open_plugins_modal(&mut app, id);
     deliver_plugins_list(&mut app, id);
 
-    // User expands a group, then the post-action refetch arrives.
+    // The user expands a group, then the refetch that follows an action arrives
     app.agents
         .get_mut(&id)
         .unwrap()
@@ -327,7 +321,7 @@ fn plugins_list_delivery_seeds_once_then_always_preserves() {
         "post-action refetch must not re-collapse an expanded group"
     );
 
-    // Reload sets Loading, but seeding is once-per-modal: still preserves.
+    // Reload sets Loading, but seeding happens once per modal, so the expanded group is still preserved
     app.agents
         .get_mut(&id)
         .unwrap()
@@ -363,9 +357,8 @@ fn open_block_viewer_skips_image_viewer_when_no_graphics() {
         )));
     agent.scrollback.set_selected(Some(0));
 
-    // Terminal has no inline-image protocol (e.g. Windows / ConPTY).
-    // The dispatch should refuse to open the image-viewer modal and
-    // surface the situation via a toast instead.
+    // The terminal has no inline-image protocol (e.g. Windows ConPTY).
+    // The dispatch refuses to open the image-viewer modal and shows a toast instead
     let _guard = set_protocol_for_test(GraphicsProtocol::None);
     let effects = dispatch(Action::OpenBlockViewer, &mut app);
 

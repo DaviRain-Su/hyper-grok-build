@@ -1,44 +1,27 @@
-//! `/multiline` -- toggle multiline input mode.
+//! `/multiline`: toggle multiline input mode.
 //!
 //! In multiline mode, Enter inserts a newline and Shift+Enter sends the
 //! prompt (the inverse of normal mode). Empty-composer mid-turn Enter still
 //! force-sends the top queued follow-up (send now), same as normal mode.
 //! Toggled via `Ctrl+M`, this slash command, or the settings modal.
 //!
-//! Dispatches `Action::SetMultilineMode(!current)`. Per-session only
-//! (no disk persistence).
+//! Dispatches `Action::SetMultilineMode(!current)`. Per-session only (no disk persistence).
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
 /// Toggle multiline input mode via `/multiline`.
 pub struct MultilineCommand;
 
 impl SlashCommand for MultilineCommand {
-    fn name(&self) -> &str {
-        "multiline"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["ml"]
-    }
-
-    fn description(&self) -> &str {
-        "Toggle multiline input mode (swap Enter and Shift+Enter)"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    fn offered_when_session_less(&self) -> bool {
-        // Dashboard dispatch/peek own their own multiline flag
-        // (`DashboardState::multiline_mode`); same swap as the agent prompt.
-        true
-    }
-
-    fn usage(&self) -> &str {
-        "/multiline"
+    slash_meta! {
+        name: "multiline",
+        aliases: ["ml"],
+        description: "Toggle multiline input mode (swap Enter and Shift+Enter)",
+        usage: "/multiline",
+        session_scoped: true,
+        // Dashboard dispatch/peek own their own multiline flag (`DashboardState::multiline_mode`); same swap as the agent prompt.
+        offered_when_session_less: true,
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
@@ -74,7 +57,7 @@ mod tests {
         }
     }
 
-    /// Off → `SetMultilineMode(true)`.
+    /// Off dispatches `SetMultilineMode(true)`.
     #[test]
     fn run_when_off_dispatches_set_to_true() {
         let cmd = MultilineCommand;
@@ -90,7 +73,7 @@ mod tests {
         }
     }
 
-    /// `/multiline` when on → dispatches `Action::SetMultilineMode(false)`.
+    /// `/multiline` when on dispatches `Action::SetMultilineMode(false)`.
     #[test]
     fn run_when_on_dispatches_set_to_false() {
         let cmd = MultilineCommand;

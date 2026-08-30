@@ -6,8 +6,7 @@ use std::io::Write;
 use tokio_util::sync::CancellationToken;
 use xai_acp_lib::acp_send;
 use xai_fast_worktree::WorktreeRecord;
-/// Read the agent's own report types rather than copies, so a field added
-/// there cannot go missing here.
+/// Reuse the agent's own report types rather than copies, so a field added there cannot go missing here.
 pub use xai_fast_worktree::{DbStats, GcReport, KeptWorktree, RebuildReport};
 use xai_grok_shell::agent::config::Config as AgentConfig;
 #[derive(Debug, clap::Args, Clone)]
@@ -46,12 +45,12 @@ enum WorktreeCommand {
         /// Report what would be removed without removing it.
         #[arg(long)]
         dry_run: bool,
-        /// Expire worktrees idle longer than this, e.g. `7d`. Without it,
-        /// nothing expires.
+        /// Expire worktrees idle longer than this, e.g. `7d`.
+        /// Without it, nothing expires.
         #[arg(long)]
         max_age: Option<String>,
-        /// Skip the live-process and protected-path guards. This does not
-        /// override the safety check; use `grok worktree rm` for that.
+        /// Skip the live-process and protected-path guards.
+        /// This does not override the safety check; use `grok worktree rm` for that.
         #[arg(short, long)]
         force: bool,
     },
@@ -417,8 +416,7 @@ mod tests {
         assert_eq!(report.expired_removed, 1);
         assert_eq!(report.remove_failed, 0);
     }
-    /// A worktree the gate kept is not one in use, and a path that was never a
-    /// repository is not a worktree that was removed.
+    /// The GC report prints kept (not reclaimable) worktrees apart from guarded (in use) ones, and non-repository paths apart from removals.
     #[test]
     fn kept_worktree_prints_apart_from_a_busy_one_and_from_a_removal() {
         let json = r#"{"result": {"dead_removed": 0, "expired_removed": 3, "skipped_alive": 0,

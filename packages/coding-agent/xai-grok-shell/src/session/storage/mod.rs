@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use std::io::{self, BufRead, BufReader, Seek};
+use std::io::{self, BufRead, BufReader, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use crate::extensions::notification::SessionNotification;
@@ -14,7 +14,6 @@ use xai_grok_sampling_types::ReasoningEffort;
 use xai_grok_workspace::session::file_state::RewindPoint;
 
 pub mod jsonl;
-#[allow(dead_code)] // Transaction APIs remain deferred until later protocol wiring.
 pub(crate) mod relocation;
 mod replay;
 #[cfg(test)]
@@ -42,9 +41,34 @@ pub(crate) const UPDATES_FILE: &str = "updates.jsonl";
 /// renaming it over the target, so a crash or a concurrent writer never leaves a
 /// torn file. The temp is removed on failure.
 pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_bytes_atomic_with(path, bytes, sync_file_durable, || {
+        sync_parent_dir_durable(path)
+    })
+}
+
+fn write_bytes_atomic_with(
+    path: &Path,
+    bytes: &[u8],
+    sync_file: impl Fn(&std::fs::File) -> io::Result<()>,
+    sync_parent: impl Fn() -> io::Result<()>,
+) -> io::Result<()> {
     let tmp = temp_sibling(path);
-    match std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
-        Ok(()) => Ok(()),
+    let write_synced = || -> io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        // NTFS/ext4 journal a rename as old-file-or-new-file only when the new
+        // file's data is already flushed; without this fsync a power loss can
+        // surface the committed rename with zero-length content.
+        sync_file(&file)
+    };
+    // Old-or-new only covers replacing a file, whose direntry is already
+    // durable; a first-time create (a session's first summary.json) has no
+    // old file, so its new entry can vanish on power loss until the parent
+    // directory is synced. A retry after rename+failed parent-sync sees the
+    // file present and cannot tell create from replace, so every successful
+    // rename pays the parent sync.
+    match write_synced().and_then(|()| std::fs::rename(&tmp, path)) {
+        Ok(()) => sync_parent(),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)
@@ -82,17 +106,138 @@ pub(crate) fn sync_file_durable(_file: &std::fs::File) -> io::Result<()> {
     ))
 }
 
+/// Fsync `dir` so entries just created or renamed into it survive power loss.
+#[cfg(target_os = "macos")]
+pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let file = std::fs::File::open(dir)?;
+    file.sync_all()?;
+    // Match file durability: macOS fsync may stop at volatile drive caches.
+    fullfsync_raw(file.as_raw_fd())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(windows)]
+pub(crate) fn sync_dir_durable(_dir: &Path) -> io::Result<()> {
+    // Windows has no supported directory-handle fsync; NTFS journals directory
+    // metadata, which can roll a very recent create back to absent but never
+    // to garbage.
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn sync_dir_durable(_dir: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "durable directory sync is unsupported on this platform",
+    ))
+}
+
+/// Fsync `<cwd_dir>/.cwd` if present so hash-encoded path recovery is not
+/// frozen to a torn marker when a later parent-dir sync durableizes the
+/// direntry. Open write-capable: Windows `FlushFileBuffers` on a read-only
+/// handle cannot persist the bytes (prior Bugbot, cwd retry).
+pub(crate) fn sync_cwd_marker_if_present(cwd_dir: &Path) -> io::Result<()> {
+    sync_cwd_marker_if_present_with(cwd_dir, sync_file_durable)
+}
+
+pub(crate) fn sync_cwd_marker_if_present_with(
+    cwd_dir: &Path,
+    sync_file: impl Fn(&std::fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let cwd_file = cwd_dir.join(".cwd");
+    match std::fs::OpenOptions::new().write(true).open(&cwd_file) {
+        Ok(file) => sync_file(&file),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// [`sync_dir_durable`] on the directory containing `path`.
+pub(crate) fn sync_parent_dir_durable(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
+    sync_dir_durable(parent)
+}
+
+/// Run `create` (a `create_dir_all`-style creation of `dir`), then
+/// [`sync_dir_durable`] every directory that gained a new entry, so the
+/// created chain itself survives power loss — fsyncing a file only makes
+/// its own direntry durable, not the directories above it. The ancestors
+/// are snapshotted before `create` because afterwards the whole chain
+/// exists; an already-existing occupied chain pays no sync.
+pub(crate) fn create_dir_all_durable(
+    dir: &Path,
+    create: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    create_dir_all_durable_with(dir, create, sync_dir_durable)
+}
+
+pub(crate) fn create_dir_all_durable_with(
+    dir: &Path,
+    create: impl FnOnce(&Path) -> io::Result<()>,
+    sync_dir: impl Fn(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut gaining_an_entry = Vec::new();
+    let mut cursor = dir;
+    while !cursor.exists() {
+        let Some(parent) = cursor.parent() else { break };
+        gaining_an_entry.push(parent);
+        cursor = parent;
+    }
+    create(dir)?;
+    // A retry after create+failed parent-sync sees the whole chain present
+    // and would otherwise sync nothing. Re-sync a bounded ancestor list so
+    // the new direntry is durable — but only when `dir` is still empty.
+    // `init_session` calls this on every open; a populated resume must not
+    // fsync ancestors (permissions / network home / macOS F_FULLFSYNC can
+    // fail a normal open). Never the filesystem root (fsync("/") can fail
+    // or stall).
+    let retry_ancestors;
+    let to_sync: &[&Path] = if !gaining_an_entry.is_empty() {
+        &gaining_an_entry
+    } else if std::fs::read_dir(dir)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
+    {
+        retry_ancestors = dir
+            .ancestors()
+            .skip(1)
+            .take(4)
+            .filter(|parent| !is_fs_root(parent))
+            .collect::<Vec<_>>();
+        &retry_ancestors
+    } else {
+        return Ok(());
+    };
+    // Fresh creates under a new top-level directory include `/` in
+    // `gaining_an_entry`; skip it here so both paths honor the root rule.
+    for parent in to_sync {
+        if is_fs_root(parent) {
+            continue;
+        }
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn is_fs_root(path: &Path) -> bool {
+    path.parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty())
+}
+
 /// Async sibling of [`write_bytes_atomic`].
 pub(crate) async fn write_bytes_atomic_async(path: &Path, bytes: Vec<u8>) -> io::Result<()> {
-    let tmp = temp_sibling(path);
-    let result = match tokio::fs::write(&tmp, bytes).await {
-        Ok(()) => tokio::fs::rename(&tmp, path).await,
-        Err(e) => Err(e),
-    };
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&tmp).await;
-    }
-    result
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || write_bytes_atomic(&path, &bytes))
+        .await
+        .map_err(io::Error::other)?
 }
 
 /// Serialize `items` to newline-delimited JSON bytes.
@@ -959,6 +1104,12 @@ pub enum AppendUpdateError {
 }
 
 #[derive(Debug)]
+pub enum AppendChatError {
+    NotCommitted(io::Error),
+    Committed(io::Error),
+}
+
+#[derive(Debug)]
 pub enum AppendCwdSwitchError {
     NotCommitted(io::Error),
     Committed {
@@ -980,6 +1131,48 @@ impl std::fmt::Display for AppendUpdateError {
         match self {
             Self::NotCommitted(error) | Self::Committed(error) => error.fmt(formatter),
         }
+    }
+}
+
+impl AppendChatError {
+    pub fn into_io_error(self) -> io::Error {
+        match self {
+            Self::NotCommitted(error) | Self::Committed(error) => error,
+        }
+    }
+}
+
+impl std::fmt::Display for AppendChatError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotCommitted(error) | Self::Committed(error) => error.fmt(formatter),
+        }
+    }
+}
+
+/// Session files a sync barrier flushes. The persistence actor marks the
+/// files that took buffered writes since the last successful barrier;
+/// atomic-rename writes are durable at write time and never enter the set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionFileSet {
+    pub updates: bool,
+    pub chat: bool,
+    pub summary: bool,
+    pub plan: bool,
+    pub rewind_points: bool,
+}
+
+impl SessionFileSet {
+    pub(crate) const ALL: Self = Self {
+        updates: true,
+        chat: true,
+        summary: true,
+        plan: true,
+        rewind_points: true,
+    };
+
+    pub(crate) fn is_empty(self) -> bool {
+        self == Self::default()
     }
 }
 
@@ -1071,6 +1264,19 @@ pub trait StorageAdapter: Send + Sync {
 
     /// Append a chat message and increment counter.
     async fn append_chat_message(&self, info: &Info, message: &ConversationItem) -> io::Result<()>;
+
+    /// Append one chat message and report whether the JSONL record was
+    /// committed before an error. Bookkeeping (summary counters) can fail
+    /// after the append has already reached the page cache.
+    async fn append_chat_message_commit_aware(
+        &self,
+        info: &Info,
+        message: &ConversationItem,
+    ) -> Result<(), AppendChatError> {
+        self.append_chat_message(info, message)
+            .await
+            .map_err(AppendChatError::NotCommitted)
+    }
 
     /// Append one working-directory switch generation exactly once.
     async fn append_cwd_switch_commit_aware(
@@ -1187,8 +1393,15 @@ pub trait StorageAdapter: Send + Sync {
     /// Load all rewind points for a session
     async fn load_rewind_points(&self, info: &Info) -> io::Result<Vec<RewindPoint>>;
 
-    /// Sync all session files to disk. Called before CopyFile to ensure all writes are persisted.
-    async fn sync_session_files(&self, info: &Info) -> io::Result<()>;
+    /// Sync the selected session files, plus the session directory entry once,
+    /// to stable media. Backs the `FlushAndAck` barrier (dirty files only) and
+    /// the pre-`CopyFile` flush ([`SessionFileSet::ALL`]), so an error means
+    /// the barrier must not ack.
+    async fn sync_session_files_selected(
+        &self,
+        info: &Info,
+        files: SessionFileSet,
+    ) -> io::Result<()>;
 
     /// Truncate rewind points from a specific prompt index (inclusive)
     /// Used when rewinding to remove future history
@@ -2059,6 +2272,319 @@ pub(crate) fn parse_prompt_extract_event(line: &str) -> PromptExtractEvent {
 mod tests {
     use super::*;
 
+    #[test]
+    fn atomic_write_runs_file_sync_barrier_before_rename_replaces_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("summary.json");
+        std::fs::write(&target, b"old").unwrap();
+
+        let target_bytes_at_sync = std::cell::RefCell::new(Vec::new());
+        write_bytes_atomic_with(
+            &target,
+            b"new",
+            |_| {
+                *target_bytes_at_sync.borrow_mut() = std::fs::read(&target).unwrap();
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            target_bytes_at_sync.borrow().as_slice(),
+            b"old",
+            "the sync barrier must run on the temp file before the rename commits"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+    }
+
+    #[test]
+    fn atomic_write_syncs_parent_directory_after_the_rename_commits_a_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("summary.json");
+
+        let events = std::cell::RefCell::new(Vec::new());
+        write_bytes_atomic_with(
+            &target,
+            b"new",
+            |_| {
+                events.borrow_mut().push("sync_file");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push(
+                    if std::fs::read(&target).is_ok_and(|bytes| bytes == b"new") {
+                        "sync_parent_after_rename"
+                    } else {
+                        "sync_parent_before_rename"
+                    },
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["sync_file", "sync_parent_after_rename"],
+            "the parent-directory sync must run after the rename commits the new entry"
+        );
+    }
+
+    #[test]
+    fn atomic_write_syncs_parent_directory_after_rename_even_when_replacing() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("summary.json");
+        std::fs::write(&target, b"old").unwrap();
+
+        let parent_syncs = std::cell::Cell::new(0);
+        write_bytes_atomic_with(
+            &target,
+            b"new",
+            |_| Ok(()),
+            || {
+                parent_syncs.set(parent_syncs.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            parent_syncs.get(),
+            1,
+            "a retry after a failed create-barrier would otherwise skip the parent sync"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+    }
+
+    #[test]
+    fn atomic_write_retries_parent_sync_after_a_failed_create_barrier() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("summary.json");
+
+        let first = write_bytes_atomic_with(
+            &target,
+            b"new",
+            |_| Ok(()),
+            || Err(io::Error::other("directory barrier failed")),
+        );
+        assert_eq!(first.unwrap_err().to_string(), "directory barrier failed");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+
+        let parent_syncs = std::cell::Cell::new(0);
+        write_bytes_atomic_with(
+            &target,
+            b"newer",
+            |_| Ok(()),
+            || {
+                parent_syncs.set(parent_syncs.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(parent_syncs.get(), 1);
+        assert_eq!(std::fs::read(&target).unwrap(), b"newer");
+    }
+
+    #[test]
+    fn create_dir_all_durable_syncs_every_directory_gaining_an_entry_on_a_fresh_chain() {
+        let root = tempfile::tempdir().unwrap();
+        let group = root.path().join("sessions").join("cwd");
+        let session = group.join("session-id");
+
+        let synced = std::cell::RefCell::new(Vec::new());
+        create_dir_all_durable_with(
+            &session,
+            |dir| std::fs::create_dir_all(dir),
+            |dir| {
+                synced.borrow_mut().push(dir.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(session.is_dir());
+        assert_eq!(
+            synced.borrow().as_slice(),
+            [
+                group.clone(),
+                root.path().join("sessions"),
+                root.path().to_path_buf()
+            ],
+            "each directory holding a newly created entry must be synced, up to the first pre-existing ancestor"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_dir_all_durable_fresh_create_skips_the_filesystem_root() {
+        let unique = format!("grok-durable-create-{}", uuid::Uuid::now_v7());
+        let top = Path::new("/").join(&unique);
+        let dir = top.join("sessions").join("id");
+        assert!(
+            !top.exists(),
+            "test unique top-level path must not already exist: {}",
+            top.display()
+        );
+
+        let synced = std::cell::RefCell::new(Vec::new());
+        create_dir_all_durable_with(
+            &dir,
+            |_dir| Ok(()),
+            |path| {
+                synced.borrow_mut().push(path.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let synced = synced.borrow();
+        assert!(
+            !synced.iter().any(|path| is_fs_root(path)),
+            "a fresh create whose chain reaches a top-level directory must not fsync /, got {synced:?}"
+        );
+        assert!(
+            synced.iter().any(|path| path == &top),
+            "the new top-level directory itself must still be synced, got {synced:?}"
+        );
+        assert!(
+            synced.iter().any(|path| path == &top.join("sessions")),
+            "intermediate parents that gained an entry must still be synced, got {synced:?}"
+        );
+    }
+
+    #[test]
+    fn create_dir_all_durable_resyncs_ancestors_when_an_empty_chain_already_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let session = root.path().join("sessions").join("cwd").join("session-id");
+        std::fs::create_dir_all(&session).unwrap();
+
+        let synced = std::cell::RefCell::new(Vec::new());
+        create_dir_all_durable_with(
+            &session,
+            |dir| std::fs::create_dir_all(dir),
+            |dir| {
+                synced.borrow_mut().push(dir.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let synced = synced.borrow();
+        assert!(
+            synced.iter().any(|path| path == session.parent().unwrap()),
+            "a retry must re-sync the parent that holds the session direntry, got {synced:?}"
+        );
+        assert!(
+            !synced.iter().any(|path| is_fs_root(path)),
+            "must not fsync the filesystem root, got {synced:?}"
+        );
+    }
+
+    #[test]
+    fn create_dir_all_durable_occupied_existing_chain_pays_no_sync() {
+        let root = tempfile::tempdir().unwrap();
+        let session = root.path().join("sessions").join("cwd").join("session-id");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("summary.json"), b"{}").unwrap();
+
+        let synced = std::cell::RefCell::new(Vec::new());
+        create_dir_all_durable_with(
+            &session,
+            |dir| std::fs::create_dir_all(dir),
+            |dir| {
+                synced.borrow_mut().push(dir.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(
+            synced.borrow().is_empty(),
+            "resume of a populated session dir must not fsync ancestors, got {:?}",
+            synced.borrow()
+        );
+    }
+
+    #[test]
+    fn create_dir_all_durable_retries_ancestor_syncs_after_a_failed_create_barrier() {
+        let root = tempfile::tempdir().unwrap();
+        let session = root.path().join("sessions").join("cwd").join("session-id");
+
+        let first = create_dir_all_durable_with(
+            &session,
+            |dir| std::fs::create_dir_all(dir),
+            |_| Err(io::Error::other("directory barrier failed")),
+        );
+        assert_eq!(first.unwrap_err().to_string(), "directory barrier failed");
+        assert!(session.is_dir());
+
+        let synced = std::cell::RefCell::new(Vec::new());
+        create_dir_all_durable_with(
+            &session,
+            |dir| std::fs::create_dir_all(dir),
+            |dir| {
+                synced.borrow_mut().push(dir.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(
+            synced
+                .borrow()
+                .iter()
+                .any(|path| path == session.parent().unwrap()),
+            "a retry after create+failed sync must still durableize the new direntry"
+        );
+    }
+
+    #[test]
+    fn atomic_write_parent_sync_error_propagates_and_keeps_the_committed_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("summary.json");
+
+        let error = write_bytes_atomic_with(
+            &target,
+            b"new",
+            |_| Ok(()),
+            || Err(io::Error::other("directory barrier failed")),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "directory barrier failed");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"new",
+            "a failed directory barrier reports the error but never unwinds the committed rename"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_write_sync_barrier_error_propagates_keeps_target_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("summary.json");
+        std::fs::write(&target, b"old").unwrap();
+
+        let error = write_bytes_atomic_with(
+            &target,
+            b"new",
+            |_| Err(io::Error::other("file barrier failed")),
+            || Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "file barrier failed");
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "a failed sync must remove its temp file"
+        );
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     /// Wrap an ACP notification as the envelope stored in updates.jsonl.
@@ -2228,8 +2754,6 @@ mod tests {
     }
 
     // ── PromptExtractIterator integration tests via tempfile ──────────────────
-
-    use std::io::Write as _;
 
     fn write_updates_file(lines: &[&str]) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();

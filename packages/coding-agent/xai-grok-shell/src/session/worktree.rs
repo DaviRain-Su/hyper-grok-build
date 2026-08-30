@@ -10,10 +10,6 @@ use std::path::Path;
 use xai_grok_workspace::session::git::find_git_root_from_path;
 pub use xai_grok_workspace::worktree::*;
 const WORKTREE_LOG: &str = "xai_worktree";
-/// Resume always consults the grove gate with `remote = None` (fail closed).
-pub(crate) fn resume_grove_worktree_flag() -> Option<bool> {
-    Some(crate::util::config::grove_worktree_enabled(None))
-}
 impl From<ShellWorktreeType> for WorktreeType {
     fn from(t: ShellWorktreeType) -> Self {
         match t {
@@ -42,6 +38,7 @@ async fn create_worktree_for_resume(
     copy_mode: WorktreeCopyMode,
     worktree_type: ShellWorktreeType,
     git_ref: Option<String>,
+    grove_worktree: Option<bool>,
 ) -> Result<CreateWorktreeFromWorktreeResponse> {
     let copy_mode = if git_ref.is_some() {
         WorktreeCopyMode::Clean
@@ -55,7 +52,7 @@ async fn create_worktree_for_resume(
         git_ref,
         worktree_type: Some(WorktreeType::from(worktree_type)),
         label: None,
-        grove_worktree: resume_grove_worktree_flag(),
+        grove_worktree,
         cancellation_token: None,
         resolved_dest_path: None,
     };
@@ -68,6 +65,20 @@ async fn create_worktree_for_resume(
     } else {
         create_worktree_from_worktree_sync(&wt_req).await
     }
+}
+/// `remove_worktree` already tried daemon unmount. `rm -rf` is only safe when
+/// dest is known-unmounted; a projected or inconclusive dest must not be walked.
+async fn fallback_rm_dir_all_after_failed_remove(wt: &Path, err: &impl std::fmt::Display) {
+    if !xai_fast_worktree::dest_is_known_unmounted(wt) {
+        tracing::warn!(
+            error = %err,
+            path = %wt.display(),
+            "remove_worktree failed during cleanup; dest is mounted or mount table inconclusive, skipping rm"
+        );
+        return;
+    }
+    tracing::warn!(error = %err, "fast remove_worktree failed during cleanup, trying rm");
+    let _ = tokio::fs::remove_dir_all(wt).await;
 }
 /// Best-effort cleanup of a worktree created during a failed resume flow.
 #[tracing::instrument(skip_all)]
@@ -90,12 +101,10 @@ async fn cleanup_worktree_on_failure(source_cwd: &str, worktree_path: &str) {
         {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
-                tracing::warn!(error = %e, "fast remove_worktree failed during cleanup, trying rm");
-                let _ = tokio::fs::remove_dir_all(wt).await;
+                fallback_rm_dir_all_after_failed_remove(wt, &e).await;
             }
             Err(e) => {
-                tracing::warn!(error = %e, "remove_worktree task panicked during cleanup, trying rm");
-                let _ = tokio::fs::remove_dir_all(wt).await;
+                fallback_rm_dir_all_after_failed_remove(wt, &e).await;
             }
         }
         if let Ok(root) = find_git_root_from_path(std::path::Path::new(source_cwd)) {
@@ -181,6 +190,7 @@ pub(crate) async fn resume_session_in_worktree(
     registry_client: Option<&crate::agent::session_registry_client::SessionRegistryClient>,
     auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
     agent_id: &str,
+    grove_worktree: Option<bool>,
 ) -> Result<ResumeSessionInWorktreeResponse> {
     use xai_grok_workspace::session::git::effective_worktree_path;
     tracing::info!(
@@ -211,6 +221,7 @@ pub(crate) async fn resume_session_in_worktree(
             registry_client,
             auth_manager,
             agent_id,
+            grove_worktree,
         )
         .await;
     }
@@ -234,6 +245,7 @@ pub(crate) async fn resume_session_in_worktree(
         req.copy_mode,
         worktree_type,
         req.git_ref.clone(),
+        grove_worktree,
     )
     .await?;
     let record = client
@@ -315,6 +327,7 @@ async fn resume_local_session_in_worktree(
     registry_client: Option<&crate::agent::session_registry_client::SessionRegistryClient>,
     auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
     agent_id: &str,
+    grove_worktree: Option<bool>,
 ) -> Result<ResumeSessionInWorktreeResponse> {
     use crate::session::fork::{ForkSessionRequest, fork_session};
     use xai_grok_workspace::session::git::effective_worktree_path;
@@ -327,6 +340,7 @@ async fn resume_local_session_in_worktree(
         req.copy_mode,
         worktree_type,
         req.git_ref.clone(),
+        grove_worktree,
     )
     .await?;
     tracing::info!(
@@ -552,16 +566,25 @@ pub(crate) async fn rehydrate_session_in_worktree(
 mod tests {
     use super::*;
     use serial_test::serial;
-    #[test]
-    #[serial]
-    fn resume_grove_worktree_flag_runs_gate_fail_closed() {
-        unsafe { std::env::set_var("GROK_WORKTREE_TYPE", "grove") };
-        let flag = resume_grove_worktree_flag();
-        unsafe { std::env::remove_var("GROK_WORKTREE_TYPE") };
-        assert_eq!(
-            flag,
-            Some(false),
-            "resume must call the grove gate; remote=None is fail-closed even when env asked for grove"
+    #[tokio::test]
+    async fn fallback_rm_dir_all_skips_when_dest_not_known_unmounted() {
+        let root = Path::new("/");
+        if xai_fast_worktree::dest_is_known_unmounted(root) {
+            return;
+        }
+        fallback_rm_dir_all_after_failed_remove(root, &"test").await;
+        assert!(root.exists(), "must not rm a live or inconclusive dest");
+    }
+    #[tokio::test]
+    async fn fallback_rm_dir_all_removes_known_unmounted_dest() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dest = tmp.path().join("leftover");
+        std::fs::create_dir(&dest).unwrap();
+        assert!(xai_fast_worktree::dest_is_known_unmounted(&dest));
+        fallback_rm_dir_all_after_failed_remove(&dest, &"test").await;
+        assert!(
+            !dest.exists(),
+            "known-unmounted copy dest should be removed"
         );
     }
     #[test]
@@ -952,6 +975,7 @@ mod tests {
             None,
             None,
             "test-agent",
+            None,
         )
         .await;
         let err = result.expect_err("should fail when session not found and no registry");
@@ -1007,6 +1031,7 @@ mod tests {
             WorktreeCopyMode::Clean,
             ShellWorktreeType::Linked,
             None,
+            None,
         )
         .await
         .expect("worktree creation should succeed");
@@ -1047,6 +1072,7 @@ mod tests {
             WorktreeCopyMode::Dirty,
             ShellWorktreeType::Linked,
             Some("main".into()),
+            None,
         )
         .await
         .expect("worktree creation with git_ref should succeed");
@@ -1074,6 +1100,7 @@ mod tests {
             &source_cwd,
             WorktreeCopyMode::Clean,
             ShellWorktreeType::Linked,
+            None,
             None,
         )
         .await

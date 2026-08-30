@@ -89,7 +89,26 @@ impl QueueInputRequest {
     }
 }
 
+pub(super) struct PreparedDelivery(pub(super) InputItem);
+
+#[cfg(test)]
+thread_local! {
+    static QUEUED_COMMITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_queued_commit_count() -> usize {
+    QUEUED_COMMITS.with(|count| count.replace(0))
+}
+
 impl SessionActor {
+    pub(super) fn commit_queued_delivery(&self, state: &mut State, prepared: PreparedDelivery) {
+        #[cfg(test)]
+        QUEUED_COMMITS.with(|count| count.set(count.get() + 1));
+        state.pending_inputs.push_back(prepared.0);
+        self.broadcast_queue_changed(state);
+    }
+
     /// Queue a user-originated prompt (writes to prompt history).
     ///
     /// `send_now` (or a user prompt arriving during an interruptible wait)
@@ -339,7 +358,7 @@ impl SessionActor {
             let insert_at = Self::send_now_insert_index(&state, running_front_id.as_deref());
             state.pending_inputs.insert(insert_at, item);
         } else {
-            state.pending_inputs.push_back(item);
+            self.commit_queued_delivery(&mut state, PreparedDelivery(item));
         }
         // qtrace: server appended a prompt to the authoritative FIFO. The index
         // it lands at vs whether a turn is already running tells us if it will
@@ -373,9 +392,9 @@ impl SessionActor {
                 })),
             );
         }
-        // Broadcast the new authoritative queue to all subscribers
-        // (fire-and-forget, never persisted).
-        self.broadcast_queue_changed(&state);
+        if merge_into_goal || send_now {
+            self.broadcast_queue_changed(&state);
+        }
         cancel_running_turn
     }
 

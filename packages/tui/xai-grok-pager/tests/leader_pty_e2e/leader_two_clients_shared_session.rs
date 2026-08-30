@@ -2,21 +2,17 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 12. **Leader mode — two clients share one session.**
-/// The two-terminal flow: pager A starts with `--leader` on an isolated
-/// socket (spawning the leader), runs a turn; pager B starts with the same
-/// socket + `--resume` and attaches to A's session through the SAME leader.
-/// Discriminating for the multi-client replay surface: B must render A's
-/// transcript exactly once (duplicated replay history and an empty/stuck
-/// pane both fail), later turns must stream live into BOTH panes regardless
-/// of which client drives, and the leader + viewer must survive the
-/// spawning client's exit.
+/// 12. **Leader mode: two clients share one session.**
+/// The two-terminal flow: pager A starts with `--leader` on an isolated socket (spawning the leader) and runs a turn.
+/// Pager B starts with the same socket and `--resume`, attaching to A's session through the SAME leader.
+/// B must render A's transcript exactly once; duplicated replay history and an empty or stuck pane both fail.
+/// Later turns must stream live into BOTH panes regardless of which client drives.
+/// The leader and viewer must survive the spawning client's exit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "PTY e2e; run with cargo test -p xai-grok-pager --test leader_pty_e2e -- --ignored --test-threads=1"]
 async fn leader_two_clients_shared_session() {
-    // One shared leader (shared HOME/GROK_HOME hold the sessions AND the
-    // explicit leader socket), so B attaches to the leader A spawned instead
-    // of the machine's default one.
+    // The shared HOME/GROK_HOME hold the sessions AND the explicit leader socket
+    // B therefore attaches to the leader A spawned instead of the machine's default one
     let cluster = LeaderCluster::start(DEFAULT_ROWS, DEFAULT_COLS)
         .await
         .expect("start cluster");
@@ -33,8 +29,7 @@ async fn leader_two_clients_shared_session() {
     a.wait_for_text(&turn_sentinel(1), STREAM_TIMEOUT)
         .expect("A turn 1");
 
-    // B attaches to A's session (most recent in the shared cwd) via the
-    // shared leader and must replay A's transcript.
+    // B attaches to A's session (most recent in the shared cwd) via the shared leader and must replay A's transcript
     let mut b = cluster.attach(&[]).expect("spawn pager B");
     b.wait_for_text(&turn_sentinel(1), LEADER_TIMEOUT)
         .expect("B replayed A's transcript");
@@ -62,18 +57,14 @@ async fn leader_two_clients_shared_session() {
     a.wait_for_text(&turn_sentinel(3), STREAM_TIMEOUT)
         .expect("A received B's live turn");
 
-    // Each submitted prompt top-anchors its turn, scrolling earlier turns
-    // above the viewport. Grow the viewport and wheel-scroll to the top
-    // (keyboard scroll keys are captured by the focused input box) so the
-    // whole 3-turn transcript is on screen, then count every sentinel
-    // exactly once — a duplicated replay or a dropped turn both fail here,
-    // on either pane.
+    // Each submitted prompt top-anchors its turn, scrolling earlier turns above the viewport
+    // Grow the viewport and wheel-scroll to the top so the whole 3-turn transcript is on screen
+    // The scroll uses wheel events because the focused input box captures the keyboard scroll keys
+    // Then count every sentinel exactly once on each pane: a duplicated replay or a dropped turn both fail here
     //
-    // Non-dev builds no longer metronome on tracing_rx; scroll finalize runs
-    // via has_active_stream ticks and cadence-suppressed wheels must still
-    // schedule ticks (handle_input returns Changed). Bazel/linux amd64 is
-    // slower than macOS local: keep retrying wheel bursts until every turn
-    // sentinel is visible (or time out), not a single fixed burst budget.
+    // Non-dev builds no longer wake on a steady tracing_rx tick
+    // Scroll finalize runs on has_active_stream ticks, and a wheel the cadence suppresses must still schedule a tick (handle_input returns Changed)
+    // Bazel on linux amd64 is slower than a local macOS run, so retry wheel bursts until every turn sentinel is visible or the deadline passes
     fn wheel_scroll_to_top(h: &mut PtyHarness) {
         for burst in 0..4 {
             for _ in 0..50 {
@@ -96,7 +87,7 @@ async fn leader_two_clients_shared_session() {
         let mut screen = h.screen_contents();
         while !all_turns_once(&screen) && std::time::Instant::now() < deadline {
             wheel_scroll_to_top(h);
-            // Home/goto-top via Esc then wheel again if turn 1 still missing.
+            // If turn 1 is still off-screen, send Esc to jump to the top and wheel again
             if screen.matches(&turn_sentinel(1)).count() == 0 {
                 let _ = h.inject_keys(keys::ESC);
                 h.update(Duration::from_millis(200));
@@ -127,8 +118,7 @@ async fn leader_two_clients_shared_session() {
         }
     }
 
-    // The spawning client's exit must not take the leader (or B) down: B
-    // keeps its transcript and stays attached.
+    // The spawning client's exit must not take the leader (or B) down: B keeps its transcript and stays attached
     drop(a);
     b.update(Duration::from_secs(3));
     assert!(

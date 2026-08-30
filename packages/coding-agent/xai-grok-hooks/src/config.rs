@@ -284,6 +284,47 @@ pub fn hook_origin(spec: &HookSpec) -> HookOrigin {
     }
 }
 
+/// User-facing hook name for blocked-prompt copy: drops the stamped
+/// `:{event}[i].hooks[j]` tail, then renders config-tier sources as tier
+/// copy — split by [`HookProvenance::is_managed_policy`] (who controls the
+/// hook), not [`HookOrigin`]'s modal grouping. Real names (`global/lint`),
+/// agent identities (`agent:<name>`), and `client:<id>` pass through.
+pub fn hook_display_name(qualified: &str) -> &str {
+    let source = strip_spec_path(qualified);
+    match source {
+        "user" | "requirements/user" => "a user hook",
+        "managed" => "a managed hook",
+        "system_managed" | "requirements/system" => "a managed policy hook",
+        _ => source,
+    }
+}
+
+/// `{source}:{event}[i].hooks[j]` → `{source}`; anything else unchanged.
+fn strip_spec_path(qualified: &str) -> &str {
+    match qualified.rsplit_once(':') {
+        Some((source, tail)) if !source.is_empty() && is_spec_path(tail) => source,
+        _ => qualified,
+    }
+}
+
+/// Matches the `{event}[{i}].hooks[{j}]` spec-path shape the parsers stamp.
+fn is_spec_path(tail: &str) -> bool {
+    let Some((event, indices)) = tail.split_once('[') else {
+        return false;
+    };
+    let Some((event_idx, hook_idx)) = indices.split_once("].hooks[") else {
+        return false;
+    };
+    let Some(hook_idx) = hook_idx.strip_suffix(']') else {
+        return false;
+    };
+    let is_index = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    !event.is_empty()
+        && event.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        && is_index(event_idx)
+        && is_index(hook_idx)
+}
+
 /// Parse hooks from a JSON value (e.g. from agent definition frontmatter).
 ///
 /// `source_dir` resolves relative command paths: pass the agent definition's
@@ -641,16 +682,10 @@ mod tests {
     use super::*;
     use crate::test_support::with_env_var;
 
-    /// The managed-policy predicate covers exactly the admin/server tiers.
-    /// The `match` (no wildcard) fails to compile when a new `HookProvenance`
-    /// variant is added, forcing an explicit decision here.
     #[test]
     fn is_managed_policy_covers_root_owned_tiers_only() {
         fn expected(layer: HookProvenance) -> bool {
             match layer {
-                // Root-owned tiers only. `$GROK_HOME` tiers (Managed,
-                // UserRequirements) are user-writable and must NOT grant
-                // the exemption.
                 HookProvenance::SystemManaged | HookProvenance::Requirements => true,
                 HookProvenance::Managed
                 | HookProvenance::UserRequirements
@@ -674,6 +709,80 @@ mod tests {
                 layer.is_managed_policy(),
                 expected(layer),
                 "is_managed_policy wrong for {layer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hook_display_name_hides_config_paths() {
+        for (qualified, expected) in [
+            ("user:user_prompt_submit[0].hooks[0]", "a user hook"),
+            (
+                "requirements/user:user_prompt_submit[0].hooks[0]",
+                "a user hook",
+            ),
+            ("managed:pre_tool_use[2].hooks[1]", "a managed hook"),
+            (
+                "requirements/system:pre_tool_use[0].hooks[0]",
+                "a managed policy hook",
+            ),
+            (
+                "system_managed:user_prompt_submit[0].hooks[0]",
+                "a managed policy hook",
+            ),
+            (
+                "global/block-hihi:user_prompt_submit[0].hooks[0]",
+                "global/block-hihi",
+            ),
+            (
+                "agent:code-reviewer:user_prompt_submit[0].hooks[0]",
+                "agent:code-reviewer",
+            ),
+            ("client:cb-123", "client:cb-123"),
+            ("a hook", "a hook"),
+        ] {
+            assert_eq!(hook_display_name(qualified), expected, "for {qualified}");
+        }
+    }
+
+    #[test]
+    fn hook_display_name_tracks_stamped_names() {
+        let tiers = [
+            ("user", HookProvenance::User, "a user hook"),
+            (
+                "requirements/user",
+                HookProvenance::UserRequirements,
+                "a user hook",
+            ),
+            ("managed", HookProvenance::Managed, "a managed hook"),
+            (
+                "requirements/system",
+                HookProvenance::Requirements,
+                "a managed policy hook",
+            ),
+            (
+                "system_managed",
+                HookProvenance::SystemManaged,
+                "a managed policy hook",
+            ),
+        ];
+        for (source_name, provenance, expected) in tiers {
+            let layer = xai_grok_config::HookConfigLayer::new(
+                provenance,
+                source_name,
+                toml::from_str::<toml::Value>(
+                    "[[UserPromptSubmit]]\n[[UserPromptSubmit.hooks]]\ntype = \"command\"\ncommand = \"gate.sh\"\n",
+                )
+                .unwrap(),
+            );
+            let (specs, errors) = parse_hooks_from_config_layers(std::slice::from_ref(&layer));
+            assert!(errors.is_empty(), "{source_name}: {errors:?}");
+            let name = &specs[0].name;
+            assert_eq!(hook_display_name(name), expected, "for stamped name {name}");
+            assert_eq!(
+                expected == "a managed policy hook",
+                provenance.is_managed_policy(),
+                "{source_name}: copy must track the trust split"
             );
         }
     }
@@ -707,8 +816,6 @@ mod tests {
 
     #[test]
     fn config_layer_keeps_valid_events_when_one_is_malformed() {
-        // A config layer skips a malformed event and keeps the rest, unlike the
-        // JSON path which fails the whole file.
         let layer = config_layer(
             "managed",
             "hooks.PreToolUse = \"oops\"\n[[hooks.PostToolUse]]\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = \"ok.sh\"\n",
@@ -731,8 +838,6 @@ mod tests {
             )
         };
 
-        // Distinct commands are additive; an identical command dedupes to the
-        // higher-authority (first-listed) copy.
         use xai_grok_config::HookProvenance::{Managed, User};
         let (additive, _) = parse_hooks_from_config_layers(&[
             mk("managed", Managed, "m.sh"),
@@ -1114,9 +1219,6 @@ mod tests {
         assert!(has_post, "expected PostToolUse hook");
     }
 
-    /// A `command` referencing a process-env var must be expanded at load time,
-    /// removing the dependence on the runtime `sh -c` heuristic for direct-exec
-    /// paths with no other shell metachars.
     #[test]
     fn parse_hook_file_expands_env_var_in_command_from_process_env() {
         let key = "GROK_HOOKS_PARSE_TEST_CMD_PROC_ENV";
@@ -1141,8 +1243,6 @@ mod tests {
         });
     }
 
-    /// An HTTP `url` referencing a process-env var must be substituted at load
-    /// time so SSRF validation sees the resolved host.
     #[test]
     fn parse_hook_file_expands_env_var_in_url_from_process_env() {
         let key = "GROK_HOOKS_PARSE_TEST_URL_PROC_ENV";
@@ -1170,8 +1270,6 @@ mod tests {
         });
     }
 
-    /// A declared `env` map is injected into the process via
-    /// `HookSpec::extra_env`.
     #[test]
     fn parse_hook_file_env_map_populates_extra_env() {
         let json = r#"{
@@ -1203,8 +1301,6 @@ mod tests {
         );
     }
 
-    /// An `env` map value for a var referenced in `command` must win over the
-    /// process env when expanding at load time.
     #[test]
     fn parse_hook_file_env_map_feeds_command_expansion() {
         let json = r#"{
@@ -1236,9 +1332,6 @@ mod tests {
         );
     }
 
-    /// A `command` referencing a var unset at load time must preserve the
-    /// literal `${VAR}`, so the runner's pre-flight check stays the single
-    /// source of truth for run-time resolvability.
     #[test]
     fn parse_hook_file_preserves_unresolved_env_refs_in_command() {
         let key = "GROK_HOOKS_PARSE_TEST_NEVER_SET_AT_LOAD_TIME";
@@ -1265,8 +1358,6 @@ mod tests {
         });
     }
 
-    /// Symmetry: load-time expansion of `url` must also preserve unset
-    /// refs, otherwise a deferred plugin var would be silently stripped.
     #[test]
     fn parse_hook_file_preserves_unresolved_env_refs_in_url() {
         let key = "GROK_HOOKS_PARSE_TEST_URL_NEVER_SET_AT_LOAD_TIME";
@@ -1288,8 +1379,6 @@ mod tests {
         });
     }
 
-    /// Explicit `"env": null` is tolerated and yields an empty `extra_env` map,
-    /// rather than serde's default failure mode.
     #[test]
     fn parse_hook_file_env_null_treated_as_empty() {
         let json = r#"{
@@ -1309,8 +1398,6 @@ mod tests {
         assert!(specs[0].extra_env.is_empty());
     }
 
-    /// Env values are stored verbatim: references inside them (e.g. `"${HOME}/x"`)
-    /// are NOT recursively expanded. The env map is plumbing, not a template layer.
     #[test]
     fn parse_hook_file_env_values_are_stored_verbatim() {
         let json = r#"{
@@ -1370,9 +1457,6 @@ mod tests {
         });
     }
 
-    /// A non-string `env` value (e.g. `"PORT": 8080`) fails deserialization; the
-    /// whole file surfaces a `ParseFile` error rather than silently dropping it.
-    /// Users who need numeric values must quote them (`"PORT": "8080"`).
     #[test]
     fn parse_hook_file_env_value_must_be_string() {
         let json = r#"{
@@ -1407,8 +1491,6 @@ mod tests {
         );
     }
 
-    /// User attempts to set runner-reserved keys via the `env` map are stripped
-    /// at load time, giving a clear "ignored" signal on top of spawn-time override.
     #[test]
     fn parse_hook_file_strips_runner_reserved_env_keys() {
         let json = r#"{

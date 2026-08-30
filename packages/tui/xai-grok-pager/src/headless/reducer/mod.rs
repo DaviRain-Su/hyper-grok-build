@@ -1,6 +1,6 @@
 //! Streaming reducers that fold the agent ACP event stream into NDJSON lines.
-//! One `Reducer` impl per wire format, selected by [`reducer_for`]. This module
-//! owns the shared [`StreamEvent`]/[`Reducer`] types; each format is a submodule.
+//! Each wire format has one `Reducer` impl, selected by [`reducer_for`].
+//! This module owns the shared [`StreamEvent`]/[`Reducer`] types; each format is a submodule.
 
 use agent_client_protocol as proto;
 use serde::Serialize;
@@ -21,8 +21,8 @@ pub(crate) fn to_line<T: Serialize>(value: &T) -> Value {
         .unwrap_or_else(|e| json!({"type": "error", "message": format!("serialize failed: {e}")}))
 }
 
-/// Merge the camelCase `structuredOutput`/`structuredOutputError` fields into a
-/// terminal wire line: `Ok` stamps the value, `Err` stamps null plus the error.
+/// Merge the camelCase `structuredOutput`/`structuredOutputError` fields into a terminal wire line.
+/// `Ok` stamps the value, `Err` stamps null plus the error.
 pub(crate) fn attach_structured_output(
     target: &mut Value,
     structured: Option<Result<Value, String>>,
@@ -37,7 +37,7 @@ pub(crate) fn attach_structured_output(
     }
 }
 
-/// Transport agnostic agent stream event, the single input every reducer folds.
+/// One event from the agent stream, independent of transport; the single input every reducer folds.
 pub(crate) enum StreamEvent {
     AgentMessage(String),
     AgentThought(String),
@@ -51,7 +51,7 @@ pub(crate) enum StreamEvent {
         skills: Vec<String>,
     },
     Lifecycle(Lifecycle),
-    /// One model response opened (Messages backend); carries real id, model, and input-side token counts.
+    /// One model response opened (Messages backend); it carries the real id, model, and input-side token counts.
     ResponseStarted {
         message_id: Option<String>,
         model: Option<String>,
@@ -59,11 +59,11 @@ pub(crate) enum StreamEvent {
         cache_read_input_tokens: u64,
         cache_creation_input_tokens: u64,
     },
-    /// One reasoning block finished (Messages backend); carries its signature for in-order `signature_delta`.
+    /// One reasoning block finished (Messages backend); it carries its signature for the in-order `signature_delta`.
     ReasoningCompleted {
         signature: Option<String>,
     },
-    /// One model response finished; carries its stop reason, id, usage, signature, and stop sequence.
+    /// One model response finished; it carries its stop reason, id, usage, signature, and stop sequence.
     ResponseCompleted {
         message_id: Option<String>,
         stop_reason: Option<String>,
@@ -83,7 +83,7 @@ pub(crate) struct ToolCallEvent {
     raw_input: Value,
     content: Value,
     locations: Value,
-    /// True for Grok's backend `web_search`, which folds inline instead of the client split.
+    /// True for Grok's backend `web_search`; it is folded inline instead of taking the split path client tools take.
     backend_web_search: bool,
 }
 
@@ -115,7 +115,12 @@ impl Lifecycle {
             Lifecycle::CompactFailed { error } if error.trim().is_empty() => {
                 "Auto-compact failed.".to_string()
             }
-            Lifecycle::CompactFailed { error } => format!("Auto-compact failed: {error}"),
+            Lifecycle::CompactFailed { error } => {
+                // Plain output is line-oriented, so the two-line error message collapses to one; JSON carries the raw string
+                // The hyphen matches the TUI
+                let single_line = error.split_whitespace().collect::<Vec<_>>().join(" ");
+                format!("Auto-compact failed - {single_line}")
+            }
             Lifecycle::CompactCancelled => "Auto-compact cancelled.".to_string(),
             Lifecycle::AutoContinue { .. } => "Resumed after compaction.".to_string(),
             Lifecycle::ImageCompressed { message } => message.clone(),
@@ -123,8 +128,8 @@ impl Lifecycle {
     }
 }
 
-/// The `streaming-json` wire token for an ACP [`proto::ToolKind`]. Explicit typed
-/// match (not serde) so renaming a variant is a compile error, not a dropped `None`.
+/// The `streaming-json` wire token for an ACP [`proto::ToolKind`].
+/// The match is typed rather than serde so renaming a variant is a compile error, not a dropped `None`.
 pub(crate) fn tool_kind_wire(kind: proto::ToolKind) -> Option<String> {
     let token = match kind {
         proto::ToolKind::Read => "read",
@@ -173,10 +178,8 @@ fn json_array_or_empty<T: serde::Serialize>(value: &T) -> Value {
     }
 }
 
-/// Canonical model-facing tool name from the `x.ai/tool` `_meta` envelope, else
-/// the display title, else kind, else `"tool"`. The shell stamps the wire name
-/// (`bash`, `x_search`, `read_file`) under `x.ai/tool.name`; without this the
-/// name falls through to the human title (`Execute ...`, `X search:`).
+/// Canonical model-facing tool name from the `x.ai/tool` `_meta` envelope, else the display title, else kind, else `"tool"`.
+/// The shell stamps the wire name (`bash`, `x_search`, `read_file`) under `x.ai/tool.name`; the human title (`Execute ...`, `X search:`) is the fallback.
 fn tool_name_from(meta: Option<&proto::Meta>, title: &str, kind: Option<&str>) -> String {
     if let Some(meta) = meta
         && let Some(name) = meta
@@ -208,10 +211,8 @@ fn is_backend_web_search(meta: Option<&proto::Meta>, raw_input: &Value) -> bool 
     backend && is_web_search
 }
 
-/// Canonical tool kind from the `x.ai/tool` `_meta` envelope, else the ACP
-/// `ToolCall.kind`. Client tools register as `ToolKind::Other` on the early
-/// notification, so the real kind (`read`, `edit`, `execute`) rides
-/// `x.ai/tool.kind`; without this every client tool reports `other`.
+/// Canonical tool kind from the `x.ai/tool` `_meta` envelope, else the ACP `ToolCall.kind`.
+/// Client tools register as `ToolKind::Other` on the early notification, so the real kind (`read`, `edit`, `execute`) arrives in `x.ai/tool.kind`.
 fn tool_kind_from(meta: Option<&proto::Meta>, kind: proto::ToolKind) -> Option<String> {
     if let Some(meta) = meta
         && let Some(k) = meta
@@ -277,7 +278,7 @@ fn command_names(commands: &[proto::AvailableCommand]) -> Vec<String> {
     commands.iter().map(|c| c.name.clone()).collect()
 }
 
-/// Skill names from the `AvailableCommandsUpdate`: commands stamped with `_meta.scope` + `_meta.path`.
+/// Skill names from the `AvailableCommandsUpdate`: commands stamped with `_meta.scope` and `_meta.path`.
 pub(crate) fn skill_names(commands: &[proto::AvailableCommand]) -> Vec<String> {
     commands
         .iter()
@@ -290,7 +291,7 @@ pub(crate) fn skill_names(commands: &[proto::AvailableCommand]) -> Vec<String> {
         .collect()
 }
 
-/// Map an ACP `SessionUpdate` to a [`StreamEvent`], or `None` for unsurfaced variants.
+/// Map an ACP `SessionUpdate` to a [`StreamEvent`], or `None` for variants the reducers ignore.
 pub(crate) fn map_session_update(update: &proto::SessionUpdate) -> Option<StreamEvent> {
     Some(match update {
         proto::SessionUpdate::ToolCall(tc) => StreamEvent::ToolCall(tool_call_event(tc)),
@@ -328,7 +329,7 @@ pub(crate) struct TurnEnd<'a> {
     pub usage: Option<&'a Value>,
     pub structured_output: Option<Result<Value, String>>,
     pub result_text: &'a str,
-    /// Total wall-clock for the run (`duration_ms` on the Messages `result`).
+    /// Total wall-clock time for the run (`duration_ms` on the Messages `result`).
     pub duration_ms: u64,
 }
 

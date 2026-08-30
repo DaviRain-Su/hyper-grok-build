@@ -2,17 +2,12 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Bracketed-paste guard for the deferred clipboard-probe stack: a short
-/// (below the 4-line chip threshold) text paste must echo inline in the
-/// prompt promptly — the pasted caption stays synchronous while any clipboard
-/// attachment probe runs off the UI thread — and submitting must send the
-/// payload intact to the model.
+/// A short text paste (below the 4-line chip threshold) must echo inline in the prompt right away, and submitting must send it to the model intact.
+/// The echo stays synchronous even while a clipboard attachment probe runs off the UI thread.
 ///
-/// Linux-hermetic: the bracketed arm's clipboard probe block is
-/// cfg(macos/windows), so this path never touches a real clipboard on CI. On
-/// a macOS dev machine the probe MAY consult the real host clipboard and
-/// attach an incidental image chip, so all asserts are contains-style on
-/// unique sentinels, never whole-prompt/message equality.
+/// The bracketed-paste clipboard probe is cfg(macos/windows), so on Linux CI this test never touches a real clipboard.
+/// On a macOS dev machine the probe MAY read the real host clipboard and attach an incidental image chip.
+/// Every assert is therefore a contains check on a unique sentinel, never whole-prompt or whole-message equality.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn paste_bracketed_inline_text_echoes_and_sends_intact() {
@@ -31,9 +26,8 @@ async fn paste_bracketed_inline_text_echoes_and_sends_intact() {
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
 
-    // A paste on the welcome screen promotes to a new session and re-processes
-    // the same event through its prompt (ActionThenForward), so the payload
-    // lands in the full-featured session prompt.
+    // A paste on the welcome screen promotes to a new session and re-processes the same event through its prompt (ActionThenForward)
+    // The payload therefore lands in the full-featured session prompt
     harness
         .inject_keys(format!("\x1b[200~{LINE_A}\n{LINE_B}\x1b[201~").as_bytes())
         .expect("bracketed-paste two-line payload");

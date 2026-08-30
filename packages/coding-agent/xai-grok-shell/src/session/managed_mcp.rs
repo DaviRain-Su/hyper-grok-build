@@ -354,7 +354,7 @@ fn non_toml_mcp_servers_with_source(
     }
 
     let claude_json_source = ConfigSource::ClaudeJson {
-        path: dirs::home_dir()
+        path: xai_dirs::home_dir()
             .map(|h| h.join(".claude.json"))
             .unwrap_or_default(),
     };
@@ -366,7 +366,7 @@ fn non_toml_mcp_servers_with_source(
     }
 
     let cursor_mcp_source = ConfigSource::McpJson {
-        path: dirs::home_dir()
+        path: xai_dirs::home_dir()
             .map(|h| h.join(".cursor").join("mcp.json"))
             .unwrap_or_default(),
     };

@@ -6,8 +6,9 @@ use xai_grok_tools::implementations::grok_build::task::coordinator::{
     ChildRunner, CoordinatorConfig, LocalBoxFuture, SendBoxFuture, StartedChild, SubagentProgress,
 };
 use xai_grok_tools::implementations::grok_build::task::types::{
-    ActiveAgentMessageDelivery, ActiveAgentMessageOutcome, ActiveAgentMessageRequest,
-    SubagentDescribeOutcome, SubagentOwner, SubagentRequest, SubagentValidateTypeOutcome,
+    ActiveAgentMessageDelivery, ActiveAgentMessageOperation, ActiveAgentMessageOutcome,
+    ActiveAgentMessageRequest, SubagentDescribeOutcome, SubagentOwner, SubagentRequest,
+    SubagentValidateTypeOutcome,
 };
 
 const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -48,6 +49,8 @@ impl ChildControl for SnapshotProbeControl {
 struct SnapshotProbeRunner {
     child_cmd_tx: mpsc::UnboundedSender<SessionCommand>,
     receipt_sink: mpsc::Sender<PromptTurnReceipt>,
+    handle_target_session_id: String,
+    force_queue_envelope: bool,
     active_message_parent_session_id: String,
     live_prompt_index: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     started: mpsc::UnboundedSender<()>,
@@ -63,6 +66,8 @@ impl ChildRunner for SnapshotProbeRunner {
     fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
         let child_cmd_tx = self.child_cmd_tx.clone();
         let receipt_sink = self.receipt_sink.clone();
+        let handle_target_session_id = self.handle_target_session_id.clone();
+        let force_queue_envelope = self.force_queue_envelope;
         let active_message_parent_session_id = self.active_message_parent_session_id.clone();
         let live_prompt_index = std::sync::Arc::clone(&self.live_prompt_index);
         let started = self.started.clone();
@@ -79,12 +84,19 @@ impl ChildRunner for SnapshotProbeRunner {
                     definition_background: false,
                     control: SnapshotProbeControl {
                         runtime: ShellChildRuntime {
+                            message_delivery:
+                                crate::session::message_delivery::MessageDeliveryHandle::new(
+                                    child_cmd_tx.clone(),
+                                    handle_target_session_id,
+                                ),
                             child_cmd_tx,
+                            active_message_target_session_id: run.request.id.clone(),
                             child_signals: crate::session::signals::SessionSignalsHandle::new(),
                             _child_thread: Some(SessionThread::from_handle(std::thread::spawn(
                                 || {},
                             ))),
                             receipt_sink,
+                            force_queue_envelope,
                             active_message_parent_session_id,
                             active_message_parent_prompt_index: std::sync::Arc::clone(
                                 &live_prompt_index,
@@ -148,6 +160,8 @@ async fn send_active_message_freezes_parent_turn_before_first_poll() {
         let runner = SnapshotProbeRunner {
             child_cmd_tx,
             receipt_sink,
+            handle_target_session_id: "child".to_owned(),
+            force_queue_envelope: false,
             active_message_parent_session_id: "parent".to_owned(),
             live_prompt_index,
             started: started_tx,
@@ -203,6 +217,82 @@ async fn send_active_message_freezes_parent_turn_before_first_poll() {
         spawn_task.abort();
     }))
     .await;
+}
+
+async fn rejected_delivery(
+    target: &str,
+    operation: ActiveAgentMessageOperation,
+    force_queue_envelope: bool,
+) -> (ActiveAgentMessageOutcome, bool) {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (coordinator_sender, receiver) =
+            xai_grok_tools::implementations::grok_build::task::coordinator::SubagentCoordinator::<
+                SnapshotProbeRunner,
+            >::channel();
+        let backend = ChannelBackend::for_coordinator_session(coordinator_sender, "parent");
+        let (child_cmd_tx, mut child_cmd_rx) = mpsc::unbounded_channel();
+        let (receipt_sink, _receipt_stream) = mpsc::channel(1);
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let runner = SnapshotProbeRunner {
+            child_cmd_tx,
+            receipt_sink,
+            handle_target_session_id: target.to_owned(),
+            force_queue_envelope,
+            active_message_parent_session_id: "parent".to_owned(),
+            live_prompt_index: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            started: started_tx,
+        };
+        let coordinator = xai_grok_tools::implementations::grok_build::task::coordinator::SubagentCoordinator::from_channel(
+            receiver,
+            runner,
+            CoordinatorConfig {
+                foreground_budget: TEST_TIMEOUT,
+                ..Default::default()
+            },
+        );
+        let coordinator_task = tokio::task::spawn_local(coordinator.run());
+        let spawn_task = tokio::task::spawn_local({
+            let backend = backend.clone();
+            async move { backend.spawn(request()).await }
+        });
+        await_with_timeout(started_rx.recv())
+            .await
+            .expect("probe child started");
+
+        let outcome = await_with_timeout(backend.send_active_message(
+            ActiveAgentMessageRequest::try_new_with_operation("child", "follow up", operation)
+            .expect("valid message"),
+        ))
+        .await;
+        let dispatched = child_cmd_rx.try_recv().is_ok();
+        coordinator_task.abort();
+        spawn_task.abort();
+        (outcome, dispatched)
+    }))
+    .await
+}
+
+#[tokio::test]
+async fn target_mismatch_rejects_without_dispatch() {
+    let actual =
+        rejected_delivery("different-child", ActiveAgentMessageOperation::Queue, false).await;
+    assert_eq!(
+        actual,
+        (ActiveAgentMessageOutcome::NotActiveOrFinalizing, false)
+    );
+}
+
+#[tokio::test]
+async fn matched_steer_is_unsupported_and_uncommitted() {
+    let actual = rejected_delivery("child", ActiveAgentMessageOperation::Steer, false).await;
+    assert_eq!(actual, (ActiveAgentMessageOutcome::Unsupported, false));
+}
+
+#[tokio::test]
+async fn malformed_operation_pair_is_unsupported_and_uncommitted() {
+    let actual = rejected_delivery("child", ActiveAgentMessageOperation::Steer, true).await;
+    assert_eq!(actual, (ActiveAgentMessageOutcome::Unsupported, false));
 }
 
 #[tokio::test]

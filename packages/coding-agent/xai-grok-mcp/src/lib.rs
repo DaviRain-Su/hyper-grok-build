@@ -16,6 +16,7 @@
 //! 2. **Owns MCP-specific integration code**:
 //!    - [`credentials`] -- on-disk `$GROK_HOME/mcp_credentials.json` store and
 //!      the rmcp `CredentialStore` adapter.
+//!    - `auth_status` -- decides auth for HTTP servers from what is on disk.
 //!    - [`oauth`] -- browser-based OAuth flow with cross-process + in-process
 //!      dedup.
 //!    - [`oauth_config`] -- BYO OAuth config types parsed out of `config.toml`.
@@ -28,7 +29,24 @@
 
 pub use rmcp;
 
+#[doc(hidden)]
+pub fn isolate_grok_home_for_tests() {
+    static HOME: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir = tempfile::TempDir::new().expect("test grok home").keep();
+        // SAFETY: OnceLock-guarded single set; the concurrent env-read race is accepted in tests.
+        unsafe { std::env::set_var("GROK_HOME", &dir) };
+        let memo = xai_grok_config::grok_home();
+        assert!(
+            memo.starts_with(&dir),
+            "grok-home memo was warmed before test isolation: {}",
+            memo.display()
+        );
+    });
+}
+
 pub mod acp_transport;
+mod auth_status;
 pub mod credentials;
 pub mod elicitation;
 pub mod liveness;

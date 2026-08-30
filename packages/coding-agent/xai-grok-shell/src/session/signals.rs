@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tdigests::TDigest;
 use tokio::sync::{mpsc, oneshot};
 
+use super::doom_loop_telemetry::merge_tightest_trigger;
 use super::inference_metrics::{InferenceLatencyStats, compute_percentiles};
 
 /// Sample the process resident-set high-water mark in bytes.
@@ -1076,43 +1077,6 @@ pub struct SessionSignalsActor {
     agent_files_set: HashSet<std::path::PathBuf>,
     /// Distinct files touched by human (for dedup)
     human_files_set: HashSet<std::path::PathBuf>,
-}
-
-/// Fold `new` trigger labels into `current`, keeping the tightest
-/// (lowest-threshold) raw label overall. Labels only — telemetry-safe.
-pub(crate) fn merge_tightest_trigger(current: Option<String>, new: &[String]) -> Option<String> {
-    xai_grok_sampling_types::doom_loop::DoomLoopSignal::tightest(
-        current
-            .iter()
-            .map(String::as_str)
-            .chain(new.iter().map(String::as_str)),
-    )
-}
-
-/// Telemetry-only per-turn doom-loop recovery tally, accumulated on the
-/// session actor by the sampling-event drainer and taken at turn end for the
-/// per-turn analytics event. Never influences recovery behavior.
-#[derive(Debug, Default, Clone)]
-pub(crate) struct DoomLoopTurnTally {
-    /// Resamples this turn (doomed attempts discarded).
-    pub(crate) attempts: u32,
-    /// Whether a completed response was accepted with confident signals.
-    pub(crate) accepted_after_budget: bool,
-    /// Tightest raw trigger label observed this turn.
-    pub(crate) top_trigger: Option<String>,
-}
-
-impl DoomLoopTurnTally {
-    /// Fold an event's trigger labels into the turn's tightest label.
-    pub(crate) fn merge_triggers(&mut self, triggers: &[String]) {
-        let current = self.top_trigger.take();
-        self.top_trigger = merge_tightest_trigger(current, triggers);
-    }
-
-    /// True when recovery acted this turn (something worth reporting).
-    pub(crate) fn fired(&self) -> bool {
-        self.attempts > 0 || self.accepted_after_budget
-    }
 }
 
 impl SessionSignalsActor {

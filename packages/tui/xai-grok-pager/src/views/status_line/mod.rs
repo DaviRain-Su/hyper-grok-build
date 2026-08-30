@@ -34,8 +34,7 @@ fn painted_width(text: &str) -> usize {
     painted_clusters(text).map(|(_, columns)| columns).sum()
 }
 
-/// The longest prefix fitting `budget` painted columns, the columns used, and
-/// whether anything was left behind.
+/// The longest prefix fitting `budget` painted columns, the columns used, and whether anything was left behind.
 fn take_columns(text: &str, budget: usize) -> (String, usize, bool) {
     let mut used = 0usize;
     let mut kept = String::new();
@@ -49,8 +48,7 @@ fn take_columns(text: &str, budget: usize) -> (String, usize, bool) {
     (kept, used, false)
 }
 
-/// The longest prefix fitting `columns`, ending in `…` when cut, or empty when
-/// there is no room for even the marker.
+/// The longest prefix fitting `columns`, ending in `…` when cut, or empty when there is no room for even the marker.
 fn fit_columns(text: &str, columns: usize) -> Cow<'_, str> {
     if painted_width(text) <= columns {
         return Cow::Borrowed(text);
@@ -62,9 +60,8 @@ fn fit_columns(text: &str, columns: usize) -> Cow<'_, str> {
     Cow::Owned(format!("{kept}\u{2026}"))
 }
 
-/// Returns the line to paint and the columns of the original it kept, which is
-/// what a link has to be clipped to: a link whose text was elided away would
-/// otherwise land on the ellipsis and make it clickable.
+/// Returns the line to paint and the columns of the original it kept, which is what a link has to be clipped to.
+/// A link whose text was elided away would otherwise land on the ellipsis and make it clickable.
 fn elide<'a>(line: &Line<'a>, width: usize) -> (Line<'a>, usize) {
     if painted_line_width(line) <= width {
         return (line.clone(), width);
@@ -110,14 +107,14 @@ pub enum StatusLineDisplay {
     Text(SanitizedText),
 }
 
-/// The space one frame gives the row, and what goes in it. Three states so
-/// the height and the paint cannot disagree about whether the row is there.
+/// The space one frame gives the row, and what goes in it.
+/// Three states so the height and the paint cannot disagree about whether the row is there.
 #[derive(Debug, Clone, Default)]
 pub enum StatusLineFrame {
     #[default]
     Off,
-    /// Not answered for yet. Holds a line so the first result does not shove
-    /// the input box up.
+    /// The script has not answered yet.
+    /// Holds a line so the first result does not shove the input box up.
     Reserved { padding: u16 },
     On {
         display: Arc<StatusLineDisplay>,
@@ -134,8 +131,8 @@ impl StatusLineFrame {
         }
     }
 
-    /// The inset, for a row that takes space at all. A reserved row has one
-    /// too: it sizes a script's first run.
+    /// The inset, for a row that takes space at all.
+    /// A reserved row has one too: it sizes a script's first run.
     pub fn padding(&self) -> Option<u16> {
         match self {
             StatusLineFrame::Off => None,
@@ -154,8 +151,8 @@ impl StatusLineFrame {
 }
 
 impl StatusLineDisplay {
-    /// What the row asks the layout to reserve. A frame with less space to give
-    /// paints fewer.
+    /// What the row asks the layout to reserve.
+    /// A frame with less space to give paints fewer.
     pub fn line_count(&self) -> u16 {
         match self {
             StatusLineDisplay::Segments(_) => 1,
@@ -197,9 +194,8 @@ pub fn render_status_line(
     project_links(area, links, &kept)
 }
 
-/// The row a `command` script is told it has, in `COLUMNS` and `LINES`. Named
-/// fields rather than a tuple: the pair crosses three modules, and a silent
-/// transposition sizes the script to one column.
+/// The row a `command` script is told it has, in `COLUMNS` and `LINES`.
+/// Named fields rather than a tuple: the pair crosses three modules, and a silent transposition sizes the script to one column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowSize {
     pub cols: u16,
@@ -207,13 +203,13 @@ pub struct RowSize {
 }
 
 impl RowSize {
-    /// What a script is told when the row has never painted. A script divides
-    /// by its width, so this is a plausible terminal rather than zero.
+    /// What a script is told when the row has never painted.
+    /// A script divides by its width, so this is a plausible terminal rather than zero.
     pub const FALLBACK: Self = Self { cols: 80, lines: 1 };
 }
 
-/// The columns left for the row's own content, or `None` when the padding
-/// leaves none. A script's `COLUMNS` is this same number.
+/// The columns left for the row's own content, or `None` when the padding leaves none.
+/// A script's `COLUMNS` is this same number.
 pub(crate) fn inner_width(width: u16, padding: u16) -> Option<u16> {
     let inset = padding.saturating_mul(2);
     (inset < width).then(|| width - inset)
@@ -251,29 +247,25 @@ fn styled_lines<'a>(
 }
 
 fn themed<'a>(line: &'a Line<'static>, theme: &Theme) -> Line<'a> {
-    // Muted, matching the `builtin` row: chrome reads below the conversation,
-    // but no quieter than the shortcut hints under it. Text that wants a colour
-    // carries one.
+    // Muted, matching the `builtin` row: chrome reads below the conversation, but no quieter than the shortcut hints under it
+    // Text that wants a colour carries one
     let base = theme.muted();
     let spans = line.spans.iter().map(|span| {
         let mut style = span.style;
         if matches!(style.fg, None | Some(ratatui::style::Color::Reset)) {
             style = style.patch(base);
         }
-        // Strip blink and hidden: a row that blinks or hides its own text is
-        // one the user cannot read.
+        // Strip blink and hidden: a row that blinks or hides its own text is one the user cannot read
         style = style.remove_modifier(
             ratatui::style::Modifier::SLOW_BLINK
                 | ratatui::style::Modifier::RAPID_BLINK
                 | ratatui::style::Modifier::HIDDEN,
         );
-        // Quantized like every other ANSI-bearing surface, so a script's colour
-        // obeys `NO_COLOR` and a terminal locked to 16 colours. Before the
-        // background fallback, which supplies a theme colour that already is.
+        // Quantized like every other ANSI-bearing output, so a script's colour obeys `NO_COLOR` and a terminal locked to 16 colours
+        // This runs before the background fallback, which supplies a theme colour that is already quantized
         style.fg = style.fg.map(xai_grok_pager_render::theme::quantize);
         style.bg = style.bg.map(xai_grok_pager_render::theme::quantize);
-        // `\x1b[0m`, which every powerline script emits, parses to an explicit
-        // `Color::Reset` background that seams against the bar below.
+        // `\x1b[0m`, which every powerline script emits, parses to an explicit `Color::Reset` background that seams against the bar below
         if matches!(style.bg, None | Some(ratatui::style::Color::Reset)) {
             style = style.bg(theme.bg_base);
         }
@@ -282,8 +274,8 @@ fn themed<'a>(line: &'a Line<'static>, theme: &Theme) -> Line<'a> {
     Line::from(spans.collect::<Vec<_>>()).style(line.style)
 }
 
-/// The columns ratatui paints. `Line::width` counts 1 for a control character
-/// the painter drops, measuring CRLF output a column too wide.
+/// The columns ratatui paints.
+/// `Line::width` counts 1 for a control character the painter drops, measuring CRLF output a column too wide.
 fn painted_line_width(line: &Line<'_>) -> usize {
     line.spans
         .iter()
@@ -297,8 +289,7 @@ fn project_links(area: Rect, links: Vec<CommandLink>, kept: &[usize]) -> Vec<Lin
         .into_iter()
         .filter(|l| l.line < area.height)
         .filter_map(|l| {
-            // Clipped to the text the elision kept, not to the row's width: the
-            // ellipsis sits inside the width and is not part of any link.
+            // Clipped to the text the elision kept, not to the row's width: the ellipsis sits inside the width and is not part of any link
             let kept = u16::try_from(*kept.get(l.line as usize)?).unwrap_or(u16::MAX);
             let col_start = area.x.saturating_add(l.col_start.min(kept));
             let col_end = area.x.saturating_add(l.col_end.min(kept)).min(max_x);

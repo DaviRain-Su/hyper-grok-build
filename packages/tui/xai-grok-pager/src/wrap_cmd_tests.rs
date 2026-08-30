@@ -1,10 +1,7 @@
-//! Unit tests for the `grok wrap` spawn planning in [`super`] (`wrap_cmd`),
-//! split out via `#[path]` to keep the module itself small.
+//! Unit tests for the `grok wrap` spawn planning in [`super`] (`wrap_cmd`), split out via `#[path]` to keep the module itself small.
 //!
-//! Everything is pure — `derive_spawn` takes the PATH lookup result and the
-//! shell as inputs — except the final test, which round-trips the rejoined
-//! command line through a real `/bin/sh -c` to prove the quoting contract end
-//! to end.
+//! Everything is pure: `derive_spawn` takes the PATH lookup result and the shell as inputs.
+//! The exception is the final test, which round-trips the rejoined line through a real `/bin/sh -c` to prove the quoting contract end to end.
 
 use super::*;
 use pretty_assertions::assert_eq;
@@ -25,8 +22,7 @@ fn single_arg_with_whitespace_always_routes_via_shell() {
     assert_eq!(plan.program, "/bin/zsh");
     assert_eq!(plan.args, cmd(&["-i", "-c", "mycli ssh host-01"]));
 
-    // Wins over the explicit-path rule too: a single program path with
-    // spaces word-splits in the shell (quote it for the shell instead).
+    // Wins over the explicit-path rule too: a single program path with spaces word-splits in the shell (quote it for the shell instead)
     let plan = derive_spawn(
         &cmd(&["/path/with space/prog"]),
         "/bin/zsh",
@@ -35,8 +31,7 @@ fn single_arg_with_whitespace_always_routes_via_shell() {
     );
     assert_eq!(plan.args, cmd(&["-i", "-c", "/path/with space/prog"]));
 
-    // Any whitespace counts, not just spaces: tabs/newlines also mark the
-    // arg as a command line to hand to the shell verbatim.
+    // Any whitespace counts, not just spaces: tabs/newlines also mark the arg as a command line to hand to the shell verbatim
     let plan = derive_spawn(
         &cmd(&["x\tssh\nhost"]),
         "/bin/sh",
@@ -63,8 +58,7 @@ fn resolvable_program_spawns_directly() {
     assert_eq!(plan.program, "ls");
     assert_eq!(plan.args, Vec::<String>::new());
 
-    // Explicit paths never route through the shell, resolvable or not —
-    // relative or absolute.
+    // Explicit paths never route through the shell, resolvable or not, relative or absolute
     let plan = derive_spawn(
         &cmd(&["./run.sh", "arg"]),
         "/bin/zsh",
@@ -80,8 +74,7 @@ fn resolvable_program_spawns_directly() {
     );
     assert_eq!(plan.program, "/abs/prog");
 
-    // A multi-arg first word with whitespace is never an alias: keep the
-    // direct spawn and its precise not-found error.
+    // With more args present, a first word containing whitespace is never an alias: keep the direct spawn and its precise not-found error
     let plan = derive_spawn(
         &cmd(&["my prog", "arg"]),
         "/bin/zsh",
@@ -91,8 +84,7 @@ fn resolvable_program_spawns_directly() {
     assert_eq!(plan.program, "my prog");
     assert_eq!(plan.args, cmd(&["arg"]));
 
-    // Same for an empty first word (unset `$PROG`): fail fast on the
-    // direct spawn rather than shell-executing the tail.
+    // Same for an empty first word (unset `$PROG`): fail fast on the direct spawn rather than shell-executing the tail
     let plan = derive_spawn(
         &cmd(&["", "rm", "-rf", "x"]),
         "/bin/zsh",
@@ -104,8 +96,7 @@ fn resolvable_program_spawns_directly() {
 
 #[test]
 fn direct_route_passes_args_verbatim_without_quoting() {
-    // Quoting exists only on the shell route's rejoined line; a resolvable
-    // program must receive its argv elements byte-for-byte.
+    // Quoting exists only on the shell route's rejoined line; a resolvable program must receive its argv elements byte-for-byte
     let plan = derive_spawn(
         &cmd(&["rsync", "a b", "don't"]),
         "/bin/zsh",
@@ -118,8 +109,8 @@ fn direct_route_passes_args_verbatim_without_quoting() {
 
 #[test]
 fn alias_route_keeps_first_word_bare_and_quotes_the_tail() {
-    // First word stays unquoted (aliases only expand on bare words); every
-    // tail word is quoted — zsh expands a bare `=word`, so no safe set.
+    // The first word stays unquoted (aliases only expand on bare words); every tail word is quoted
+    // Zsh expands a bare `=word`, so no character set is safe to leave unquoted
     let plan = derive_spawn(
         &cmd(&["x", "ssh", "=host", "don't"]),
         "/bin/zsh",
@@ -150,13 +141,13 @@ fn plain_shell_mode_drops_dash_i() {
 fn quote_word_edge_cases() {
     assert_eq!(quote_word("don't"), "'don'\\''t'");
     assert_eq!(quote_word(""), "''");
-    // A lone quote is the worst case for the close-escape-reopen idiom.
+    // A lone quote is the worst case: the idiom closes the quote, escapes it, and reopens
     assert_eq!(quote_word("'"), "''\\'''");
 }
 
 #[test]
 fn quote_word_neutralizes_shell_metacharacters() {
-    // Expansion/control characters must come out single-quoted inert.
+    // Expansion and control characters must come out single-quoted, so the shell leaves them inert
     for meta in ["$HOME", "`id`", "*", "!!", ";", "&&", "|", "a\nb"] {
         assert_eq!(quote_word(meta), format!("'{meta}'"));
     }
@@ -184,9 +175,8 @@ fn resolve_shell_uses_existing_file() {
     assert_eq!(resolve_shell(Some(&path)), path);
 }
 
-/// Feed the rejoined command line through a real `/bin/sh -c` and assert the
-/// child receives exactly the original words — the quoting contract proven
-/// against an actual shell, not just against expected strings.
+/// Feed the rejoined command line through a real `/bin/sh -c` and assert the child receives exactly the original words.
+/// This proves the quoting contract against an actual shell, not just against expected strings.
 #[test]
 fn joined_line_roundtrips_words_through_real_sh() {
     let words = [

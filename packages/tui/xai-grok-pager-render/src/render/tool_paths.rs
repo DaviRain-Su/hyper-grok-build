@@ -74,7 +74,7 @@ fn non_empty_rel(rel: &Path) -> Option<String> {
 
 fn home_dir() -> Option<&'static Path> {
     static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
-    HOME.get_or_init(dirs::home_dir).as_deref()
+    HOME.get_or_init(xai_dirs::home_dir).as_deref()
 }
 
 /// Resolve the path-native target for OSC8 or background filesystem work.
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn home_relative_target_preserves_filesystem_spelling_for_io() {
-        let Some(home) = dirs::home_dir() else {
+        let Some(home) = xai_dirs::home_dir() else {
             return;
         };
         assert_eq!(resolve_tool_path_target("~", None), Some(home.clone()));

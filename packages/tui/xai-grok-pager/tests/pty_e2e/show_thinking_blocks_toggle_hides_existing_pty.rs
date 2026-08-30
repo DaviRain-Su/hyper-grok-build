@@ -175,8 +175,8 @@ fn wait_until_gone(harness: &mut PtyHarness, needle: &str, timeout: Duration) ->
     !harness.contains_text(needle)
 }
 
-/// F2 → filter `show thinking blocks` (unique Bool row; bare "thinking" hits
-/// Max thoughts width) → Enter commit → Space toggle once → assert row value.
+/// Opens settings with F2, filters for `show thinking blocks`, commits with Enter, toggles once with Space, then asserts the row value.
+/// The full filter phrase is needed: bare "thinking" also matches the Max thoughts width row.
 fn toggle_show_thinking_blocks(harness: &mut PtyHarness, want_on: bool) {
     const F2: &[u8] = b"\x1bOQ";
     if harness.contains_text("Space:prompt") {
@@ -272,7 +272,7 @@ fn expand_thinking_to_show_sentinel(harness: &mut PtyHarness) {
 #[ignore]
 async fn show_thinking_blocks_toggle_hides_existing_pty() {
     let content = ContentController::start().await.expect("start content");
-    // Default is off (rollout); opt in so the turn can create/show thinking first.
+    // The rollout default is off; opt in so the turn can create and show thinking first
     seed_ui_config(&content, "show_thinking_blocks = true");
     let model = "test-model";
     let reasoning =

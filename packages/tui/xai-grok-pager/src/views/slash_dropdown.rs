@@ -1,10 +1,7 @@
-//! Dropdown list renderer for slash command completion.
-//!
-//! Renders slash command/arg suggestions as a scrollable list following
-//! the same polished layout as the question/answer panel:
+//! Renders slash command/arg suggestions as a scrollable list, following the same layout as the question/answer panel:
 //! - Aligned label column (truncated with `...` when too long)
 //! - Description text after a fixed gap, truncated to remaining width
-//! - Selection highlight (bg_visual + bold on selected row)
+//! - Selection highlight (bg_visual and bold on the selected row)
 //! - Mouse hover highlight (25% blended bg)
 //! - Scrollbar when results exceed visible height
 
@@ -32,12 +29,9 @@ const LABEL_DESC_GAP: usize = 2;
 /// Prefix display width in columns (`"❯ "` or `"  "`).
 const PREFIX_W: usize = 2;
 
-/// Terminal rows needed to show every item at `items_width`, capped at
-/// [`MAX_DROPDOWN_ROWS`].
-///
-/// Items render as flat lines (label + wrapped-description continuations),
-/// so an item-count height starves wrapped items and can leave later
-/// matches entirely off-area.
+/// Terminal rows needed to show every item at `items_width`, capped at [`MAX_DROPDOWN_ROWS`].
+/// Items render as flat lines (the label line plus wrapped-description continuations).
+/// An item-count height therefore starves wrapped items and can leave later matches entirely off-area.
 pub fn desired_item_rows(items: &[SuggestionRow], items_width: u16) -> u16 {
     if items.is_empty() {
         return 0;
@@ -50,21 +44,19 @@ fn tag_suffix(row: &SuggestionRow) -> Option<String> {
     row.tag.as_ref().map(|t| format!(" [{t}]"))
 }
 
-/// Rendered width of a row's `" [tag]"` suffix (0 when untagged). Measured
-/// without allocating: space + `[` + tag + `]` = tag width + 3. The tag shares
-/// the label column so descriptions stay aligned across tagged/untagged rows.
+/// Rendered width of a row's `" [tag]"` suffix (0 when untagged).
+/// Measured without allocating: space + `[` + tag + `]` = tag width + 3.
+/// The tag shares the label column so descriptions stay aligned across tagged/untagged rows.
 fn tag_suffix_width(row: &SuggestionRow) -> usize {
     row.tag.as_ref().map(|t| t.width() + 3).unwrap_or(0)
 }
 
 /// Compute the aligned label column width from all visible items.
 ///
-/// The label column gets up to 60% of the available width (capped at `LABEL_CAP`).
-/// This prioritises showing the full command name over the description. The tag
-/// suffix is folded in so a `/cmd [tag]` row and a plain `/cmd` row share the
-/// same description column. Untagged rows keep origin/main behavior (overlong
-/// commands are ignored); tagged rows always contribute a `LABEL_CAP`-clamped
-/// width so a long tag can never zero out the column.
+/// The label column gets up to 60% of the available width (capped at `LABEL_CAP`), prioritising the full command name over the description.
+/// The tag suffix is folded in so a `/cmd [tag]` row and a plain `/cmd` row share the same description column.
+/// An untagged row longer than `LABEL_CAP` is ignored.
+/// A tagged row always contributes a `LABEL_CAP`-clamped width, so a long tag can never zero out the column.
 fn compute_label_column_w(items: &[SuggestionRow], content_w: usize) -> usize {
     let budget = (content_w * 3 / 5).min(LABEL_CAP);
     let max_display_w = items
@@ -84,12 +76,11 @@ fn compute_label_column_w(items: &[SuggestionRow], content_w: usize) -> usize {
 
 /// Build a flat list of styled lines for all visible items.
 ///
-/// Each item produces one or more lines: the first has the prefix + label +
-/// first description line; continuation lines are indented to the description
-/// column. This is the same approach as `question_view::build_flat_option_lines`.
+/// Each item produces one or more lines: the first has the prefix, label, and first description line.
+/// Continuation lines are indented to the description column.
+/// This is the same approach as `question_view::build_flat_option_lines`.
 ///
-/// Returns `(flat_lines, item_first_line_indices)` where each entry in the
-/// second vec is the flat-line index where item `i` starts (for scroll targeting).
+/// Returns `(flat_lines, item_first_line_indices)`: each entry in the second vec is the flat-line index where item `i` starts, for scroll targeting.
 fn build_flat_lines(
     items: &[SuggestionRow],
     selected: usize,
@@ -130,15 +121,13 @@ fn build_flat_lines(
 
 /// Render the slash dropdown items into the given area.
 ///
-/// This renders ONLY the result rows (no borders or separators).
-/// Panel chrome (clear, borders, count hint) is handled by the caller
-/// (AgentView). The `area` covers just the item rows.
+/// This renders only the result rows (no borders or separators).
+/// Panel chrome (clear, borders, count hint) is handled by the caller (AgentView); `area` covers just the item rows.
 ///
-/// `hovered` is the absolute item index currently under the mouse
-/// (`None` if no hover). Used for blended hover highlight like file-search.
+/// `hovered` is the absolute item index currently under the mouse (`None` if no hover); it drives the blended hover highlight like file-search.
 ///
-/// Returns the visible-row → item mapping for mouse hit-testing: once a
-/// description wraps, rows ≠ items, so callers must not use row arithmetic.
+/// Returns the mapping from visible row to item for mouse hit-testing.
+/// Once a description wraps, rows and items diverge, so callers must not use row arithmetic.
 pub fn render_dropdown(
     buf: &mut Buffer,
     area: Rect,
@@ -153,9 +142,9 @@ pub fn render_dropdown(
     let items = &snap.matches;
     let selected = snap.selected.min(items.len().saturating_sub(1));
 
-    // Reserve 2 right columns when wrapped content overflows. Decided at
-    // full width; narrowing generally adds lines. Dropping a badge can free
-    // width — worst case a spare gutter, never a missing scrollbar.
+    // Reserve 2 right columns when wrapped content overflows
+    // The check runs at full width; narrowing generally adds lines
+    // Dropping a badge can free width; the worst case is a spare gutter, never a missing scrollbar
     let content_w = area.width as usize;
     let visible_rows = area.height as usize;
     let needs_scrollbar = flat_line_count(items, content_w, visible_rows + 1) > visible_rows;
@@ -165,7 +154,6 @@ pub fn render_dropdown(
         content_w
     };
 
-    // Compute aligned label column width across all items.
     let label_col_w = compute_label_column_w(items, row_w.saturating_sub(PREFIX_W));
 
     // Build flat line list (multi-line descriptions produce multiple lines per item).
@@ -215,8 +203,7 @@ pub fn render_dropdown(
 
     // ── Scrollbar ───────────────────────────────────────────────────────
     if needs_scrollbar {
-        // Intersect with the frame buffer so a resize race cannot paint past
-        // `buf.area` (same failure mode as item rows).
+        // Intersect with the frame buffer so a resize race cannot paint past `buf.area` (same failure mode as item rows)
         let sb_x = area.x + area.width.saturating_sub(1);
         let sb_y = area.y.max(buf.area.y);
         let sb_bottom = (area.y.saturating_add(area.height)).min(buf.area.bottom());
@@ -250,15 +237,14 @@ pub fn render_dropdown(
 /// Hit-test geometry produced by [`render_dropdown`].
 #[derive(Debug, Clone, Default)]
 pub struct RenderedDropdown {
-    /// Item index shown on each visible row (top to bottom). Shorter than the
-    /// area height when the content ends early.
+    /// Item index shown on each visible row (top to bottom).
+    /// The vec is shorter than the area height when the content ends early.
     pub row_items: Vec<usize>,
     /// Whether the right 2 columns of the area are the scrollbar gutter.
     pub has_scrollbar: bool,
 }
 
-/// Badge geometry shared by [`flat_line_count`] and [`build_item_lines`]
-/// so height estimation cannot diverge from what is drawn.
+/// Badge geometry shared by [`flat_line_count`] and [`build_item_lines`] so height estimation cannot diverge from what is drawn.
 struct BadgeLayout {
     badge: Option<String>,
     desc_w: usize,
@@ -280,10 +266,9 @@ impl BadgeLayout {
     }
 }
 
-/// Flat line count of `items` at `row_w`, mirroring [`build_item_lines`]
-/// (label line + wrapped-description continuation lines). Saturates at
-/// `cap` so the empty-query dropdown (every command listed) doesn't wrap
-/// hundreds of descriptions just to compare against a single-digit height.
+/// Flat line count of `items` at `row_w`, mirroring [`build_item_lines`] (the label line plus wrapped-description continuation lines).
+/// Saturates at `cap`.
+/// The empty-query dropdown lists every command; without the cap it would wrap hundreds of descriptions to compare against a single-digit height.
 fn flat_line_count(items: &[SuggestionRow], row_w: usize, cap: usize) -> usize {
     let label_col_w = compute_label_column_w(items, row_w.saturating_sub(PREFIX_W));
     let desc_indent = PREFIX_W + label_col_w + LABEL_DESC_GAP;
@@ -337,7 +322,7 @@ fn build_item_lines(
     let bg_style = Style::default().bg(row_bg);
     let tag_style = Style::default().fg(theme.accent_system).bg(row_bg);
 
-    // 1. Build prefix + label spans with fuzzy match highlighting.
+    // 1. Build prefix and label spans with fuzzy match highlighting.
     let prefix = if is_selected {
         crate::glyphs::prompt_arrow()
     } else {
@@ -348,10 +333,9 @@ fn build_item_lines(
         if is_selected { normal_style } else { bg_style },
     );
 
-    // Optional " [tag]" suffix, right-aligned at the end of the label column
-    // (just left of the description). Truncated/reserved so the name never
-    // overruns it at narrow widths. Leading space in the suffix separates
-    // label and tag when padding is 0 (longest command+tag row).
+    // Optional " [tag]" suffix, right-aligned at the end of the label column (just left of the description)
+    // The tag is truncated and its width reserved so the name never overruns it at narrow widths
+    // The suffix's leading space separates label and tag when padding is 0 (the row whose command plus tag is longest)
     let tag_text = tag_suffix(item).map(|s| truncate_str(&s, label_col_w));
     let tag_w = tag_text.as_deref().map(|s| s.width()).unwrap_or(0);
 
@@ -359,23 +343,19 @@ fn build_item_lines(
     let label_w = label.width();
     let padding = label_col_w.saturating_sub(label_w + tag_w);
 
-    // Build per-character spans for the label with fuzzy highlight.
     let label_spans = build_highlighted_spans(&label, &item.indices, normal_style, match_style);
 
-    // Description column indent (prefix + label + gap). `label_col_w` already
-    // includes the tag suffix, so descriptions align across tagged/untagged
-    // rows.
+    // `label_col_w` already includes the tag suffix, so descriptions align across tagged/untagged rows
     let desc_indent = PREFIX_W + label_col_w + LABEL_DESC_GAP;
     let layout = BadgeLayout::compute(item, total_w, desc_indent);
 
-    // Word-wrap description into lines of `desc_w` width.
     let desc_lines = if item.description.is_empty() {
         Vec::new()
     } else {
         simple_word_wrap(&item.description, layout.desc_w)
     };
 
-    // 2. First line: prefix + label + padding + [tag] + gap + first desc + right badge.
+    // 2. First line: prefix, label, padding, [tag], gap, first desc, then the right badge.
     {
         let mut spans = vec![prefix_span];
         spans.extend(label_spans);
@@ -415,9 +395,8 @@ fn build_item_lines(
 
 /// Build spans for a text string with fuzzy match character highlighting.
 ///
-/// Characters at positions listed in `indices` get `match_style` (accent color),
-/// all others get `normal_style`. Adjacent characters with the same style are
-/// coalesced into a single `Span` to keep the span count low.
+/// Characters at positions listed in `indices` get `match_style` (accent color), all others get `normal_style`.
+/// Adjacent characters with the same style are coalesced into a single `Span` to keep the span count low.
 fn build_highlighted_spans(
     text: &str,
     indices: &[u32],
@@ -445,7 +424,7 @@ fn build_highlighted_spans(
         } else if is_match == current_is_match {
             current.push(ch);
         } else {
-            // Style transition — flush current run.
+            // Style transition: flush the current run
             let style = if current_is_match {
                 match_style
             } else {
@@ -477,7 +456,6 @@ fn simple_word_wrap(text: &str, width: usize) -> Vec<String> {
         return vec![text.to_string()];
     }
     let mut lines = Vec::new();
-    // Normalize: collapse newlines into spaces.
     let normalized = text.replace('\n', " ");
     let mut remaining = normalized.as_str();
     while !remaining.is_empty() {
@@ -499,7 +477,6 @@ fn simple_word_wrap(text: &str, width: usize) -> Vec<String> {
                     last_space = Some(i);
                 }
             }
-            // Prefer word boundary; fall back to hard break at width.
             last_space.map(|i| i + 1).unwrap_or_else(|| {
                 remaining
                     .char_indices()
@@ -543,8 +520,8 @@ mod tests {
         assert_eq!(desired_item_rows(&[], 80), 0);
     }
 
-    /// During terminal resize the computed items area can extend past
-    /// the frame buffer. Item paint must not panic via ratatui `set_line`.
+    /// During terminal resize the computed items area can extend past the frame buffer.
+    /// Item paint must not panic via ratatui `set_line`.
     #[test]
     fn render_dropdown_past_buffer_bottom_does_not_panic() {
         use ratatui::buffer::Buffer;
@@ -568,9 +545,8 @@ mod tests {
             ..Default::default()
         };
 
-        // 80×10 buffer; items area starts at y=8 with height 8 → rows y=8..15,
-        // which extends past the buffer bottom (y=10). Mimics a resize race
-        // where layout still thinks the terminal is taller than the buffer.
+        // 80×10 buffer; the items area starts at y=8 with height 8, so its rows span y=8..15, past the buffer bottom (y=10)
+        // This mimics a resize race where layout still thinks the terminal is taller than the buffer
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
         let area = Rect::new(2, 8, 76, 8);
         render_dropdown(&mut buf, area, &snap, Some(1), &theme);
@@ -647,9 +623,8 @@ mod tests {
         }
     }
 
-    /// Degenerate geometry sweep: tiny/zero widths and heights, over-wide
-    /// glyphs, and unbreakable words must neither panic (debug arithmetic,
-    /// non-char-boundary splits) nor loop (zero-progress wrap).
+    /// Degenerate geometry sweep: tiny/zero widths and heights, over-wide glyphs, and unbreakable words.
+    /// These must neither panic (debug arithmetic, non-char-boundary splits) nor loop (zero-progress wrap).
     #[test]
     fn tiny_geometry_never_panics_or_hangs() {
         use ratatui::buffer::Buffer;
@@ -684,8 +659,7 @@ mod tests {
         }
     }
 
-    /// Two matches, first description wraps: sizing must count wrapped
-    /// lines or the sibling lands off-area.
+    /// Two matches, first description wraps: sizing must count wrapped lines or the sibling lands off-area.
     #[test]
     fn desired_item_rows_counts_wrapped_description_lines() {
         let long = "Apply the Japandi visual design system - a warm, earthy, calm aesthetic \
@@ -707,8 +681,7 @@ mod tests {
         assert_eq!(desired_item_rows(&short, 60), 2);
     }
 
-    /// Every item is on screen (present in the hit map) when the area is
-    /// sized via `desired_item_rows`.
+    /// Every item is on screen (present in the hit map) when the area is sized via `desired_item_rows`.
     #[test]
     fn render_dropdown_row_map_covers_all_items_at_desired_height() {
         use ratatui::buffer::Buffer;
@@ -745,7 +718,7 @@ mod tests {
         assert!(rendered.row_items.windows(2).all(|w| w[0] <= w[1]));
     }
 
-    /// Scrollbar + row map when content exceeds the capped height.
+    /// Scrollbar and row map when content exceeds the capped height.
     #[test]
     fn render_dropdown_scrollbar_on_line_overflow() {
         use ratatui::buffer::Buffer;
@@ -773,8 +746,7 @@ mod tests {
         assert_eq!(rendered.row_items[0], 0, "scroll starts at the top");
     }
 
-    /// A tagged row renders "[tag]" (system-accent) between the command name and
-    /// the description; untagged rows and arg rows render no bracket.
+    /// A tagged row renders "[tag]" (system-accent) between the command name and the description; untagged rows and arg rows render no bracket.
     #[test]
     fn tagged_command_row_renders_bracketed_tag() {
         use ratatui::buffer::Buffer;
@@ -789,7 +761,7 @@ mod tests {
         let width: u16 = 60;
         let snap = SlashSnapshot {
             open: true,
-            // Select row 1 so the tagged + arg rows stay unselected.
+            // Select row 1 so the tagged and arg rows stay unselected
             matches: vec![tagged, untagged, arg],
             selected: 1,
             ..Default::default()
@@ -804,9 +776,9 @@ mod tests {
                 .collect()
         };
 
-        // True buffer column of `needle`'s first cell. Do not use `str::find` on
-        // `row_text`: the selected-row prefix is multi-byte (`❯`), so byte
-        // offsets drift from display columns and falsely report misalignment.
+        // True buffer column of `needle`'s first cell
+        // Do not use `str::find` on `row_text`: the selected-row prefix is multi-byte (`❯`)
+        // Byte offsets drift from display columns and falsely report misalignment
         let desc_col = |y: u16, needle: &str| -> u16 {
             let needle_chars: Vec<char> = needle.chars().collect();
             (0..width)
@@ -837,7 +809,7 @@ mod tests {
             "tag renders in the system accent"
         );
 
-        // Row 1 (untagged) and row 2 (arg): no bracket at all.
+        // Row 1 (untagged) and row 2 (arg): no bracket
         assert!(
             !row_text(1).contains('['),
             "untagged row has no bracket: {}",
@@ -849,9 +821,8 @@ mod tests {
             row_text(2)
         );
 
-        // Shared-column invariant: the description starts at the same buffer
-        // column on the tagged row and the untagged row (the tag folds into
-        // the label column, so it never shifts the description).
+        // Shared-column invariant: the description starts at the same buffer column on the tagged row and the untagged row
+        // The tag folds into the label column, so it never shifts the description
         let desc0_x = desc_col(0, "does work");
         let desc1_x = desc_col(1, "no tag here");
         assert_eq!(
@@ -862,10 +833,9 @@ mod tests {
             row_text(1)
         );
 
-        // Tag is right-aligned: closing `]` sits at the label-column right edge,
-        // immediately before the first-line gap space and then the description.
-        // First-line gap is one space (see build_item_lines), so `]` column ==
-        // desc_col - 1 - 1. (Do not use str::find — multi-byte selected prefix.)
+        // Tag is right-aligned: closing `]` sits at the label-column right edge, just before the first-line gap space and then the description
+        // First-line gap is one space (see build_item_lines), so `]` column == desc_col - 1 - 1
+        // (Do not use str::find: the selected prefix is multi-byte.)
         let close_bracket_x = (0..width)
             .rev()
             .find(|&x| buf.cell((x, 0)).map(|c| c.symbol()) == Some("]"))
@@ -877,8 +847,8 @@ mod tests {
             row_text(0)
         );
 
-        // A long tag at narrow widths must truncate without panicking (zero-width
-        // / non-char-boundary math), including the width < 4 early-return path.
+        // A long tag at narrow widths must truncate without panicking (zero-width or non-char-boundary math)
+        // This includes the width < 4 early-return path
         let mut long_tagged = row("/x", "d");
         long_tagged.tag = Some("superlongtagname".to_string());
         let narrow = SlashSnapshot {

@@ -178,12 +178,22 @@ impl SessionActor {
                     .await;
                 } else {
                     match crate::config::remove_hooks_path(&path) {
-                        Ok(()) => {
+                        Ok(true) => {
                             xai_grok_telemetry::session_ctx::log_event(
                                 xai_grok_telemetry::events::HookRemoved { success: true },
                             );
                             self.send_host_turn_slash_command_output(&format!(
                                 "Removed hook path: {path}\nRestart session to stop loading hooks from this path."
+                            ))
+                            .await;
+                        }
+                        Ok(false) => {
+                            xai_grok_telemetry::session_ctx::log_event(
+                                xai_grok_telemetry::events::HookRemoved { success: false },
+                            );
+                            self.send_host_turn_slash_command_output(&format!(
+                                "{path} is not a user-registered hook directory; \
+                                 config-defined hook sources cannot be removed from here."
                             ))
                             .await;
                         }

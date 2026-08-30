@@ -24,14 +24,12 @@ use xai_grok_config_types::MemoryIndexConfig;
 
 static SQLITE_VEC_INIT: Once = Once::new();
 
-/// Register the sqlite-vec extension globally. Must be called before any
-/// `MemoryIndex::open_or_create()`. Safe to call multiple times (Once guard).
+/// Register the sqlite-vec extension globally. Call it before any `MemoryIndex::open_or_create()`; repeat calls are safe (Once guard).
 pub fn init_sqlite_vec() {
     SQLITE_VEC_INIT.call_once(|| {
-        // SAFETY: sqlite_vec::sqlite3_vec_init has the C ABI signature expected by
-        // sqlite3_auto_extension. The explicit type annotation on transmute makes
-        // this compiler-verified — if sqlite-vec changes its init signature, the
-        // annotation will cause a compile error instead of silent UB.
+        // SAFETY: sqlite_vec::sqlite3_vec_init has the C ABI signature expected by sqlite3_auto_extension
+        // The explicit type annotation on transmute makes this compiler-verified
+        // If sqlite-vec changes its init signature, the annotation will cause a compile error instead of silent UB
         // We pin sqlite-vec to exact version =0.1.7-alpha.2; any bump must re-verify.
         unsafe {
             rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
@@ -94,15 +92,13 @@ impl MemoryIndex {
     /// Open or create the index database at `db_path`.
     ///
     /// `dimensions` sets the embedding vector size for the `chunks_vec` table.
-    /// If sqlite-vec failed to load (call `init_sqlite_vec()` first), the
-    /// index gracefully degrades to FTS-only mode.
+    /// If sqlite-vec failed to load (call `init_sqlite_vec()` first), the index gracefully degrades to FTS-only mode.
     pub fn open_or_create(
         db_path: &Path,
         storage: MemoryStorage,
         config: MemoryIndexConfig,
         dimensions: usize,
     ) -> Result<Self, rusqlite::Error> {
-        // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -117,8 +113,7 @@ impl MemoryIndex {
         )
     }
 
-    /// Open with an explicit journal mode — the seam tests use to exercise
-    /// the network-filesystem decision on a local disk.
+    /// Open with an explicit journal mode. Tests use it to exercise the network-filesystem decision on a local disk.
     fn open_or_create_with_journal_mode(
         db_path: &Path,
         storage: MemoryStorage,
@@ -145,7 +140,6 @@ impl MemoryIndex {
                 }
             };
 
-        // Create schema
         db.execute_batch(&schema::schema_sql(dimensions, vec_available))?;
 
         // Store/verify embedding dimensions in meta table
@@ -157,10 +151,10 @@ impl MemoryIndex {
 
         match stored_dims {
             Some(ref s) if s.parse::<usize>().ok() == Some(dimensions) => {
-                // Dimensions match — nothing to do
+                // Dimensions match, nothing to do
             }
             Some(ref s) => {
-                // Dimension mismatch — recreate vec table
+                // Dimension mismatch, recreate vec table
                 tracing::warn!(
                     stored = %s,
                     requested = dimensions,
@@ -180,7 +174,7 @@ impl MemoryIndex {
                 )?;
             }
             None => {
-                // First time — store dimensions
+                // First time, store dimensions
                 db.execute(
                     schema::UPSERT_META_SQL,
                     params!["embedding_dimensions", dimensions.to_string()],
@@ -236,7 +230,6 @@ impl MemoryIndex {
         let new_chunks = chunk_markdown(&content, &self.chunk_config);
         let path_str = path.to_string_lossy().to_string();
 
-        // Load existing chunks for this path
         let existing = self.get_chunks_for_path(&path_str)?;
 
         let now = std::time::SystemTime::now()
@@ -247,8 +240,7 @@ impl MemoryIndex {
         let mut result = ReindexResult::default();
         let mut seen_ids = std::collections::HashSet::new();
 
-        // Wrap all mutations in a transaction so partial failures don't leave
-        // the index inconsistent between chunks, FTS, and vec tables.
+        // Wrap all mutations in a transaction so partial failures don't leave the index inconsistent between chunks, FTS, and vec tables
         let tx = self.db.transaction()?;
 
         for (i, chunk) in new_chunks.iter().enumerate() {
@@ -258,7 +250,7 @@ impl MemoryIndex {
 
             match existing.get(&chunk_id) {
                 Some(old) if old.hash == hash => {
-                    // Unchanged — skip
+                    // Unchanged, skip
                 }
                 Some(old) => {
                     // Changed: update chunk, delete stale FTS entry, insert new one
@@ -356,9 +348,8 @@ impl MemoryIndex {
 
     /// FTS5 keyword search. Returns results ranked by BM25 score.
     ///
-    /// Applies stop word filtering to improve precision for conversational
-    /// queries. When all words are stop words, returns empty results — the
-    /// caller (`hybrid_search`) falls back to the vector search path.
+    /// Applies stop word filtering to improve precision for conversational queries.
+    /// When all words are stop words, it returns empty results; the caller (`hybrid_search`) falls back to the vector search path.
     pub fn search_fts_by_sources(
         &self,
         query: &str,
@@ -470,9 +461,9 @@ impl MemoryIndex {
 
     /// Return the current value of the reindex claim from meta.
     ///
-    /// An empty string means no claim is active.  A non-empty claim means
-    /// a session currently owns the reindex lock (or a crashed session left
-    /// a stale one).  Used by `grok memory doctor` to detect stuck states.
+    /// An empty string means no claim is active.
+    /// A non-empty claim means a session currently owns the reindex lock (or a crashed session left a stale one).
+    /// `grok memory doctor` uses this to detect stuck states.
     pub fn get_reindex_claim(&self) -> String {
         self.db
             .query_row(
@@ -485,8 +476,7 @@ impl MemoryIndex {
 
     /// Return all distinct file paths that have at least one indexed chunk.
     ///
-    /// Used by `grok memory doctor` to detect orphaned chunks (chunks whose
-    /// source file has since been deleted).
+    /// `grok memory doctor` uses this to detect orphaned chunks (chunks whose source file has since been deleted).
     pub fn all_indexed_paths(&self) -> Result<Vec<String>, rusqlite::Error> {
         let mut stmt = self
             .db
@@ -581,8 +571,8 @@ impl MemoryIndex {
 
     /// Try to claim exclusive reindex rights using the `meta` table.
     ///
-    /// Uses an atomic UPDATE: succeeds only if unclaimed (empty) or stale
-    /// (older than `stale_threshold_secs`). Returns `true` if claimed.
+    /// Uses an atomic UPDATE: succeeds only if unclaimed (empty) or stale (older than `stale_threshold_secs`).
+    /// Returns `true` if claimed.
     /// Under SQLite's serialized writer model, at most one agent wins.
     pub fn try_claim_reindex(&self, stale_threshold_secs: i64) -> bool {
         let pid = std::process::id();
@@ -621,14 +611,9 @@ impl MemoryIndex {
 
     /// Delete all indexed chunks for a given file path.
     ///
-    /// Called when the watcher detects a file-removal event.  Without this,
-    /// chunks from deleted memory files remain searchable indefinitely.
-    ///
-    /// Deletes from all three tables (`chunks`, `chunks_fts`, `chunks_vec`) in
-    /// a single transaction so the index stays consistent even on partial failure.
-    ///
-    /// Returns the number of chunks removed, which is 0 when the path was not
-    /// previously indexed (idempotent).
+    /// The watcher calls this on file-removal events so deleted memory files stop being searchable.
+    /// Deletes from all three tables (`chunks`, `chunks_fts`, `chunks_vec`) in one transaction so the index stays consistent even on partial failure.
+    /// Returns the number of chunks removed, which is 0 when the path was not previously indexed (idempotent).
     pub fn delete_path(&mut self, path: &Path) -> Result<usize, rusqlite::Error> {
         let path_str = path.to_string_lossy().to_string();
         let existing = self.get_chunks_for_path(&path_str)?;
@@ -709,7 +694,7 @@ impl MemoryIndex {
             .map_or(Ok(None), |v| Ok(Some(v)))
     }
 
-    /// Insert an FTS5 entry for a chunk. Uses contentless FTS5 — manual management.
+    /// Insert an FTS5 entry for a chunk. The FTS table is contentless, so entries are managed by hand.
     #[expect(
         dead_code,
         reason = "used by future reindex_all and non-transactional paths"
@@ -792,7 +777,7 @@ mod tests {
 
     #[test]
     fn test_open_or_create_uses_wal_on_local_fs() {
-        // Ambient kill-switch would override the decision; skip if set.
+        // GROK_SQLITE_JOURNAL_MODE overrides the journal-mode decision; skip when it is set
         if std::env::var("GROK_SQLITE_JOURNAL_MODE").is_ok() {
             return;
         }
@@ -802,9 +787,8 @@ mod tests {
 
     #[test]
     fn test_network_mode_uses_fresh_per_host_truncate_db() {
-        // Network mode opens a per-host sibling of the given path (the
-        // legacy shared file is left untouched — a live old binary can flip
-        // it back to WAL at any time) in rollback-journal mode.
+        // Network mode opens a per-host sibling of the given path in rollback-journal mode
+        // The legacy shared file is left untouched; a live old binary can flip it back to WAL at any time
         let tmp = TempDir::new().unwrap();
         let db_path = tmp.path().join("test.sqlite");
         let storage = test_storage(&tmp);
@@ -867,7 +851,7 @@ mod tests {
         let mut idx = test_index(&tmp);
 
         let file_path = tmp.path().join("test.md");
-        // Write file with content that produces 2+ chunks
+        // Write file with content that produces at least 2 chunks
         let big = format!(
             "## Section 1\n\n{}\n\n## Section 2\n\n{}",
             "A".repeat(2000),
@@ -962,13 +946,11 @@ mod tests {
     // Append-then-reindex regression test
     // -----------------------------------------------------------------------
 
-    /// Simulates the `/memory append` → immediate-reindex flow.
+    /// Simulates the `/memory append` then immediate-reindex flow.
     ///
-    /// Previously the TUI's `AppendMemory` action wrote the file and returned
-    /// without reindexing.  Appended content was only searchable after a future
-    /// watcher-driven sync or the next session startup.  The fix reindexes
-    /// immediately after append; this test ensures that regression cannot silently
-    /// re-appear.
+    /// The TUI's `AppendMemory` action once wrote the file and returned without reindexing.
+    /// Appended content was then only searchable after a watcher-driven sync or the next session startup.
+    /// This test keeps that regression from silently returning.
     #[test]
     fn test_append_then_reindex_is_immediately_searchable() {
         let tmp = TempDir::new().unwrap();
@@ -982,7 +964,7 @@ mod tests {
         )
         .unwrap();
 
-        // The content is NOT yet in the index — search returns nothing.
+        // The content is not yet in the index, so search returns nothing
         let pre = idx.search_fts("prefer references over clones", 10).unwrap();
         assert!(
             pre.is_empty(),
@@ -1030,7 +1012,7 @@ mod tests {
         );
     }
 
-    /// delete_path is idempotent — calling it twice (or on an unindexed file) is safe.
+    /// delete_path is idempotent: calling it twice (or on an unindexed file) is safe.
     #[test]
     fn test_delete_path_idempotent() {
         let tmp = TempDir::new().unwrap();
@@ -1180,12 +1162,10 @@ mod tests {
     /// 1. Index a file.
     /// 2. Delete the file from disk (simulates a user removing a session log).
     /// 3. Run the same orphan-removal logic as `grok memory reindex`:
-    ///    compare `all_indexed_paths()` against current files and call
-    ///    `delete_path()` for paths that no longer exist.
+    ///    compare `all_indexed_paths()` against current files and call `delete_path()` for paths that no longer exist.
     /// 4. Verify the stale chunks are gone and are no longer searchable.
     ///
-    /// This proves that `grok memory reindex`'s Phase 1 actually fixes the
-    /// state that `grok memory doctor` warns about.
+    /// This proves that `grok memory reindex`'s Phase 1 fixes the state that `grok memory doctor` warns about.
     #[test]
     fn test_reindex_maintenance_removes_orphaned_chunks() {
         let tmp = TempDir::new().unwrap();
@@ -1203,11 +1183,11 @@ mod tests {
             "should find content before file is deleted"
         );
 
-        // Delete the file — now it is orphaned in the index.
+        // Delete the file; now it is orphaned in the index
         std::fs::remove_file(&file).unwrap();
 
         // Simulate `grok memory reindex` Phase 1: compare indexed vs current.
-        let current: std::collections::BTreeSet<String> = vec![].into_iter().collect(); // empty = no files
+        let current: std::collections::BTreeSet<String> = vec![].into_iter().collect(); // Empty means no files exist.
         let indexed = idx.all_indexed_paths().unwrap();
         for path in &indexed {
             if !current.contains(path) {
@@ -1225,21 +1205,18 @@ mod tests {
 
     /// A fresh (non-stale) reindex claim blocks `try_claim_reindex`.
     ///
-    /// Verifies that `grok memory reindex` Phase 0 correctly bails when a
-    /// live session holds a fresh claim — i.e., the CLI cannot steal a live
-    /// session's lock and then mutate the index concurrently.
+    /// Verifies that `grok memory reindex` Phase 0 bails when a live session holds a fresh claim.
+    /// The CLI cannot steal a live session's lock and then mutate the index concurrently.
     #[test]
     fn test_try_claim_reindex_fails_when_fresh_claim_held() {
         let tmp = TempDir::new().unwrap();
         let idx = test_index(&tmp);
 
-        // First caller claims unconditionally (stale threshold = i64::MAX means
-        // any pre-existing claim is already "expired").
+        // First caller claims unconditionally: a stale threshold of i64::MAX means any pre-existing claim is already "expired"
         let first = idx.try_claim_reindex(i64::MAX);
         assert!(first, "first claim should succeed on fresh index");
 
-        // A second caller with STALE_SECS=60 must fail because the claim was
-        // set moments ago and is not yet older than 60 seconds.
+        // A second caller with STALE_SECS=60 must fail because the claim was set moments ago and is not yet older than 60 seconds
         let second = idx.try_claim_reindex(60);
         assert!(
             !second,
@@ -1258,15 +1235,13 @@ mod tests {
 
     /// `grok memory reindex` Phase 3 resets the stale reindex claim.
     ///
-    /// Verifies that `release_claim()` clears `meta.reindex_claim` so that
-    /// `grok memory doctor` no longer reports a stale lock after reindex runs.
+    /// Verifies that `release_claim()` clears `meta.reindex_claim` so that `grok memory doctor` no longer reports a stale lock after reindex runs.
     #[test]
     fn test_reindex_maintenance_resets_stale_claim() {
         let tmp = TempDir::new().unwrap();
         let idx = test_index(&tmp);
 
-        // Acquire the claim using stale_secs=0 (steals any existing claim)
-        // so we start with a known non-empty claim value.
+        // Acquire the claim using stale_secs=0 (steals any existing claim) so we start with a known non-empty claim value
         let claimed = idx.try_claim_reindex(0);
         assert!(claimed, "try_claim_reindex should succeed on a fresh index");
         assert!(

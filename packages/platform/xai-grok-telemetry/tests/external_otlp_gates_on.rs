@@ -108,6 +108,7 @@ fn external_stream_gates_on_end_to_end() {
     xai_grok_telemetry::log_event(xai_grok_telemetry::events::ToolCallCompleted {
         tool_name: "github__create_issue".into(),
         outcome: xai_grok_session_events::types::ToolOutcome::Success,
+        hook_rewrote: false,
         duration_ms: 12,
         tool_result_size_bytes: None,
         file_path: Some("/tmp/projectdir/config.toml".into()),

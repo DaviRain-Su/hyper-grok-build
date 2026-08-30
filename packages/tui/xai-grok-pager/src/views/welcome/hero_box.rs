@@ -1,4 +1,4 @@
-//! Hero box component — side-by-side logo + menu inside a bordered box.
+//! Hero box component: the logo and menu sit side by side inside a bordered box.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
@@ -16,41 +16,36 @@ pub(super) const HERO_BOX_MIN_WIDTH: u16 = 90;
 /// Vertical padding (rows) between the box border and its inner content.
 const V_PAD: u16 = 1;
 
-/// Horizontal inset (cols) between the right column's content and the box
-/// border; also the collapsed left-column width when the logo is hidden.
+/// Horizontal inset (cols) between the right column's content and the box border; also the collapsed left-column width when the logo is hidden.
 const H_INSET: u16 = 2;
 
 /// Horizontal gap (cols) between the logo and the right column inside the box.
 const LOGO_H_PAD: u16 = 3;
 
-/// Rows the promo upgrade CTA reserves in the info slot: a spacer row above the
-/// `[label]` button row. Reserved on top of the announcement text rows so the
-/// message never paints over the button.
+/// Rows the promo upgrade CTA reserves in the info slot: a spacer row above the `[label]` button row.
+/// Reserved on top of the announcement text rows so the message never paints over the button.
 const UPGRADE_CTA_ROWS: u16 = 2;
 
 const HERO_SUBTITLE: &str = "Thanks for trying Grok Build, give feedback with /feedback!";
 
 use super::{PROMPT_HEIGHT, VERSION_GAP};
 
-/// Rows the "thanks" subtitle occupies. Hidden when the in-box info slot
-/// (changelog / announcement) is shown, to keep the box compact.
+/// Rows the "thanks" subtitle occupies.
+/// Hidden when the in-box info slot (changelog or announcement) is shown, to keep the box compact.
 fn subtitle_rows(info_height: u16) -> u16 {
     if info_height > 0 { 0 } else { 1 }
 }
 
-/// Height of the hero box's right column: version + optional subtitle +
-/// optional info block + the gap before the menu + the menu itself.
+/// Height of the hero box's right column: version + optional subtitle + optional info block + the gap before the menu + the menu itself.
 fn right_col_height(menu_height: u16, info_height: u16) -> u16 {
     let info_gap = if info_height > 0 { 1u16 } else { 0 };
     // version(1) + subtitle + [info_gap + info] + gap-before-menu(1) + menu
     1 + subtitle_rows(info_height) + info_gap + info_height + 1 + menu_height
 }
 
-/// Minimum content-area height the hero box needs to render without truncating:
-/// the optional error row, the box, a one-row flex gap, and the fixed rows
-/// below (tip + prompt + version). The box always shows the full-height logo,
-/// so a terminal shorter than this falls back to the stacked layout instead of
-/// overflowing.
+/// Minimum content-area height the hero box needs to render without truncating.
+/// That covers the optional error row, the box, a one-row flex gap, and the fixed rows below (tip + prompt + version).
+/// The box always shows the full-height logo, so a terminal shorter than this falls back to the stacked layout instead of overflowing.
 pub(super) fn min_content_height(
     error_height: u16,
     menu_height: u16,
@@ -63,10 +58,9 @@ pub(super) fn min_content_height(
     gap_after_error + error_height + hero_box_height + 1 + WelcomeLayout::fixed_below(tip_height)
 }
 
-/// Largest in-box info-slot height ≤ `desired` for which the hero box still
-/// fits in `content_height`. Lets the expanded announcement grow without ever
-/// pushing the box past the fit gate; the renderer trails a `…` for whatever
-/// tail still doesn't fit (graceful fallback, never an overflow).
+/// Largest in-box info-slot height, at most `desired`, for which the hero box still fits in `content_height`.
+/// Lets the expanded announcement grow without ever pushing the box past the fit gate.
+/// The renderer trails a `…` for whatever tail still doesn't fit, so the fallback never overflows.
 pub(super) fn clamp_info_height(
     desired: u16,
     content_height: u16,
@@ -91,10 +85,9 @@ fn left_col_width() -> u16 {
     }
 }
 
-/// Compute the hero box layout: bordered box with logo left, version + menu right.
+/// Compute the hero box layout: a bordered box with the logo on the left and the version and menu on the right.
 ///
-/// Sizes the in-box info slot here (the announcement clamped to fit, else the
-/// fixed `changelog_height`) so the renderer just draws into `hero_info`.
+/// Sizes the in-box info slot here (the announcement clamped to fit, else the fixed `changelog_height`) so the renderer just draws into `hero_info`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compute_hero_box(
     content_area: Rect,
@@ -110,9 +103,8 @@ pub(super) fn compute_hero_box(
     let tip_gap = if tip_height > 0 { 1u16 } else { 0 };
     let fixed_below = WelcomeLayout::fixed_below(tip_height);
 
-    // Column widths are height-independent, so derive them once and reuse for
-    // both the measurement and the rects: `hero_info.width == info_slot_width`,
-    // i.e. measured == drawn.
+    // Column widths are height-independent, so derive them once and reuse for both the measurement and the rects
+    // `hero_info.width == info_slot_width`, so the measured width is the drawn width
     let box_width = content_area.width.saturating_sub(6).min(120);
     let inner_width = box_width.saturating_sub(2);
     let left_col_width = left_col_width();
@@ -137,8 +129,7 @@ pub(super) fn compute_hero_box(
     let gap_after_error = if error_height > 0 { 1 } else { 0 };
     let fixed_above = gap_after_error + error_height;
 
-    // Top padding for vertical centering (use the default menu height so the
-    // logo position stays constant regardless of picker/focus state).
+    // Top padding for vertical centering (use the default menu height so the logo position stays constant regardless of picker or focus state)
     let default_menu_height = 4u16;
     let default_inner = logo_rows.max(right_col_height(default_menu_height, info_height));
     let default_hero = 2 + V_PAD * 2 + default_inner;
@@ -147,10 +138,8 @@ pub(super) fn compute_hero_box(
         .saturating_sub(default_hero)
         .saturating_sub(fixed_below)
         / 3;
-    // Centering derives top_pad from the default-menu box, but the fit gate
-    // (min_content_height) sizes for the actual box with no pad. Clamp to the
-    // real slack so a taller-than-default menu can't push the rows below the
-    // box off the bottom at the tight boundary.
+    // Centering derives top_pad from the default-menu box, but the fit gate (min_content_height) sizes for the actual box with no pad
+    // Clamp to the real slack so a menu taller than the default can't push the rows below the box off the bottom at the tight boundary
     let top_pad = top_pad.min(
         content_area
             .height
@@ -191,8 +180,8 @@ pub(super) fn compute_hero_box(
     .flex(Flex::Center)
     .areas(hero_box_slot);
 
-    // Inner area inside the border + v_pad. Widths reuse the values above; only
-    // x/y come from the laid-out box.
+    // Inner area inside the border and the vertical pad
+    // Widths reuse the values above; only x and y come from the laid-out box
     let inner = Rect {
         x: hero_box.x + 1,
         y: hero_box.y + 1 + V_PAD,
@@ -200,13 +189,12 @@ pub(super) fn compute_hero_box(
         height: inner_height,
     };
 
-    // Left column: balanced padding around the logo; collapses to a small
-    // inset when the logo is hidden.
+    // Left column: balanced padding around the logo; collapses to a small inset when the logo is hidden
     let logo_width = super::logo::full_logo_visual_width();
     // Logo body leans right; shave a column off the left pad to optically center.
     let logo_left_pad = LOGO_H_PAD.saturating_sub(1);
 
-    // Logo top-aligned, horizontally centered within left column.
+    // The logo is top-aligned and horizontally centered within the left column
     let hero_logo = Rect {
         x: inner.x + logo_left_pad,
         y: inner.y,
@@ -214,7 +202,7 @@ pub(super) fn compute_hero_box(
         height: logo_rows.min(inner.height),
     };
 
-    // Right column: rest of inner width after left column.
+    // The right column takes the rest of the inner width after the left column
     let right_x = inner.x + left_col_width;
 
     // Version line at top of right column.
@@ -225,7 +213,7 @@ pub(super) fn compute_hero_box(
         height: 1,
     };
 
-    // Subtitle line below version — hidden when the info slot is shown.
+    // Subtitle line below the version; hidden when the info slot is shown
     let hero_subtitle = if subtitle_rows(info_height) > 0 {
         Rect {
             x: right_x,
@@ -237,7 +225,7 @@ pub(super) fn compute_hero_box(
         zero
     };
 
-    // Info block (announcement or changelog) below version + optional subtitle.
+    // Info block (announcement or changelog) below the version and optional subtitle
     let info_y = inner.y + 1 + subtitle_rows(info_height) + info_gap;
     let hero_info = if info_height > 0 {
         Rect {
@@ -253,7 +241,7 @@ pub(super) fn compute_hero_box(
     // version + subtitle + info_gap + info + gap-before-menu
     let right_header_rows = 1 + subtitle_rows(info_height) + info_gap + info_height + 1;
 
-    // Menu below the header rows, left-aligned in right column.
+    // The menu sits below the header rows, left-aligned in the right column
     let hero_menu = Rect {
         x: right_x,
         y: inner.y + right_header_rows,
@@ -280,7 +268,7 @@ pub(super) fn compute_hero_box(
 
 /// Hit-test rects produced by [`render_hero_box`].
 pub(super) struct HeroBoxRects {
-    /// Hit-test rect per menu item row (for click/hover).
+    /// Hit-test rect per menu item row (for clicks and hover).
     pub(super) menu_rects: Vec<Rect>,
     /// Clickable changelog info block, if drawn.
     pub(super) changelog_cta_rect: Option<Rect>,
@@ -288,13 +276,13 @@ pub(super) struct HeroBoxRects {
     pub(super) announcement_truncated: bool,
     /// Full announcement block area (clickable anywhere to toggle), if shown.
     pub(super) announcement_rect: Option<Rect>,
-    /// Promo upgrade CTA `[label]` button rect (click → open), if drawn.
+    /// Promo upgrade CTA `[label]` button rect (a click opens it), if drawn.
     pub(super) upgrade_cta_rect: Option<Rect>,
     #[cfg(feature = "local-workspace")]
     pub(super) workspace_mode_rects: super::WorkspaceModeHitRects,
 }
 
-/// Render the bordered hero box with logo left, version + subtitle + menu right.
+/// Render the bordered hero box with the logo on the left and the version, subtitle, and menu on the right.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_hero_box(
     layout: &WelcomeLayout,
@@ -346,8 +334,7 @@ pub(super) fn render_hero_box(
         );
     }
 
-    // In-box info slot: the announcement takes priority over the changelog,
-    // and only one is ever shown — always in this same position.
+    // In-box info slot: the announcement takes priority over the changelog, and only one is ever shown, always in this same position
     let mut changelog_cta_rect = None;
     let mut announcement_truncated = false;
     let mut announcement_rect = None;
@@ -429,11 +416,11 @@ pub(super) fn render_hero_box(
     }
 }
 
-/// Draw the announcement text + (optional) upgrade CTA into `area`, reserving
-/// the CTA rows at the bottom so a long/expanded message never overpaints the
-/// button; the button is placed right after the drawn text + a spacer row.
-/// Shared by the hero box and the stacked layout. Returns `(text_area,
-/// truncated, upgrade_cta_rect)`.
+/// Draw the announcement text and the optional upgrade CTA into `area`.
+/// The CTA rows are reserved at the bottom so a long or expanded message never overpaints the button.
+/// The button is placed right after the drawn text and a spacer row.
+/// Shared by the hero box and the stacked layout.
+/// Returns `(text_area, truncated, upgrade_cta_rect)`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_announcement_with_upgrade_cta(
     buf: &mut Buffer,
@@ -461,16 +448,15 @@ pub(super) fn render_announcement_with_upgrade_cta(
             announcement_text_rows(ann, text_area.width, expanded).min(text_area.height);
         let cta_y = area.y + text_rows + 1;
         if cta_y < area.y + area.height {
-            // Hover follows the button cells (mouse-pos driven, like the sibling
-            // info blocks); the shared painter owns the styling + truncation.
+            // Hover follows the button cells under the mouse position, like the sibling info blocks
+            // The shared painter owns the styling and truncation
             let btn_w =
                 UnicodeWidthStr::width(format!("[{label}]").as_str()).min(area.width as usize);
             let hovered = mouse_pos.is_some_and(|(mx, my)| {
                 my == cta_y && mx >= area.x && (mx as usize) < area.x as usize + btn_w
             });
-            // Pinned (non-dismissible) promo shows its dim `cta.caption`; a
-            // dismissible one stays bare. No permission prompt on the welcome
-            // screen, so no gating; the painter drops it whole if too narrow.
+            // A pinned (non-dismissible) promo shows its dim `cta.caption`; a dismissible one stays bare
+            // No permission prompt exists on the welcome screen, so no gating; the painter drops the caption whole if too narrow
             let caption = (!crate::views::announcements::is_dismissible(ann))
                 .then(|| crate::views::announcements::usable_cta_caption(ann))
                 .flatten();
@@ -482,11 +468,10 @@ pub(super) fn render_announcement_with_upgrade_cta(
     (text_area, truncated, cta_rect)
 }
 
-/// Render the announcement (title + message) into `area`, used by both welcome
-/// layouts. Collapsed wraps to 2 lines + a `…`; expanded shows what fits; the
-/// block brightens while hovered, but only when it's interactive (overflowing
-/// or already expanded). Returns whether the message was truncated (the
-/// "expandable" signal).
+/// Render the announcement (title and message) into `area`, used by both welcome layouts.
+/// Collapsed wraps to 2 lines and a `…`; expanded shows what fits.
+/// The block brightens while hovered, but only when it's interactive (overflowing or already expanded).
+/// Returns whether the message was truncated (the "expandable" signal).
 pub(super) fn render_announcement_block(
     buf: &mut Buffer,
     theme: &Theme,
@@ -517,9 +502,8 @@ pub(super) fn render_announcement_block(
         } else {
             remaining_rows.min(2)
         };
-        // Only brighten when there's something to toggle (an overflowing message
-        // or the already-expanded state); a short message that fits isn't
-        // clickable, so it must not look interactive.
+        // Only brighten when there's something to toggle (an overflowing message or the already-expanded state)
+        // A short message that fits isn't clickable, so it must not look interactive
         let interactive = expanded || wrapped_line_count(msg, area.width) as usize > max_lines;
         let hovered = over && interactive;
         let msg_style = super::hover_style(theme, hovered, Style::default().fg(theme.gray));
@@ -538,9 +522,8 @@ pub(super) fn render_announcement_block(
     false
 }
 
-/// Render the changelog block (header + bullets) in the info slot. When
-/// `clickable` (full notes exist), the whole block opens the notes on click and
-/// brightens while hovered; returns that clickable rect.
+/// Render the changelog block (header and bullets) in the info slot.
+/// When `clickable` (full notes exist), the whole block opens the notes on click and brightens while hovered; returns that clickable rect.
 fn render_hero_changelog(
     buf: &mut Buffer,
     theme: &Theme,
@@ -571,9 +554,9 @@ fn render_hero_changelog(
         area.width,
     );
 
-    // Bullets start 2 rows down (header + blank), matching the height budget.
+    // Bullets start 2 rows down (header row plus a blank), matching the height budget
     let bullet_style = super::hover_style(theme, hovered, Style::default().fg(theme.gray_bright));
-    let max_text_width = area.width.saturating_sub(4) as usize; // " • " prefix + pad
+    let max_text_width = area.width.saturating_sub(4) as usize; // " • " prefix plus pad
     for (i, bullet) in bullets.iter().enumerate() {
         let row = area.y + 2 + i as u16;
         if row >= area.y + area.height {
@@ -587,8 +570,8 @@ fn render_hero_changelog(
     clickable.then_some(area)
 }
 
-/// Word-wrap `text` into lines no wider than `width` columns. A single word
-/// longer than `width` becomes its own (over-wide) line; the renderer clips it.
+/// Word-wrap `text` into lines no wider than `width` columns.
+/// A single word longer than `width` becomes its own (over-wide) line; the renderer clips it.
 fn wrap_lines(text: &str, width: u16) -> Vec<String> {
     use unicode_width::UnicodeWidthStr;
 
@@ -615,15 +598,14 @@ fn wrap_lines(text: &str, width: u16) -> Vec<String> {
     lines
 }
 
-/// Number of rows `text` occupies when word-wrapped to `width` columns. Shared
-/// by the layout height pre-pass and the renderer so they can't drift.
+/// Number of rows `text` occupies when word-wrapped to `width` columns.
+/// Shared by the layout height pre-pass and the renderer so they can't drift.
 pub(super) fn wrapped_line_count(text: &str, width: u16) -> u16 {
     wrap_lines(text, width).len() as u16
 }
 
-/// Rows the announcement TEXT wants at `width`: title + message, the message
-/// capped at 2 wrapped lines unless `expanded`. Shared with the renderer so the
-/// upgrade CTA is placed right after the drawn text (reserved == drawn).
+/// Rows the announcement TEXT wants at `width`: title and message, the message capped at 2 wrapped lines unless `expanded`.
+/// Shared with the renderer so the upgrade CTA is placed right after the drawn text (the reserved rows match the drawn rows).
 pub(super) fn announcement_text_rows(
     ann: &xai_grok_announcements::RemoteAnnouncement,
     width: u16,
@@ -637,9 +619,9 @@ pub(super) fn announcement_text_rows(
     title_rows + msg_rows
 }
 
-/// Rows the announcement info slot wants at `width`: the text rows plus, when a
-/// promo upgrade CTA is shown, a spacer row + the `[label]` button row
-/// (`UPGRADE_CTA_ROWS`). Shared with the renderer (reserved == drawn).
+/// Rows the announcement info slot wants at `width`.
+/// That is the text rows plus, when a promo upgrade CTA is shown, the spacer row and the `[label]` button row (`UPGRADE_CTA_ROWS`).
+/// Shared with the renderer (the reserved rows match the drawn rows).
 pub(super) fn announcement_desired_rows(
     ann: &xai_grok_announcements::RemoteAnnouncement,
     width: u16,
@@ -650,9 +632,9 @@ pub(super) fn announcement_desired_rows(
         + if has_upgrade_cta { UPGRADE_CTA_ROWS } else { 0 }
 }
 
-/// Word-wrap `text` into at most `max_lines` rows at (`x`, `y`). Overflow ends
-/// the last row with a `…` painted in `ell_style`. Returns whether the text was
-/// truncated.
+/// Word-wrap `text` into at most `max_lines` rows at (`x`, `y`).
+/// Overflow ends the last row with a `…` painted in `ell_style`.
+/// Returns whether the text was truncated.
 #[allow(clippy::too_many_arguments)]
 fn render_wrapped_text(
     buf: &mut Buffer,
@@ -716,8 +698,8 @@ mod tests {
         crate::theme::Theme::current()
     }
 
-    /// Distinctive long managed-config message whose tail ("incidents") only
-    /// shows when expanded — mirrors the enterprise-policy case from the bug.
+    /// A distinctive long message whose tail ("incidents") only shows when expanded.
+    /// Mirrors the enterprise-policy announcement that first showed the bug.
     const LONG_MSG: &str = "Enterprise security policy is now in effect for all \
 managed devices and accounts. Report security incidents";
 
@@ -836,7 +818,7 @@ managed devices and accounts. Report security incidents";
         assert!(!extract_text(&buf, 0, 1, area.width).is_empty());
         assert!(!extract_text(&buf, 0, 2, area.width).is_empty());
         assert_eq!(extract_text(&buf, 0, 3, area.width), "");
-        // The 2nd message line ends with the `…` affordance, and a hit-rect.
+        // The 2nd message line ends with the `…` affordance and reports truncation
         assert!(extract_text(&buf, 0, 2, area.width).contains('…'));
         assert!(truncated);
         // The tail of the message is hidden while collapsed.
@@ -855,8 +837,7 @@ managed devices and accounts. Report security incidents";
 
     #[test]
     fn short_announcement_does_not_brighten_on_hover() {
-        // A short message that fits isn't clickable, so hovering must not
-        // brighten it (otherwise it looks interactive when it isn't).
+        // A short message that fits isn't clickable, so hovering must not brighten it (otherwise it looks interactive when it isn't)
         let area = Rect::new(0, 0, 40, 6);
         let theme = theme();
         let a = ann(Some("FYI"), Some("All systems normal."));
@@ -873,8 +854,7 @@ managed devices and accounts. Report security incidents";
 
     #[test]
     fn overflowing_announcement_brightens_on_hover() {
-        // A collapsible (overflowing) message is interactive, so hovering it
-        // brightens the message to the primary color.
+        // A collapsible (overflowing) message is interactive, so hovering it brightens the message to the primary color
         let area = Rect::new(0, 0, 28, 10);
         let theme = theme();
         let a = ann(Some("Heads up"), Some(LONG_MSG));
@@ -900,15 +880,14 @@ managed devices and accounts. Report security incidents";
         let mut expanded = Buffer::empty(area);
         let truncated = render_announcement_block(&mut expanded, &theme(), area, &a, true, None);
         assert!(all_text(&expanded, area).contains("incidents"));
-        // Fully shown → nothing truncated, so no `…` and no hit-rect.
+        // Fully shown means nothing truncated, so no `…` and no hit-rect
         assert!(!all_text(&expanded, area).contains('…'));
         assert!(!truncated);
     }
 
     #[test]
     fn announcement_expanded_clamped_keeps_ellipsis() {
-        // Too few rows for the full message even when expanded: still graceful
-        // (renders what fits + keeps the `…`), never overflows the area.
+        // Too few rows for the full message even when expanded: renders what fits, keeps the `…`, and never overflows the area
         let area = Rect::new(0, 0, 28, 4);
         let mut buf = Buffer::empty(area);
         let a = ann(Some("Heads up"), Some(LONG_MSG));
@@ -919,11 +898,10 @@ managed devices and accounts. Report security incidents";
         assert_eq!(extract_text(&buf, 0, area.height, area.width), "");
     }
 
-    /// The upgrade CTA reserves `UPGRADE_CTA_ROWS` on top of the text rows;
-    /// `render_announcement_with_upgrade_cta` paints `[label]` below the message
-    /// — plus the dim `cta.caption` for a pinned promo that configures one; bare
-    /// for a caption-less pinned promo or a dismissible one — and returns the
-    /// button rect (button only, caption excluded).
+    /// The upgrade CTA reserves `UPGRADE_CTA_ROWS` on top of the text rows.
+    /// `render_announcement_with_upgrade_cta` paints `[label]` below the message, plus the dim `cta.caption` for a pinned promo that configures one.
+    /// The button stays bare for a caption-less pinned promo or a dismissible one.
+    /// Returns the button rect (button only, caption excluded).
     #[test]
     fn upgrade_cta_reserves_rows_and_returns_button_rect() {
         let area = Rect::new(0, 0, 40, 8);
@@ -939,7 +917,7 @@ managed devices and accounts. Report security incidents";
             text_rows
         );
 
-        // Pinned promo with a configured caption: button + dim caption below.
+        // Pinned promo with a configured caption: the button with the dim caption below
         let mut pinned = ann(None, Some("Grok 4.5 is here. Upgrade now."));
         pinned.dismissible = Some(false);
         pinned.cta = Some(xai_grok_announcements::AnnouncementCta {

@@ -1,5 +1,5 @@
-//! The `streaming-messages-json` serde wire DTOs: the Messages API line shapes
-//! plus their serialization helpers. Pure data; reducer logic lives elsewhere.
+//! The `streaming-messages-json` serde wire DTOs: the Messages API line shapes and their serialization helpers.
+//! These types are pure data; the reducer logic lives elsewhere.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,8 +11,8 @@ pub(super) fn new_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Serialize an `f64` cost, substituting `0.0` for a non-finite value that would
-/// otherwise make `serde_json` error and degrade the whole line to the `error` fallback.
+/// Serialize an `f64` cost, substituting `0.0` for a non-finite value.
+/// A non-finite value would make `serde_json` error and degrade the whole line to the `error` fallback.
 pub(super) fn serialize_finite_cost<S: serde::Serializer>(
     value: &f64,
     serializer: S,
@@ -20,7 +20,7 @@ pub(super) fn serialize_finite_cost<S: serde::Serializer>(
     serializer.serialize_f64(if value.is_finite() { *value } else { 0.0 })
 }
 
-/// Map a Grok permission mode to the Messages `permissionMode` enum, clamping Grok-only values to `default`.
+/// Map a Grok permission mode to the Messages `permissionMode` enum; Grok-only values become `default`.
 pub(super) fn messages_permission_mode(mode: Option<&str>) -> &'static str {
     match mode {
         Some("acceptEdits") => "acceptEdits",
@@ -47,20 +47,20 @@ pub(super) enum ContentBlock {
         name: String,
         input: Value,
     },
-    /// A backend `web_search` folded inline as Messages API `server_tool_use`.
+    /// A backend `web_search` written into `content[]` as a Messages API `server_tool_use` block.
     ServerToolUse {
         id: String,
         name: &'static str,
         input: Value,
     },
-    /// The results of an inline web search (`web_search_tool_result`); `content` is the hit array.
+    /// The results of a backend web search (`web_search_tool_result`); `content` holds the array of hits.
     WebSearchToolResult {
         tool_use_id: String,
         content: Value,
     },
 }
 
-/// The wire fields of Messages API `message.usage` (reasoning tokens folded into `output_tokens`).
+/// The wire fields of Messages API `message.usage` (reasoning tokens are counted in `output_tokens`).
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct MessageUsage {
     #[serde(default)]
@@ -83,14 +83,14 @@ pub(super) struct ServerToolUse {
 }
 
 impl From<&ResponseUsage> for MessageUsage {
-    /// Project the shell's per-response usage onto the four `message.usage` fields.
+    /// Copy the shell's per-response usage into the four `message.usage` fields.
     fn from(u: &ResponseUsage) -> Self {
         Self {
             input_tokens: u.input_tokens,
             output_tokens: u.output_tokens,
             cache_read_input_tokens: u.cache_read_input_tokens,
             cache_creation_input_tokens: u.cache_creation_input_tokens,
-            // Server-tool counts ride the terminal `result` usage only.
+            // Server-tool counts appear only on the terminal `result` usage
             server_tool_use: None,
         }
     }
@@ -182,9 +182,9 @@ pub(super) struct CompactMetadata {
     pub(super) pre_tokens: u64,
 }
 
-/// Every top-level `streaming-messages-json` NDJSON line. `#[serde(tag = "type")]`
-/// derives the `type` discriminant from the variant, so a line can never carry a
-/// mistyped tag; the two `system` subtypes ride the nested [`SystemLine`] `subtype`.
+/// Every top-level `streaming-messages-json` NDJSON line.
+/// `#[serde(tag = "type")]` derives the `type` discriminant from the variant, so a line can never carry a mistyped tag.
+/// The two `system` subtypes are discriminated by the nested [`SystemLine`] `subtype`.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum MessagesLine {
@@ -271,8 +271,8 @@ pub(super) enum StreamEventBody {
     MessageStop,
 }
 
-/// The `message` body of a partial `message_start`; carries the real id and
-/// input-side usage, with `output_tokens` finalized later on `message_delta`.
+/// The `message` body of a partial `message_start`.
+/// Carries the real message id and the input token usage; `output_tokens` is finalized later on `message_delta`.
 #[derive(Serialize)]
 pub(super) struct PartialMessage {
     pub(super) id: String,
@@ -301,13 +301,13 @@ pub(super) enum PartialBlock {
         name: String,
         input: EmptyObject,
     },
-    /// Partial-stream open for a `server_tool_use` block; input rides a following `input_json_delta`.
+    /// Opens a `server_tool_use` block in the partial stream; the input arrives in a following `input_json_delta`.
     ServerToolUse {
         id: String,
         name: &'static str,
         input: EmptyObject,
     },
-    /// Partial-stream `web_search_tool_result` block; carries its full `content` at start.
+    /// A `web_search_tool_result` block in the partial stream; carries its full `content` at start.
     WebSearchToolResult {
         tool_use_id: String,
         content: Value,

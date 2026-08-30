@@ -21,7 +21,17 @@ fn drain_persistence(rx: &mut mpsc::UnboundedReceiver<PersistenceMsg>) -> Vec<Pe
     out
 }
 
-fn is_turn_completed(m: &PersistenceMsg) -> bool {
+fn is_durable_turn_completed(m: &PersistenceMsg) -> bool {
+    matches!(
+        m,
+        PersistenceMsg::AppendUpdateDurablyAndAck {
+            update: crate::session::storage::SessionUpdate::Xai(n),
+            ..
+        } if matches!(n.update, XaiSessionUpdate::TurnCompleted { .. })
+    )
+}
+
+fn is_buffered_turn_completed(m: &PersistenceMsg) -> bool {
     matches!(
         m,
         PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n))
@@ -38,12 +48,20 @@ fn is_agent_message_delta(m: &PersistenceMsg) -> bool {
 }
 
 /// Pull the `(prompt_id, stop_reason, agent_result, elapsed_ms)` of the first
-/// persisted `TurnCompleted`, if any.
+/// persisted `TurnCompleted` (buffered or durable rail), if any.
 fn turn_completed_fields(
     msgs: &[PersistenceMsg],
 ) -> Option<(String, String, Option<String>, Option<u64>)> {
-    msgs.iter().find_map(|m| match m {
-        PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n)) => match &n.update {
+    msgs.iter().find_map(|m| {
+        let (PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n))
+        | PersistenceMsg::AppendUpdateDurablyAndAck {
+            update: crate::session::storage::SessionUpdate::Xai(n),
+            ..
+        }) = m
+        else {
+            return None;
+        };
+        match &n.update {
             XaiSessionUpdate::TurnCompleted {
                 prompt_id,
                 stop_reason,
@@ -57,8 +75,7 @@ fn turn_completed_fields(
                 *elapsed_ms,
             )),
             _ => None,
-        },
-        _ => None,
+        }
     })
 }
 
@@ -190,11 +207,16 @@ async fn normal_completion_persists_turn_completed_after_buffered_delta_flush() 
                 .expect("the flushed buffered delta must be persisted");
             let terminal_idx = msgs
                 .iter()
-                .position(is_turn_completed)
-                .expect("the terminal must be persisted");
+                .position(is_durable_turn_completed)
+                .expect("the terminal must be persisted via the durable append path");
             assert!(
                 delta_idx < terminal_idx,
                 "TurnCompleted must land in updates.jsonl after the flushed buffered delta"
+            );
+            assert!(
+                !msgs.iter().any(is_buffered_turn_completed),
+                "the terminal must not ride the buffered Update rail, or a power loss \
+                 after the turn's flush barrier could keep the content but drop the terminal"
             );
 
             // Limitation: this drives `handle_completion` directly and mirrors
@@ -243,6 +265,117 @@ async fn error_completion_persists_turn_completed_with_error_detail() {
             assert_eq!(stop_reason, "error");
             assert_eq!(agent_result.as_deref(), Some("boom"));
             assert_eq!(elapsed_ms, Some(0));
+        })
+        .await;
+}
+
+fn turn_completed_error_kind(msgs: &[PersistenceMsg]) -> Option<String> {
+    msgs.iter().find_map(|m| {
+        let (PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n))
+        | PersistenceMsg::AppendUpdateDurablyAndAck {
+            update: crate::session::storage::SessionUpdate::Xai(n),
+            ..
+        }) = m
+        else {
+            return None;
+        };
+        match &n.update {
+            XaiSessionUpdate::TurnCompleted { error_kind, .. } => error_kind.clone(),
+            _ => None,
+        }
+    })
+}
+
+/// A max-tokens truncation failure stamps its typed kind in the durable
+/// terminal's `error_kind` field (replay/wake rails pick the truncation copy
+/// from it); a failure without a kind marker stamps none.
+#[tokio::test(flavor = "current_thread")]
+async fn truncation_completion_stamps_error_kind_on_turn_completed_field() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("p-trunc".to_string());
+            let (item, _rx) = pending_input("p-trunc");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(item);
+            }
+
+            actor
+                .handle_completion(
+                    "p-trunc".to_string(),
+                    Err(crate::sampling::error::map_sampling_err_to_acp(
+                        crate::sampling::error::SamplingError::MaxTokensTruncation,
+                    )),
+                    Some(0),
+                )
+                .await;
+
+            let msgs = drain_persistence(&mut persistence_rx);
+            let (prompt_id, stop_reason, agent_result, _) = turn_completed_fields(&msgs)
+                .expect("a truncation failure must persist a TurnCompleted");
+            assert_eq!(prompt_id, "p-trunc");
+            assert_eq!(stop_reason, "error");
+            assert_eq!(
+                agent_result.as_deref(),
+                Some(crate::sampling::error::MAX_TOKENS_TRUNCATION_MESSAGE)
+            );
+            assert_eq!(
+                turn_completed_error_kind(&msgs).as_deref(),
+                Some("max_tokens_truncation"),
+                "the terminal must carry the typed error kind"
+            );
+        })
+        .await;
+}
+
+/// A failure without a kind marker carries no `error_kind` on its terminal.
+#[tokio::test(flavor = "current_thread")]
+async fn generic_error_completion_omits_error_kind_on_turn_completed_field() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("p-generic".to_string());
+            let (item, _rx) = pending_input("p-generic");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(item);
+            }
+
+            actor
+                .handle_completion(
+                    "p-generic".to_string(),
+                    Err(acp::Error::internal_error().data("boom")),
+                    Some(0),
+                )
+                .await;
+
+            let msgs = drain_persistence(&mut persistence_rx);
+            assert!(
+                turn_completed_fields(&msgs).is_some(),
+                "a failed completion must persist a TurnCompleted"
+            );
+            assert_eq!(
+                turn_completed_error_kind(&msgs),
+                None,
+                "a failure without a kind marker must not stamp error_kind"
+            );
         })
         .await;
 }
@@ -385,13 +518,18 @@ async fn cancel_without_running_task_persists_none_elapsed() {
 
 /// Pull the first persisted `TurnCompleted`'s notification `_meta`, if any.
 fn turn_completed_meta(msgs: &[PersistenceMsg]) -> Option<serde_json::Value> {
-    msgs.iter().find_map(|m| match m {
-        PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n))
-            if matches!(n.update, XaiSessionUpdate::TurnCompleted { .. }) =>
-        {
-            n.meta.clone()
-        }
-        _ => None,
+    msgs.iter().find_map(|m| {
+        let (PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n))
+        | PersistenceMsg::AppendUpdateDurablyAndAck {
+            update: crate::session::storage::SessionUpdate::Xai(n),
+            ..
+        }) = m
+        else {
+            return None;
+        };
+        matches!(n.update, XaiSessionUpdate::TurnCompleted { .. })
+            .then(|| n.meta.clone())
+            .flatten()
     })
 }
 

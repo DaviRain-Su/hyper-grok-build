@@ -1,8 +1,7 @@
 //! Self-contained terminal renderer for Mermaid diagrams.
 //!
-//! Renders `graph`/`flowchart`, `sequenceDiagram`, and `stateDiagram` blocks
-//! as Unicode box-drawing art; unsupported diagram types fall back to the raw
-//! source in a framed box.
+//! Renders `graph`/`flowchart`, `sequenceDiagram`, and `stateDiagram` blocks as Unicode box-drawing art.
+//! Unsupported diagram types fall back to the raw source in a framed box.
 
 use std::collections::HashMap;
 
@@ -30,14 +29,12 @@ const MAX_LABEL: usize = 28;
 const PAD: usize = 1;
 const GAP_X: usize = 3;
 const GAP_Y: usize = 2;
-/// Node labels wrap to at most this many display columns per line, and at most
-/// this many lines (overflow is truncated with an ellipsis).
+/// Node labels wrap to at most this many display columns per line, and at most this many lines (overflow is truncated with an ellipsis).
 const WRAP_WIDTH: usize = 24;
 const MAX_LINES: usize = 4;
-/// Identifier-boundary characters preferred as break points when a single word
-/// is too wide to fit, so it is not sliced mid-segment.
-/// Mirrors `TOKEN_BREAK_CHARS` in `third_party/mermaid-to-svg/src/text_wrap.rs`;
-/// the two renderers are deliberately independent, so keep these two in sync.
+/// Identifier-boundary characters preferred as break points when a single word is too wide to fit, so it is not sliced mid-segment.
+/// Mirrors `TOKEN_BREAK_CHARS` in `third_party/mermaid-to-svg/src/text_wrap.rs`.
+/// The two renderers are deliberately independent, so keep these two in sync.
 const LABEL_BREAK_CHARS: [char; 4] = ['_', '-', '.', '/'];
 /// Sentinel marking the trailing column of a wide glyph (never emitted).
 const CONT: char = '\u{0}';
@@ -486,8 +483,8 @@ fn clean_label(raw: &str) -> String {
     } else {
         unquoted.to_string()
     };
-    // Decode after tag-stripping so `<b>` is removed as markup while `&lt;b&gt;`
-    // survives as a literal `<b>`; one decode at the single return covers both paths.
+    // Decode after tag-stripping so `<b>` is removed as markup while `&lt;b&gt;` survives as a literal `<b>`
+    // One decode at the single return covers both paths
     decode_html_entities(&text)
 }
 
@@ -515,8 +512,7 @@ fn decode_html_entities(s: &str) -> String {
             decode_entity_body(&body).map(|c| (c, j))
         });
         match decoded {
-            // Resume past the `;`; the single pass never re-scans emitted text, so
-            // `&amp;lt;` decodes to the literal `&lt;` rather than to `<`.
+            // Resume past the `;`; the single pass never re-scans emitted text, so `&amp;lt;` decodes to the literal `&lt;` rather than to `<`
             Some((c, j)) => {
                 out.push(c);
                 i = j + 1;
@@ -1521,8 +1517,8 @@ impl Canvas {
         }
     }
 
-    /// Mirror top-to-bottom for `BT` (rows reorder; within-row text is
-    /// unaffected, so labels stay readable). Box-drawing glyphs flip too.
+    /// Mirror top-to-bottom for `BT` (rows reorder; within-row text is unaffected, so labels stay readable).
+    /// Box-drawing glyphs flip too.
     fn flip_vertical(&mut self) {
         for y in 0..self.h / 2 {
             let y2 = self.h - 1 - y;
@@ -1537,8 +1533,8 @@ impl Canvas {
         }
     }
 
-    /// Mirror left-to-right for `RL`. Mirroring reverses each row, so after
-    /// flipping glyphs we reverse each text/label run back to reading order.
+    /// Mirror left-to-right for `RL`.
+    /// Mirroring reverses each row, so after flipping glyphs we reverse each text/label run back to reading order.
     fn flip_horizontal(&mut self) {
         for y in 0..self.h {
             for x in 0..self.w / 2 {
@@ -1871,8 +1867,7 @@ fn layout_canvas(
         })
         .collect();
 
-    // BT/RL reuse the TD/LR layout, then flip the finished canvas (so text
-    // stays readable) into the bottom-up / right-to-left orientation.
+    // BT/RL reuse the TD/LR layout, then flip the finished canvas (so text stays readable) into the bottom-up / right-to-left orientation
     let vertical = matches!(graph.dir, Dir::Down | Dir::Up);
     let plan = if vertical {
         place_td(&ranks, max_rank, &by_rank, &sizes, graph, &mut placed)
@@ -2419,10 +2414,9 @@ fn assign_tracks(spans: &[(usize, usize, usize, usize, usize)]) -> (Vec<(usize, 
     (out, tracks.len())
 }
 
-/// Reorder nodes within each rank to minimize edge crossings (Sugiyama-style
-/// barycenter sweeps): alternate down/up passes sort each rank by the mean
-/// position of its forward neighbours, keeping the ordering with the fewest
-/// crossings between adjacent ranks.
+/// Reorder nodes within each rank to minimize edge crossings (Sugiyama-style barycenter sweeps).
+/// Alternate down/up passes sort each rank by the mean position of its forward neighbours.
+/// The pass keeps the ordering with the fewest crossings between adjacent ranks.
 fn order_ranks(by_rank: &mut [Vec<usize>], edges: &[Edge], ranks: &[usize]) {
     let n = ranks.len();
     if by_rank.len() < 2 || n < 3 {
@@ -2520,10 +2514,9 @@ fn count_crossings(edges: &[Edge], ranks: &[usize], pos: &[usize]) -> usize {
     crossings
 }
 
-/// Assign a center coordinate (along the cross-axis) to every node so nodes line
-/// up under their neighbours. Iterative barycenter relaxation: each node drifts
-/// toward the average of its forward neighbours while ranks keep order and a
-/// minimum `sep` between boxes, which straightens chains and centers branches.
+/// Assign a center coordinate (along the cross-axis) to every node so nodes line up under their neighbours.
+/// Iterative barycenter relaxation straightens chains and centers branches.
+/// Each node drifts toward the average of its forward neighbours while ranks keep order and a minimum `sep` between boxes.
 fn assign_positions(
     by_rank: &[Vec<usize>],
     size: &[usize],
@@ -2634,8 +2627,7 @@ fn wrap_label(label: &str, width: usize, max_lines: usize) -> Vec<String> {
             for ch in word.chars() {
                 let cw = char_w(ch);
                 if chunk_w + cw > width && !chunk.is_empty() {
-                    // Prefer breaking after the last identifier boundary so a long
-                    // token is not sliced mid-segment; fall back to a per-char break.
+                    // Prefer breaking after the last identifier boundary so a long token is not sliced mid-segment; fall back to a per-char break
                     let carry = match chunk.rfind(LABEL_BREAK_CHARS) {
                         Some(p) => chunk.split_off(p + 1),
                         None => String::new(),
@@ -2747,8 +2739,7 @@ fn draw_box(canvas: &mut Canvas, p: &Placed, lines: &[String], shape: Shape) {
         for c in text.chars() {
             let cw = char_width(c).max(1);
             canvas.set(cur, row, c, Cls::Text);
-            // Wide glyphs (CJK, emoji) own a second column; mark it as a
-            // continuation so the line builder doesn't emit a stray space.
+            // Wide glyphs (CJK, emoji) own a second column; mark it as a continuation so the line builder doesn't emit a stray space
             for k in 1..cw {
                 canvas.set(cur + k, row, CONT, Cls::Text);
             }
@@ -3708,8 +3699,7 @@ mod tests {
 
     #[test]
     fn plain_label_keeps_literal_text_and_underscores() {
-        // Not a markdown string (no backtick wrapper): Mermaid renders it
-        // literally, so brackets, snake_case, and any `*`/`_` must survive.
+        // Not a markdown string (no backtick wrapper): Mermaid renders it literally, so brackets, snake_case, and any `*`/`_` must survive
         let g = parse_graph("flowchart TD\n  A[\"[ 464, 3797 ] seq_len d_model\"]").unwrap();
         assert_eq!(g.nodes[0].label, "[ 464, 3797 ] seq_len d_model");
     }
@@ -3731,9 +3721,8 @@ mod tests {
 
     #[test]
     fn generic_types_are_not_stripped_as_html() {
-        // `<String>` / `<i32>` / `<id>` look like tags but are not HTML
-        // formatting tags, so they must survive (only b/i/code/span/… etc. and
-        // <br> are stripped).
+        // `<String>` / `<i32>` / `<id>` look like tags but are not HTML formatting tags, so they must survive
+        // Only b/i/code/span/… etc. and <br> are stripped.
         let g = parse_graph(
             "flowchart TD\n  A[\"Returns Vec<String>\"] --> B[\"Option<i32> for <id>\"]",
         )
@@ -3779,9 +3768,8 @@ mod tests {
 
     #[test]
     fn direct_push_sinks_decode_entities() {
-        // Entities contain `;`, which split_statements treats as a separator, so
-        // they reach a sink intact only inside quotes; assert through the real
-        // parsers where such quoting works.
+        // Entities contain `;`, which split_statements treats as a separator, so they reach a sink intact only inside quotes
+        // Assert through the real parsers where such quoting works
         let g = parse_state(
             "stateDiagram-v2\n  state \"work &lt;job&gt;\" as J\n  Idle --> Run: \"on &lt;go&gt;\"\n  Run: \"d &lt;e&gt;\"",
         )
@@ -3813,9 +3801,8 @@ mod tests {
         assert!(s.items.iter().any(|it| matches!(it,
             SeqItem::Divider { text } if text.contains("c <x>") && !text.contains("&lt;"))));
 
-        // Class members and ER attributes have no clean quoted form (splitter
-        // fragments unquoted `;`; ER drops quoted text as a comment), so exercise
-        // those decodes at the finalizer directly.
+        // Class members and ER attributes have no clean quoted form (splitter fragments unquoted `;`; ER drops quoted text as a comment)
+        // Exercise those decodes directly at push_member and push_er_attribute
         let mut member = ClassInfo::default();
         push_member(&mut member, "+run &lt;R&gt;");
         assert_eq!(member.attrs, vec!["+run <R>".to_string()]);
@@ -3986,18 +3973,17 @@ mod tests {
     fn wrap_label_token_without_break_char_falls_back_per_char() {
         let token = "a".repeat(40);
         let lines = wrap_label(&token, WRAP_WIDTH, MAX_LINES);
-        // No boundary char -> per-char hard break across multiple lines.
+        // The token has no boundary char, so the wrap hard-breaks per char across multiple lines
         assert!(lines.len() >= 2, "must hard-break: {lines:?}");
-        // 40 narrow chars fit in <= MAX_LINES, so nothing is truncated or lost.
+        // 40 narrow chars fit in MAX_LINES or fewer lines, so nothing is truncated or lost
         assert_eq!(lines.concat(), token);
     }
 
     #[test]
     fn flowchart_long_identifier_breaks_on_boundary_not_mid_segment() {
         let out = plain("graph TD\n A[mark_filter_restore_context] --> B[Done]");
-        // The boundary-respecting pieces are present in the rendered art; the
-        // `wrap_label_breaks_long_identifier_on_boundary` unit test proves there
-        // is no mid-segment slice (losslessly), so no offset-coupled guard here.
+        // The boundary-respecting pieces are present in the rendered art
+        // `wrap_label_breaks_long_identifier_on_boundary` proves the break is on a boundary and lossless, so no exact-offset check here
         assert!(out.contains("mark_filter_restore_"), "{out}");
         assert!(out.contains("context"), "{out}");
     }
@@ -4016,7 +4002,7 @@ mod tests {
             lines[1..].iter().any(|l| !l.contains(LABEL_BREAK_CHARS)),
             "a later line must be a per-char break: {lines:?}"
         );
-        // 43 cols < MAX_LINES*WRAP_WIDTH, so it must not truncate; fully lossless.
+        // 43 cols is less than MAX_LINES*WRAP_WIDTH, so it must not truncate; fully lossless
         assert_eq!(lines.concat(), token);
     }
 

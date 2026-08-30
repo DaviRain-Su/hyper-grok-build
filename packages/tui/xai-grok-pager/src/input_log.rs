@@ -1,4 +1,4 @@
-//! Input flight recorder — rolling buffer of recent key events.
+//! Input flight recorder: a rolling buffer of recent key events.
 //!
 //! Ctrl+Shift+D dumps to `~/.grok/logs/input-debug-<timestamp>.json`.
 //! Can be better utilized once input bugs are fully resolved.
@@ -10,9 +10,8 @@ use std::time::Instant;
 const DEFAULT_CAPACITY: usize = 200;
 /// Snapshot of textarea state captured by `PromptWidget::handle_key`.
 ///
-/// Stored on `PromptWidget` after each key; read by `AgentView` when
-/// building `RawInputEntry`. `None` fields mean the key was handled before
-/// reaching the textarea (e.g., file search, slash command).
+/// Stored on `PromptWidget` after each key; read by `AgentView` when building `RawInputEntry`.
+/// `None` fields mean the key was handled before reaching the textarea (e.g., file search, slash command).
 #[derive(Clone, Debug, Default)]
 pub struct LastInputDelta {
     pub cursor_before: Option<usize>,
@@ -41,8 +40,8 @@ pub enum OutcomeSnapshot {
     Unchanged,
     Action,
 }
-/// Raw entry stored in the ring buffer. No heap allocations —
-/// formatting happens only during [`InputRingBuffer::snapshot_entries`].
+/// Raw entry stored in the ring buffer.
+/// No heap allocations; formatting happens only during [`InputRingBuffer::snapshot_entries`].
 #[derive(Clone, Debug)]
 pub struct RawInputEntry {
     pub wall_ts: u64,
@@ -67,8 +66,7 @@ pub struct InputRecord {
     /// Wall-clock unix millis for log correlation.
     pub wall_ts: u64,
     /// Sanitized key category (see [`sanitize_key_code`]).
-    /// Printable chars are logged as `"Char"` without the character value
-    /// to prevent reconstructing typed text from the dump.
+    /// Printable chars are logged as `"Char"` without the character value to prevent reconstructing typed text from the dump.
     pub key: String,
     /// Modifier flags, e.g. `"NONE"`, `"CONTROL"`.
     pub mods: String,
@@ -138,11 +136,9 @@ impl InputRingBuffer {
             })
             .collect()
     }
-    /// Number of raw entries in the buffer.
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
-    /// Time span covered by the buffer in milliseconds.
     pub fn time_span_ms(&self) -> u64 {
         match (self.entries.front(), self.entries.back()) {
             (Some((first, _)), Some((last, _))) => last.duration_since(*first).as_millis() as u64,
@@ -191,7 +187,6 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
-    /// Helper: build a minimal `RawInputEntry` with the given key code.
     fn stub_entry(key_code: KeyCode) -> RawInputEntry {
         RawInputEntry {
             wall_ts: 0,

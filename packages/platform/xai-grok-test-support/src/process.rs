@@ -1085,18 +1085,28 @@ mod tests {
     async fn graceful_termination_exits_without_escalation() {
         let sandbox = TestSandbox::new();
         let ready_file = sandbox.temp_dir().join("term-ready.pid");
+        // Block in a shell builtin (`read`) with an open stdin pipe rather than
+        // `sleep` in a loop. Process-group SIGTERM races with an external sleep
+        // child under dash: the shell can exit signalled (non-success) instead
+        // of running the trap's `exit 0`.
         let mut process = TestProcess::spawn(
-            shell("trap 'exit 0' TERM; echo $$ > \"$READY_FILE\"; while :; do sleep 1; done"),
+            shell("trap 'exit 0' TERM; echo $$ > \"$READY_FILE\"; read -r _ || true"),
             &sandbox,
             TestProcessConfig::new()
                 .label("handle-term")
+                .stdin(TestStdin::Piped)
                 .env("READY_FILE", &ready_file),
         )
         .expect("spawn TERM-handling child");
         wait_for_pid_file(&ready_file).await;
 
         let status = process.close().await.expect("graceful close");
-        assert!(status.success());
+        assert!(
+            status.success(),
+            "graceful close should exit cleanly: status={status:?} reason={:?} diag={}",
+            process.termination_reason(),
+            process.diagnostic_summary()
+        );
         assert_eq!(
             process.termination_reason(),
             Some(TestProcessTermination::GracefulTerminate)

@@ -1,54 +1,33 @@
-//! `/rename` (alias `/title`) -- rename the current session.
+//! `/rename` (alias `/title`) renames the current session.
 
 use crate::app::actions::Action;
-use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{
+    AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand, slash_meta,
+};
 use xai_grok_shell::session::persistence::{MAX_TITLE_SCALARS, sanitize_rename_title};
 
-/// Rename the current session's title/summary.
 pub struct RenameCommand;
 
 impl SlashCommand for RenameCommand {
-    fn name(&self) -> &str {
-        "rename"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["title"]
-    }
-
-    fn description(&self) -> &str {
-        "Rename the current session"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    fn usage(&self) -> &str {
-        "/rename <title> | --auto"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn args_required(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("<title>")
+    slash_meta! {
+        name: "rename",
+        aliases: ["title"],
+        description: "Rename the current session",
+        usage: "/rename <title> | --auto",
+        takes_args: true,
+        args_required: true,
+        session_scoped: true,
+        arg_placeholder: "<title>",
     }
 
     fn suggest_args(&self, ctx: &AppCtx, args_query: &str) -> Option<Vec<ArgItem>> {
-        // Empty-args-only: a ghost row that survives typed input (including
-        // `--auto`) steals Enter (`accept_slash_completion` replaces the
-        // args range).
+        // The ghost row is offered only while the args are empty
+        // A row that survives typed input (including `--auto`) steals Enter: `accept_slash_completion` replaces the args range
         if !args_query.trim().is_empty() {
             return None;
         }
-        // Prefill is `rename_source_title`, not `entry_title` — see that
-        // helper. `current_title` is already sanitized at sync time.
+        // The prefill is `rename_source_title`, not `entry_title` (see that helper)
+        // `current_title` is already sanitized at sync time
         let title = ctx.current_title?.trim();
         if title.is_empty() || title == "--auto" {
             return None;
@@ -69,10 +48,9 @@ impl SlashCommand for RenameCommand {
             return CommandResult::Error("No active session".to_string());
         }
 
-        // Strip so `/rename --auto<BEL>` is still the reserved verb, not a
-        // literal title. Also check the raw trim so `--auto\tmore` keeps
-        // the trailing-text error (tab is a control and would otherwise
-        // concatenate). `--automatic` stays a normal rename.
+        // Strip so `/rename --auto<BEL>` is still the reserved verb, not a literal title
+        // Also check the raw trim so `--auto\tmore` keeps the trailing-text error (tab is a control and would otherwise concatenate)
+        // `--automatic` stays a normal rename
         let title = sanitize_rename_title(args);
         if is_auto_verb(&title) || is_auto_verb(args) {
             return CommandResult::Action(Action::ResetSessionTitleToAuto);
@@ -182,9 +160,8 @@ mod tests {
         assert_eq!(snap.matches.len(), 1);
         assert_eq!(snap.matches[0].insert_text, "Fix Login Bug");
 
-        // Title change alone does not rebuild the snapshot (render used to
-        // stop at set_current_title). A refresh after the update is what
-        // offers the new ghost while `/rename ` is already open.
+        // A title change alone does not rebuild the snapshot (render used to stop at set_current_title)
+        // A refresh after the update is what offers the new ghost while `/rename ` is already open
         ctrl.set_current_title(Some("Late Title".into()));
         assert_eq!(state.snapshot().matches[0].insert_text, "Fix Login Bug");
         ctrl.refresh(&state, "/rename ", 8, &models);

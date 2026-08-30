@@ -5,10 +5,9 @@ use crate::common::*;
 const BODY_SENTINEL: &str = "READBODYONLYSENTINEL";
 const DONE_SENTINEL: &str = "LOOKUP_TURN_DONE";
 
-/// Uses `read_file` rather than `grep`: the grep tool shells out to `rg`,
-/// which is absent from the Bazel remote-exec sandbox (only xai-grok-tools'
-/// own test targets ship `@ripgrep_hermetic//:rg`), and a failed spawn
-/// degrades to a zero-match result that vacuously passes the absence assert.
+/// This test uses `read_file` rather than `grep`: the grep tool shells out to `rg`, which the Bazel remote-exec sandbox lacks.
+/// Only xai-grok-tools' own test targets ship `@ripgrep_hermetic//:rg`.
+/// A failed `rg` spawn degrades to a zero-match result that vacuously passes the absence assert.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_lookup_commits_one_line_summary() {

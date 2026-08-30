@@ -345,7 +345,7 @@ pub fn discover_plugins(
     // Gate the grok plugins dir on user_grok_home() so a project's .grok/plugins
     // is never scanned as user-global when no home resolves.
     let grok = xai_grok_config::user_grok_home();
-    let plugin_dirs = user_plugin_dirs(dirs::home_dir().as_deref(), grok.as_deref());
+    let plugin_dirs = user_plugin_dirs(xai_dirs::home_dir().as_deref(), grok.as_deref());
     for (plugins_dir, origin) in plugin_dirs {
         if plugins_dir.is_dir() {
             scan_plugin_dir(
@@ -401,7 +401,7 @@ pub fn discover_plugins(
     // scope wins. Within same scope, first-found (alphabetical by canonical
     // with explicit installPath entries (nested under cache/<marketplace>/<plugin>/<version>/).
     // The plugin name is extracted from the JSON key ("name@marketplace").
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = xai_dirs::home_dir() {
         let installed_json = home
             .join(".claude")
             .join("plugins")

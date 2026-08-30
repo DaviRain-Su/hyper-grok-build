@@ -192,6 +192,12 @@ pub struct SessionHandle {
         Option<xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle>,
 }
 impl SessionHandle {
+    pub(crate) fn message_delivery(&self) -> super::message_delivery::MessageDeliveryHandle {
+        super::message_delivery::MessageDeliveryHandle::new(
+            self.cmd_tx.clone(),
+            self.info.id.0.to_string(),
+        )
+    }
     /// Last assistant `model_id` / `model_fingerprint` in conversation (global, not turn-scoped).
     pub(crate) async fn get_model_metadata(&self) -> xai_chat_state::ModelMetadata {
         let (tx, rx) = oneshot::channel();

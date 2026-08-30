@@ -23,8 +23,8 @@ tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 tracing = { workspace = true }
 chrono = { workspace = true }
 ignore = { workspace = true }
-dirs = "6"
 xai-grok-config = { workspace = true }
+xai-dirs = { workspace = true }
 sha2 = { workspace = true }
 strum = { workspace = true }
 thiserror = { workspace = true }

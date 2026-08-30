@@ -3,39 +3,21 @@ use xai_grok_tools::implementations::grok_build::{
     IMAGE_GEN_TOOL_NAME, IMAGINE_COMMAND_NAME, imagine_instruction, imagine_usage_message,
 };
 
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
 const REQUIRED_TOOLS: &[&str] = &[IMAGE_GEN_TOOL_NAME];
 
 pub struct ImagineCommand;
 
 impl SlashCommand for ImagineCommand {
-    fn name(&self) -> &str {
-        IMAGINE_COMMAND_NAME
-    }
-
-    fn description(&self) -> &str {
-        "Generate an image from a text description"
-    }
-
-    fn usage(&self) -> &str {
-        "/imagine <description>"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn args_required(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("description of the image to generate")
-    }
-
-    fn required_tools(&self) -> &[&str] {
-        REQUIRED_TOOLS
+    slash_meta! {
+        name: IMAGINE_COMMAND_NAME,
+        description: "Generate an image from a text description",
+        usage: "/imagine <description>",
+        takes_args: true,
+        args_required: true,
+        arg_placeholder: "description of the image to generate",
+        required_tools: REQUIRED_TOOLS,
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {

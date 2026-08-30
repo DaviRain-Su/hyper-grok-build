@@ -304,8 +304,7 @@ fn corrupt_registry_degrades_to_untracked_rows() {
     );
 }
 
-// The fallback must not re-measure an excluded row against its own volume:
-// that printed bytes the total did not hold.
+// The fallback must not re-measure an excluded row against its own volume: that printed bytes the total did not hold
 #[cfg(unix)]
 #[test]
 fn a_row_off_the_anchor_reports_no_size() {
@@ -373,8 +372,7 @@ fn every_open_outcome_maps_to_its_state() {
     }
 }
 
-// Deleting a registry that is merely unopenable loses every label,
-// creation time, and session id in it.
+// Deleting a registry that is merely unopenable loses every label, creation time, and session id in it
 #[test]
 fn unopenable_registry_is_not_reported_as_corrupt() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -395,8 +393,7 @@ fn unopenable_registry_is_not_reported_as_corrupt() {
     );
 }
 
-// A column showing only creation prints 40d beside a `--max-age 7d` hint
-// for a worktree gc will not touch.
+// A column showing only creation prints 40d beside a `--max-age 7d` hint for a worktree gc will not touch
 #[test]
 fn age_column_reads_what_gc_reads() {
     const DAY: i64 = 86_400;
@@ -436,8 +433,7 @@ fn walk_issues_convert_to_report_counters() {
     );
 }
 
-// Flipping Busy to Corrupt puts "damaged, remove it" in front of a user
-// whose registry is only busy.
+// Flipping Busy to Corrupt puts "damaged, remove it" in front of a user whose registry is only busy
 #[test]
 fn sqlite_failure_kinds_map_to_states() {
     let cases = [
@@ -450,8 +446,8 @@ fn sqlite_failure_kinds_map_to_states() {
     }
 }
 
-// A read-only WAL open leaves sidecars, so sizing runs first. Only their
-// absence from the total proves the ordering.
+// A read-only WAL open leaves sidecars, so sizing runs first
+// Only their absence from the total proves the ordering
 #[test]
 fn the_registry_open_lands_after_sizing() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -873,8 +869,7 @@ fn print_report_renders_registry_notices() {
     }
 }
 
-// Bare `gc` reclaims nothing: without `--max-age` the age pass is off, and
-// the pass only walks registry records.
+// Bare `gc` reclaims nothing: without `--max-age` the age pass is off, and the pass only walks registry records
 #[test]
 fn reclaim_hint_names_a_sequence_that_frees_space() {
     const AGE: &str = "run `grok worktree gc --max-age 7d --dry-run`";
@@ -991,7 +986,7 @@ fn symlinked_worktrees_dir_is_surfaced_not_silently_dropped() {
 #[cfg(unix)]
 #[test]
 #[serial_test::serial(GROK_HOME)]
-// serial keys are independent locks, so a test setting both must hold both.
+// Serial keys are independent locks, so a test setting both must hold both
 #[serial_test::serial(HOME)]
 fn symlinked_default_home_keeps_home_label() {
     let tmp = tempfile::TempDir::new().unwrap();

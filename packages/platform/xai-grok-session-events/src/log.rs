@@ -18,7 +18,8 @@ struct EventEntry {
 
 const EVENTS_FILE: &str = "events.jsonl";
 
-/// Shared event writer for `events.jsonl`. `Clone + Send + Sync`.
+/// Writes events to `events.jsonl`.
+/// Clones share one file, and the writer is `Send + Sync` so background tasks can hold one.
 #[derive(Clone)]
 pub struct EventWriter {
     inner: Arc<EventWriterInner>,
@@ -49,12 +50,11 @@ impl EventWriter {
         }
     }
 
-    /// No-op writer that discards all events.
     pub fn noop() -> Self {
         Self {
             inner: Arc::new(EventWriterInner {
                 file: Mutex::new(None),
-                error_logged: AtomicBool::new(true), // suppress error logging
+                error_logged: AtomicBool::new(true), // True from the start, so this writer never warns
             }),
         }
     }
@@ -122,6 +122,7 @@ mod tests {
             outcome: ToolOutcome::Success,
             tool_call_id: "call_xyz".into(),
             source: crate::types::ToolCompletedSource::Shell,
+            rewriting_hook: None,
         });
         writer.emit(Event::TurnEnded {
             outcome: TurnOutcomeLabel::Completed,

@@ -5,10 +5,8 @@ use crate::common::*;
 const PLAN_LINES: usize = 60;
 const TAG: &str = "QUIT";
 
-/// The permanent-loss shape of the parked-plan bug users hit: quitting without
-/// answering must still leave the whole plan in the terminal. The pinned live
-/// region is repainted and never retained, so only what was committed at park
-/// time survives the process. Design doc §6.16.
+/// Quitting without answering a parked plan approval must still leave the whole plan in the terminal.
+/// The pinned live region is repainted and never retained, so only what was committed at park time survives the process.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_parked_plan_survives_quit() {

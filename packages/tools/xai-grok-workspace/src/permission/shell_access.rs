@@ -564,7 +564,7 @@ fn protected_grok_config_file_with_home(
             | xai_grok_config::MANAGED_CONFIG_FILENAME
             | xai_grok_config::REQUIREMENTS_FILENAME,
         ) => ProtectedEditReason::GrokConfig,
-        Some("sandbox.toml") => ProtectedEditReason::GrokSandbox,
+        Some(xai_grok_config::SANDBOX_CONFIG_FILENAME) => ProtectedEditReason::GrokSandbox,
         _ => return None,
     };
     let in_dot_grok = components.len() >= 2 && components[components.len() - 2] == ".grok";
@@ -1719,10 +1719,22 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let home_path = home.path();
         for (file, reason) in [
-            ("config.toml", ProtectedEditReason::GrokConfig),
-            ("managed_config.toml", ProtectedEditReason::GrokConfig),
-            ("requirements.toml", ProtectedEditReason::GrokConfig),
-            ("sandbox.toml", ProtectedEditReason::GrokSandbox),
+            (
+                xai_grok_config::USER_CONFIG_FILENAME,
+                ProtectedEditReason::GrokConfig,
+            ),
+            (
+                xai_grok_config::MANAGED_CONFIG_FILENAME,
+                ProtectedEditReason::GrokConfig,
+            ),
+            (
+                xai_grok_config::REQUIREMENTS_FILENAME,
+                ProtectedEditReason::GrokConfig,
+            ),
+            (
+                xai_grok_config::SANDBOX_CONFIG_FILENAME,
+                ProtectedEditReason::GrokSandbox,
+            ),
         ] {
             let path = home_path.join(file);
             let components = [file];
@@ -1733,19 +1745,21 @@ mod tests {
             );
         }
         // Same file names elsewhere (or with no resolvable home) stay ordinary.
-        let elsewhere = home_path.join("sub").join("sandbox.toml");
+        let elsewhere = home_path
+            .join("sub")
+            .join(xai_grok_config::SANDBOX_CONFIG_FILENAME);
         assert_eq!(
             protected_grok_config_file_with_home(
                 &elsewhere,
-                &["sub", "sandbox.toml"],
+                &["sub", xai_grok_config::SANDBOX_CONFIG_FILENAME],
                 Some(home_path)
             ),
             None
         );
         assert_eq!(
             protected_grok_config_file_with_home(
-                &home_path.join("sandbox.toml"),
-                &["sandbox.toml"],
+                &home_path.join(xai_grok_config::SANDBOX_CONFIG_FILENAME),
+                &[xai_grok_config::SANDBOX_CONFIG_FILENAME],
                 None
             ),
             None
@@ -1769,8 +1783,8 @@ mod tests {
         let physical_home = resolve_following_symlinks(&real_home, 0).unwrap();
         assert_eq!(
             protected_grok_config_file_with_home(
-                &physical_home.join("sandbox.toml"),
-                &["sandbox.toml"],
+                &physical_home.join(xai_grok_config::SANDBOX_CONFIG_FILENAME),
+                &[xai_grok_config::SANDBOX_CONFIG_FILENAME],
                 Some(&link)
             ),
             Some(ProtectedEditReason::GrokSandbox)

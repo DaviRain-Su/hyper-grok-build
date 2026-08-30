@@ -1,7 +1,6 @@
 //! Integration tests for the public render path through the default engine.
 //!
-//! These use only the public API (`default_engine` + `render_checked`) so they
-//! exercise the real, always-compiled dagre-based engine end to end.
+//! These use only the public API (`default_engine` and `render_checked`) so they exercise the real, always-compiled dagre-based engine end to end.
 
 use xai_grok_mermaid::{
     MermaidError, MermaidTheme, RenderLimits, RenderParams, default_engine, render_checked,
@@ -22,9 +21,8 @@ fn default_engine_renders_a_flowchart() {
     assert_eq!(img.height(), diagram.height_px);
 }
 
-/// Untrusted-input contract through the real engine: a panic would surface as
-/// `MermaidError::Panic`, which we assert against. Unparseable input may return
-/// other errors (which degrade to the code-block fallback), never a panic.
+/// Untrusted input through the real engine: `render_checked` reports a panic as `MermaidError::Panic`, which we assert against.
+/// Unparseable input may return other errors (which degrade to the code-block fallback), never a panic.
 #[test]
 fn garbage_input_is_isolated_not_panicked() {
     let limits = RenderLimits::default();
@@ -74,10 +72,8 @@ fn sequence_diagram_with_activations_renders_to_png() {
     assert_eq!(img.height(), diagram.height_px);
 }
 
-/// Regression: a class diagram using quoted cardinalities, stereotypes,
-/// generics, and the full relation set must render instead of erroring
-/// (previously failed with "Unrecognized classDiagram line" on
-/// `Owner "1" o-- "0..*" Animal`).
+/// Regression: a class diagram using quoted cardinalities, stereotypes, generics, and the full relation set must render instead of erroring.
+/// It previously failed with "Unrecognized classDiagram line" on `Owner "1" o-- "0..*" Animal`.
 #[test]
 fn class_diagram_with_cardinalities_renders() {
     let src = "classDiagram\n    direction TB\n    class Animal {\n        <<abstract>>\n        #String name\n        +makeSound()* String\n    }\n    class Owner {\n        +List~Animal~ pets\n        +adopt(Animal pet) void\n    }\n    Animal <|-- Dog : extends\n    Feedable <|.. Animal : implements\n    Owner \"1\" o-- \"0..*\" Animal : owns\n    Dog \"1\" --> \"0..1\" Ball : plays with\n    Veterinarian ..> Animal : examines\n    HealthReport --* Animal : belongs to";
@@ -95,8 +91,7 @@ fn class_diagram_with_cardinalities_renders() {
     assert!(!diagram.png.is_empty());
 }
 
-/// Same source + params must produce identical PNG bytes (the engine's text
-/// metrics are font-free, so rendering is deterministic).
+/// The same source and params must produce identical PNG bytes (the engine measures text without a font file, so rendering is deterministic).
 #[test]
 fn rendering_is_deterministic() {
     let engine = default_engine();
@@ -118,10 +113,8 @@ fn rendering_is_deterministic() {
     assert_eq!(a.png, b.png, "same input must yield identical PNG bytes");
 }
 
-/// End-to-end guard for the word-wrap fix: the real user diagram (a flowchart of
-/// long Python identifiers) must reach the rendered SVG with its identifiers
-/// intact, never hard-sliced mid-identifier. Renders through the same
-/// `mermaid_to_svg::render_mermaid_to_svg` path the pager uses.
+/// The real user diagram, a flowchart of long Python identifiers, must reach the SVG with each identifier intact, never sliced mid-identifier.
+/// This renders through the same `mermaid_to_svg::render_mermaid_to_svg` path the pager uses.
 #[test]
 fn long_identifier_node_labels_survive_intact_in_svg() {
     let src = "flowchart TB
@@ -135,8 +128,8 @@ fn long_identifier_node_labels_survive_intact_in_svg() {
     nav --> mark --> global --> sidebar --> page";
     let svg = mermaid_to_svg::render_mermaid_to_svg(src, None)
         .expect("the real user flowchart must render to SVG");
-    // Each long identifier appears as a COMPLETE single tspan; a slice (at any
-    // offset) could never produce the whole identifier as one tspan's content.
+    // Each long identifier appears as a complete single tspan
+    // A slice at any offset could never produce the whole identifier as one tspan's content
     assert!(
         svg.contains(">mark_filter_restore_context</tspan>"),
         "{svg}"
@@ -147,9 +140,8 @@ fn long_identifier_node_labels_survive_intact_in_svg() {
     );
 }
 
-/// A categorical-x-axis xychart with two `line` series must render to a decodable
-/// PNG through the full `[Open Image]` path (source -> SVG -> raster), on both
-/// themes. The categorical x-axis (no `-->`) previously failed to open.
+/// An xychart with a categorical x-axis and two `line` series must render to a decodable PNG on both themes.
+/// This exercises the full `[Open Image]` path (source to SVG to raster); a categorical x-axis (no `-->`) previously failed to open.
 #[test]
 fn categorical_xychart_with_two_series_renders_to_png() {
     const SOURCE: &str = "xychart-beta\n    \

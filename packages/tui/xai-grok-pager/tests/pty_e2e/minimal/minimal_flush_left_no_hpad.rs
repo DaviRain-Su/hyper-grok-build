@@ -3,11 +3,9 @@
 use crate::common::*;
 
 /// Minimal mode paints the welcome card edge-to-edge (no outer horizontal pad).
-/// The live region's status / prompt / info rows and committed user+agent blocks
-/// must share that left edge — previously they sat at `block_pad_left + accent`
-/// (= 3 columns of blank gutter), which looked misaligned against the welcome
-/// box. Assert every non-blank visible row either is welcome-card chrome
-/// (border / logo interior) or starts at column 0.
+/// The live region's status, prompt, and info rows and the committed user and agent blocks must share that left edge.
+/// They previously sat at `block_pad_left + accent`, 3 columns of blank gutter, which looked misaligned against the welcome box.
+/// Assert every non-blank visible row either is welcome-card chrome (border or logo interior) or starts at column 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_flush_left_no_hpad() {
@@ -19,7 +17,7 @@ async fn minimal_flush_left_no_hpad() {
     let mut harness = spawn_minimal(&content);
     wait_minimal_ready(&mut harness);
 
-    // Idle: status + prompt + info bar must be flush-left (no leading spaces).
+    // Idle: the status, prompt, and info bar must be flush-left (no leading spaces)
     assert_flush_left_live_rows(
         &harness.screen_contents(),
         &["minimal · /help"],
@@ -32,7 +30,7 @@ async fn minimal_flush_left_no_hpad() {
     harness
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("response renders");
-    // Let the turn finish and commit settle into scrollback / live region.
+    // Let the turn finish and the committed content settle into scrollback and the live region
     harness
         .wait_for_text(MINIMAL_IDLE_SENTINEL, Duration::from_secs(20))
         .expect("return to idle after response");
@@ -43,8 +41,7 @@ async fn minimal_flush_left_no_hpad() {
         screen.contains(MOCK_RESPONSE_SENTINEL),
         "response must be on screen\nscreen:\n{screen}"
     );
-    // Committed user line (`❯ go`), agent response, and live chrome all
-    // flush-left with the welcome card.
+    // The committed user line (`❯ go`), the agent response, and the live chrome all sit flush-left with the welcome card
     assert_flush_left_live_rows(
         &screen,
         &[
@@ -56,8 +53,8 @@ async fn minimal_flush_left_no_hpad() {
     );
 
     // Slash menu: typing a command prefix opens the dropdown below the prompt.
-    // Its rows must be flush-left too — previously the panel sat at the layout
-    // hpad and the item rows one further column in (`❯ /transcript` at col 3).
+    // Its rows must be flush-left too
+    // Previously the panel sat at the layout hpad and the item rows one further column in (`❯ /transcript` at col 3)
     harness
         .inject_keys(b"/tra")
         .expect("type slash command prefix");
@@ -69,15 +66,13 @@ async fn minimal_flush_left_no_hpad() {
         &["View the conversation transcript"],
         "slash dropdown",
     );
-    // Close the dropdown / clear the prompt so quit isn't intercepted.
+    // Close the dropdown and clear the prompt so quit isn't intercepted
     harness.inject_keys(b"\x1b").expect("esc closes dropdown");
     harness.update(Duration::from_millis(100));
 
-    // Permission modal: a scripted `run_terminal_command` tool call (no --yolo)
-    // opens the prompt-replacing permission modal. Its rows must be flush-left
-    // too — previously the whole modal sat at the layout hpad (2 columns in).
-    // The accent `┃` paints the modal's first column, so a correct row has zero
-    // leading spaces.
+    // Permission modal: a scripted `run_terminal_command` tool call (no --yolo) opens the permission modal that replaces the prompt
+    // Its rows must be flush-left too; previously the whole modal sat at the layout hpad (2 columns in)
+    // The accent `┃` paints the modal's first column, so a correct row has zero leading spaces
     content.set_response("PERMISSION_SETTLED — turn finished after the allow.");
     let args = json!({
         "command": "echo flush-check > flush_marker.txt",
@@ -114,10 +109,8 @@ async fn minimal_flush_left_no_hpad() {
     quit_minimal(&mut harness);
 }
 
-/// For each `needle`, find the first screen line containing it and assert that
-/// line has no leading ASCII spaces (flush-left). Welcome-card rows start with
-/// box-drawing chars at col 0 already; this targets the previously-padded
-/// live/committed content.
+/// For each `needle`, find the first screen line containing it and assert that line has no leading ASCII spaces (flush-left).
+/// Welcome-card rows start with box-drawing chars at col 0 already; this targets the live and committed content that used to be padded.
 fn assert_flush_left_live_rows(screen: &str, needles: &[&str], phase: &str) {
     for needle in needles {
         let line = screen

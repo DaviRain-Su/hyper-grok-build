@@ -1,14 +1,13 @@
 //! Streaming markdown renderer for terminal UIs.
 //!
-//! This crate provides incremental/streaming markdown rendering optimized for
-//! displaying LLM responses in terminal UIs. Key features:
+//! This crate provides incremental/streaming markdown rendering optimized for displaying LLM responses in terminal UIs.
+//! Key features:
 //!
 //! - **Streaming rendering**: Efficiently render markdown as it arrives chunk by chunk
 //! - **Checkpoint-based freezing**: Only re-render the "tail" after stable boundaries
 //! - **Syntax highlighting**: Code blocks highlighted via syntect
 //! - **Terminal color adaptation**: Automatic downgrade for 256-color/16-color terminals
-//! - **LaTeX math rendering**: `$...$`, `$$...$$`, `\(...\)` and `\[...\]` math is
-//!   converted to a Unicode approximation (`$E=mc^2$` → `E=mc²`) in pretty mode
+//! - **LaTeX math rendering**: pretty mode approximates `$...$`, `$$...$$`, `\(...\)` and `\[...\]` math in Unicode (`$E=mc^2$` becomes `E=mc²`)
 //!
 //! # Example
 //!
@@ -44,7 +43,7 @@ mod syntax;
 mod url_scan;
 
 // Re-export public API
-pub use buffers::MarkdownBuffers;
+pub use buffers::{CellJoin, MarkdownBuffers, TableCellCopy, TableCopyMeta};
 pub use checkpoint::{Checkpoint, CheckpointKind};
 pub use colors::{
     ColorLevel, adapt_color, adapt_style, detect_color_level, get_color_level,
@@ -58,16 +57,13 @@ pub use streaming::StreamingMarkdownRenderer;
 pub use style::{MarkdownStyle, TableBorders};
 pub use syntax::Syntect;
 
-// Re-export test helpers when fuzzing
 #[cfg(fuzzing)]
 pub use syntax::test_syntect;
 
 /// Render markdown to ratatui Lines with full output including checkpoint.
 ///
-/// Runs the parser pass followed by the `url_scan` pass so the returned
-/// output's `hyperlinks` mirrors what `StreamingMarkdownRenderer::finish()`
-/// produces for the same input (plain-URL detection for the pretty-mode
-/// `(url)` suffix and bare URLs in prose).
+/// Runs the `url_scan` pass after parsing so the output's `hyperlinks` matches what `StreamingMarkdownRenderer::finish()` produces for the same input.
+/// The scan detects plain URLs: the pretty-mode `(url)` suffix and bare URLs in prose.
 pub fn render_markdown_ratatui_full(
     text: &str,
     ms: MarkdownStyle,
@@ -89,8 +85,7 @@ pub fn render_markdown_ratatui_with_buffers(
     render_markdown_ratatui_with_buffers_width(text, ms, pretty, buffers, syntect, None)
 }
 
-/// Render markdown to ratatui Lines, reusing the provided buffers,
-/// with an optional maximum table width.
+/// Render markdown to ratatui Lines, reusing the provided buffers, with an optional maximum table width.
 pub fn render_markdown_ratatui_with_buffers_width(
     text: &str,
     ms: MarkdownStyle,
@@ -99,21 +94,16 @@ pub fn render_markdown_ratatui_with_buffers_width(
     syntect: Option<&Syntect>,
     max_table_width: Option<usize>,
 ) -> (MarkdownRenderOutput, Option<Checkpoint>) {
-    // Normalize LaTeX delimiters (`\(…\)`/`\[…\]`/`\begin{equation}`) into the
-    // canonical `$`/`$$` forms before parsing, so the math handlers convert them
-    // uniformly (incl. inside table cells). All offsets are in normalized space;
-    // `StreamingMarkdownRenderer` normalizes at ingestion so its stored source
-    // matches. Streaming tail renders (`render_markdown_ratatui_with_link_id`)
-    // do NOT re-normalize — they receive already-normalized source.
+    // Normalize `\(…\)`/`\[…\]`/`\begin{equation}` to `$`/`$$` before parsing, so the math handlers see one form, table cells included
+    // All offsets are in normalized space; `StreamingMarkdownRenderer` normalizes as input arrives, so its stored source matches
+    // Streaming tail renders (`render_markdown_ratatui_with_link_id`) do not re-normalize; they receive already-normalized source
     let normalized = latex_delimiters::normalize_latex_delimiters(text);
     let mut parsed = MarkdownParser::new(&normalized, ms, buffers, syntect)
         .max_table_width(max_table_width)
         .parse();
     let next_link_id = parsed.next_link_id;
     let (mut output, checkpoint) = parsed.render_ratatui(pretty);
-    // Mirror `StreamingMarkdownRenderer::finish()`: detect plain URLs
-    // so a one-shot full render produces the same hyperlinks a
-    // `push_and_render` + `finish()` sequence would.
+    // Mirror `StreamingMarkdownRenderer::finish()` so a one-shot render gets the same hyperlinks a `push_and_render` + `finish()` sequence would
     let (extra_links, _post_scan_next_id) =
         url_scan::detect_plain_urls(&output.lines, &output.hyperlinks, next_link_id);
     output.hyperlinks.extend(extra_links);
@@ -123,15 +113,12 @@ pub fn render_markdown_ratatui_with_buffers_width(
     (output, checkpoint)
 }
 
-/// Render markdown to ratatui Lines and provide `next_link_id` so the
-/// streaming renderer can resume link ID assignment across tail re-renders.
+/// Render markdown to ratatui Lines and provide `next_link_id` so the streaming renderer can resume link ID assignment across tail re-renders.
 ///
-/// `open_code` threads an optional incremental highlighter for the trailing
-/// still-open fenced code block: only the streaming tail re-render passes
-/// `Some(cache)`; `finish()` and non-streaming callers pass `None`. Everything
-/// other than that one open block (closed code blocks, HTML, math, tables,
-/// inline) always goes through the unchanged batch highlighter, so output is
-/// byte-for-byte identical to the cache-less path. See [`open_code_highlighter`].
+/// `open_code` is an optional incremental highlighter for the trailing still-open fenced code block.
+/// Only the streaming tail re-render passes `Some(cache)`; `finish()` and non-streaming callers pass `None`.
+/// Everything else (closed code blocks, HTML, math, tables, inline) goes through the unchanged batch highlighter.
+/// Output is byte-for-byte identical to the cache-less path; see [`open_code_highlighter`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_markdown_ratatui_with_link_id(
     text: &str,
@@ -151,7 +138,7 @@ pub(crate) fn render_markdown_ratatui_with_link_id(
         .open_code(open_code)
         .parse();
 
-    // NOTE: There can be multiple links in a tail, hence next_link_id is the return.
+    // There can be multiple links in a tail, so next_link_id is returned
     let next_link_id = parsed.next_link_id;
     let (output, checkpoint) = parsed.render_ratatui(pretty);
     (output, checkpoint, next_link_id)

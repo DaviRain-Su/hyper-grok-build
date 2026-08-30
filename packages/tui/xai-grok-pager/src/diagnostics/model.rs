@@ -1,5 +1,3 @@
-//! Shared terminal diagnostic report types.
-
 use crate::clipboard::{ClipboardDelivery, NativeClipboardPreflight, Osc52Capability};
 use crate::host::{DisplayServer, HostOs};
 use crate::terminal::{ByobuBackend, ModifierDelivery, MultiplexerKind, TerminalName};
@@ -98,8 +96,8 @@ pub struct DiagnosticFacts {
     pub keyboard: Option<KeyboardFact>,
     pub newline: Option<NewlineFact>,
     pub clipboard: ClipboardFacts,
-    /// Passive mic enumeration when voice capture is available. `None` omits the
-    /// Voice section (no-audio builds, or TUI when voice mode is off).
+    /// Passive mic enumeration when voice capture is available.
+    /// `None` omits the Voice section (no-audio builds, or TUI when voice mode is off).
     pub voice: Option<VoiceFacts>,
 }
 
@@ -123,18 +121,15 @@ pub struct TmuxFacts {
 
 /// Whether the attached tmux client forwards 24-bit color to the terminal.
 ///
-/// tmux resolves a client's features once, at attach time, so this describes
-/// the live client and not the config on disk: a config change applies only
-/// after that client reattaches.
+/// tmux resolves a client's features once, at attach time, so this describes the live client and not the config on disk.
+/// A config change applies only after that client reattaches.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TmuxColorPassthrough {
     /// The client advertises `RGB`, so truecolor SGR reaches the terminal.
     Forwarded,
-    /// tmux reduces 24-bit color to the client terminfo's palette, which is
-    /// what makes themes look washed out even when Grok emits truecolor.
+    /// tmux reduces 24-bit color to the client terminfo's palette, which is what makes themes look washed out even when Grok emits truecolor.
     Reduced,
-    /// No usable evidence: tmux predates `terminal-features` (3.2), no client
-    /// is attached, or the query failed. Never treated as a problem.
+    /// No usable evidence: tmux predates `terminal-features` (3.2), no client is attached, or the query failed. Never treated as a problem.
     Unknown,
 }
 
@@ -187,8 +182,7 @@ pub struct ClipboardFacts {
     pub container_no_display: bool,
     pub data_control: DataControlFact,
     pub delivery: ClipboardDelivery,
-    /// Compatibility projection for compact status/JSON consumers. Detailed
-    /// policy and remediation live in named findings.
+    /// A one-line fix string kept for the compact status and JSON outputs. Detailed policy and remediation live in named findings.
     pub fix: Option<String>,
 }
 

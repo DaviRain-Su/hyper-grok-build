@@ -88,6 +88,38 @@ fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<P
         interactivity,
     })
 }
+/// True when this command later boots an agent (`spawn_grok_shell` / agent
+/// subcommand) that heals managed policy after `apply_sandbox`.
+fn command_needs_pre_sandbox_policy_heal(command: Option<&Command>) -> bool {
+    match command {
+        None
+        | Some(Command::Agent(_))
+        | Some(Command::Dashboard)
+        | Some(Command::Models)
+        | Some(Command::Worktree(_)) => true,
+        Some(
+            Command::Inspect { .. }
+            | Command::Doctor(_)
+            | Command::Leader(_)
+            | Command::Logout
+            | Command::Login { .. }
+            | Command::Mcp(_)
+            | Command::Plugin(_)
+            | Command::Memory(_)
+            | Command::Sessions(_)
+            | Command::Setup { .. }
+            | Command::Share(_)
+            | Command::Wrap(_)
+            | Command::Export(_)
+            | Command::Trace(_)
+            | Command::Update { .. }
+            | Command::Version { .. }
+            | Command::Completions { .. }
+            | Command::DiskUsage(_)
+            | Command::Workspace(_),
+        ) => false,
+    }
+}
 use std::env;
 use xai_grok_update::{UpdateConfig, auto_update};
 
@@ -1215,7 +1247,7 @@ async fn run_agent_command(
     xai_grok_telemetry::instrumentation::install_panic_hook();
     if trust {
         match std::env::current_dir() {
-            Ok(cwd) => xai_grok_shell::agent::folder_trust::grant_folder_trust(&cwd),
+            Ok(cwd) => xai_grok_workspace::folder_trust::grant_folder_trust(&cwd),
             Err(e) => {
                 tracing::warn!(error = %e, "--trust: failed to resolve cwd; folder not trusted")
             }
@@ -2160,6 +2192,35 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             std::process::exit(1);
         }
     };
+    if args.trust {
+        match std::env::current_dir() {
+            Ok(cwd) => xai_grok_workspace::folder_trust::grant_folder_trust(&cwd),
+            Err(e) => {
+                eprintln!("warning: --trust: failed to resolve cwd; folder not trusted: {e}");
+            }
+        }
+    }
+    if command_needs_pre_sandbox_policy_heal(args.command.as_ref()) {
+        match xai_grok_shell::config::load_agent_config_disk_only() {
+            Ok(agent_cfg) => {
+                let auth_manager = std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new(
+                    &xai_grok_shell::util::grok_home::grok_home(),
+                    agent_cfg.grok_com_config.clone(),
+                ));
+                auth_manager.configure_refresher(
+                    agent_cfg.grok_com_config.auth_provider_command.clone(),
+                    None,
+                );
+                xai_grok_shell::managed_config::ensure_managed_policy_present(&auth_manager).await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "managed policy: skipped session-start heal (disk config load failed)"
+                );
+            }
+        }
+    }
     xai_grok_shell::config::apply_sandbox(
         None,
         sandbox_profile_arg.as_deref(),
@@ -2894,6 +2955,37 @@ async fn signal_leaders_to_relaunch(installed_version: &str, allow_same_version:
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn embedded_agent_commands_heal_managed_policy_before_sandboxing() {
+        for args in [
+            vec!["grok"],
+            vec!["grok", "agent", "stdio"],
+            vec!["grok", "dashboard"],
+            vec!["grok", "models"],
+            vec!["grok", "worktree", "list"],
+        ] {
+            let args = PagerArgs::try_parse_from(args).unwrap();
+            assert!(
+                command_needs_pre_sandbox_policy_heal(args.command.as_ref()),
+                "{args:?}"
+            );
+        }
+    }
+    #[test]
+    fn utility_commands_skip_managed_policy_heal() {
+        for args in [
+            vec!["grok", "inspect"],
+            vec!["grok", "mcp", "list"],
+            vec!["grok", "sessions", "list"],
+            vec!["grok", "version"],
+        ] {
+            let args = PagerArgs::try_parse_from(args).unwrap();
+            assert!(
+                !command_needs_pre_sandbox_policy_heal(args.command.as_ref()),
+                "{args:?}"
+            );
+        }
+    }
     #[test]
     fn default_caps_the_core_count() {
         let nz = |n| NonZeroUsize::new(n).unwrap();

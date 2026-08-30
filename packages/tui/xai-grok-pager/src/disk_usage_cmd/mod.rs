@@ -1,6 +1,6 @@
-//! `grok du`: what the user grok home uses on disk. It creates no grok home,
-//! registry file, or schema, but a read-only open of a WAL database leaves
-//! `-shm` and `-wal` sidecars, so sizes are collected before it opens.
+//! `grok du`: what the user's grok home uses on disk.
+//! It creates no grok home, registry file, or schema.
+//! A read-only open of a WAL database still leaves `-shm` and `-wal` sidecars, so sizes are collected before the registry opens.
 
 mod display;
 
@@ -39,7 +39,7 @@ pub struct DiskUsageArgs {
 }
 
 pub fn run(args: DiskUsageArgs) -> Result<()> {
-    // The registry's own resolution, unlike xai_grok_config::grok_home().
+    // resolve_grok_home resolves the home the way the registry does, unlike xai_grok_config::grok_home()
     let grok_home = resolve_grok_home()?;
     let mut out = std::io::stdout().lock();
     let present = grok_home
@@ -112,9 +112,8 @@ pub(crate) struct DiskUsageReport {
     schema_version: u32,
     grok_home: String,
     total_bytes: u64,
-    /// Capacity less available is at least the used bytes (`f_bavail`
-    /// withholds the root reserve), so a larger `total_bytes` proves blocks
-    /// were counted more than once.
+    /// Capacity less available is at least the used bytes (`f_bavail` withholds the root reserve).
+    /// A larger `total_bytes` therefore proves blocks were counted more than once.
     volume_capacity_bytes: Option<u64>,
     volume_available_bytes: Option<u64>,
     /// Largest first.
@@ -122,7 +121,7 @@ pub(crate) struct DiskUsageReport {
     root_files_bytes: u64,
     #[serde(flatten)]
     skips: SkipCounts,
-    /// Not followed, so a symlinked `worktrees/` leaves the total short.
+    /// Symlinked directories are not followed, so a symlinked `worktrees/` leaves the total short.
     unfollowed_dir_symlinks: u64,
     worktrees_outside_managed_roots: u64,
     registry: RegistryState,
@@ -198,8 +197,8 @@ impl Registration {
     }
 }
 
-/// `last_accessed_at` is stamped by session and agent activity, not by a
-/// shell parked in the tree. `db rebuild` registers rows with no `git_ref`.
+/// `last_accessed_at` is stamped by session and agent activity, not by a shell parked in the tree.
+/// `db rebuild` registers rows with no `git_ref`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TrackedRow {
     id: String,
@@ -331,7 +330,7 @@ fn collect_report(grok_home: &Path) -> Result<DiskUsageReport> {
                     issues.unstatable_entries += 1;
                 }
             }
-            // Its rows size the target directly, so they can outweigh the total.
+            // The worktree rows size the symlink's target directly, so they can outweigh the total
             if file_type.is_symlink() && std::fs::metadata(child.path()).is_ok_and(|m| m.is_dir()) {
                 tracing::debug!(path = %child.path().display(), "du: top-level symlink to a directory is not followed");
                 unfollowed_dir_symlinks += 1;
@@ -385,8 +384,8 @@ fn load_registry(grok_home: &Path) -> (RegistryState, Vec<WorktreeRecord>, PathB
     classify(WorktreeDb::open_read_only(grok_home))
 }
 
-/// The arm an open failed on decides nothing: a busy writer and an IO blip
-/// fail the same call damage does. The error code decides `Corrupt`.
+/// The arm an open failed on decides nothing: a busy writer, an IO blip, and file damage all fail the same call.
+/// The error code alone decides `Corrupt`.
 fn classify(open: RegistryOpen) -> (RegistryState, Vec<WorktreeRecord>, PathBuf) {
     match open {
         RegistryOpen::Opened { path, db } => match db.list(&ListFilter {
@@ -458,7 +457,7 @@ fn collect_worktrees(
         if !known.insert(path.clone()) {
             continue;
         }
-        // Manual records can live anywhere; outside the roots, never sized.
+        // Manual records can live anywhere; a row outside the roots is never sized
         if path_under_worktree_roots(&path, &roots) {
             let size = row_size(&path, sizes, &mut out.issues, volume);
             out.rows.push(WorktreeUsage::tracked(rec, &path, size));

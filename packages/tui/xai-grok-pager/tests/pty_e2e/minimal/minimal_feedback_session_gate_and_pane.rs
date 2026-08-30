@@ -8,8 +8,7 @@ const SESSION_GATE_SENTINEL: &str = "No active session";
 const THANKS_SENTINEL: &str = "Thanks for the feedback";
 const PANE_FEEDBACK: &str = "minimal-pty-feedback-report-xyz";
 
-/// Minimal: bare `/feedback` without a bound session_id shows a system notice;
-/// once a session exists the freeform pane opens and submits like full TUI.
+/// Minimal: bare `/feedback` without a bound session_id shows a system notice; with a session the freeform pane opens and submits like full TUI.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn minimal_feedback_session_gate_and_pane() {
@@ -19,12 +18,10 @@ async fn minimal_feedback_session_gate_and_pane() {
     let mut harness = spawn_minimal(&content);
     wait_minimal_ready(&mut harness);
 
-    // Minimal dispatches NewSession at startup; session_id binds when ACP
-    // session/new returns. wait_minimal_ready only waits for the idle prompt,
-    // so the first `/feedback` can hit the no-session gate or open the pane.
-    // Under remote CI a single-shot `/feedback\r` can land Enter before the
-    // composer has absorbed the slash filter, so the command never runs and
-    // the welcome card still fills the screen after the wait.
+    // Minimal dispatches NewSession at startup; session_id binds when ACP session/new returns
+    // wait_minimal_ready only waits for the idle prompt, so the first `/feedback` can hit the no-session gate or open the pane
+    // Under remote CI a single-shot `/feedback\r` can land Enter before the composer has absorbed the slash filter
+    // The command then never runs and the welcome card still fills the screen after the wait
     inject_keys_paced(&mut harness, b"/feedback");
     harness.inject_keys(b"\r").expect("submit bare /feedback");
     harness

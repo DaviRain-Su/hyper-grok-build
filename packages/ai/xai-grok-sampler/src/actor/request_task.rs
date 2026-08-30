@@ -4,7 +4,6 @@
 //! consumes a Layer 2 stream from the matching backend transform.
 //! Cancellation is cooperative via `CancellationToken`.
 
-use std::collections::BTreeMap;
 use std::pin::pin;
 use std::sync::{
     Arc, Mutex,
@@ -19,15 +18,18 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use xai_grok_sampling_types::{
-    ApiErrorCode, ConversationItem, ConversationRequest, ConversationResponse,
-    EmptyResponseContext, ReasoningModelIdentity, SamplingError, SentCredential,
-    error::Result as SamplingResult,
+    ApiErrorCode, ConversationRequest, ConversationResponse, EmptyResponseContext, SamplingError,
+    SentCredential, error::Result as SamplingResult,
 };
 
+use crate::actor::request_metadata::{
+    CompletionState, SamplingResultWithMetrics, merge_signal_labels,
+};
 use crate::client::{ApiBackend, SamplingClient};
 use crate::config::{RetryPolicy, SamplerConfig};
 use crate::doom_loop_recovery::{FailedResponseCapture, append_recovery_context};
 use crate::events::{SamplingErrorInfo, SamplingErrorKind, SamplingEvent, StripReason};
+use crate::handle::CollectedSamplingResult;
 use crate::metrics::InferenceLatencyStats;
 use crate::retry::{
     self as retry_mod, RetryDecision, classify_error, clone_error, resolve_max_retries,
@@ -42,10 +44,7 @@ use crate::types::RequestId;
 /// to detect dead streams before the user gives up).
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
 
-/// Result type for the `submit_and_collect` oneshot. Carries the rich
-/// `SamplingError` so callers can inspect retryability, status code,
-/// etc., without losing information through the
-/// `SamplingErrorInfo` round trip.
+/// Public result returned by `SamplerHandle::submit_and_collect`.
 pub type CompletionResult = Result<(ConversationResponse, InferenceLatencyStats), SamplingError>;
 
 /// Outcome of a single attempt within the retry loop.
@@ -62,7 +61,10 @@ enum AttemptOutcome {
     /// as a transient failure (the model returned reasoning-only or
     /// the stream was truncated). Metrics from the empty attempt are
     /// discarded; a successful retry produces fresh ones.
-    Empty { context: EmptyResponseContext },
+    Empty {
+        context: EmptyResponseContext,
+        doom_loop_signals: Vec<String>,
+    },
     /// Stream emitted [`SamplingEvent::Failed`]. The captured raw
     /// error is what the retry loop classifies; if no rich error was
     /// captured (e.g. the failure was synthesised inside the L2
@@ -70,6 +72,7 @@ enum AttemptOutcome {
     /// [`SamplingErrorInfo`].
     Failed {
         error: SamplingError,
+        doom_loop_signals: Vec<String>,
         recovery_items: Vec<xai_grok_sampling_types::ConversationItem>,
     },
     /// `cancel_token` fired mid-attempt. The retry loop bails out
@@ -91,9 +94,9 @@ pub(crate) async fn run_request_task(
     retry_policy: RetryPolicy,
     event_tx: mpsc::UnboundedSender<SamplingEvent>,
     cancel_token: CancellationToken,
-    completion_tx: Option<oneshot::Sender<CompletionResult>>,
+    completion: Option<oneshot::Sender<CollectedSamplingResult>>,
 ) -> RequestId {
-    let mut completion_tx = completion_tx;
+    let mut completion = CompletionState::new(completion);
     let idle_timeout = Duration::from_secs(
         config
             .idle_timeout_secs
@@ -111,8 +114,8 @@ pub(crate) async fn run_request_task(
     let mut client = match SamplingClient::new(config.clone()) {
         Ok(c) => c,
         Err(err) => {
-            emit_failed(&event_tx, &request_id, &err);
-            send_completion(&mut completion_tx, Err(err));
+            let terminal_event_queued = emit_failed(&event_tx, &request_id, &err);
+            send_completion(&mut completion, Err(err), terminal_event_queued);
             return request_id;
         }
     };
@@ -139,7 +142,7 @@ pub(crate) async fn run_request_task(
 
     loop {
         if cancel_token.is_cancelled() {
-            handle_cancellation(&event_tx, &request_id, &mut completion_tx);
+            handle_cancellation(&event_tx, &request_id, &mut completion);
             return request_id;
         }
 
@@ -171,6 +174,12 @@ pub(crate) async fn run_request_task(
                 response,
                 mut metrics,
             } => {
+                completion.merge_doom_loop_signals(
+                    response
+                        .doom_loop_signals
+                        .iter()
+                        .map(|signal| signal.raw.clone()),
+                );
                 metrics.attempts = retry_count + doom_retry_count + 1;
                 if let Some(policy) = doom_policy {
                     let confident = policy.confident_triggers(&response.doom_loop_signals);
@@ -192,15 +201,25 @@ pub(crate) async fn run_request_task(
                 // Emit Completed only after the loop succeeds; the L2
                 // stream's terminal event was suppressed by
                 // `run_one_attempt`.
-                let _ = event_tx.send(SamplingEvent::Completed {
-                    request_id: request_id.clone(),
-                    response: response.clone(),
-                    metrics: metrics.clone(),
-                });
-                send_completion(&mut completion_tx, Ok((*response, metrics)));
+                let terminal_event_queued = event_tx
+                    .send(SamplingEvent::Completed {
+                        request_id: request_id.clone(),
+                        response: response.clone(),
+                        metrics: metrics.clone(),
+                    })
+                    .is_ok();
+                send_completion(
+                    &mut completion,
+                    Ok((*response, metrics)),
+                    terminal_event_queued,
+                );
                 return request_id;
             }
-            AttemptOutcome::Empty { context } => {
+            AttemptOutcome::Empty {
+                context,
+                doom_loop_signals,
+            } => {
+                completion.merge_doom_loop_signals(doom_loop_signals);
                 tracing::warn!(
                     target: crate::sampling_log::TARGET,
                     empty_response = true,
@@ -228,7 +247,7 @@ pub(crate) async fn run_request_task(
                     &mut client,
                     &config,
                     &cancel_token,
-                    &mut completion_tx,
+                    &mut completion,
                 )
                 .await
                 {
@@ -237,8 +256,10 @@ pub(crate) async fn run_request_task(
             }
             AttemptOutcome::Failed {
                 error,
+                doom_loop_signals,
                 recovery_items,
             } => {
+                completion.merge_doom_loop_signals(doom_loop_signals);
                 // Doom-loop resamples run on their own budget and never
                 // consult the transport classifier, so no classifier change
                 // can silently debit the transport budget for a doom failure.
@@ -250,12 +271,24 @@ pub(crate) async fn run_request_task(
                     if retry_policy.retry_only_before_output
                         && output_observed.load(Ordering::Relaxed)
                     {
-                        emit_failed(&event_tx, &request_id, &error);
-                        send_completion(&mut completion_tx, Err(clone_error(&error)));
+                        let terminal_event_queued = emit_failed(&event_tx, &request_id, &error);
+                        send_completion(
+                            &mut completion,
+                            Err(clone_error(&error)),
+                            terminal_event_queued,
+                        );
                         return request_id;
                     }
                     let backoff = retry_mod::doom_loop_backoff(doom_retry_count + 1);
                     doom_retry_count += 1;
+                    let (recovery_triggers, aborted_at_chunk) = match &error {
+                        SamplingError::DoomLoopDetected {
+                            triggers,
+                            aborted_at_chunk,
+                        } => (triggers.clone(), *aborted_at_chunk),
+                        _ => unreachable!("doom-loop branch requires DoomLoopDetected"),
+                    };
+                    completion.record_recovery_attempt(recovery_triggers, aborted_at_chunk);
                     append_recovery_context(&mut request, recovery_items);
                     tracing::warn!(
                         target: crate::sampling_log::TARGET,
@@ -275,7 +308,7 @@ pub(crate) async fn run_request_task(
                     if sleep_or_cancel(backoff, &cancel_token).await {
                         continue;
                     }
-                    handle_cancellation(&event_tx, &request_id, &mut completion_tx);
+                    handle_cancellation(&event_tx, &request_id, &mut completion);
                     return request_id;
                 }
                 if !apply_retry_decision(
@@ -289,7 +322,7 @@ pub(crate) async fn run_request_task(
                     &mut client,
                     &config,
                     &cancel_token,
-                    &mut completion_tx,
+                    &mut completion,
                 )
                 .await
                 {
@@ -297,7 +330,7 @@ pub(crate) async fn run_request_task(
                 }
             }
             AttemptOutcome::Cancelled => {
-                handle_cancellation(&event_tx, &request_id, &mut completion_tx);
+                handle_cancellation(&event_tx, &request_id, &mut completion);
                 return request_id;
             }
             AttemptOutcome::InitFailed { error } => {
@@ -312,7 +345,7 @@ pub(crate) async fn run_request_task(
                     &mut client,
                     &config,
                     &cancel_token,
-                    &mut completion_tx,
+                    &mut completion,
                 )
                 .await
                 {
@@ -340,7 +373,7 @@ async fn apply_retry_decision(
     client: &mut SamplingClient,
     config: &SamplerConfig,
     cancel_token: &CancellationToken,
-    completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
+    completion: &mut CompletionState,
 ) -> bool {
     let rate_limit_threshold = if retry_policy.rate_limit_retry_threshold == 0 {
         retry_mod::RATE_LIMIT_RETRY_THRESHOLD
@@ -385,7 +418,7 @@ async fn apply_retry_decision(
             if sleep_or_cancel(backoff, cancel_token).await {
                 true
             } else {
-                handle_cancellation(event_tx, request_id, completion_tx);
+                handle_cancellation(event_tx, request_id, completion);
                 false
             }
         }
@@ -395,40 +428,16 @@ async fn apply_retry_decision(
             if sleep_or_cancel(backoff, cancel_token).await {
                 true
             } else {
-                handle_cancellation(event_tx, request_id, completion_tx);
+                handle_cancellation(event_tx, request_id, completion);
                 false
             }
-        }
-        RetryDecision::RetryWithModelBoundStateStrip => {
-            let stripped = request.strip_model_bound_state();
-            if stripped == 0 {
-                // The classifier matched but the request contains no removable
-                // continuation state. Repeating the same payload cannot help.
-                emit_failed(event_tx, request_id, err);
-                send_completion(completion_tx, Err(clone_error(err)));
-                return false;
-            }
-            *retry_count += 1;
-            tracing::warn!(
-                stripped,
-                model = %config.model,
-                "model-bound history rejected; retrying with portable transcript"
-            );
-            emit_retrying(
-                event_tx,
-                request_id,
-                *retry_count,
-                max_retries.max(*retry_count),
-                err,
-            );
-            true
         }
         RetryDecision::RetryWithImageStrip => {
             let stripped_urls = request.strip_images();
             if stripped_urls.is_empty() {
                 // Nothing left to strip; upgrade to fatal.
-                emit_failed(event_tx, request_id, err);
-                send_completion(completion_tx, Err(clone_error(err)));
+                let terminal_event_queued = emit_failed(event_tx, request_id, err);
+                send_completion(completion, Err(clone_error(err)), terminal_event_queued);
                 return false;
             }
             // Only the deterministic signal (a 400 stamped with the
@@ -472,7 +481,7 @@ async fn apply_retry_decision(
             *retry_count += 1;
             emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
             if !sleep_or_cancel(backoff, cancel_token).await {
-                handle_cancellation(event_tx, request_id, completion_tx);
+                handle_cancellation(event_tx, request_id, completion);
                 return false;
             }
 
@@ -495,8 +504,8 @@ async fn apply_retry_decision(
             true
         }
         RetryDecision::EmitToSession(emitted_err) => {
-            emit_failed(event_tx, request_id, &emitted_err);
-            send_completion(completion_tx, Err(emitted_err));
+            let terminal_event_queued = emit_failed(event_tx, request_id, &emitted_err);
+            send_completion(completion, Err(emitted_err), terminal_event_queued);
             false
         }
         RetryDecision::Fatal(fatal_err) => {
@@ -530,8 +539,8 @@ async fn apply_retry_decision(
                 }
                 exhausted_span.in_scope(|| {});
             }
-            emit_failed(event_tx, request_id, &fatal_err);
-            send_completion(completion_tx, Err(fatal_err));
+            let terminal_event_queued = emit_failed(event_tx, request_id, &fatal_err);
+            send_completion(completion, Err(fatal_err), terminal_event_queued);
             false
         }
     }
@@ -556,7 +565,7 @@ async fn sleep_or_cancel(duration: Duration, cancel_token: &CancellationToken) -
 #[allow(clippy::too_many_arguments)]
 async fn run_one_attempt(
     client: &SamplingClient,
-    mut request: ConversationRequest,
+    request: ConversationRequest,
     request_id: RequestId,
     idle_timeout: Duration,
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
@@ -564,12 +573,7 @@ async fn run_one_attempt(
     doom_check: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
     output_observed: Arc<AtomicBool>,
 ) -> AttemptOutcome {
-    if let Err(error) = client.apply_conversation_defaults(&mut request) {
-        return AttemptOutcome::InitFailed { error };
-    }
-    let reasoning_model_identity = request.reasoning_model_identity.clone();
     let length_policy = request.length_policy;
-
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
             let (raw, metadata) = match client.conversation_stream(request).await {
@@ -584,7 +588,6 @@ async fn run_one_attempt(
                 event_tx,
                 cancel_token,
                 captured,
-                reasoning_model_identity,
                 None,
                 FailedResponseCapture::default(),
                 output_observed,
@@ -592,7 +595,7 @@ async fn run_one_attempt(
             )
             .await
         }
-        ApiBackend::Responses | ApiBackend::CodexResponses => {
+        ApiBackend::Responses => {
             let (raw, metadata, doom_loop) =
                 match client.conversation_stream_responses(request).await {
                     Ok(parts) => parts,
@@ -626,87 +629,8 @@ async fn run_one_attempt(
                 event_tx,
                 cancel_token,
                 captured,
-                reasoning_model_identity,
                 doom_check,
                 failed_response,
-                output_observed,
-                length_policy,
-            )
-            .await
-        }
-        ApiBackend::GoogleGenerateContent => {
-            let (raw, identity) = match client.conversation_stream_google(request).await {
-                Ok(pair) => pair,
-                Err(e) => return AttemptOutcome::InitFailed { error: e },
-            };
-            let (teed, captured) = tee_errors(raw);
-            let l2 = crate::google::stream_google_generate_content(
-                teed,
-                request_id.clone(),
-                identity,
-                idle_timeout,
-            );
-            drive_l2(
-                l2,
-                request_id,
-                event_tx,
-                cancel_token,
-                captured,
-                reasoning_model_identity,
-                None,
-                FailedResponseCapture::default(),
-                output_observed,
-                length_policy,
-            )
-            .await
-        }
-        ApiBackend::BedrockConverseStream => {
-            let (raw, identity) = match client.conversation_stream_bedrock(request).await {
-                Ok(pair) => pair,
-                Err(e) => return AttemptOutcome::InitFailed { error: e },
-            };
-            let (teed, captured) = tee_errors(raw);
-            let l2 = crate::bedrock::stream_bedrock_converse(
-                teed,
-                request_id.clone(),
-                identity,
-                idle_timeout,
-            );
-            drive_l2(
-                l2,
-                request_id,
-                event_tx,
-                cancel_token,
-                captured,
-                reasoning_model_identity,
-                None,
-                FailedResponseCapture::default(),
-                output_observed,
-                length_policy,
-            )
-            .await
-        }
-        ApiBackend::PiMessages => {
-            let (raw, identity) = match client.conversation_stream_pi_messages(request).await {
-                Ok(pair) => pair,
-                Err(e) => return AttemptOutcome::InitFailed { error: e },
-            };
-            let (teed, captured) = tee_errors(raw);
-            let l2 = crate::pi_messages::stream_pi_messages(
-                teed,
-                request_id.clone(),
-                identity,
-                idle_timeout,
-            );
-            drive_l2(
-                l2,
-                request_id,
-                event_tx,
-                cancel_token,
-                captured,
-                reasoning_model_identity,
-                None,
-                FailedResponseCapture::default(),
                 output_observed,
                 length_policy,
             )
@@ -725,7 +649,6 @@ async fn run_one_attempt(
                 event_tx,
                 cancel_token,
                 captured,
-                reasoning_model_identity,
                 None,
                 FailedResponseCapture::default(),
                 output_observed,
@@ -778,38 +701,35 @@ async fn drive_l2(
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     cancel_token: &CancellationToken,
     captured: ErrorCell,
-    reasoning_model_identity: Option<ReasoningModelIdentity>,
     doom_check: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
     failed_response: FailedResponseCapture,
     output_observed: Arc<AtomicBool>,
     length_policy: xai_grok_sampling_types::LengthPolicy,
 ) -> AttemptOutcome {
     let mut l2 = pin!(l2);
-    let mut active_backend_tools = BTreeMap::<String, String>::new();
+    let mut doom_loop_signals = Vec::new();
     let mut await_first_output_span = Some(tracing::info_span!("sampling.await_first_output"));
     loop {
         tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
-                for (call_id, name) in std::mem::take(&mut active_backend_tools) {
-                    let _ = event_tx.send(SamplingEvent::BackendToolCallFailed {
-                        request_id: request_id.clone(),
-                        call_id,
-                        name,
-                        error: "request cancelled".to_string(),
-                    });
-                }
                 return AttemptOutcome::Cancelled;
             }
             next = l2.next() => match next {
-                Some(SamplingEvent::Completed { mut response, metrics, .. }) => {
-                    for item in &mut response.items {
-                        if let ConversationItem::Assistant(assistant) = item {
-                            assistant.reasoning_model_identity = reasoning_model_identity.clone();
-                        }
-                    }
+                Some(SamplingEvent::Completed { response, metrics, .. }) => {
                     output_observed.store(true, Ordering::Relaxed);
                     await_first_output_span.take();
+                    let mut all_triggers = Vec::new();
+                    merge_signal_labels(
+                        &mut all_triggers,
+                        response.doom_loop_signals.iter().map(|signal| &signal.raw),
+                    );
+                    if !all_triggers.is_empty() {
+                        let _ = event_tx.send(SamplingEvent::DoomLoopSignals {
+                            request_id: request_id.clone(),
+                            triggers: all_triggers.clone(),
+                        });
+                    }
                     // Doom outranks the truncation/empty classes: a confident
                     // loop poisons the attempt whatever else it looks like.
                     if let Some(policy) = doom_check {
@@ -820,20 +740,22 @@ async fn drive_l2(
                                     triggers,
                                     aborted_at_chunk: None,
                                 },
+                                doom_loop_signals: all_triggers,
                                 recovery_items: failed_response.take_items(),
                             };
                         }
                     }
-                    // Fail-vs-salvage is centralized in `apply_length_policy`
-                    // (empty Length and Length with tool calls never
-                    // salvage). A salvaged response has no empty reason, so
-                    // it falls through to `Completed` below.
+                    // Fail-vs-salvage is centralized in `apply_length_policy`;
+                    // detector metadata survives a failing verdict. A salvaged
+                    // response has no empty reason, so it falls through to
+                    // `Completed` below.
                     let response =
                         match crate::client::apply_length_policy(length_policy, *response) {
                             Ok(response) => Box::new(response),
                             Err(error) => {
                                 return AttemptOutcome::Failed {
                                     error,
+                                    doom_loop_signals: all_triggers,
                                     recovery_items: Vec::new(),
                                 };
                             }
@@ -845,19 +767,14 @@ async fn drive_l2(
                         == Some(xai_grok_sampling_types::StopReason::ContentFilter);
                     if !content_filtered && let Some(reason) = response.empty_reason() {
                         let context = build_empty_context(reason, &response);
-                        return AttemptOutcome::Empty { context };
+                        return AttemptOutcome::Empty {
+                            context,
+                            doom_loop_signals: all_triggers,
+                        };
                     }
                     return AttemptOutcome::Completed { response, metrics };
                 }
                 Some(SamplingEvent::Failed { error: info, .. }) => {
-                    for (call_id, name) in std::mem::take(&mut active_backend_tools) {
-                        let _ = event_tx.send(SamplingEvent::BackendToolCallFailed {
-                            request_id: request_id.clone(),
-                            call_id,
-                            name,
-                            error: info.message.clone(),
-                        });
-                    }
                     await_first_output_span.take();
                     let raw = captured
                         .lock()
@@ -871,20 +788,18 @@ async fn drive_l2(
                     };
                     return AttemptOutcome::Failed {
                         error,
+                        doom_loop_signals,
                         recovery_items,
                     };
                 }
+                Some(SamplingEvent::DoomLoopSignals { triggers, .. }) => {
+                    merge_signal_labels(&mut doom_loop_signals, triggers.iter().cloned());
+                    let _ = event_tx.send(SamplingEvent::DoomLoopSignals {
+                        request_id: request_id.clone(),
+                        triggers,
+                    });
+                }
                 Some(other) => {
-                    match &other {
-                        SamplingEvent::BackendToolCallStarted { call_id, name, .. } => {
-                            active_backend_tools.insert(call_id.clone(), name.clone());
-                        }
-                        SamplingEvent::BackendToolCallCompleted { call_id, .. }
-                        | SamplingEvent::BackendToolCallFailed { call_id, .. } => {
-                            active_backend_tools.remove(call_id);
-                        }
-                        _ => {}
-                    }
                     if matches!(
                         other,
                         SamplingEvent::FirstToken { .. }
@@ -892,7 +807,6 @@ async fn drive_l2(
                             | SamplingEvent::ToolCallDelta { .. }
                             | SamplingEvent::BackendToolCallStarted { .. }
                             | SamplingEvent::BackendToolCallCompleted { .. }
-                            | SamplingEvent::BackendToolCallFailed { .. }
                     ) {
                         output_observed.store(true, Ordering::Relaxed);
                         await_first_output_span.take();
@@ -900,14 +814,6 @@ async fn drive_l2(
                     let _ = event_tx.send(retag(other, &request_id));
                 }
                 None => {
-                    for (call_id, name) in std::mem::take(&mut active_backend_tools) {
-                        let _ = event_tx.send(SamplingEvent::BackendToolCallFailed {
-                            request_id: request_id.clone(),
-                            call_id,
-                            name,
-                            error: "stream dropped without terminal event".to_string(),
-                        });
-                    }
                     // L2 streams always terminate with Completed or
                     // Failed; reaching None means the producer was
                     // dropped without termination -- treat as a
@@ -916,6 +822,7 @@ async fn drive_l2(
                         error: SamplingError::EventStreamError(
                             "stream dropped without terminal event".to_string(),
                         ),
+                        doom_loop_signals,
                         recovery_items: Vec::new(),
                     };
                 }
@@ -1037,12 +944,14 @@ fn emit_failed(
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     request_id: &RequestId,
     err: &SamplingError,
-) {
+) -> bool {
     let info = SamplingErrorInfo::from(err);
-    let _ = event_tx.send(SamplingEvent::Failed {
-        request_id: request_id.clone(),
-        error: info,
-    });
+    event_tx
+        .send(SamplingEvent::Failed {
+            request_id: request_id.clone(),
+            error: info,
+        })
+        .is_ok()
 }
 
 fn emit_retrying(
@@ -1053,18 +962,12 @@ fn emit_retrying(
     err: &SamplingError,
 ) {
     let info = SamplingErrorInfo::from(err);
-    let reason = if err.is_model_bound_history_error() {
-        "Model-specific reasoning history was incompatible; retrying with portable context."
-            .to_string()
-    } else {
-        err.to_string()
-    };
     let _ = event_tx.send(SamplingEvent::Retrying {
         request_id: request_id.clone(),
         attempt,
         max_retries,
         kind: info.kind,
-        reason,
+        reason: err.to_string(),
         doom_loop_triggers: info.doom_loop_triggers,
         doom_loop_aborted_at_chunk: info.doom_loop_aborted_at_chunk,
     });
@@ -1086,7 +989,7 @@ fn emit_images_stripped(
 fn handle_cancellation(
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     request_id: &RequestId,
-    completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
+    completion: &mut CompletionState,
 ) {
     // No status code, no upstream API error -- this is a client-side
     // termination. Use kind=Api so consumers that switch on kind have
@@ -1105,23 +1008,25 @@ fn handle_cancellation(
         doom_loop_aborted_at_chunk: None,
         credential: SentCredential::Unknown,
     };
-    let _ = event_tx.send(SamplingEvent::Failed {
-        request_id: request_id.clone(),
-        error: info,
-    });
+    let terminal_event_queued = event_tx
+        .send(SamplingEvent::Failed {
+            request_id: request_id.clone(),
+            error: info,
+        })
+        .is_ok();
     send_completion(
-        completion_tx,
+        completion,
         Err(SamplingError::auth_unknown("request cancelled")),
+        terminal_event_queued,
     );
 }
 
 fn send_completion(
-    completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
-    result: CompletionResult,
+    completion: &mut CompletionState,
+    result: SamplingResultWithMetrics,
+    terminal_event_queued: bool,
 ) {
-    if let Some(tx) = completion_tx.take() {
-        let _ = tx.send(result);
-    }
+    completion.send(result, terminal_event_queued);
 }
 
 #[cfg(test)]
@@ -1130,19 +1035,32 @@ mod tests {
     use futures_util::stream;
     use xai_grok_sampling_types::ApiErrorCode;
 
-    fn length_completed_event(text: &str) -> SamplingEvent {
-        let response = xai_grok_sampling_types::ConversationResponse {
-            items: vec![xai_grok_sampling_types::ConversationItem::assistant(text)],
-            stop_reason: Some(xai_grok_sampling_types::StopReason::Length),
+    fn completed_response(
+        stop_reason: Option<xai_grok_sampling_types::StopReason>,
+        content: &str,
+    ) -> ConversationResponse {
+        ConversationResponse {
+            items: vec![xai_grok_sampling_types::ConversationItem::assistant(
+                content,
+            )],
+            stop_reason,
             usage: None,
             cost_usd_ticks: None,
-            message_chunks_emitted: 0,
-            doom_loop_signals: vec![],
+            message_chunks_emitted: u64::from(!content.is_empty()),
+            doom_loop_signals: vec![xai_grok_sampling_types::doom_loop::DoomLoopSignal::parse(
+                "exact_repetition:42x3@thinking",
+            )],
             stop_message: None,
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
-        };
+        }
+    }
+
+    fn length_completed_event(text: &str) -> SamplingEvent {
+        let mut response =
+            completed_response(Some(xai_grok_sampling_types::StopReason::Length), text);
+        response.doom_loop_signals.clear();
         SamplingEvent::Completed {
             request_id: RequestId::random(),
             response: Box::new(response),
@@ -1156,12 +1074,11 @@ mod tests {
     ) -> AttemptOutcome {
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         drive_l2(
-            stream::iter(vec![event]),
+            stream::iter([event]),
             RequestId::random(),
             &event_tx,
             &CancellationToken::new(),
             Arc::new(Mutex::new(None)),
-            None,
             None,
             FailedResponseCapture::default(),
             Arc::new(AtomicBool::new(false)),
@@ -1170,7 +1087,108 @@ mod tests {
         .await
     }
 
-    /// Legacy policy: a Length completion fails with MaxTokensTruncation.
+    async fn terminal_outcome(response: ConversationResponse) -> AttemptOutcome {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        drive_l2(
+            stream::iter([SamplingEvent::Completed {
+                request_id: RequestId::from("terminal-signals"),
+                response: Box::new(response),
+                metrics: InferenceLatencyStats::default(),
+            }]),
+            RequestId::from("terminal-signals"),
+            &event_tx,
+            &CancellationToken::new(),
+            Arc::new(Mutex::new(None)),
+            None,
+            FailedResponseCapture::default(),
+            Arc::new(AtomicBool::new(false)),
+            xai_grok_sampling_types::LengthPolicy::Fail,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn length_and_empty_outcomes_retain_terminal_detector_signals() {
+        let length = terminal_outcome(completed_response(
+            Some(xai_grok_sampling_types::StopReason::Length),
+            "truncated",
+        ))
+        .await;
+        assert!(matches!(
+            length,
+            AttemptOutcome::Failed {
+                doom_loop_signals,
+                ..
+            } if doom_loop_signals == ["exact_repetition:42x3@thinking".to_string()]
+        ));
+
+        let empty = terminal_outcome(completed_response(None, "")).await;
+        assert!(matches!(
+            empty,
+            AttemptOutcome::Empty {
+                doom_loop_signals,
+                ..
+            } if doom_loop_signals == ["exact_repetition:42x3@thinking".to_string()]
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_detector_signals_are_bounded_before_forwarding() {
+        use crate::doom_loop::{MAX_COLLECTED_DOOM_LOOP_SIGNALS, MAX_DOOM_LOOP_SIGNAL_BYTES};
+
+        let mut response = completed_response(
+            Some(xai_grok_sampling_types::StopReason::Length),
+            "truncated",
+        );
+        response.doom_loop_signals =
+            std::iter::once(xai_grok_sampling_types::doom_loop::DoomLoopSignal::parse(
+                &"x".repeat(MAX_DOOM_LOOP_SIGNAL_BYTES + 1),
+            ))
+            .chain((0..MAX_COLLECTED_DOOM_LOOP_SIGNALS + 20).map(|index| {
+                xai_grok_sampling_types::doom_loop::DoomLoopSignal::parse(&format!(
+                    "unknown_{index}@thinking"
+                ))
+            }))
+            .collect();
+
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let outcome = drive_l2(
+            stream::iter([SamplingEvent::Completed {
+                request_id: RequestId::from("bounded-terminal-signals"),
+                response: Box::new(response),
+                metrics: InferenceLatencyStats::default(),
+            }]),
+            RequestId::from("bounded-terminal-signals"),
+            &event_tx,
+            &CancellationToken::new(),
+            Arc::new(Mutex::new(None)),
+            None,
+            FailedResponseCapture::default(),
+            Arc::new(AtomicBool::new(false)),
+            xai_grok_sampling_types::LengthPolicy::Fail,
+        )
+        .await;
+
+        let AttemptOutcome::Failed {
+            doom_loop_signals, ..
+        } = outcome
+        else {
+            panic!("length completion must fail");
+        };
+        assert_eq!(MAX_COLLECTED_DOOM_LOOP_SIGNALS, doom_loop_signals.len());
+        assert!(
+            doom_loop_signals
+                .iter()
+                .all(|label| label.len() <= MAX_DOOM_LOOP_SIGNAL_BYTES)
+        );
+        let SamplingEvent::DoomLoopSignals { triggers, .. } =
+            event_rx.try_recv().expect("bounded signal event")
+        else {
+            panic!("expected detector signal event");
+        };
+        assert_eq!(doom_loop_signals, triggers);
+    }
+
     #[tokio::test]
     async fn length_policy_fail_converts_completed_to_failed() {
         let outcome = drive_length_event(
@@ -1178,16 +1196,15 @@ mod tests {
             xai_grok_sampling_types::LengthPolicy::Fail,
         )
         .await;
-        match outcome {
-            AttemptOutcome::Failed { error, .. } => {
-                assert!(matches!(error, SamplingError::MaxTokensTruncation));
+        assert!(matches!(
+            outcome,
+            AttemptOutcome::Failed {
+                error: SamplingError::MaxTokensTruncation,
+                ..
             }
-            other => panic!("expected Failed(MaxTokensTruncation), got {other:?}"),
-        }
+        ));
     }
 
-    /// Salvage policy: a non-empty Length completion is delivered with its
-    /// partial content and the Length stop reason preserved.
     #[tokio::test]
     async fn length_policy_salvage_completes_with_partial_content() {
         let outcome = drive_length_event(
@@ -1195,9 +1212,63 @@ mod tests {
             xai_grok_sampling_types::LengthPolicy::CompletePartial,
         )
         .await;
+        let AttemptOutcome::Completed { response, .. } = outcome else {
+            panic!("expected completed partial response");
+        };
+        assert_eq!(response.assistant_text(), "partial");
+        assert_eq!(
+            response.stop_reason,
+            Some(xai_grok_sampling_types::StopReason::Length)
+        );
+    }
+
+    fn with_tool_call(mut event: SamplingEvent, arguments: &str) -> SamplingEvent {
+        let SamplingEvent::Completed { response, .. } = &mut event else {
+            unreachable!("helper builds Completed");
+        };
+        let Some(xai_grok_sampling_types::ConversationItem::Assistant(a)) =
+            response.items.last_mut()
+        else {
+            unreachable!("helper builds a trailing Assistant item");
+        };
+        a.tool_calls = vec![xai_grok_sampling_types::ToolCall {
+            id: "call_1".into(),
+            name: "do_thing".into(),
+            arguments: arguments.into(),
+        }];
+        event
+    }
+
+    /// Argument-truncated tool calls never execute — both salvaging
+    /// policies still fail them.
+    #[tokio::test]
+    async fn length_policy_truncated_tool_call_arguments_still_fail() {
+        for policy in [
+            xai_grok_sampling_types::LengthPolicy::CompleteToolCalls,
+            xai_grok_sampling_types::LengthPolicy::CompletePartial,
+        ] {
+            let event = with_tool_call(length_completed_event("partial"), "{\"x\": \"trunc");
+            let outcome = drive_length_event(event, policy).await;
+            match outcome {
+                AttemptOutcome::Failed { error, .. } => {
+                    assert!(matches!(error, SamplingError::MaxTokensTruncation));
+                }
+                other => panic!("expected Failed(MaxTokensTruncation), got {other:?}"),
+            }
+        }
+    }
+
+    /// Default policy: Length with completed tool calls is delivered for
+    /// execution, with the Length stop reason kept visible for telemetry.
+    #[tokio::test]
+    async fn length_policy_default_completes_with_completed_tool_calls() {
+        let event = with_tool_call(length_completed_event("partial"), "{\"x\": 1}");
+        let outcome =
+            drive_length_event(event, xai_grok_sampling_types::LengthPolicy::default()).await;
         match outcome {
             AttemptOutcome::Completed { response, .. } => {
-                assert_eq!(response.assistant_text(), "partial");
+                assert_eq!(response.tool_calls().len(), 1);
+                assert_eq!(response.tool_calls()[0].arguments.as_ref(), "{\"x\": 1}");
                 assert_eq!(
                     response.stop_reason,
                     Some(xai_grok_sampling_types::StopReason::Length)
@@ -1207,44 +1278,6 @@ mod tests {
         }
     }
 
-    /// Salvage policy, response carrying tool calls: still fails (the
-    /// trailing call's arguments may be truncated). Pins the invariant that
-    /// stop_reason==Length implies no tool calls.
-    #[tokio::test]
-    async fn length_policy_salvage_with_tool_calls_still_fails() {
-        let event = {
-            let mut e = length_completed_event("partial");
-            let SamplingEvent::Completed { response, .. } = &mut e else {
-                unreachable!("helper builds Completed");
-            };
-            let Some(xai_grok_sampling_types::ConversationItem::Assistant(a)) =
-                response.items.last_mut()
-            else {
-                unreachable!("helper builds a trailing Assistant item");
-            };
-            a.tool_calls = vec![xai_grok_sampling_types::ToolCall {
-                id: "call_cut".into(),
-                name: "do_thing".into(),
-                arguments: "{\"x\": \"trunc".into(),
-            }];
-            e
-        };
-        let outcome = drive_length_event(
-            event,
-            xai_grok_sampling_types::LengthPolicy::CompletePartial,
-        )
-        .await;
-        match outcome {
-            AttemptOutcome::Failed { error, .. } => {
-                assert!(matches!(error, SamplingError::MaxTokensTruncation));
-            }
-            other => panic!("expected Failed(MaxTokensTruncation), got {other:?}"),
-        }
-    }
-
-    /// Salvage policy, empty response: still fails — never routed to the
-    /// Empty resample family (deterministic under a fixed cap; would
-    /// retry-storm).
     #[tokio::test]
     async fn length_policy_salvage_empty_still_fails() {
         let outcome = drive_length_event(
@@ -1252,12 +1285,13 @@ mod tests {
             xai_grok_sampling_types::LengthPolicy::CompletePartial,
         )
         .await;
-        match outcome {
-            AttemptOutcome::Failed { error, .. } => {
-                assert!(matches!(error, SamplingError::MaxTokensTruncation));
+        assert!(matches!(
+            outcome,
+            AttemptOutcome::Failed {
+                error: SamplingError::MaxTokensTruncation,
+                ..
             }
-            other => panic!("expected Failed(MaxTokensTruncation), got {other:?}"),
-        }
+        ));
     }
 
     #[test]
@@ -1430,7 +1464,7 @@ mod tests {
         cancel_token.cancel();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let (completion_tx, completion_rx) = oneshot::channel();
-        let mut completion_tx = Some(completion_tx);
+        let mut completion = CompletionState::new(Some(completion_tx));
         let mut retry_count = 0;
         let mut request = ConversationRequest::default();
         let config = SamplerConfig {
@@ -1452,7 +1486,7 @@ mod tests {
             &mut client,
             &config,
             &cancel_token,
-            &mut completion_tx,
+            &mut completion,
         )
         .await;
 
@@ -1465,87 +1499,12 @@ mod tests {
             event_rx.recv().await,
             Some(SamplingEvent::Failed { .. })
         ));
-        assert!(completion_rx.await.expect("completion sent").is_err());
-    }
-
-    #[tokio::test]
-    async fn model_bound_recovery_strips_state_once_and_surfaces_portable_retry() {
-        use reqwest::StatusCode;
-        use xai_grok_sampling_types::{ConversationItem, synthesized_reasoning_item};
-
-        let cancel_token = CancellationToken::new();
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let (completion_tx, _completion_rx) = oneshot::channel();
-        let mut completion_tx = Some(completion_tx);
-        let mut retry_count = 0;
-        let mut request = ConversationRequest::from_items(vec![
-            ConversationItem::user("question"),
-            ConversationItem::Reasoning(synthesized_reasoning_item("private state")),
-            ConversationItem::assistant_with_model("portable answer", "old-model"),
-        ]);
-        let config = SamplerConfig {
-            base_url: "http://localhost".into(),
-            model: "new-model".into(),
-            ..Default::default()
-        };
-        let mut client = SamplingClient::new(config.clone()).expect("test client");
-        let error = SamplingError::Api {
-            status: StatusCode::BAD_REQUEST,
-            message: "Could not decrypt the provided encrypted_content".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: Some(false),
-            error_code: None,
-        };
-
-        let should_continue = apply_retry_decision(
-            &error,
-            &mut retry_count,
-            0,
-            &RetryPolicy::default(),
-            &event_tx,
-            &RequestId::from("model-bound-recovery"),
-            &mut request,
-            &mut client,
-            &config,
-            &cancel_token,
-            &mut completion_tx,
-        )
-        .await;
-
         assert!(
-            should_continue,
-            "portable recovery gets one retry even when transport retries are disabled"
-        );
-        assert_eq!(retry_count, 1);
-        assert!(request.items.iter().all(|item| !matches!(
-            item,
-            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
-        )));
-        assert!(request.items.iter().any(|item| matches!(
-            item,
-            ConversationItem::Assistant(assistant)
-                if assistant.content.as_ref() == "portable answer"
-        )));
-        match event_rx.recv().await {
-            Some(SamplingEvent::Retrying {
-                attempt,
-                max_retries,
-                reason,
-                ..
-            }) => {
-                assert_eq!(attempt, 1);
-                assert_eq!(max_retries, 1);
-                assert_eq!(
-                    reason,
-                    "Model-specific reasoning history was incompatible; retrying with portable context."
-                );
-            }
-            other => panic!("expected portable-context retry event, got {other:?}"),
-        }
-        assert!(
-            completion_tx.is_some(),
-            "retry must not complete the request"
+            completion_rx
+                .await
+                .expect("completion sent")
+                .result
+                .is_err()
         );
     }
 

@@ -5,11 +5,9 @@ use super::common::*;
 const NESTED_TOKEN: &str = "NESTED_TOKEN";
 const NESTED_OUTRO: &str = "NESTED_QUOTE_DONE";
 
-/// PTY: drag-select copy on a NESTED quote line (`> > …`, rendered `│ │ …`)
-/// excludes every nesting level's bar from the clipboard.
+/// PTY: drag-select copy on a nested quote line (`> > …`, rendered `│ │ …`) excludes every nesting level's bar from the clipboard.
 ///
-/// `SSH_CONNECTION` forces the OSC 52 clipboard route for readback, same as
-/// `recap_header_not_in_selection_pty`.
+/// `SSH_CONNECTION` forces the OSC 52 clipboard route for readback, same as `recap_header_not_in_selection_pty`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn nested_quote_drag_copy_excludes_bars_pty() {
@@ -64,16 +62,14 @@ async fn nested_quote_drag_copy_excludes_bars_pty() {
     harness
         .wait_for_text("Space:prompt", Duration::from_secs(10))
         .expect("scrollback focused (Space:prompt hint) after Tab");
-    // Settle: the sentinel streams within the same turn, so the turn-end
-    // relayout can shift rows after the waits above; locate afterwards.
+    // Settle: the sentinel streams within the same turn, so the relayout at turn end can shift rows after the waits above; locate afterwards
     harness.update(Duration::from_millis(1500));
 
     let screen = harness.screen_contents();
     let (row, col) = locate_screen_text(&screen, NESTED_TOKEN).unwrap_or_else(|| {
         panic!("could not locate {NESTED_TOKEN:?}; screen:\n{screen}");
     });
-    // Start on the OUTER bar ("│ │ " sits four columns left of the token) so
-    // the anchor clamps past the whole excluded prefix.
+    // Start on the outer bar ("│ │ " sits four columns left of the token) so the anchor clamps past the whole excluded prefix
     let bar_col = col.saturating_sub(4);
     let nested_line = screen.lines().nth(row as usize).unwrap_or("");
     assert_eq!(

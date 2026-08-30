@@ -2,27 +2,22 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Paste-then-send race guard, end to end: a bracketed paste with Enter
-/// arriving in the SAME input burst (terminal auto-paste-and-run, fast users)
-/// must submit the full payload exactly ONCE — never dropped, never
-/// duplicated.
+/// Paste-then-send race guard, end to end.
+/// A bracketed paste with Enter in the SAME input burst (terminal auto-paste-and-run, fast users) must submit the full payload exactly ONCE.
+/// The payload must never be dropped or duplicated.
 ///
-/// What each platform actually exercises: on Linux the paste path is fully
-/// synchronous (the clipboard probe block is cfg(macos/windows)), so this
-/// guards the plain paste→submit ordering. On macOS the deferred-probe send
-/// stash is exercised ONLY when the real host pasteboard happens to carry a
-/// raster (the snapshot gate skips the probe otherwise); the test stays
-/// hermetic and does not seed one — the stash itself is covered by unit tests
-/// (`agent_send_before_paste_probe_keeps_image`).
+/// What each platform actually exercises: on Linux the paste path is fully synchronous (the clipboard probe block is cfg(macos/windows)).
+/// The Linux run therefore guards the plain paste-then-submit ordering.
+/// On macOS a send that arrives while the clipboard probe is still pending gets stashed.
+/// That stash path runs ONLY when the real host pasteboard happens to carry a raster.
+/// The snapshot gate skips the probe otherwise.
+/// The test stays hermetic and does not seed one; the stash itself is covered by unit tests (`agent_send_before_paste_probe_keeps_image`).
 ///
-/// "Exactly once" is asserted on user messages, not HTTP requests: the shell
-/// may legitimately retry the SAME turn over a second endpoint (Responses →
-/// Chat Completions fallback against the mock), but a dropped send leaves 0
-/// payload-bearing user messages and a double-submit leaves 2 in one
-/// request's accumulated history.
+/// "Exactly once" is asserted on user messages, not HTTP requests.
+/// The shell may legitimately retry the SAME turn over a second endpoint (Responses to Chat Completions fallback against the mock).
+/// A dropped send leaves 0 payload-bearing user messages and a double-submit leaves 2 in one request's accumulated history.
 ///
-/// On a macOS dev machine the real host clipboard may add an incidental image
-/// chip, so asserts are contains-style on sentinels.
+/// On a macOS dev machine the real host clipboard may add an incidental image chip, so the asserts only check that the sentinels appear.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn paste_bracketed_then_immediate_enter_sends_intact() {
@@ -42,9 +37,8 @@ async fn paste_bracketed_then_immediate_enter_sends_intact() {
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
 
-    // Paste + Enter in ONE injected buffer: the Enter chases the closing
-    // ESC[201~ with no settle, submitting before any deferred paste work
-    // could possibly finish.
+    // Paste and Enter in ONE injected buffer: the Enter chases the closing ESC[201~ with no settle
+    // It submits before any deferred paste work could possibly finish
     harness
         .inject_keys(format!("\x1b[200~{LINE_1}\n{LINE_2}\n{LINE_3}\x1b[201~\r").as_bytes())
         .expect("bracketed paste + immediate Enter");
@@ -56,8 +50,7 @@ async fn paste_bracketed_then_immediate_enter_sends_intact() {
     // Settle so any stray follow-up request would have landed before counting.
     harness.update(Duration::from_secs(2));
 
-    // Serialized-body counting stays agnostic to the endpoint shape
-    // (`messages` for Chat Completions, `input` for Responses).
+    // Counting inside each serialized body works for either endpoint shape (`messages` for Chat Completions, `input` for Responses)
     let per_body_payload_counts: Vec<usize> = content
         .request_bodies()
         .iter()

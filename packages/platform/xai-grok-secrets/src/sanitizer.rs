@@ -5,15 +5,14 @@ use std::sync::LazyLock;
 const REDACTED: &str = "[REDACTED_SECRET]";
 const REDACTED_URL_VALUE: &str = "redacted";
 
-/// Vendor API keys with `sk-`/`sk_` prefixes and xAI (`xai-`) keys. `\b`-anchored so
-/// `task-`/`disk-`/`risk-` don't fold a stray `sk-`.
+/// Vendor API keys with `sk-`/`sk_` prefixes and xAI (`xai-`) keys.
+/// The `\b` anchor keeps the `sk-` inside `task-`/`disk-`/`risk-` from matching.
 static API_KEY_PREFIX_REGEX: LazyLock<Regex> =
     LazyLock::new(|| compile(r"\b(?:sk[-_]|xai-)[A-Za-z0-9_-]{20,}"));
 /// AWS long-term (`AKIA`) and temporary (`ASIA`) access-key IDs.
 static AWS_ACCESS_KEY_REGEX: LazyLock<Regex> =
     LazyLock::new(|| compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"));
-/// GitHub PATs: classic (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`) + fine-grained
-/// (`github_pat_`).
+/// GitHub PATs: classic (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`) and fine-grained (`github_pat_`).
 static GITHUB_TOKEN_REGEX: LazyLock<Regex> =
     LazyLock::new(|| compile(r"\b(?:gh[opusr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"));
 /// GitLab (`glpat-`) and Slack (`xoxa-`/`xoxb-`/`xoxp-`/`xapp-`) tokens.
@@ -22,15 +21,14 @@ static VENDOR_TOKEN_REGEX: LazyLock<Regex> =
 /// Google API keys (`AIza` + 35 chars).
 static GOOGLE_API_KEY_REGEX: LazyLock<Regex> =
     LazyLock::new(|| compile(r"\bAIza[0-9A-Za-z_-]{35}"));
-/// PEM private-key block (any key type), base64 body included. `(?s)` so `.`
-/// spans the newline-delimited body.
+/// PEM private-key block (any key type), base64 body included.
+/// The `(?s)` flag lets `.` span the newline-delimited body.
 static PEM_PRIVATE_KEY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     compile(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----")
 });
 static BEARER_TOKEN_REGEX: LazyLock<Regex> =
     LazyLock::new(|| compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-]{16,}\b"));
-/// Bare JWT (`eyJ...header.payload.signature`) with no `Bearer`/`sk-` prefix —
-/// the shape used by deployment keys and OIDC tokens.
+/// Bare JWT (`eyJ...header.payload.signature`) with no `Bearer`/`sk-` prefix, the shape used by deployment keys and OIDC tokens.
 static JWT_REGEX: LazyLock<Regex> =
     LazyLock::new(|| compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"));
 /// 8-char value floor to avoid false positives on short values.
@@ -71,8 +69,7 @@ static SENSITIVE_QUERY_PARAMS: &[&str] = &[
     "token",
 ];
 
-/// Excludes trailing punctuation so backticks/brackets in surrounding text
-/// don't get folded into the URL match.
+/// Excludes trailing punctuation so backticks/brackets in surrounding text don't get folded into the URL match.
 static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| compile(r#"https?://[^\s"'<>(){}\[\],;`]+"#));
 
 static MATCH_ANY: LazyLock<RegexSet> = LazyLock::new(|| {
@@ -110,8 +107,7 @@ pub fn redact_secrets(input: &str) -> Cow<'_, str> {
     Cow::Owned(s)
 }
 
-/// Use [`redact_json_string_values`] for the standard scrub; use this
-/// directly only when composing a custom one.
+/// Use [`redact_json_string_values`] for the standard scrub; use this directly only when composing a custom one.
 pub fn walk_json_strings(value: &mut serde_json::Value, f: &mut impl FnMut(&mut String)) {
     match value {
         serde_json::Value::String(s) => f(s),
@@ -155,8 +151,7 @@ static HOME_DIR: LazyLock<Option<String>> = LazyLock::new(|| {
         .filter(|s| !s.is_empty())
 });
 
-/// Env usernames (`USERNAME`/`USER`), deduped; 3-char floor avoids folding
-/// short generic segments.
+/// Env usernames (`USERNAME`/`USER`), deduped; the 3-char floor avoids folding short generic segments.
 static USERNAMES: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut names: Vec<String> = Vec::new();
     for var in ["USERNAME", "USER"] {
@@ -177,13 +172,12 @@ fn is_segment_boundary(c: char) -> bool {
     !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
 
-/// Backstop for headless contexts where `$HOME`/`$USER` are unset. Case-sensitive
-/// (`/Users`, `/home`, `\Users`) so it won't mangle REST `/users/` paths.
+/// Backstop for headless contexts where `$HOME`/`$USER` are unset.
+/// The match is case-sensitive (`/Users`, `/home`, `\Users`) so it won't mangle REST `/users/` paths.
 static HOME_ROOT_USER_REGEX: LazyLock<Regex> =
     LazyLock::new(|| compile(r"([/\\](?:Users|home)[/\\])([^/\\]+)"));
 
-/// Collapse `$HOME` to `~` and whole path segments equal to the OS username
-/// to `<user>`.
+/// Collapse `$HOME` to `~` and whole path segments equal to the OS username to `<user>`.
 pub fn redact_user_paths(input: &str) -> Cow<'_, str> {
     redact_user_paths_with_backstop(input, HOME_DIR.as_deref(), USERNAMES.as_slice())
 }
@@ -194,9 +188,8 @@ fn redact_user_paths_with_backstop<'a>(
     usernames: &[String],
 ) -> Cow<'a, str> {
     let env_scrubbed = redact_user_paths_env(input, home, usernames);
-    // The regex backstop runs ONLY when env is unavailable; otherwise the pass
-    // above is authoritative and the regex would over-redact (`/Users/Shared`,
-    // REST `/users/<id>`, etc.).
+    // The regex backstop runs ONLY when env is unavailable
+    // Otherwise the pass above is authoritative and the regex would over-redact (`/Users/Shared`, REST `/users/<id>`, etc.)
     if home.is_some() || !usernames.is_empty() {
         return env_scrubbed;
     }
@@ -250,8 +243,8 @@ fn replace_home_prefix(input: &str, home: &str) -> String {
     out
 }
 
-/// Replace whole `/`- or `\`-delimited segments equal to a username with
-/// `<user>`. Case-insensitive on Windows (NTFS), case-sensitive elsewhere.
+/// Replace whole `/`- or `\`-delimited segments equal to a username with `<user>`.
+/// Case-insensitive on Windows (NTFS), case-sensitive elsewhere.
 fn redact_username_segments(value: &str, usernames: &[String]) -> String {
     let mut out = String::with_capacity(value.len());
     let mut buf = String::new();
@@ -323,8 +316,7 @@ fn compile(pattern: &str) -> Regex {
 mod tests {
     use super::*;
 
-    /// Tripwire: if you add a regex to `MATCH_ANY`, also add a redaction
-    /// pass in `redact_secrets` (and update this count).
+    /// If you add a regex to `MATCH_ANY`, also add a redaction pass in `redact_secrets` and update this count.
     #[test]
     fn match_any_count_matches_redact_secrets_passes() {
         assert_eq!(MATCH_ANY.patterns().len(), 10);
@@ -339,11 +331,8 @@ mod tests {
         assert!(matches!(redact_secrets("model=grok-3"), Cow::Borrowed(_)));
     }
 
-    /// Joins fixture fragments at runtime so realistic-looking fake tokens
-    /// never appear contiguously in the source text. Keeps secret scanners
-    /// (e.g. GitHub push protection) from flagging the redaction tests'
-    /// synthetic credentials while the assembled strings still exercise the
-    /// real patterns.
+    /// Joins fixture fragments at runtime so realistic-looking fake tokens never appear whole in the source text.
+    /// Secret scanners (e.g. GitHub push protection) would otherwise flag them.
     fn fixture(parts: &[&str]) -> String {
         parts.concat()
     }
@@ -516,7 +505,7 @@ mod tests {
             redact_user_paths_env("/data/alice: denied", None, &["alice".to_owned()]),
             "/data/<user>: denied"
         );
-        // A longer segment must not fold to the shorter name.
+        // The longer `alicia` must not fold to the `alice` home
         assert_eq!(
             redact_user_paths_env("/Users/alicia/x", home, &[]),
             "/Users/alicia/x"

@@ -2,11 +2,11 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 18. **Per-session cap — the 4th show is gated.**
-/// Within one session the tip shows up to its cap (3). The slot is cleared
-/// between shows via TTL expiry (re-showing a still-visible same-key tip only
-/// refreshes its TTL and does not re-count), so each fresh show increments the
-/// in-memory count. The 4th wipe is then gated → no banner.
+/// 18. **Per-session cap: the 4th show is gated.**
+/// Within one session the tip shows up to its cap of 3.
+/// Re-showing a tip that is still visible under the same key only refreshes its TTL and does not re-count.
+/// The slot must therefore clear via TTL expiry between shows, so each fresh show increments the in-memory count.
+/// The 4th wipe is then gated and shows no banner.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn undo_tip_session_cap_blocks_fourth_show() {
@@ -27,14 +27,13 @@ async fn undo_tip_session_cap_blocks_fourth_show() {
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome");
 
-    // Three fresh shows: wipe → tip → wait out the TTL so the slot clears.
+    // Three fresh shows: wipe, wait for the tip, then wait out the TTL so the slot clears
     for i in 1..=3 {
         wipe_substantial_draft(&mut harness);
         harness
             .wait_for_text(UNDO_TIP_SENTINEL, Duration::from_secs(10))
             .unwrap_or_else(|e| panic!("tip must show on wipe #{i}: {e}"));
-        // The active tip keeps animation alive, so its TTL ticks down; wait
-        // for it to expire (clear the slot) before the next, counted, show.
+        // The active tip keeps animation alive, so its TTL ticks down; wait for it to expire (clearing the slot) before the next counted show
         wait_for_labels_absent(&mut harness, &[UNDO_TIP_SENTINEL], Duration::from_secs(25));
         assert!(
             !harness.contains_text(UNDO_TIP_SENTINEL),
@@ -44,7 +43,7 @@ async fn undo_tip_session_cap_blocks_fourth_show() {
         );
     }
 
-    // Fourth wipe: the in-memory count is at the cap (3) → gated, no banner.
+    // Fourth wipe: the in-memory count is at the cap (3), so no banner shows
     wipe_substantial_draft(&mut harness);
     harness.update(Duration::from_millis(1000));
     assert!(

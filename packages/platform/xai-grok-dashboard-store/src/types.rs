@@ -1,54 +1,45 @@
-//! Typed values for the workspace store: identifiers, enums stored as raw
-//! text, member rows, and write payloads.
+//! Typed values for the workspace store: identifiers, enums stored as raw text, member rows, and write payloads.
 //!
-//! Validation follows "parse, don't validate": [`SessionId::new`] is the
-//! single validation point for ids, so every API taking a `SessionId` is
-//! injection-safe by type. Enum values are typed in code but stored as raw
-//! text; values this binary does not know surface as `Other` and are written
-//! back byte-identical.
+//! Validation follows "parse, don't validate": [`SessionId::new`] is the single validation point for ids.
+//! Every API taking a `SessionId` is therefore injection-safe by type.
+//! Enum values are typed in code but stored as raw text; values this binary does not know decode as `Other` and are written back byte-identical.
 
 use std::fmt;
 
 use crate::error::{Result, StoreError};
 
-/// Maximum number of workspace members. UI copy about the limit must derive
-/// from this constant.
+/// Maximum number of workspace members.
+/// UI copy about the limit must derive from this constant.
 pub const WORKSPACE_CAPACITY: usize = 256;
 
-/// Rank spacing for `pin_rank` / `order_rank`. Appending assigns
-/// `max_rank + RANK_GAP`; inserting between neighbors `a < b` takes
-/// `(a + b) / 2` (integer midpoint).
+/// Rank spacing for `pin_rank` / `order_rank`.
+/// Appending assigns `max_rank + RANK_GAP`; inserting between neighbors `a < b` takes `(a + b) / 2` (integer midpoint).
 pub const RANK_GAP: i64 = 1024;
 
 /// Byte cap for [`SessionId`] (one path component, like any filename).
 pub const MAX_SESSION_ID_BYTES: usize = 255;
-/// Byte cap for `cwd`. A longer path errors rather than truncates: a clipped
-/// path is corruption, not display damage.
+/// Byte cap for `cwd`.
+/// A longer path errors rather than truncates: a clipped path is corruption, not display damage.
 pub const MAX_CWD_BYTES: usize = 4096;
 /// Byte cap for `title`; over-long values truncate at a char boundary.
 pub const MAX_TITLE_BYTES: usize = 1024;
 /// Byte cap for `model`; over-long values truncate at a char boundary.
 pub const MAX_MODEL_BYTES: usize = 256;
-/// Defensive byte cap for `last_turn_summary`; over-long values truncate at
-/// a char boundary.
+/// Defensive byte cap for `last_turn_summary`; over-long values truncate at a char boundary.
 pub const MAX_SUMMARY_BYTES: usize = 8192;
-/// Byte cap for caller-supplied unknown enum values entering through
-/// `from_raw`. Over-cap values are rejected, never truncated; values read
-/// back from the store are exempt so passthrough stays unconditional.
+/// Byte cap for caller-supplied unknown enum values entering through `from_raw`.
+/// Values over the cap are rejected, never truncated; values read back from the store are exempt so passthrough stays unconditional.
 pub const MAX_ENUM_BYTES: usize = 64;
 
-/// One portable path component: non-empty, at most
-/// [`MAX_SESSION_ID_BYTES`] bytes, and valid as a file name on Unix and
-/// Windows. Constructed once at the boundary, so downstream joins of ids
-/// into filesystem paths cannot traverse or alias another id.
+/// One portable path component: non-empty, at most [`MAX_SESSION_ID_BYTES`] bytes, and valid as a file name on Unix and Windows.
+/// Constructed once at the boundary, so downstream joins of ids into filesystem paths cannot traverse or alias another id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionId(String);
 
 impl SessionId {
     /// # Errors
     ///
-    /// [`StoreError::InvalidSessionId`] when `raw` is empty, over
-    /// [`MAX_SESSION_ID_BYTES`] bytes, or is not a portable path component.
+    /// [`StoreError::InvalidSessionId`] when `raw` is empty, over [`MAX_SESSION_ID_BYTES`] bytes, or is not a portable path component.
     pub fn new(raw: impl Into<String>) -> Result<Self> {
         let raw = raw.into();
         let reason = if raw.is_empty() {
@@ -194,8 +185,7 @@ impl MemberKind {
     ///
     /// # Errors
     ///
-    /// [`StoreError::InvalidEnumValue`] when unknown text is empty, or
-    /// [`StoreError::EnumValueTooLong`] when it exceeds [`MAX_ENUM_BYTES`].
+    /// [`StoreError::InvalidEnumValue`] when unknown text is empty, or [`StoreError::EnumValueTooLong`] when it exceeds [`MAX_ENUM_BYTES`].
     pub fn from_raw(raw: &str) -> Result<Self> {
         match raw {
             "build" => Ok(Self::Build),
@@ -204,7 +194,7 @@ impl MemberKind {
         }
     }
 
-    /// Total decode for text read back from the store.
+    /// Decodes text read back from the store; unlike [`Self::from_raw`], it cannot fail.
     pub(crate) fn from_stored(raw: String) -> Self {
         match raw.as_str() {
             "build" => Self::Build,
@@ -214,8 +204,7 @@ impl MemberKind {
     }
 }
 
-/// Where a member's session came from; written once at insert and never
-/// updated by any API.
+/// Where a member's session came from; written once at insert and never updated by any API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemberOrigin {
     Local,
@@ -237,8 +226,7 @@ impl MemberOrigin {
     ///
     /// # Errors
     ///
-    /// [`StoreError::InvalidEnumValue`] when unknown text is empty, or
-    /// [`StoreError::EnumValueTooLong`] when it exceeds [`MAX_ENUM_BYTES`].
+    /// [`StoreError::InvalidEnumValue`] when unknown text is empty, or [`StoreError::EnumValueTooLong`] when it exceeds [`MAX_ENUM_BYTES`].
     pub fn from_raw(raw: &str) -> Result<Self> {
         match raw {
             "local" => Ok(Self::Local),
@@ -247,7 +235,7 @@ impl MemberOrigin {
         }
     }
 
-    /// Total decode for text read back from the store.
+    /// Decodes text read back from the store; unlike [`Self::from_raw`], it cannot fail.
     pub(crate) fn from_stored(raw: String) -> Self {
         match raw.as_str() {
             "local" => Self::Local,
@@ -279,8 +267,7 @@ impl Grouping {
     ///
     /// # Errors
     ///
-    /// [`StoreError::InvalidEnumValue`] when unknown text is empty, or
-    /// [`StoreError::EnumValueTooLong`] when it exceeds [`MAX_ENUM_BYTES`].
+    /// [`StoreError::InvalidEnumValue`] when unknown text is empty, or [`StoreError::EnumValueTooLong`] when it exceeds [`MAX_ENUM_BYTES`].
     pub fn from_raw(raw: &str) -> Result<Self> {
         match raw {
             "state" => Ok(Self::State),
@@ -289,7 +276,7 @@ impl Grouping {
         }
     }
 
-    /// Total decode for text read back from the store.
+    /// Decodes text read back from the store; unlike [`Self::from_raw`], it cannot fail.
     pub(crate) fn from_stored(raw: String) -> Self {
         match raw.as_str() {
             "state" => Self::State,
@@ -306,9 +293,8 @@ pub struct MemberKey {
     pub kind: MemberKind,
 }
 
-/// Metadata columns — exactly the set `update_member_metadata` may touch.
-/// `origin` and the rank columns are structurally absent, so no metadata
-/// write can clobber them.
+/// Metadata columns, exactly the set `update_member_metadata` may touch.
+/// `origin` and the rank columns are not fields here, so no metadata write can clobber them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberMetadata {
     /// Required and absolute for build members; optional for other kinds.
@@ -325,18 +311,15 @@ pub struct MemberMetadata {
 }
 
 impl MemberMetadata {
-    /// Shared write-boundary validation for every path that carries
-    /// metadata, so the hottest write (the per-turn metadata sync) cannot
-    /// drift from the insert path's rules. Returns a borrowed view — the
-    /// per-turn sync must not pay an owned copy just to (rarely) truncate.
+    /// Every write path validates its metadata here, so the hottest write (the per-turn metadata sync) cannot drift from the insert path's rules.
+    /// Returns a borrowed view: the per-turn sync must not pay an owned copy just to (rarely) truncate.
     ///
     /// # Errors
     ///
     /// [`StoreError::CwdRequired`] when a build member has no cwd,
-    /// [`StoreError::CwdNotAbsolute`] when a present cwd is relative, or
-    /// [`StoreError::CwdTooLong`] when it exceeds the cap. Display text over
-    /// its cap truncates instead of erroring: refusing a metadata sync over a
-    /// long title would be worse than clipping it.
+    /// [`StoreError::CwdNotAbsolute`] when a present cwd is relative,
+    /// or [`StoreError::CwdTooLong`] when it exceeds the cap.
+    /// Display text over its cap truncates instead of erroring: refusing a metadata sync over a long title would be worse than clipping it.
     pub(crate) fn validated(&self, kind: &MemberKind) -> Result<ValidatedMetadataRef<'_>> {
         if matches!(kind, MemberKind::Build) && self.cwd.is_none() {
             return Err(StoreError::CwdRequired);
@@ -369,8 +352,7 @@ impl MemberMetadata {
     }
 }
 
-/// Validated, capped view of a [`MemberMetadata`]; what the write paths
-/// bind into SQL.
+/// Validated, capped view of a [`MemberMetadata`]; what the write paths bind into SQL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ValidatedMetadataRef<'a> {
     pub cwd: Option<&'a str>,
@@ -381,7 +363,6 @@ pub(crate) struct ValidatedMetadataRef<'a> {
     pub last_change_unix_ms: i64,
 }
 
-/// Char-boundary walk-back.
 fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> &str {
     if text.len() <= max_bytes {
         return text;
@@ -393,8 +374,8 @@ fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> &str {
     &text[..end]
 }
 
-/// Payload for `insert_member`. `origin` is set here and only here; no later
-/// API can rewrite it.
+/// Payload for `insert_member`.
+/// `origin` is set here and only here; no later API can rewrite it.
 #[derive(Debug, Clone)]
 pub struct NewMember {
     pub key: MemberKey,
@@ -414,11 +395,10 @@ pub struct Member {
     pub last_turn_summary: Option<String>,
     pub is_worktree: bool,
     pub last_change_unix_ms: i64,
-    /// `None` = unpinned. Gapped integer; lower sorts first. Rank values
-    /// carry no meaning beyond relative order: never assume density or a
-    /// fixed origin.
+    /// `None` means unpinned; the rank is a gapped integer and lower sorts first.
+    /// Rank values carry no meaning beyond relative order: never assume density or a fixed origin.
     pub pin_rank: Option<i64>,
-    /// `None` = no manual position; same semantics as `pin_rank`.
+    /// `None` means no manual position; otherwise behaves like `pin_rank`.
     pub order_rank: Option<i64>,
 }
 
@@ -426,17 +406,16 @@ pub struct Member {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {
     pub grouping: Grouping,
-    /// Rows in primary-key order. Ordering policy (pins, ranks, recency) is
-    /// consumer-side; the store returns raw deterministic rows.
+    /// Rows in primary-key order.
+    /// Ordering policy (pins, ranks, recency) belongs to the consumer; the store returns raw deterministic rows.
     pub members: Vec<Member>,
-    /// `PRAGMA data_version` captured in the same read transaction, so a
-    /// poller comparing against this value cannot miss a commit that landed
-    /// between snapshot and first poll.
+    /// `PRAGMA data_version` captured in the same read transaction.
+    /// A poller comparing against this value cannot miss a commit that landed between the snapshot and its first poll.
     pub data_version: i64,
 }
 
-/// One rank write in a `set_pin_rank` / `set_order_rank` batch. `None`
-/// clears the rank (unpin / drop the manual position).
+/// One rank write in a `set_pin_rank` / `set_order_rank` batch.
+/// `None` clears the rank (unpin / drop the manual position).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RankAssignment {
     pub key: MemberKey,
@@ -447,18 +426,16 @@ pub struct RankAssignment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertOutcome {
     Inserted,
-    /// Capacity was reached: the oldest unpinned members were deleted in
-    /// the same transaction (normally one; more than one heals an overfull
-    /// file). Carries the evicted keys in unspecified order.
+    /// Capacity was reached: the oldest unpinned members were deleted in the same transaction (normally one; more than one heals an overfull file).
+    /// Carries the evicted keys in unspecified order.
     InsertedEvicting(Vec<MemberKey>),
-    /// The key already existed: metadata columns were updated; `origin` and
-    /// the rank columns were left untouched.
+    /// The key already existed: metadata columns were updated; `origin` and the rank columns were left untouched.
     UpdatedExisting,
 }
 
-/// What `remove_member` did. Removal is idempotent: removing an
-/// already-removed member is a success (`NotPresent`), never an error, so
-/// two windows racing the same archive both succeed.
+/// What `remove_member` did.
+/// Removal is idempotent: removing an already-removed member is a success (`NotPresent`), never an error.
+/// Two windows racing the same archive both succeed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoveOutcome {
     Removed,
@@ -470,13 +447,11 @@ pub enum RemoveOutcome {
 pub enum RekeyOutcome {
     /// The row moved to the new id; its ranks traveled with it.
     Moved,
-    /// A row with the target key already existed: it kept its origin and
-    /// metadata, its NULL ranks were filled from the old row, and the old
-    /// row was deleted.
+    /// A row with the target key already existed: it kept its origin and metadata.
+    /// Its NULL ranks were filled from the old row, and the old row was deleted.
     MergedIntoExisting,
-    /// The member already has the target id; nothing was written. Guards the
-    /// degenerate self-rekey from the merge arm, whose final delete would
-    /// destroy the row it just merged into.
+    /// The member already has the target id; nothing was written.
+    /// This arm keeps a rekey to the member's own id out of the merge arm, whose final delete would destroy the row it just merged into.
     NoChange,
 }
 
@@ -485,9 +460,8 @@ pub enum RekeyOutcome {
 pub enum SchemaState {
     /// The file is at this build's schema version; all operations work.
     Current,
-    /// The file was written by a newer grok. Reads remain available while
-    /// its schema is read-compatible; every write returns
-    /// [`StoreError::NewerSchema`].
+    /// The file was written by a newer grok.
+    /// Reads remain available while its schema is read-compatible; every write returns [`StoreError::NewerSchema`].
     NewerReadOnly { user_version: u32 },
 }
 

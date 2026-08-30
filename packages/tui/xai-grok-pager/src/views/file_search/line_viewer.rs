@@ -1,15 +1,15 @@
 //! Line viewer popup for selecting line ranges from a file.
 //!
-//! A centered modal overlay showing syntax-highlighted file content with
-//! line numbers. Backed by [`ListPaneState`] for navigation, visual selection,
-//! and search. Used to build `@foo/bar.rs:10-12` line references.
+//! A centered modal overlay showing syntax-highlighted file content with line numbers.
+//! Backed by [`ListPaneState`] for navigation, visual selection, and search.
+//! Used to build `@foo/bar.rs:10-12` line references.
 //!
 //! ## Lifecycle
 //!
 //! 1. Opened via `:` in dropdown, `Ctrl-L` on element, or `<left>:` after element.
 //! 2. User navigates with j/k, searches with `/`, selects range with `v`.
-//! 3. **Enter** confirms → element updated with line range, undo group closed.
-//! 4. **Esc** cancels → undo group cancelled, reverts to pre-viewer state.
+//! 3. **Enter** confirms: the element is updated with the line range and the undo group is closed.
+//! 4. **Esc** cancels: the undo group is cancelled, reverting to the pre-viewer state.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -42,20 +42,18 @@ const MERMAID_AFFORDANCE_ID_BASE: u64 = 2_000_000;
 /// A single source line for the line viewer.
 ///
 /// In normal mode, each item has one `content` line (syntax-highlighted source).
-/// In markdown mode, `rendered_lines` holds the rendered markdown output for this
-/// source line (may be multiple visual lines, e.g., table with borders). The item
-/// uses custom `render()` and `desired_height()` for multi-line display.
+/// In markdown mode, `rendered_lines` holds the rendered markdown output for this source line (a table with borders spans several visual lines).
+/// The item uses custom `render()` and `desired_height()` for multi-line display.
 #[derive(Clone)]
 pub struct SourceLine {
     /// 1-based line number (for display and `@file:N-M` references).
     line_number: usize,
-    /// Unique item ID for ListPane selection tracking. In normal mode this
-    /// equals `line_number`. In markdown mode, source lines can repeat
-    /// (e.g., table borders) so we use a monotonic counter instead.
+    /// Unique item ID for ListPane selection tracking.
+    /// In normal mode this equals `line_number`; in markdown mode, source lines can repeat (table borders) so we use a monotonic counter instead.
     item_id: u64,
     /// Styled content (syntax highlighted). Used in normal mode.
     content: Line<'static>,
-    /// Prefix: right-aligned line number (dim — default).
+    /// Prefix: right-aligned line number (dim, the default).
     prefix: Line<'static>,
     /// Prefix for visual selection range (medium brightness).
     prefix_in_selection: Line<'static>,
@@ -432,7 +430,7 @@ impl ListItem for CommentLine {
 /// draw loop (same pattern as scrollback).
 pub struct MermaidAffordanceLine {
     item_id: u64,
-    /// Fence body — data for Open / Copy path / Copy source.
+    /// Fence body: data for Open / Copy path / Copy source.
     pub source: String,
     prefix: Line<'static>,
 }
@@ -497,8 +495,7 @@ impl ListItem for MermaidAffordanceLine {
         if area.height == 0 || area.width == 0 {
             return;
         }
-        // Blank prefix only — write via cell_mut so out-of-bounds coords
-        // cannot panic (Buffer::set_line indexes and panics on OOB).
+        // Blank prefix only; write via cell_mut so out-of-bounds coords cannot panic (Buffer::set_line indexes and panics on OOB)
         let prefix_w = self.prefix_width().min(area.width);
         let style = self
             .prefix
@@ -635,17 +632,14 @@ impl ListItem for PlanViewerItem {
 
 /// What kind of content the line viewer is showing.
 ///
-/// Replaces string-based type sniffing (`title_override == Some("plan.md")`)
-/// with a typed enum so that plan-specific behavior (commenting, approval,
-/// double-click, shortcuts) can be dispatched via `match` rather than
-/// string comparison.
+/// Replaces string-based type sniffing (`title_override == Some("plan.md")`) with a typed enum.
+/// Plan-specific behavior (commenting, approval, double-click, shortcuts) dispatches via `match` rather than string comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LineViewerKind {
     /// Normal file preview opened from an `@file` reference.
     #[default]
     FilePreview,
-    /// Plan document preview (plan.md) — supports commenting, approval
-    /// buttons, send-feedback, and double-click-to-comment.
+    /// Plan document preview (plan.md): supports commenting, approval buttons, send-feedback, and double-click-to-comment.
     PlanPreview,
 }
 
@@ -690,14 +684,11 @@ pub struct LineViewerState {
     /// Whether we're inside an undo group (to close/cancel on exit).
     pub in_undo_group: bool,
     /// Cached inner popup area from last render (for mouse hit-testing).
-    /// Excludes the divider + footer rows in plan modes, so it matches
-    /// the area the ListPane was rendered into — used for routing list
-    /// events to `ListPaneState::handle_mouse_event`.
+    /// Excludes the divider and footer rows in plan modes, so it matches the area the ListPane was rendered into.
+    /// Used for routing list events to `ListPaneState::handle_mouse_event`.
     pub last_popup_area: Option<Rect>,
-    /// Cached full modal area (inside the border, including the footer)
-    /// from the last render. Used by the click-outside-modal check so
-    /// clicks landing on the divider or empty space between footer
-    /// buttons don't accidentally close the modal.
+    /// Cached full modal area (inside the border, including the footer) from the last render.
+    /// Used by the click-outside-modal check so clicks landing on the divider or empty space between footer buttons do not close the modal.
     pub last_modal_area: Option<Rect>,
     /// Cached close button rect from last render (for mouse hit-testing).
     pub close_button_area: Option<Rect>,
@@ -708,29 +699,24 @@ pub struct LineViewerState {
     /// Whether the fullscreen button is hovered.
     pub fullscreen_hovered: bool,
     /// Plan-specific state. `Some` only when `kind == PlanPreview`.
-    /// Keeps plan-only fields (buttons, approval, double-click) out of
-    /// the generic viewer.
+    /// Keeps plan-only fields (buttons, approval, double-click) out of the generic viewer.
     pub plan: Option<PlanViewerExtras>,
-    /// Initial scroll range (0-based indices). Consumed on first prepare_layout
-    /// to center the range in the viewport.
+    /// Initial scroll range (0-based indices), consumed on the first prepare_layout to center the range in the viewport.
     initial_scroll_range: Option<Range<usize>>,
-    /// Optional title override. When set, the viewer title bar shows this
-    /// instead of the (potentially long) file path. Used for plan previews.
+    /// Optional title override, shown in the title bar instead of the (potentially long) file path. Used for plan previews.
     pub title_override: Option<String>,
     /// Raw markdown content for rebuilding when the display width changes.
     /// `None` for non-markdown viewers.
     markdown_content: Option<String>,
     /// The last `max_table_width` used to build markdown lines.
-    /// Compared against the current content width in `prepare_layout` to
-    /// trigger a rebuild when the viewer is resized.
+    /// Compared against the current content width in `prepare_layout` to trigger a rebuild when the viewer is resized.
     last_table_width: Option<usize>,
-    /// Copy of comments last applied via `rebuild_with_comments`, so that
-    /// a width-triggered rebuild can re-interleave them automatically.
+    /// Copy of comments last applied via `rebuild_with_comments`, so that a width-triggered rebuild can re-interleave them automatically.
     last_comments: Vec<crate::views::plan_approval_view::PlanComment>,
     /// `(source_lines index to follow, diagram source)` for affordance rows.
     mermaid_after: Vec<(usize, String)>,
-    /// When `true`, the viewer uses the full overlay area instead of the
-    /// 75% centered popup. Toggled by Ctrl+F.
+    /// When `true`, the viewer uses the full overlay area instead of the 75% centered popup.
+    /// Toggled by Ctrl+F.
     pub fullscreen: bool,
 }
 
@@ -786,8 +772,8 @@ impl LineViewerState {
 
     /// Open a file and create the viewer with markdown rendering.
     ///
-    /// Same as `open()` but renders the content as rich markdown instead of
-    /// raw syntax-highlighted text. Source-line-based navigation is preserved.
+    /// Same as `open()` but renders the content as rich markdown instead of raw syntax-highlighted text.
+    /// Source-line-based navigation is preserved.
     pub fn open_markdown(path: &Path, element_id: Option<ElementId>) -> Option<Self> {
         let content = std::fs::read_to_string(path).ok()?;
         Self::open_markdown_content(path.to_path_buf(), content, element_id)
@@ -803,9 +789,8 @@ impl LineViewerState {
         }
         let path = path.into();
 
-        // Defer the actual markdown render to the first `prepare_layout` call
-        // which knows the display width. `rebuild_markdown_for_width` will
-        // build source_lines with the correct `max_table_width`.
+        // Defer the actual markdown render to the first `prepare_layout` call, which knows the display width
+        // `rebuild_markdown_for_width` will build source_lines with the correct `max_table_width`
         let source_lines = Vec::new();
         let lines = Vec::new();
 
@@ -848,8 +833,7 @@ impl LineViewerState {
 
     /// Set initial selection and scroll to a line range (1-based).
     ///
-    /// Enters visual mode with the range pre-selected and scrolls so the
-    /// range is visible (centered if possible).
+    /// Enters visual mode with the range pre-selected and scrolls so the range is visible (centered if possible).
     pub fn set_initial_selection(&mut self, range: Range<usize>) {
         // Convert 1-based line numbers to 0-based ListPane indices.
         let start_idx = range.start.saturating_sub(1);
@@ -862,7 +846,6 @@ impl LineViewerState {
 
             // Enter visual mode and extend to end line.
             if end_idx > start_idx + 1 {
-                // Multi-line range: enter visual mode.
                 self.list_state.enter_visual_mode(&self.lines);
                 // Move selection to the end of the range.
                 let end_line_idx = (end_idx - 1).min(self.lines.len() - 1);
@@ -877,16 +860,15 @@ impl LineViewerState {
 
     /// Rebuild markdown items when the available content width changes.
     ///
-    /// Recomputes `max_table_width` from the ListPane's content width
-    /// (total width minus line-number prefix), then re-renders markdown
-    /// with constrained tables so box-drawing borders aren't word-wrapped.
+    /// Recomputes `max_table_width` from the ListPane's content width (total width minus line-number prefix).
+    /// Markdown then re-renders with constrained tables so box-drawing borders aren't word-wrapped.
     fn rebuild_markdown_for_width(&mut self, width: u16) {
         let Some(ref content) = self.markdown_content else {
             return;
         };
 
         let prefix_width = digit_count(source_line_count(content).max(1)) + 1;
-        let scrollbar_width = SCROLLBAR_TOTAL_COLS as usize; // gap + track
+        let scrollbar_width = SCROLLBAR_TOTAL_COLS as usize; // gap and track
         let content_width = (width as usize)
             .saturating_sub(prefix_width)
             .saturating_sub(scrollbar_width);
@@ -1019,23 +1001,23 @@ impl LineViewerState {
         self.rebuild_markdown_for_width(width);
         self.list_state.prepare_layout(&self.lines, width, height);
 
-        // On the first render with an initial range, center the range
-        // in the viewport. Consumed once so subsequent navigation is normal.
+        // On the first render with an initial range, center the range in the viewport
+        // Consumed once so subsequent navigation is normal
         if let Some(range) = self.initial_scroll_range.take() {
             let vp = height as usize;
             let total = self.lines.len();
             let pad = 3usize; // inner padding (lines of context above/below)
 
             if total <= vp {
-                // Entire file fits — no scrolling needed.
+                // Entire file fits, so no scrolling is needed
             } else {
                 let range_len = range.end.saturating_sub(range.start);
                 let offset = if range_len + pad * 2 <= vp {
-                    // Range fits with padding — center it.
+                    // Range fits with padding: center it
                     let center = range.start + range_len / 2;
                     center.saturating_sub(vp / 2)
                 } else {
-                    // Range larger than viewport — put start near top with padding.
+                    // Range larger than viewport: put the start near the top with padding
                     range.start.saturating_sub(pad)
                 };
                 // Clamp to valid range.
@@ -1045,27 +1027,23 @@ impl LineViewerState {
         }
     }
 
-    /// Rebuild `self.lines` from source lines + comments.
+    /// Rebuild `self.lines` from source lines and comments.
     ///
     /// Comments are inserted after the last source line in their range.
-    /// Item IDs for comments use a high base offset to avoid colliding
-    /// with source line IDs.
+    /// Item IDs for comments use a high base offset to avoid colliding with source line IDs.
     pub fn rebuild_with_comments(
         &mut self,
         comments: &[crate::views::plan_approval_view::PlanComment],
     ) {
         self.last_comments = comments.to_vec();
         self.interleave_comments(comments);
-        // Item count/content changed — force the list pane to recompute
-        // wrapping heights on the next render frame.
+        // Item count/content changed: force the list pane to recompute wrapping heights on the next render frame
         self.list_state.invalidate_layout();
     }
 
-    /// Interleave source lines with Mermaid affordance rows and comments
-    /// without updating `last_comments`.
+    /// Interleave source lines with Mermaid affordance rows and comments without updating `last_comments`.
     ///
-    /// `mermaid_after` is document-ordered; affordances sit under the
-    /// diagram art, before any comments on the same source line.
+    /// `mermaid_after` is document-ordered; affordances sit under the diagram art, before any comments on the same source line.
     fn interleave_comments(&mut self, comments: &[crate::views::plan_approval_view::PlanComment]) {
         let max_digits = digit_count(
             self.source_lines
@@ -1203,9 +1181,8 @@ fn build_source_lines(path: &Path, content: &str) -> Vec<SourceLine> {
         .enumerate()
         .map(|(i, text)| {
             let line_number = i + 1;
-            // Feed every line, blank ones included, through the highlighter so
-            // its parse state stays in sync. Skipping blanks corrupts constructs
-            // that span multiple lines (block comments, multi-line strings).
+            // Feed every line, blank ones included, through the highlighter so its parse state stays in sync
+            // Skipping blanks corrupts constructs that span multiple lines (block comments, multi-line strings)
             let styled_line = match highlighter.as_mut() {
                 Some(hl) => highlight_to_ratatui_line(hl, text, &syntect.syntax_set),
                 None if text.is_empty() => Line::from(" ".to_owned()),
@@ -1216,8 +1193,7 @@ fn build_source_lines(path: &Path, content: &str) -> Vec<SourceLine> {
         .collect()
 }
 
-/// Count source lines in content, matching `str::split('\n')` semantics
-/// with trailing-newline handling.
+/// Count source lines the way `str::split('\n')` does, not counting a final trailing newline.
 fn source_line_count(content: &str) -> usize {
     let count = content.split('\n').count();
     if content.ends_with('\n') {
@@ -1235,13 +1211,10 @@ struct BuiltMarkdownLines {
 
 /// Build markdown-rendered source lines from file content.
 ///
-/// Uses `MarkdownContent` to render the full document, then groups rendered
-/// lines by source line using `line_source_map`. Each source line becomes
-/// one `SourceLine` item that may span multiple visual lines (e.g., a table
-/// block renders as border + header + separator + data + border).
+/// Uses `MarkdownContent` to render the full document, then groups rendered lines by source line using `line_source_map`.
+/// Each source line becomes one `SourceLine` item that may span multiple visual lines (a table renders as border, header, separator, data, border).
 ///
-/// With `render_mermaid` auto/on, also anchors affordance rows under each
-/// closed mermaid fence.
+/// With `render_mermaid` auto/on, also anchors affordance rows under each closed mermaid fence.
 fn build_markdown_lines(content: &str, max_table_width: Option<usize>) -> BuiltMarkdownLines {
     let md = MarkdownContent::new_source_faithful(content, max_table_width);
     let pre_wrap = md.pre_wrap_lines();
@@ -1249,9 +1222,8 @@ fn build_markdown_lines(content: &str, max_table_width: Option<usize>) -> BuiltM
     let mermaid = md.mermaid_content();
     let mermaid_ranges = md.mermaid_block_ranges();
 
-    // Background colors come from each line's style (set by the renderer
-    // for code blocks etc.). pre_wrap_lines() returns owned Lines that
-    // carry their style including bg.
+    // Background colors come from each line's style (set by the renderer for code blocks etc.)
+    // pre_wrap_lines() returns owned Lines that carry their style including bg
     let line_bgs: Vec<Option<Color>> = pre_wrap.iter().map(|line| line.style.bg).collect();
 
     // Split source text into raw lines for plain_text / search.
@@ -1277,7 +1249,7 @@ fn build_markdown_lines(content: &str, max_table_width: Option<usize>) -> BuiltM
         prewrap_to_group.push(groups.len() - 1);
     }
 
-    // group index → source_lines index after blank-line injection.
+    // Maps group index to source_lines index after blank-line injection
     let mut group_to_source_idx: Vec<usize> = Vec::with_capacity(groups.len());
     let mut source_lines = Vec::new();
     let mut next_item_id = 0u64;
@@ -1382,8 +1354,7 @@ fn highlight_to_ratatui_line(
         if piece.is_empty() {
             continue;
         }
-        // Shared path: polarity-safe under the terminal-native lock, else
-        // normal theme quantize (see xai_grok_pager_render::syntax).
+        // Shared path: polarity-safe under the terminal-native lock, else normal theme quantize (see xai_grok_pager_render::syntax)
         let fg = crate::syntax::syntect_rgb_to_fg(
             style.foreground.r,
             style.foreground.g,
@@ -1409,10 +1380,8 @@ fn digit_count(n: usize) -> usize {
 
 // ── Rendering helpers ───────────────────────────────────────────────────
 
-/// Build a single review-footer shortcut button styled to match the
-/// shortcut hints in `modal_window::render_modal_shortcuts`:
-/// bold key in the primary text color + dim label, with a
-/// hover-highlighted background.
+/// Build a single review-footer shortcut button styled to match the shortcut hints in `modal_window::render_modal_shortcuts`.
+/// The style is a bold key in the primary text color and a dim label, with a hover-highlighted background.
 fn build_shortcut_button<'a>(
     key: char,
     rest: &str,
@@ -1437,10 +1406,9 @@ fn build_shortcut_button<'a>(
 
 /// Render the line viewer popup.
 ///
-/// In normal mode, draws a 75% centered panel with dimmed background
-/// (modifiers reset). In fullscreen mode (`viewer.fullscreen`), fills
-/// the entire overlay area without dimming. Renders the ListPane
-/// inside the panel with syntax-highlighted lines.
+/// In normal mode, draws a 75% centered panel with dimmed background (modifiers reset).
+/// In fullscreen mode (`viewer.fullscreen`), fills the entire overlay area without dimming.
+/// Renders the ListPane inside the panel with syntax-highlighted lines.
 pub fn render_line_viewer(
     buf: &mut Buffer,
     full_area: Rect,
@@ -1449,11 +1417,10 @@ pub fn render_line_viewer(
     theme: &Theme,
     comment_count: usize,
 ) {
-    // Compute popup area. In enlarge (fullscreen) mode the popup
-    // nearly fills the overlay, but leaves 1 row of top padding and
-    // 2 cols of side padding so it doesn't crowd the screen edges
-    // (the caller already excludes the prompt + turn_status from
-    // `full_area`). In normal mode it sits in a 75% centered popup.
+    // Compute the popup area
+    // In enlarge (fullscreen) mode it nearly fills the overlay, leaving 1 row of top and 2 cols of side padding so it doesn't crowd the edges
+    // The caller already excludes the prompt and turn_status from `full_area`
+    // In normal mode it sits in a 75% centered popup
     let (popup_area, should_dim) = if viewer.fullscreen {
         const TOP_PAD: u16 = 1;
         const SIDE_PAD: u16 = 2;
@@ -1471,9 +1438,8 @@ pub fn render_line_viewer(
         (Rect::new(popup_x, popup_y, popup_width, popup_height), true)
     };
 
-    // Plan modes (both review and casual) reserve 2 extra rows inside
-    // the frame for the divider + action-button footer, so they need
-    // a slightly taller minimum than ordinary file previews.
+    // Plan modes (both review and casual) reserve 2 extra rows inside the frame for the divider and action-button footer
+    // They therefore need a slightly taller minimum than ordinary file previews
     let min_height: u16 = if viewer.show_footer() { 7 } else { 5 };
     if popup_area.width < 10 || popup_area.height < min_height {
         viewer.last_popup_area = None;
@@ -1502,13 +1468,10 @@ pub fn render_line_viewer(
     let inner = border.inner(popup_area);
     border.render(popup_area, buf);
 
-    // Plan modes reserve 2 rows at the bottom of `inner` for the
-    // divider + action-button row (rendered in step 8 below). Compute
-    // the actual content_area now so `prepare_layout` sees the true
-    // viewport height — passing the larger `inner.height` would make
-    // `ListPaneState`'s auto-scroll/paging math off by `footer_rows`
-    // (the selection can hide behind the footer; Ctrl-D/Ctrl-U jump
-    // too far; initial-scroll-to-range centering is mis-sized).
+    // Plan modes reserve 2 rows at the bottom of `inner` for the divider and action-button row (rendered in step 8 below)
+    // Compute the actual content_area now so `prepare_layout` sees the true viewport height
+    // Passing the larger `inner.height` would make `ListPaneState`'s auto-scroll/paging math off by `footer_rows`
+    // The selection could hide behind the footer, Ctrl-D/Ctrl-U would jump too far, and initial-scroll-to-range centering would be mis-sized
     let footer_rows: u16 = if viewer.show_footer() { 2 } else { 0 };
     let content_area = Rect {
         x: inner.x,
@@ -1520,10 +1483,9 @@ pub fn render_line_viewer(
     // 4. Prepare layout (resolves selection index for title + rendering).
     viewer.prepare_layout(content_area.width, content_area.height);
 
-    // 5. Title bar: styled file path + line range.
-    //    Only show line range when visual selection is active.
-    //    When title_override is set (e.g. plan preview), use that instead
-    //    of the full file path to avoid overflow.
+    // 5. Title bar: styled file path and line range.
+    //    Only show the line range when visual selection is active
+    //    When title_override is set (e.g. plan preview), use that instead of the full file path to avoid overflow.
     if inner.width > 4 {
         let rel_path = viewer.path.strip_prefix(cwd).unwrap_or(&viewer.path);
         let rel_path_str = viewer
@@ -1533,14 +1495,13 @@ pub fn render_line_viewer(
             .to_string();
         let line_range = if viewer.list_state.visual_mode {
             viewer.line_range_suffix().map(|s| {
-                // Strip leading ':' — styled_file_ref adds its own.
+                // Strip the leading ':'; styled_file_ref adds its own
                 s.strip_prefix(':').unwrap_or(&s).to_owned()
             })
         } else {
             None
         };
 
-        // Build styled title with shared helper.
         let mut title = super::styled_file_ref(
             &rel_path_str,
             line_range.as_deref(),
@@ -1552,9 +1513,7 @@ pub fn render_line_viewer(
             span.style = span.style.bg(theme.bg_base);
         }
 
-        // Wrap with `─ ... ─` decorations to match other modals
-        // (see modal_window.rs:341-346) and left-align flush with the
-        // top-left corner.
+        // Wrap with `─ ... ─` decorations to match other modals (see modal_window.rs:341-346) and left-align flush with the top-left corner.
         let deco = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
         title.spans.insert(0, Span::styled("\u{2500} ", deco));
         title.spans.push(Span::styled(" \u{2500}", deco));
@@ -1571,22 +1530,16 @@ pub fn render_line_viewer(
     }
 
     // 6. Action buttons on the top border, right-aligned.
-    //    Layout: ... [↗][✗]  (rightmost buttons first; the two abut
-    //    flush — see the spacing notes on the close/fullscreen labels
-    //    below).
-    //    The close [✗] is omitted in plan-review (feedback) mode because
-    //    the modal is not user-closeable in that state — clicking it
-    //    would be a no-op (see the close-button branch of
-    //    `handle_line_viewer_mouse` in agent_view.rs).
+    //    Layout: ... [↗][✗] (rightmost buttons first; the two abut flush, see the spacing notes on the close/fullscreen labels below).
+    //    The close [✗] is omitted in plan-review (feedback) mode because the modal is not user-closeable in that state
+    //    Clicking it would be a no-op (see the close-button branch of `handle_line_viewer_mouse` in agent_view.rs)
     let mut right_edge = popup_area.x + popup_area.width - 1;
 
     if !viewer.feedback_active() {
         let close_text = crate::glyphs::ballot_x(); // ✗ (ASCII on legacy ConHost)
-        // Label is `[✗] ` (trailing space, no leading space). The
-        // fullscreen button's label has no trailing space when the
-        // close is visible, so the two buttons abut flush as `[↗][✗]`,
-        // tucked under the top-right corner with one space inside the
-        // frame on each side: ` [↗][✗] `.
+        // Label is `[✗] ` (trailing space, no leading space)
+        // The fullscreen button's label has no trailing space when the close is visible, so the two buttons abut flush as `[↗][✗]`
+        // They tuck under the top-right corner with one space inside the frame on each side: ` [↗][✗] `
         let close_w: u16 = 4; // "[✗] "
         if popup_area.width > close_w + 2 {
             let close_x = right_edge - close_w;
@@ -1609,14 +1562,10 @@ pub fn render_line_viewer(
         viewer.close_button_area = None;
     }
 
-    // Fullscreen toggle button. The icon stays constant regardless of
-    // current state — the button is a toggle, not a status indicator.
+    // Fullscreen toggle button. The icon stays constant regardless of current state: the button is a toggle, not a status indicator.
     //
-    // Spacing: when the close button is rendered (casual mode) the
-    // fullscreen drops its trailing space so the two sit flush as
-    // `[↗][✗]`. When the close is hidden (plan-review mode) the
-    // fullscreen keeps its trailing space so it doesn't crowd the
-    // corner `╮`.
+    // Spacing: when the close button is rendered (casual mode) the fullscreen drops its trailing space so the two sit flush as `[↗][✗]`
+    // When the close is hidden (plan-review mode) the fullscreen keeps its trailing space so it doesn't crowd the corner `╮`
     let fs_icon = crate::glyphs::enlarge(); // ↗ (ASCII on legacy ConHost)
     let close_visible = viewer.close_button_area.is_some();
     let (fs_label, fs_w): (String, u16) = if close_visible {
@@ -1641,10 +1590,8 @@ pub fn render_line_viewer(
         viewer.fullscreen_button_area = None;
     }
 
-    // The legacy top-border "send" button is gone — both plan-approval
-    // and casual modes now render the send action in the modal footer
-    // alongside the other shortcut buttons. Clear stale hit-rects so
-    // mouse handlers don't act on positions from a previous render.
+    // The legacy top-border "send" button is gone; both plan-approval and casual modes now render the send action in the modal footer
+    // Clear stale hit-rects so mouse handlers don't act on positions from a previous render
     if let Some(plan) = viewer.plan.as_mut() {
         plan.send_button_area = None;
         plan.approve_button_area = None;
@@ -1652,26 +1599,22 @@ pub fn render_line_viewer(
     }
 
     // 7. Render ListPane.
-    //    Plan modes (review + casual) reserve 2 rows at the bottom of
-    //    `inner` for a horizontal divider plus the action-button row.
-    //    The divider sits at `inner.bottom() - 2` and the buttons at
-    //    `inner.bottom() - 1`, both inside the modal frame.
+    //    Plan modes (review and casual) reserve 2 rows at the bottom of `inner` for a horizontal divider plus the action-button row
+    //    The divider sits at `inner.bottom() - 2` and the buttons at `inner.bottom() - 1`, both inside the modal frame
     //
-    //    `footer_rows` / `content_area` were computed above (just
-    //    after `inner`) so `prepare_layout` could see the true
-    //    viewport height. Reuse them here.
+    //    `footer_rows` / `content_area` were computed above (just after `inner`) so `prepare_layout` could see the true viewport height
+    //    Reuse them here
     let style = LineViewerState::list_pane_style();
 
     let pane = ListPane::new(&viewer.lines).focused(true).style(style);
     StatefulWidget::render(pane, content_area, buf, &mut viewer.list_state);
 
-    // Cache the list-rendered area (for ListPane mouse dispatch) and
-    // the full modal area inside the border (for the click-outside
-    // check that decides whether to close the modal).
+    // Cache the list-rendered area (for ListPane mouse dispatch)
+    // Also cache the full modal area inside the border, for the click-outside check that decides whether to close the modal
     viewer.last_popup_area = Some(content_area);
     viewer.last_modal_area = Some(inner);
 
-    // 7b. Line range highlight — active drag or commenting range.
+    // 7b. Line range highlight: active drag or commenting range.
     if let Some(plan) = viewer.plan_ref() {
         let highlight_range =
             if let (Some(start), Some(end)) = (plan.gutter_drag_start, plan.gutter_drag_end) {
@@ -1689,9 +1632,8 @@ pub fn render_line_viewer(
             let blend_bg =
                 crate::render::color::blend_color(theme.bg_base, theme.accent_plan, 0.15)
                     .unwrap_or(theme.accent_plan);
-            // Stop the highlight one column before the scrollbar so
-            // the gap + track stay readable instead of being tinted
-            // by the comment-range overlay.
+            // Stop the highlight one column before the scrollbar
+            // The gap and track stay readable instead of being tinted by the comment-range overlay
             let highlight_width = content_area.width.saturating_sub(SCROLLBAR_TOTAL_COLS);
             for row in content_area.y..content_area.y + content_area.height {
                 if let Some(ln) = viewer.source_line_at_screen_row(row, content_area)
@@ -1705,14 +1647,11 @@ pub fn render_line_viewer(
         }
     }
 
-    // 8. Action buttons inside the modal footer (centered), for both
-    //    plan-approval and casual plan-preview modes. A full-width `─`
-    //    divider separates the button row from the content above
-    //    (matches modal_window.rs's tab divider style).
+    // 8. Action buttons inside the modal footer (centered), for both plan-approval and casual plan-preview modes.
+    //    A full-width `─` divider separates the button row from the content above (matches modal_window.rs's tab divider style)
     //
-    //    Buttons use the same `key bold + label dim` treatment as
-    //    `render_modal_shortcuts`, sit in a single row separated by
-    //    `  |  `, centered within the modal frame.
+    //    Buttons use the same bold-key, dim-label treatment as `render_modal_shortcuts`
+    //    They sit in a single row separated by `  |  `, centered within the modal frame
     //    Casual preview omits `q` (close via the X button).
     if viewer.show_footer() && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
@@ -1734,11 +1673,8 @@ pub fn render_line_viewer(
         let copy_spans = build_shortcut_button('y', "copy plan", copy_hovered, theme);
         let copy_w: u16 = copy_spans.iter().map(|s| s.width() as u16).sum();
 
-        // In approval mode, always show `a approve`. When there are
-        // pending review comments, also show `s revise` (request changes).
-        // In approval mode, show `a approve` (or `a approve w/ comments`
-        // when inline comments are pending). In casual mode, show `s send`
-        // only when comments exist.
+        // In approval mode, show `a approve` (or `a approve w/ comments` when inline comments are pending)
+        // In casual mode, show `s send` only when comments exist
         let (_action_label, action_w, action_spans): (&str, u16, Option<Vec<Span>>) = if is_approval
         {
             let label = if comment_count > 0 {
@@ -1757,8 +1693,7 @@ pub fn render_line_viewer(
             ("", 0, None)
         };
 
-        // `s revise` button — always visible in approval mode so the
-        // user can request changes (switches to prompt for revision notes).
+        // `s revise` button, always visible in approval mode so the user can request changes (switches to prompt for revision notes)
         let (revise_w, revise_spans): (u16, Option<Vec<Span>>) = if is_approval {
             let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
             let spans = build_shortcut_button('s', "request changes", send_hovered, theme);
@@ -1777,8 +1712,8 @@ pub fn render_line_viewer(
             None
         };
 
-        // Pending-comment badge rendered after the `c comment` button
-        // as ` N ●` in `accent_plan`. Shown whenever comments exist.
+        // Pending-comment badge rendered after the `c comment` button as ` N ●` in `accent_plan`
+        // Shown whenever comments exist
         use unicode_width::UnicodeWidthStr;
         let badge_text: String = if comment_count > 0 {
             format!(" {comment_count} {}", crate::glyphs::filled_dot())
@@ -1810,7 +1745,7 @@ pub fn render_line_viewer(
         if total_w <= inner.width {
             let mut x = inner.x + (inner.width - total_w) / 2;
 
-            // Action button (approve / send) — left-most.
+            // Action button (approve / send), left-most
             if let Some(spans) = &action_spans {
                 let approve_x = x;
                 for span in spans {
@@ -1827,7 +1762,7 @@ pub fn render_line_viewer(
                 viewer.plan_mut().approve_button_area = None;
             }
 
-            // Revise button — approval mode with comments.
+            // Revise button, approval mode with comments
             if let Some(spans) = &revise_spans {
                 let revise_x = x;
                 for span in spans {
@@ -1844,7 +1779,7 @@ pub fn render_line_viewer(
                 viewer.plan_mut().send_button_area = None;
             }
 
-            // Comment button — always present in both modes.
+            // Comment button, always present in both modes
             let comment_x = x;
             for span in &comment_spans {
                 let w = span.width() as u16;
@@ -1873,7 +1808,7 @@ pub fn render_line_viewer(
                 viewer.plan_mut().copy_button_area = None;
             }
 
-            // Quit button — approval mode only.
+            // Quit button, approval mode only
             if let Some((spans, w)) = quit_spans {
                 buf.set_string(x, bottom_y, separator, sep_style);
                 x += sep_w;
@@ -1888,8 +1823,7 @@ pub fn render_line_viewer(
                 viewer.plan_mut().abandon_button_area = None;
             }
         } else {
-            // Footer too narrow — disable hit-tests so stale rects
-            // from a previous render don't fire.
+            // Footer too narrow: disable hit-tests so stale rects from a previous render don't fire
             let plan = viewer.plan_mut();
             plan.approve_button_area = None;
             plan.comment_button_area = None;
@@ -2085,9 +2019,8 @@ mod tests {
 
     #[test]
     fn markdown_viewer_preserves_soft_break_collapsed_lines() {
-        // Repro: consecutive non-blank lines (a poem) form one
-        // CommonMark paragraph. Source-faithful rendering must keep each line
-        // on its own numbered row instead of collapsing to one paragraph.
+        // Repro: consecutive non-blank lines (a poem) form one CommonMark paragraph
+        // Source-faithful rendering must keep each line on its own numbered row instead of collapsing to one paragraph
         let mut viewer = LineViewerState::open_markdown_content(
             "plan.md",
             "Line one,\nLine two,\nLine three.".to_owned(),
@@ -2116,9 +2049,8 @@ mod tests {
 
     #[test]
     fn markdown_viewer_comment_range_maps_full_soft_break_paragraph() {
-        // Commenting round-trip: selecting all rows of a soft-break paragraph
-        // must map back to the full file line range so the agent inspects the
-        // correct lines. Pre-fix this collapsed to a single line number.
+        // Commenting round-trip: selecting all rows of a soft-break paragraph must map back to the full file line range
+        // The agent then inspects the correct lines; this used to collapse to a single line number
         let mut viewer = LineViewerState::open_markdown_content(
             "plan.md",
             "Line one,\nLine two,\nLine three.".to_owned(),

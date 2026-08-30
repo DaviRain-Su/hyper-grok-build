@@ -49,10 +49,6 @@ fn filter_parser_state_known() {
         FilterValue::State(RowState::Idle)
     ));
     assert!(matches!(
-        parse_filter("s:blocked"),
-        FilterValue::State(RowState::Blocked)
-    ));
-    assert!(matches!(
         parse_filter("s:completed"),
         FilterValue::State(RowState::Completed)
     ));
@@ -183,8 +179,7 @@ fn compact_cwd_path_equals_home() {
 // `rename_under_cap_appends` tests below, which assert exact
 // character at the cap boundary.
 
-/// Edge case 20: stale row ids in `pinned` / `reorder` are dropped
-/// on `gc_stale_refs`.
+/// Stale row ids in `pinned` / `reorder` are dropped on `gc_stale_refs`.
 #[test]
 fn gc_drops_stale_ids() {
     let mut state = DashboardState::new();
@@ -197,7 +192,7 @@ fn gc_drops_stale_ids() {
 }
 
 /// Lenient parsing: malformed `pinned` (string instead of array)
-/// is silently dropped. Edge case 12.
+/// is silently dropped.
 #[test]
 fn parse_persist_keys_rejects_non_array() {
     let s = r#"pinned = "not-an-array""#;
@@ -296,7 +291,7 @@ fn ctrl_g_toggles_grouping_ctrl_s_does_not() {
     );
 
     // Ctrl+S on the empty `[+ New Agent]` button is "send + open"
-    // (create + detail), NOT a grouping toggle.
+    // (create and open detail), NOT a grouping toggle
     let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
     assert!(
         matches!(
@@ -307,8 +302,7 @@ fn ctrl_g_toggles_grouping_ctrl_s_does_not() {
     );
 }
 
-/// Edge case 4: selection survives a row refresh as long as the
-/// underlying `DashboardRowId` is still present.
+/// Selection survives a row refresh as long as the underlying `DashboardRowId` is still present.
 #[test]
 fn reanchor_selection_keeps_existing_id() {
     let mut state = DashboardState::new();
@@ -325,7 +319,6 @@ fn reanchor_selection_keeps_existing_id() {
         cwd: std::path::PathBuf::from("/"),
         last_change_at: std::time::SystemTime::now(),
         pinned: false,
-        is_active: false,
         badges: Vec::new(),
         context_pct: None,
         indent: 0,
@@ -360,7 +353,6 @@ fn reanchor_selection_drops_to_none_when_previous_disappeared() {
         cwd: std::path::PathBuf::from("/"),
         last_change_at: std::time::SystemTime::now(),
         pinned: false,
-        is_active: false,
         badges: Vec::new(),
         context_pct: None,
         indent: 0,
@@ -560,8 +552,6 @@ fn parse_row_state_token_all_synonyms() {
         ("errored", RowState::Failed),
         ("cancelled", RowState::Failed),
         ("canceled", RowState::Failed),
-        ("blocked", RowState::Blocked),
-        ("paused", RowState::Blocked),
     ] {
         assert_eq!(parse_row_state_token(s), Some(expected), "input={s}");
     }
@@ -810,7 +800,7 @@ fn worktree_dialog_cancel_without_stash_leaves_input_empty() {
 
 /// `Ctrl+W` resolves to the worktree-toggle action (which is what puts it
 /// in the dashboard cheatsheet and lets the dispatcher git-gate it). The
-/// actual flag flip + non-git guard live in
+/// actual flag flip and non-git guard live in
 /// `dispatch_dashboard_toggle_worktree` and are covered there.
 #[test]
 fn ctrl_w_emits_toggle_worktree_action() {
@@ -853,7 +843,7 @@ fn peek_fields_for_test(response_type: &str) -> super::super::peek::PeekFields {
     }
 }
 
-/// edge case 13: Esc closes peek first.
+/// Esc closes peek first.
 #[test]
 fn esc_closes_peek_first() {
     let mut state = make_state_with_selection();
@@ -1001,7 +991,7 @@ fn test_png_bytes() -> Vec<u8> {
 
 /// The Ctrl/Cmd+V chord path attaches a clipboard image to the peek
 /// reply (image wins over the caption) without leaking into dispatch. Drives
-/// the real deferred entry point + completion.
+/// the real deferred entry point and completion.
 #[test]
 fn peek_paste_key_clipboard_image_wins_over_text() {
     let mut state = state_with_open_peek();
@@ -1479,11 +1469,11 @@ fn peek_esc_clears_draft_then_unselects() {
     let reg = crate::actions::ActionRegistry::defaults();
     state.peek_reply.set_text("draft");
     let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-    // First Esc clears the draft, keeps the peek + selection.
+    // First Esc clears the draft, keeps the peek and selection
     let _ = state.handle_key(&esc, &reg);
     assert!(state.peek_reply.text().is_empty());
     assert!(state.selected.is_some());
-    // Second Esc unselects → focuses the + New Agent button + closes peek.
+    // Second Esc unselects: focuses the + New Agent button and closes the peek
     let _ = state.handle_key(&esc, &reg);
     assert!(state.peek.is_none());
     assert!(state.selected.is_none());
@@ -1868,7 +1858,7 @@ fn peek_paste_in_question_mode_gated_on_reject_selection() {
 
 /// The Ask tool (`AskUserQuestion`) is answered from the peek too:
 /// selecting an option emits `DashboardQuestionAnswer { option_idx }`,
-/// and the "Other" free-text row emits it with `option_idx: None` +
+/// and the "Other" free-text row emits it with `option_idx: None` and
 /// the typed text. (Ask questions carry no `request_id`.)
 #[test]
 fn peek_ask_question_answer_routing() {
@@ -1876,7 +1866,7 @@ fn peek_ask_question_answer_routing() {
     let mut state = make_state_with_selection();
     let mut f = peek_fields_for_test("Awaiting your input");
     f.question = Some("Which approach?".into());
-    // Two real options + an appended "Other" free-text row.
+    // Two real options and an appended "Other" free-text row
     f.options = vec![
         ("Redis".into(), "Redis".into()),
         ("In-memory".into(), "In-memory".into()),
@@ -2207,8 +2197,7 @@ fn esc_blurs_input_keeps_draft_and_selection() {
     assert_eq!(state.dispatch.text(), "hello", "draft is preserved");
 }
 
-/// edge case 13: Esc with empty input + active filter
-/// clears filter.
+/// Esc with an empty input and an active filter clears the filter.
 #[test]
 fn esc_clears_active_filter() {
     let mut state = make_state_with_selection();
@@ -2269,7 +2258,7 @@ fn esc_with_selection_deselects() {
 /// Enter with an empty prompt while the button is
 /// focused emits `DashboardCreateNewAgentWithDetail`. The
 /// state handler returns the action; the dispatcher then
-/// spawns the session + switches to its detail view.
+/// spawns the session and switches to its detail view.
 #[test]
 fn enter_on_focused_button_with_empty_prompt_emits_create_with_detail() {
     use crate::app::actions::Action;
@@ -2315,7 +2304,7 @@ fn enter_on_focused_button_with_non_empty_prompt_emits_dispatch() {
     }
 }
 
-/// Ctrl+S ("send + open") on focused button + non-empty prompt
+/// Ctrl+S ("send + open") on a focused button with a non-empty prompt
 /// emits `DashboardDispatch { attach: true }` so the
 /// dispatcher's new-session arm switches view AND sets
 /// `attached_agent`. The state handler doesn't know about attach
@@ -2410,7 +2399,7 @@ fn ctrl_s_on_row_selected_with_text_emits_dispatch_with_attach() {
 /// Ctrl+S ("send + open") on focused button with EMPTY prompt
 /// behaves like plain Enter — emits `CreateNewAgentWithDetail`.
 /// There's nothing to "send" so the chord collapses to:
-/// the only sensible interpretation is "create + open
+/// the only sensible interpretation is "create and open
 /// detail", which the unmodified Enter already does.
 #[test]
 fn ctrl_s_on_focused_button_with_empty_prompt_emits_create_with_detail() {
@@ -2482,7 +2471,7 @@ fn enter_with_prefix_text_dispatches_not_filters() {
     );
 }
 
-/// edge case 21: Enter on free text dispatches.
+/// Enter on free text dispatches.
 /// Assert the payload matches the typed text and that
 /// `attach` is false (no Shift modifier). A regression that
 /// dispatched a different string (or swallowed the input) would
@@ -2717,7 +2706,7 @@ fn vim_off_jk_type_into_input() {
     );
 }
 
-/// vim-mode ON + the overview list focused (via Tab) — `j`/`k`
+/// vim-mode ON with the overview list focused (via Tab) — `j`/`k`
 /// navigate the row list. In the input focus they type (covered by
 /// `vim_on_jk_type_into_input_when_focused`).
 #[test]
@@ -3028,7 +3017,7 @@ fn enter_on_peek_reply_paste_chip_expands() {
 }
 
 /// Multiline peek still expands paste chips before treating bare Enter
-/// as a newline (dispatch + agent order).
+/// as a newline (dispatch and agent order).
 #[test]
 fn multiline_peek_enter_on_paste_chip_expands() {
     let mut state = state_with_open_peek();
@@ -3302,12 +3291,12 @@ fn pasted_image_chip_omits_full_path() {
 }
 
 // -----------------------------------------------------------------
-// The clipboard raster/file-url probe (osascript) + image decode +
+// The clipboard raster/file-url probe (osascript), image decode, and
 // session persist run OFF the event loop. A paste that would probe
 // enqueues a `ProbeClipboardAttachment` effect and returns without an
 // inline probe (`clipboard_probe_call_count() == 0`); the chip
 // attaches later via `complete_clipboard_attachment_paste`. Snapshot /
-// support are faked via the test-only seam; plain text with no
+// support are faked via `set_clipboard_probe_hook`; plain text with no
 // raster stays fully synchronous (no defer).
 // -----------------------------------------------------------------
 
@@ -3392,7 +3381,7 @@ fn cmd_v_image(state: &mut DashboardState, clipboard_text: Option<&str>) {
 fn dispatch_bracketed_image_paste_defers_probe() {
     let mut state = DashboardState::new();
     let reg = crate::actions::ActionRegistry::defaults();
-    // Empty bracketed paste + a raster on the pasteboard.
+    // Empty bracketed paste with a raster on the pasteboard
     crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook::with_raster(
         None,
     ));
@@ -3455,10 +3444,10 @@ fn dispatch_cmd_v_probe_ctx_not_bracketed() {
     );
 }
 
-/// Bracketed caption + raster: image wins across the deferral boundary — the
+/// Bracketed caption with a raster: image wins across the deferral boundary — the
 /// caption is NOT inserted synchronously (it is carried into the effect and
 /// dropped when the probe returns an image), so the dashboard bracketed path
-/// attaches exactly one thing: the image, never image + caption.
+/// attaches exactly one thing: the image, never both image and caption.
 #[test]
 fn dispatch_bracketed_caption_image_wins_no_double_insert() {
     let mut state = DashboardState::new();
@@ -3936,9 +3925,9 @@ fn stashed_peek_reply_dropped_when_question_active() {
 }
 
 // -----------------------------------------------------------------
-// `/` literal + `Ctrl+/` search mode (replaces the old `/`→filter
-// behaviour that silently swallowed prompts starting with a
-// filter prefix).
+// `/` literal and `Ctrl+/` search mode (replaces the old behaviour
+// where `/` entered a filter and silently swallowed prompts
+// starting with a filter prefix)
 // -----------------------------------------------------------------
 
 /// `/` types a literal slash into the prompt — it no longer
@@ -4058,7 +4047,7 @@ fn search_mode_bare_letter_types_into_query() {
     );
 }
 
-/// edge case 21: Enter on empty input attaches.
+/// Enter on empty input attaches.
 #[test]
 fn enter_with_empty_input_attaches() {
     let state = make_state_with_selection();
@@ -4323,7 +4312,6 @@ fn inactive_section_collapsed_by_default() {
         RowState::Idle,
         RowState::Completed,
         RowState::Failed,
-        RowState::Blocked,
     ] {
         assert!(
             !state.is_section_collapsed(SectionKey::State(other)),
@@ -4365,7 +4353,7 @@ fn idle_overflow_enter_and_arrows_toggle_show_all() {
 fn idle_overflow_vim_hl_focus_gated() {
     let reg = crate::actions::ActionRegistry::defaults();
 
-    // vim ON + LIST focused — `l`/`h` toggle show-all.
+    // vim ON with the LIST focused — `l`/`h` toggle show-all
     crate::appearance::cache::set_vim_mode(true);
     let mut state = DashboardState::new();
     state.focus_idle_overflow();
@@ -4378,7 +4366,7 @@ fn idle_overflow_vim_hl_focus_gated() {
     assert!(show_all_after_l, "list-focused vim `l` must reveal");
     assert!(!show_all_after_h, "list-focused vim `h` must re-fold");
 
-    // vim ON + INPUT focused (list_focused == false) + empty draft —
+    // vim ON with the INPUT focused (list_focused == false) and an empty draft —
     // `h`/`l` must type into the prompt, never toggle show-all.
     crate::appearance::cache::set_vim_mode(true);
     let mut state = DashboardState::new();
@@ -4577,7 +4565,7 @@ fn shortcuts_modal_close_button_clicks_and_hovers() {
     state.shortcuts_modal = Some(modal);
     let reg = crate::actions::ActionRegistry::defaults();
 
-    // Hover over the button → tracked + repaint requested.
+    // Hovering the button is tracked and requests a repaint
     let over = Event::Mouse(MouseEvent {
         kind: MouseEventKind::Moved,
         column: 72,
@@ -5054,7 +5042,7 @@ fn section_vim_hl_collapse_expand() {
     let reg = crate::actions::ActionRegistry::defaults();
     let key_sec = SectionKey::State(RowState::Working);
 
-    // vim ON + LIST focused — `h`/`l` fold the section.
+    // vim ON with the LIST focused — `h`/`l` fold the section
     crate::appearance::cache::set_vim_mode(true);
     let mut state = DashboardState::new();
     state.focus_section(key_sec);
@@ -5069,7 +5057,7 @@ fn section_vim_hl_collapse_expand() {
     assert!(collapsed_after_h, "list-focused vim `h` must collapse");
     assert!(!collapsed_after_l, "list-focused vim `l` must expand");
 
-    // vim ON + INPUT focused (list_focused == false) + empty draft —
+    // vim ON with the INPUT focused (list_focused == false) and an empty draft —
     // `h`/`l` must type into the prompt, never fold the section.
     crate::appearance::cache::set_vim_mode(true);
     let mut state = DashboardState::new();
@@ -5119,7 +5107,6 @@ fn reanchor_test_row(id: usize, state: RowState) -> super::super::row::Dashboard
         cwd: std::path::PathBuf::from("/"),
         last_change_at: std::time::SystemTime::now(),
         pinned: false,
-        is_active: false,
         badges: Vec::new(),
         context_pct: None,
         indent: 0,
@@ -5496,7 +5483,7 @@ fn handle_scroll_saturates_at_zero() {
     assert!(s.manual_scroll_active);
 }
 
-/// THE FIX: when the user has manually scrolled, the
+/// When the user has manually scrolled, the
 /// snap-to-selection in `clamp_viewport` is skipped so the
 /// viewport doesn't get yanked back to the selected row. Without
 /// this skip, scrolling past the cursor was a no-op visually

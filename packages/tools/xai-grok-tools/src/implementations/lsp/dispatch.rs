@@ -37,7 +37,7 @@ enum StartupState {
 struct StartupCoordinator {
     state: TokioMutex<StartupState>,
     notify: tokio::sync::Notify,
-    pre_ready_file_changes: TokioMutex<HashMap<PathBuf, String>>,
+    pre_ready_file_changes: TokioMutex<HashMap<PathBuf, (Option<String>, super::DiskChangeKind)>>,
 }
 
 pub struct LspBackendAdapter {
@@ -94,9 +94,12 @@ async fn bootstrap_lsp(
     lsp_manager: Arc<tokio::sync::Mutex<LspManager>>,
     startup: Arc<StartupCoordinator>,
 ) -> Result<(), String> {
-    let pending_changes: Vec<(PathBuf, String)> = {
+    let pending_changes: Vec<(PathBuf, Option<String>, super::DiskChangeKind)> = {
         let mut pending = startup.pre_ready_file_changes.lock().await;
-        pending.drain().collect()
+        pending
+            .drain()
+            .map(|(path, (content, kind))| (path, content, kind))
+            .collect()
     };
 
     let restartable = {
@@ -105,8 +108,8 @@ async fn bootstrap_lsp(
         if mgr.clients.is_empty() {
             return Err("No LSP servers started successfully.".to_string());
         }
-        for (path, content) in &pending_changes {
-            mgr.notify_file_changed(path, content);
+        for (path, content, kind) in &pending_changes {
+            mgr.notify_file_event(path, content.as_deref(), *kind);
         }
         mgr.restartable_servers()
     };
@@ -214,17 +217,27 @@ impl super::LspBackend for LspBackendAdapter {
     }
 
     async fn notify_file_changed(&self, path: &std::path::Path, content: &str) {
+        self.notify_file_event(path, Some(content), super::DiskChangeKind::Changed)
+            .await;
+    }
+
+    async fn notify_file_event(
+        &self,
+        path: &std::path::Path,
+        content: Option<&str>,
+        kind: super::DiskChangeKind,
+    ) {
         if self.is_ready() {
             self.lsp_manager
                 .lock()
                 .await
-                .notify_file_changed(path, content);
+                .notify_file_event(path, content, kind);
         } else {
             self.startup
                 .pre_ready_file_changes
                 .lock()
                 .await
-                .insert(path.to_path_buf(), content.to_string());
+                .insert(path.to_path_buf(), (content.map(str::to_string), kind));
         }
     }
 

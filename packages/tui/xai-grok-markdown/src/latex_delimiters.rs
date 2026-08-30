@@ -1,14 +1,10 @@
-//! Streaming normalization of LaTeX math delimiters into the canonical
-//! `$...$` / `$$...$$` forms that `pulldown-cmark`'s math extension understands.
+//! Streaming normalization of LaTeX math delimiters into the canonical `$...$` / `$$...$$` forms that `pulldown-cmark`'s math extension understands.
 //!
-//! Models overwhelmingly emit the backslash delimiter forms (`\(...\)`,
-//! `\[...\]`) and sometimes `\begin{equation}...\end{equation}`. `pulldown-cmark`
-//! only recognizes the `$` forms, so historically the backslash forms were
-//! handled by bespoke post-parse source scanners — which were disabled inside
-//! table cells (a bug). By rewriting every delimiter form into the
-//! canonical `$`/`$$` form *before* parsing, the existing
-//! `Event::InlineMath`/`Event::DisplayMath` handlers (which already convert math
-//! in both prose and table cells) handle everything uniformly.
+//! Models overwhelmingly emit the backslash delimiter forms (`\(...\)`, `\[...\]`) and sometimes `\begin{equation}...\end{equation}`.
+//! `pulldown-cmark` only recognizes the `$` forms, so historically the backslash forms were handled by bespoke post-parse source scanners.
+//! Those scanners were disabled inside table cells (a bug).
+//! This pass instead rewrites every delimiter form into the canonical `$`/`$$` form *before* parsing.
+//! The `Event::InlineMath`/`Event::DisplayMath` handlers already convert math in both prose and table cells, so everything is handled uniformly.
 //!
 //! # Transform set (applied only outside code, respecting escapes)
 //!
@@ -20,62 +16,45 @@
 //! | `\[` / `\]` (unmatched) | `$$` |
 //! | `\begin{equation[*]}` / `\end{equation[*]}` (unmatched) | `$$` |
 //!
-//! Inline `\( … \)` is converted span-at-once: the matching unescaped `\)` is
-//! located and the ASCII whitespace immediately inside the delimiters is
-//! trimmed, so the emitted `$…$` has no space right after the opening `$` or
-//! before the closing `$`. pulldown-cmark's dollar-math flanking rule rejects
-//! `$ … $` (whitespace next to a delimiter) and would otherwise leave a padded
-//! span as raw `$ … $` text. Interior newlines join to spaces (TeX treats them
-//! as spaces) so a span wrapped across source lines cannot be re-parsed as
-//! block structure.
+//! Inline `\( … \)` is converted span-at-once: the matching unescaped `\)` is located; the ASCII whitespace just inside the delimiters is trimmed.
+//! The trim matters because pulldown-cmark's dollar-math flanking rule rejects `$ … $` and would leave a padded span as raw text.
+//! Interior newlines join to spaces (TeX treats them as spaces) so a span wrapped across source lines cannot be re-parsed as block structure.
 //!
 //! # Display spans are joined onto one line
 //!
-//! Every display-math opener — `\[`, `\begin{equation[*]}`, or a bare `$$` —
-//! is resolved span-at-once: the matching close (`\]`, `\end{equation[*]}`, or
-//! `$$`, whichever comes first) is located and the span is emitted as
-//! `$$…$$` with each interior line trimmed and joined by a single space.
-//! CommonMark gives *block* constructs priority over inline math, so a
-//! multi-line `$$…$$` whose interior contains a line that looks like a block
-//! start — a setext underline (`=`/`-` alone on a line), a `#`
-//! heading, or a `-` list item — would otherwise be split into
-//! heading/list/paragraph blocks and never reach the math parser. TeX treats
-//! interior newlines as spaces, so joining is semantics-preserving (`\\` row
-//! separators are untouched and still produce multi-line output downstream).
+//! Every display-math opener (`\[`, `\begin{equation[*]}`, or a bare `$$`) is resolved span-at-once.
+//! The matching close is `\]`, `\end{equation[*]}`, or `$$`, whichever comes first.
+//! The span is emitted as `$$…$$` with each interior line trimmed and joined by a single space.
+//! CommonMark gives *block* constructs priority over inline math.
+//! So a multi-line `$$…$$` with an interior line that looks like a block start would be split into blocks and never reach the math parser.
+//! A block start is a setext underline of `=`/`-`, a `#` heading, or a `-` list item.
+//! TeX treats interior newlines as spaces, so joining preserves the rendering.
+//! `\\` row separators are untouched and still produce multi-line output downstream.
 //!
-//! The close-scan is bounded: it gives up (emitting the opener alone, exactly
-//! the old behavior) past [`MAX_MATH_SOURCE_LEN`] look-ahead, at a blank line
-//! (a paragraph break — two stray `$$` in prose must not fuse across
-//! paragraphs), or at a line starting with `>` (blockquoted math carries `>`
-//! markers that must not become span content; pulldown already handles the
-//! quoted multi-line span after marker stripping).
+//! The close-scan is bounded: it gives up (emitting the opener alone, exactly the old behavior) past [`MAX_MATH_SOURCE_LEN`] look-ahead.
+//! It also gives up at a blank line (a paragraph break: two stray `$$` in prose must not fuse across paragraphs).
+//! And it gives up at a line starting with `>`: blockquoted math carries `>` markers that must not become span content.
+//! Pulldown already handles the quoted multi-line span after marker stripping.
 //!
-//! Bare single `$` is left untouched (so the pass is **idempotent**). Escaped
-//! openers (`\\(`, `\\[`, `\$`) are left literal via backslash-pair consumption,
-//! matching the old scanner's even/odd parity rule. Content inside inline code
-//! spans and fenced code blocks is left verbatim (so LaTeX-in-backticks stays
-//! raw, preserving prior behavior). Inner LaTeX environments such as
-//! `\begin{aligned}` / `\begin{pmatrix}` are *not* touched — they live inside the
-//! `$$...$$` span and are rendered by the LaTeX→Unicode converter.
+//! Bare single `$` is left untouched (so the pass is **idempotent**).
+//! Escaped openers (`\\(`, `\\[`, `\$`) are left literal via backslash-pair consumption, matching the old scanner's even/odd parity rule.
+//! Content inside inline code spans and fenced code blocks is left verbatim, so LaTeX-in-backticks stays raw as before.
+//! Inner LaTeX environments such as `\begin{aligned}` / `\begin{pmatrix}` are *not* touched.
+//! They live inside the `$$...$$` span and are rendered by the LaTeX-to-Unicode converter.
 //!
 //! # Streaming
 //!
-//! [`LatexDelimiterNormalizer`] is fed chunks in order and is **chunk-split
-//! invariant**: feeding the same total text produces the same output regardless
-//! of where the chunk boundaries fall. It achieves this by holding back only a
-//! bounded ambiguous suffix (a trailing `\`/`\begin{…` partial, a trailing
-//! backtick/tilde run whose length isn't yet known, or an unclosed inline `\(`
-//! whose `\)` has not arrived — bounded by the math size cap so an open that
-//! never closes cannot stall the stream) until the next chunk, and by flushing
-//! that suffix on [`finish`](LatexDelimiterNormalizer::finish).
+//! [`LatexDelimiterNormalizer`] is fed chunks in order and is **chunk-split invariant**.
+//! The same total text produces the same output no matter where the chunk boundaries fall.
+//! It holds back only a bounded ambiguous suffix until the next chunk, and flushes that suffix on [`finish`](LatexDelimiterNormalizer::finish).
+//! The suffix is a trailing `\`/`\begin{…` partial, a backtick/tilde run whose length isn't yet known, or an inline `\(` whose `\)` has not arrived.
+//! The hold-back is bounded by the math size cap, so an open that never closes cannot stall the stream.
 //!
 //! # Known divergences from CommonMark (bounded, documented)
 //!
-//! - 4-space *indented* code blocks are not treated as code (math inside them
-//!   would convert). Rare in model output.
-//! - Inline code spans are treated as single-line: an unterminated `` ` `` reverts
-//!   to normal at the newline. This only changes behavior next to a stray,
-//!   unmatched backtick.
+//! - 4-space *indented* code blocks are not treated as code, so math inside them converts. Rare in model output.
+//! - Inline code spans are treated as single-line: an unterminated `` ` `` reverts to normal at the newline.
+//!   This only changes behavior next to a stray, unmatched backtick.
 //!
 //! Streaming-vs-one-shot equivalence is pinned by an exhaustive byte-split test.
 
@@ -86,7 +65,7 @@ const ENV_BEGIN_STARRED: &str = "\\begin{equation*}";
 const ENV_END: &str = "\\end{equation}";
 const ENV_END_STARRED: &str = "\\end{equation*}";
 
-/// Longest environment token we special-case (`\begin{equation*}` = 17 bytes).
+/// Longest environment token we special-case (`\begin{equation*}`, 17 bytes).
 /// Bounds how many trailing bytes a `push` may hold back for a `\begin`/`\end`.
 const ENV_TOKENS: [&str; 4] = [ENV_BEGIN, ENV_BEGIN_STARRED, ENV_END, ENV_END_STARRED];
 
@@ -106,15 +85,14 @@ enum State {
 
 /// Streaming, code-aware, escape-aware LaTeX delimiter normalizer.
 ///
-/// Feed chunks via [`push`](Self::push) and call [`finish`](Self::finish) at end
-/// of stream. For a complete string in hand, use [`normalize_latex_delimiters`].
+/// Feed chunks via [`push`](Self::push) and call [`finish`](Self::finish) at end of stream.
+/// For a complete string in hand, use [`normalize_latex_delimiters`].
 #[derive(Debug, Clone)]
 pub struct LatexDelimiterNormalizer {
     state: State,
     /// True when the next byte begins a new line (start of input counts).
     at_line_start: bool,
-    /// Raw bytes held back from a previous `push` because they may be the prefix
-    /// of a construct that needs more input to classify.
+    /// Raw bytes held back from a previous `push` because they may be the prefix of a construct that needs more input to classify.
     pending: String,
 }
 
@@ -142,8 +120,7 @@ impl LatexDelimiterNormalizer {
 
     /// Push a raw chunk; returns the finalized normalized prefix.
     ///
-    /// A bounded ambiguous suffix may be held back and emitted by a later
-    /// `push` or by [`finish`](Self::finish).
+    /// A bounded ambiguous suffix may be held back and emitted by a later `push` or by [`finish`](Self::finish).
     pub fn push(&mut self, chunk: &str) -> String {
         if chunk.is_empty() {
             return String::new();
@@ -166,9 +143,9 @@ impl LatexDelimiterNormalizer {
         out
     }
 
-    /// Process `buf` from the start, advancing internal state. Returns the
-    /// emitted text and the number of bytes consumed; bytes `[consumed..]` are
-    /// the held-back ambiguous suffix (always empty when `final_flush`).
+    /// Process `buf` from the start, advancing internal state.
+    /// Returns the emitted text and the number of bytes consumed.
+    /// Bytes `[consumed..]` are the held-back ambiguous suffix (always empty when `final_flush`).
     fn process(&mut self, buf: &str, final_flush: bool) -> (String, usize) {
         let bytes = buf.as_bytes();
         let n = bytes.len();
@@ -207,30 +184,24 @@ impl LatexDelimiterNormalizer {
                             self.at_line_start = false;
                         }
                         b'\\' => {
-                            // Every non-`break` arm below advances past a delimiter
-                            // mid-line, so `at_line_start` is cleared once here; the
-                            // `break`s (hold-backs) skip it and preserve it for
-                            // the retry, making that invariant structural.
+                            // Every non-`break` arm below advances past a delimiter mid-line, so `at_line_start` is cleared once here
+                            // The `break`s (hold-backs) skip the clear and keep `at_line_start` for the retry
                             match classify_backslash(buf, i, final_flush) {
                                 Bs::NeedMore => break,
                                 Bs::InlineOpen => match find_inline_close(bytes, i, final_flush) {
                                     InlineClose::Found { close } => {
-                                        // Trim pulldown's flanking whitespace so `$…$` is
-                                        // accepted; the custom set (vs `char::is_ascii_whitespace`)
-                                        // exists only to add vertical tab (0x0B).
+                                        // Trim pulldown's flanking whitespace so `$…$` is accepted
+                                        // The custom set (vs `char::is_ascii_whitespace`) exists only to add vertical tab (0x0B)
                                         let inner = buf[i + 2..close]
                                             .trim_matches(|c: char| matches!(c, ' ' | '\t'..='\r'));
                                         if inner.is_empty() {
-                                            // Empty after trim: a lone `$` keeps the old
-                                            // position-for-position output (`$<ws>$`, or
-                                            // `$$` when the interior is truly empty).
+                                            // Empty after trim: a lone `$` keeps the old position-for-position output
+                                            // That output is `$<ws>$`, or `$$` when the interior is truly empty
                                             out.push('$');
                                             i += 2;
                                         } else {
-                                            // Join interior newlines: a `$…$` wrapped
-                                            // across source lines would otherwise be
-                                            // vulnerable to block re-parsing (setext
-                                            // underlines, list markers).
+                                            // Join interior newlines
+                                            // A `$…$` wrapped across source lines could be re-parsed as blocks (setext underlines, list markers)
                                             out.push('$');
                                             push_joined_lines(&mut out, inner);
                                             out.push('$');
@@ -251,15 +222,13 @@ impl LatexDelimiterNormalizer {
                                             emit_display_span(&mut out, &buf[i + len..close]);
                                             i = close + close_len;
                                         }
-                                        // No close in reach: emit the canonical opener
-                                        // alone (old position-for-position behavior)
-                                        // and process the interior normally.
+                                        // No close in reach: emit the canonical opener alone (the old position-for-position behavior)
+                                        // The interior is processed normally
                                         DisplayClose::Unmatched => {
                                             out.push_str("$$");
                                             i += len;
                                         }
-                                        // Hold back from the opener until the close
-                                        // (or an abort condition) arrives.
+                                        // Hold back from the opener until the close (or an abort condition) arrives
                                         DisplayClose::NeedMore => break,
                                     }
                                 }
@@ -280,18 +249,15 @@ impl LatexDelimiterNormalizer {
                                 break; // may become `$$`; hold it back
                             }
                             if run >= 2 {
-                                // A display opener is exactly two `$`; any further
-                                // `$`s are span content for the close-scan. Consuming
-                                // two (not the whole run) keeps emitted spans fixed
-                                // points: output like `$` + `$$…$$` re-tokenizes to
-                                // the same bytes on a second pass (idempotency).
+                                // A display opener is exactly two `$`; any further `$`s are span content for the close-scan
+                                // Consuming two (not the whole run) keeps emitted spans fixed points
+                                // Output like `$` + `$$…$$` re-tokenizes to the same bytes on a second pass (idempotency)
                                 match find_display_close(buf, i + 2, final_flush) {
                                     DisplayClose::Found { close, close_len } => {
                                         emit_display_span(&mut out, &buf[i + 2..close]);
                                         i = close + close_len;
                                     }
-                                    // No close in reach: `$$` stays literal (pulldown
-                                    // decides), interior is processed normally.
+                                    // No close in reach: `$$` stays literal (pulldown decides), the interior is processed normally
                                     DisplayClose::Unmatched => {
                                         out.push_str("$$");
                                         i += 2;
@@ -299,18 +265,15 @@ impl LatexDelimiterNormalizer {
                                     DisplayClose::NeedMore => break,
                                 }
                             } else {
-                                // Single `$` (inline math / currency) passes through
-                                // verbatim; pulldown handles it.
+                                // Single `$` (inline math / currency) passes through verbatim; pulldown handles it
                                 out.push('$');
                                 i += 1;
                             }
                             self.at_line_start = false;
                         }
                         _ => {
-                            // Copy a run of ordinary bytes up to the next
-                            // interesting ASCII byte. Multibyte UTF-8 bytes
-                            // (>= 0x80) never equal the ASCII delimiters, so
-                            // they are copied whole and slices stay valid.
+                            // Copy a run of ordinary bytes up to the next interesting ASCII byte
+                            // Multibyte UTF-8 bytes (0x80 and up) never equal the ASCII delimiters, so they are copied whole and slices stay valid
                             let start = i;
                             while i < n && !matches!(bytes[i], b'\n' | b'`' | b'\\' | b'$') {
                                 i += 1;
@@ -321,9 +284,8 @@ impl LatexDelimiterNormalizer {
                     }
                 }
                 State::InlineCode { run } => {
-                    // Single-line span: copy verbatim until a matching-length
-                    // backtick run closes it, the line ends (unterminated → revert
-                    // to Normal so later math still converts), or EOF.
+                    // Single-line span: copy verbatim until a matching-length backtick run closes it, the line ends, or EOF
+                    // An unterminated span reverts to Normal at the newline so later math still converts
                     let start = i;
                     let mut handled = false;
                     while i < n {
@@ -392,8 +354,7 @@ impl LatexDelimiterNormalizer {
     }
 }
 
-/// One-shot normalization == `push(s)` + `finish()`. Used by batch render
-/// entries and tests.
+/// One-shot normalization, the same as `push(s)` + `finish()`. Used by batch render entries and tests.
 pub fn normalize_latex_delimiters(s: &str) -> String {
     let mut nz = LatexDelimiterNormalizer::new();
     let mut out = nz.push(s);
@@ -419,8 +380,8 @@ enum FenceScan {
     NeedMore,
 }
 
-/// Scan for an opening fence (`` ``` `` / `~~~`, length >= 3) at line start,
-/// allowing up to 3 leading spaces. An info string may follow the run.
+/// Scan for an opening fence (`` ``` `` / `~~~`, at least 3 chars) at line start, allowing up to 3 leading spaces.
+/// An info string may follow the run.
 fn scan_fence_open(bytes: &[u8], i: usize, final_flush: bool) -> FenceScan {
     let n = bytes.len();
     let mut j = i;
@@ -436,7 +397,7 @@ fn scan_fence_open(bytes: &[u8], i: usize, final_flush: bool) -> FenceScan {
         return if final_flush {
             FenceScan::No
         } else {
-            FenceScan::NeedMore // ≤3 spaces then EOF: a fence may still start
+            FenceScan::NeedMore // 3 or fewer spaces then EOF: a fence may still start
         };
     }
     let ch = bytes[j];
@@ -457,8 +418,7 @@ fn scan_fence_open(bytes: &[u8], i: usize, final_flush: bool) -> FenceScan {
     }
 }
 
-/// Scan for a closing fence at line start: up to 3 spaces, a run of `ch` with
-/// length >= `len`, then only whitespace to end of line.
+/// Scan for a closing fence at line start: up to 3 spaces, a run of `ch` at least `len` long, then only whitespace to end of line.
 fn scan_fence_close(bytes: &[u8], i: usize, ch: u8, len: usize, final_flush: bool) -> FenceScan {
     let n = bytes.len();
     let mut j = i;
@@ -482,7 +442,7 @@ fn scan_fence_close(bytes: &[u8], i: usize, ch: u8, len: usize, final_flush: boo
     }
     let run = count_run(bytes, j, ch);
     if j + run == n && !final_flush {
-        return FenceScan::NeedMore; // run may still grow to >= len
+        return FenceScan::NeedMore; // run may still grow to reach `len`
     }
     if run < len {
         return FenceScan::No;
@@ -510,24 +470,20 @@ fn scan_fence_close(bytes: &[u8], i: usize, ch: u8, len: usize, final_flush: boo
             end: j + run,
         }
     } else {
-        FenceScan::No // non-whitespace after the run → info string → content
+        FenceScan::No // non-whitespace after the run means an info string, so this line is content
     }
 }
 
-/// Classification of a backslash sequence starting at `i` (where `bytes[i]` is
-/// `\`).
+/// Classification of a backslash sequence starting at `i` (where `bytes[i]` is `\`).
 enum Bs {
     /// Replace `buf[i..i+len]` with `to`.
     Convert { to: &'static str, len: usize },
-    /// An inline math open `\(`: the caller locates the matching `\)` and emits
-    /// a whitespace-trimmed `$…$` span (see [`find_inline_close`]).
+    /// An inline math open `\(`: the caller locates the matching `\)` and emits a whitespace-trimmed `$…$` span (see [`find_inline_close`]).
     InlineOpen,
-    /// A display math open (`\[` or `\begin{equation[*]}`, `len` bytes): the
-    /// caller locates the matching close and emits a line-joined `$$…$$` span
-    /// (see [`find_display_close`]).
+    /// A display math open (`\[` or `\begin{equation[*]}`, `len` bytes).
+    /// The caller locates the matching close and emits a line-joined `$$…$$` span (see [`find_display_close`]).
     DisplayOpen { len: usize },
-    /// Emit `buf[i..i+len]` verbatim (consumes the sequence so escape parity
-    /// holds; e.g. `\\` is consumed as a pair).
+    /// Emit `buf[i..i+len]` verbatim (consumes the sequence so escape parity holds; e.g. `\\` is consumed as a pair).
     Literal { len: usize },
     /// Not enough input to classify; hold back from `i`.
     NeedMore,
@@ -545,22 +501,19 @@ fn classify_backslash(buf: &str, i: usize, final_flush: bool) -> Bs {
         };
     }
     match bytes[i + 1] {
-        // Escaped backslash: emit the pair so a following `(`/`[` is not read as
-        // a delimiter (this is the even/odd parity rule, applied incrementally).
+        // Escaped backslash: emit the pair so a following `(`/`[` is not read as a delimiter
+        // This is the even/odd parity rule, applied incrementally
         b'\\' => Bs::Literal { len: 2 },
-        // Inline open: the caller scans for the matching `\)` to emit a
-        // whitespace-trimmed `$…$`. A lone `\)` (unmatched close) still maps to
-        // `$` position-for-position.
+        // Inline open: the caller scans for the matching `\)` to emit a whitespace-trimmed `$…$`
+        // A lone `\)` (unmatched close) still maps to `$` position-for-position
         b'(' => Bs::InlineOpen,
         b')' => Bs::Convert { to: "$", len: 2 },
-        // Display open: the caller scans for the matching close to emit a
-        // line-joined `$$…$$`. A lone `\]` (unmatched close) still maps to
-        // `$$` position-for-position.
+        // Display open: the caller scans for the matching close to emit a line-joined `$$…$$`
+        // A lone `\]` (unmatched close) still maps to `$$` position-for-position
         b'[' => Bs::DisplayOpen { len: 2 },
         b']' => Bs::Convert { to: "$$", len: 2 },
         b'b' | b'e' => match match_env(buf, i, final_flush) {
-            // `\begin{equation[*]}` opens a display span; a stray
-            // `\end{equation[*]}` still maps to `$$` position-for-position.
+            // `\begin{equation[*]}` opens a display span; a stray `\end{equation[*]}` still maps to `$$` position-for-position
             EnvScan::Convert(len) => {
                 if bytes[i + 1] == b'b' {
                     Bs::DisplayOpen { len }
@@ -569,8 +522,7 @@ fn classify_backslash(buf: &str, i: usize, final_flush: bool) -> Bs {
                 }
             }
             EnvScan::NeedMore => Bs::NeedMore,
-            // Not one of our envs (e.g. `\begin{aligned}`): emit just the `\` and
-            // let the rest be copied as ordinary text (verbatim).
+            // Not one of our envs (e.g. `\begin{aligned}`): emit just the `\` and let the rest be copied as ordinary text (verbatim).
             EnvScan::No => Bs::Literal { len: 1 },
         },
         // `\$`, `\x`, etc: emit the `\`, process the next char normally.
@@ -582,26 +534,20 @@ fn classify_backslash(buf: &str, i: usize, final_flush: bool) -> Bs {
 enum InlineClose {
     /// Unescaped `\)` found; `close` is the byte index of its backslash.
     Found { close: usize },
-    /// No usable close: either none within the look-ahead cap, or the open is
-    /// still unclosed at end of stream. The caller emits a lone `$` (no trim),
-    /// reproducing the old position-for-position behavior.
+    /// No usable close: either none within the look-ahead cap, or the open is still unclosed at end of stream.
+    /// The caller emits a lone `$` (no trim), reproducing the old position-for-position behavior.
     Unmatched,
-    /// Buffer ends within the cap without a close and more input may still
-    /// arrive; the caller holds back from the open until the `\)` shows up.
+    /// Buffer ends within the cap without a close and more input may still arrive; the caller holds back from the open until the `\)` shows up.
     NeedMore,
 }
 
-/// Scan for the unescaped `\)` closing an inline `\(` at `open`
-/// (`bytes[open..open + 2] == b"\\("`). The inner length is bounded by
-/// [`MAX_MATH_SOURCE_LEN`] (the converter's own input cap) so an unclosed `\(`
-/// cannot stall the stream; the bound is a distance relative to `open`, so the
-/// Found/Unmatched decision is the same whether the input arrives whole or
-/// split. Mirrors [`classify_backslash`]'s `final_flush`: at end of stream an
-/// unfound close resolves to `Unmatched` instead of `NeedMore`.
+/// Scan for the unescaped `\)` closing an inline `\(` at `open` (`bytes[open..open + 2] == b"\\("`).
+/// The inner length is bounded by [`MAX_MATH_SOURCE_LEN`] (the converter's own input cap) so an unclosed `\(` cannot stall the stream.
+/// The bound is a distance relative to `open`, so the Found/Unmatched decision is the same whether the input arrives whole or split.
+/// Mirrors [`classify_backslash`]'s `final_flush`: at end of stream an unfound close resolves to `Unmatched` instead of `NeedMore`.
 ///
-/// Backslash parity matches [`classify_backslash`]: `\\` is an escaped pair
-/// (its following byte is literal), a lone `\)` is the close, and any other
-/// `\x` consumes both bytes as span content.
+/// Backslash parity matches [`classify_backslash`]: `\\` is an escaped pair (its following byte is literal).
+/// A lone `\)` is the close, and any other `\x` consumes both bytes as span content.
 fn find_inline_close(bytes: &[u8], open: usize, final_flush: bool) -> InlineClose {
     debug_assert!(
         bytes.get(open) == Some(&b'\\') && bytes.get(open + 1) == Some(&b'('),
@@ -610,8 +556,7 @@ fn find_inline_close(bytes: &[u8], open: usize, final_flush: bool) -> InlineClos
     let n = bytes.len();
     let mut k = open + 2;
     while k < n {
-        // A close at `k` would give inner `buf[open + 2..k]`; stop once that
-        // would exceed what `latex_to_unicode_inline` accepts.
+        // A close at `k` would give inner `buf[open + 2..k]`; stop once that would exceed what `latex_to_unicode_inline` accepts
         if k - (open + 2) > MAX_MATH_SOURCE_LEN {
             return InlineClose::Unmatched;
         }
@@ -625,8 +570,7 @@ fn find_inline_close(bytes: &[u8], open: usize, final_flush: bool) -> InlineClos
             k += 1;
         }
     }
-    // End of buffer within the cap (or a trailing `\`): unclosed at EOF emits a
-    // lone `$`; otherwise hold back for more input.
+    // End of buffer within the cap (or a trailing `\`): unclosed at EOF emits a lone `$`; otherwise hold back for more input
     if final_flush {
         InlineClose::Unmatched
     } else {
@@ -634,40 +578,30 @@ fn find_inline_close(bytes: &[u8], open: usize, final_flush: bool) -> InlineClos
     }
 }
 
-/// Outcome of scanning a display span (opened by `\[`, `$$`, or
-/// `\begin{equation[*]}`) for its close.
+/// Outcome of scanning a display span (opened by `\[`, `$$`, or `\begin{equation[*]}`) for its close.
 enum DisplayClose {
     /// Close token found; `close` is its byte index, `close_len` its length.
     Found { close: usize, close_len: usize },
-    /// No usable close: past the look-ahead cap, aborted at a blank line or a
-    /// blockquote marker, or unclosed at end of stream. The caller emits the
-    /// canonical `$$` opener alone (the old position-for-position behavior).
+    /// No usable close: past the look-ahead cap, aborted at a blank line or a blockquote marker, or unclosed at end of stream.
+    /// The caller emits the canonical `$$` opener alone (the old position-for-position behavior).
     Unmatched,
-    /// Buffer ends without a decision and more input may still arrive; the
-    /// caller holds back from the opener.
+    /// Buffer ends without a decision and more input may still arrive; the caller holds back from the opener.
     NeedMore,
 }
 
-/// Scan for the token closing a display span whose content starts at
-/// `content_start`. Any display close token counts — `\]`, `$$`, or
-/// `\end{equation[*]}` — matching the pre-existing behavior where mismatched
-/// opener/close pairs (e.g. `\[ … $$`) still formed a span because every
-/// delimiter normalized to `$$` independently.
+/// Scan for the token closing a display span whose content starts at `content_start`.
+/// Any display close token counts: `\]`, `$$`, or `\end{equation[*]}`.
+/// Mismatched opener/close pairs (e.g. `\[ … $$`) formed a span in the old scanners too, because every delimiter normalized to `$$` independently.
 ///
-/// The scan is bounded by [`MAX_MATH_SOURCE_LEN`] relative to `content_start`
-/// (so the Found/Unmatched decision is split-invariant) and aborts — leaving
-/// the source for normal processing — at:
+/// The scan is bounded by [`MAX_MATH_SOURCE_LEN`] relative to `content_start` (so the Found/Unmatched decision is split-invariant).
+/// It aborts, leaving the source for normal processing, at:
 ///
-/// - a blank line: a paragraph break means the opener was almost certainly not
-///   math (e.g. `$$` used as prose), and two stray `$$` must not fuse across
-///   paragraphs;
-/// - a line starting with `>`: blockquoted display math carries `>` markers
-///   that would otherwise be joined into the span as literal content
-///   (pulldown handles the quoted multi-line span itself after stripping the
-///   markers).
+/// - a blank line: a paragraph break means the opener was almost certainly not math (e.g. `$$` used as prose).
+///   Two stray `$$` must not fuse across paragraphs.
+/// - a line starting with `>`: blockquoted display math carries `>` markers that would otherwise be joined into the span as literal content.
+///   Pulldown handles the quoted multi-line span itself after stripping the markers.
 ///
-/// Backslash parity matches [`find_inline_close`]: `\\` and other `\x` pairs
-/// are span content, consumed two bytes at a time.
+/// Backslash parity matches [`find_inline_close`]: `\\` and other `\x` pairs are span content, consumed two bytes at a time.
 fn find_display_close(buf: &str, content_start: usize, final_flush: bool) -> DisplayClose {
     let bytes = buf.as_bytes();
     let n = bytes.len();
@@ -722,13 +656,12 @@ fn find_display_close(buf: &str, content_start: usize, final_flush: bool) -> Dis
                     };
                 }
                 if k + run == n && !final_flush {
-                    return DisplayClose::NeedMore; // lone `$` at EOB may extend
+                    return DisplayClose::NeedMore; // lone `$` at end of buffer may extend
                 }
                 k += run;
             }
             b'\n' => {
-                // Look at the next line's start: blank line or `>` marker
-                // aborts the span (see doc comment).
+                // Look at the next line's start: a blank line or `>` marker aborts the span (see doc comment)
                 let mut j = k + 1;
                 while j < n && matches!(bytes[j], b' ' | b'\t') {
                     j += 1;
@@ -751,21 +684,17 @@ fn find_display_close(buf: &str, content_start: usize, final_flush: bool) -> Dis
     }
 }
 
-/// Emit `interior` as a canonical `$$…$$` span, joining interior lines.
-///
-/// Single-line interiors are emitted verbatim (bare `$$…$$` input passes
-/// through byte-for-byte, keeping the pass idempotent). Multi-line interiors
-/// have each line trimmed and joined with a single space so CommonMark block
-/// parsing (setext underlines, list items, headings) cannot split the span;
-/// TeX treats the newlines as spaces, so rendering is unchanged.
+/// Emit `interior` as a canonical `$$…$$` span.
+/// Single-line interiors pass through byte-for-byte, keeping the pass idempotent.
+/// Multi-line interiors are trimmed and joined with spaces so CommonMark blocks cannot split the span; TeX treats the newlines as spaces.
 fn emit_display_span(out: &mut String, interior: &str) {
     out.push_str("$$");
     push_joined_lines(out, interior);
     out.push_str("$$");
 }
 
-/// Push `text` onto `out`; if it spans multiple lines, trim each line and
-/// join the non-empty ones with single spaces (single-line text is verbatim).
+/// Push `text` onto `out`; multi-line text has each line trimmed and the non-empty ones joined with single spaces.
+/// Single-line text is pushed verbatim.
 fn push_joined_lines(out: &mut String, text: &str) {
     if !text.contains('\n') {
         out.push_str(text);
@@ -806,8 +735,7 @@ fn match_env(buf: &str, i: usize, final_flush: bool) -> EnvScan {
         }
     }
     if let Some(len) = best {
-        // `\begin{equation}` is not a prefix of `\begin{equation*}` (char 16 is
-        // `}` vs `*`), so the longest full match is unambiguous.
+        // `\begin{equation}` is not a prefix of `\begin{equation*}` (char 16 is `}` vs `*`), so the longest full match is unambiguous
         return EnvScan::Convert(len);
     }
     if could_extend && !final_flush {
@@ -837,8 +765,7 @@ mod tests {
 
     #[test]
     fn normalize_inline_paren_trims_boundary_ws() {
-        // Padding on both flanks is stripped so pulldown's dollar-math flanking
-        // rule accepts the emitted `$…$`.
+        // Padding on both flanks is stripped so pulldown's dollar-math flanking rule accepts the emitted `$…$`
         assert_eq!(norm("a \\( x+y \\) b"), "a $x+y$ b");
         // One-sided padding.
         assert_eq!(norm("\\(x \\)"), "$x$");
@@ -846,8 +773,8 @@ mod tests {
         // Multiple spaces / tabs collapse away at the boundaries only.
         assert_eq!(norm("\\(   x+y   \\)"), "$x+y$");
         assert_eq!(norm("\\(\tx\t\\)"), "$x$");
-        // VT (0x0B) is the one flanking-whitespace char `char::is_ascii_whitespace`
-        // omits, so this pins the custom trim predicate against a regression to std.
+        // VT (0x0B) is the one flanking-whitespace char `char::is_ascii_whitespace` omits
+        // This pins the custom trim predicate against a regression to std
         assert_eq!(norm("\\(\u{0b}x\u{0b}\\)"), "$x$");
         // Interior whitespace and inner escaped braces are preserved.
         assert_eq!(norm("\\( a + b \\)"), "$a + b$");
@@ -858,19 +785,17 @@ mod tests {
     fn normalize_inline_paren_trim_leaves_escapes_and_dollars_alone() {
         // Escaped `\\(`/`\\)` is a literal backslash + paren, not a math span.
         assert_eq!(norm("\\\\( x \\\\)"), "\\\\( x \\\\)");
-        // Only the backslash forms are ours: a space-padded bare `$ x $` is NOT
-        // trimmed (currency untouched-ness is covered by `currency_not_misconverted`).
+        // Only the backslash forms are ours: a space-padded bare `$ x $` is NOT trimmed
+        // Currency is covered by `currency_not_misconverted`
         assert_eq!(norm("$ x $"), "$ x $");
     }
 
     #[test]
     fn normalize_inline_paren_empty_span_degrades_position_for_position() {
-        // A whitespace-only span keeps its interior between two lone `$` (the
-        // old position-for-position form) rather than trimming to a `$$` opener.
+        // A whitespace-only span keeps its interior between two lone `$` (the old position-for-position form) rather than trimming to `$$`
         assert_eq!(norm("\\( \\)"), "$ $");
         assert_eq!(norm("\\(   \\)"), "$   $");
-        // A truly-empty `\(\)` has no interior to separate the `$`, so it still
-        // collapses to `$$` — matching the pre-fix behavior (pinned, not a goal).
+        // A truly-empty `\(\)` has no interior to separate the `$`, so it still collapses to `$$`, matching the old behavior (pinned, not a goal)
         assert_eq!(norm("\\(\\)"), "$$");
     }
 
@@ -884,9 +809,8 @@ mod tests {
 
     #[test]
     fn multiline_display_with_setext_hazard_joins() {
-        // A lone `=` line inside a display span is a CommonMark setext
-        // underline: unjoined, pulldown parses a heading and the math is
-        // never seen (the raw-LaTeX bug).
+        // A lone `=` line inside a display span is a CommonMark setext underline
+        // Unjoined, pulldown parses a heading and the math is never seen (the raw-LaTeX bug)
         assert_eq!(norm("$$\nx\n=\ny\n$$"), "$$x = y$$");
         assert_eq!(norm("\\[\nx\n=\ny\n\\]"), "$$x = y$$");
         // `-` (setext H2 / list marker) likewise.
@@ -910,8 +834,7 @@ mod tests {
 
     #[test]
     fn mismatched_display_delimiters_still_join() {
-        // Every opener accepts every closer, matching the old behavior where
-        // each token normalized to `$$` independently.
+        // Every opener accepts every closer, matching the old behavior where each token normalized to `$$` independently
         assert_eq!(norm("\\[\nx\n=\ny\n$$"), "$$x = y$$");
         assert_eq!(norm("$$\nx\n\\]"), "$$x$$");
     }
@@ -929,16 +852,14 @@ mod tests {
         // Two stray `$$` across a paragraph break must not fuse into a span.
         let input = "Tickets cost $$.\n\nDinner cost $$.";
         assert_eq!(norm(input), input);
-        // Math with an interior blank line stays as-is too (pre-existing
-        // breakage; joining across paragraphs would be worse).
+        // Math with an interior blank line stays as-is too (pre-existing breakage; joining across paragraphs would be worse)
         let math = "$$\nx\n\ny\n$$";
         assert_eq!(norm(math), math);
     }
 
     #[test]
     fn display_join_aborts_at_blockquote_marker() {
-        // Quoted display math keeps its `>` markers: pulldown strips them per
-        // line and handles the span; joining would make them span content.
+        // Quoted display math keeps its `>` markers: pulldown strips them per line and handles the span; joining would make them span content
         let input = "> $$\n> x + y\n> $$";
         assert_eq!(norm(input), input);
     }
@@ -954,8 +875,7 @@ mod tests {
 
     #[test]
     fn display_join_gives_up_past_cap() {
-        // No close within MAX_MATH_SOURCE_LEN: the opener stays literal and
-        // the interior is processed normally.
+        // No close within MAX_MATH_SOURCE_LEN: the opener stays literal and the interior is processed normally
         let big = "y".repeat(MAX_MATH_SOURCE_LEN + 10);
         let input = format!("$$\nx\n{big}");
         assert_eq!(norm(&input), input);
@@ -1020,9 +940,9 @@ mod tests {
 
     #[test]
     fn escaped_backslash_paren_stays_literal() {
-        // `\\(` = escaped backslash + literal paren → must NOT become math.
+        // `\\(` is an escaped backslash plus a literal paren, so it must NOT become math
         assert_eq!(norm("\\\\(x\\\\)"), "\\\\(x\\\\)");
-        // `\\\(` = escaped backslash + real `\(` → the `\(` converts.
+        // `\\\(` is an escaped backslash plus a real `\(`, so the `\(` converts
         assert_eq!(norm("\\\\\\(x\\\\\\)"), "\\\\$x\\\\$");
     }
 
@@ -1244,20 +1164,16 @@ The review is already complete at:\n\n\
 mod token_soup_stress {
     use super::*;
 
-    /// Randomized delimiter-soup stress. Two invariants are universal and
-    /// pinned here for arbitrary input:
+    /// Randomized delimiter-soup stress. Two invariants are universal and pinned here for arbitrary input:
     ///
     /// 1. the normalizer never panics;
-    /// 2. streaming char-by-char matches the one-shot output (chunk-split
-    ///    invariance — what production streaming actually relies on).
+    /// 2. streaming char-by-char matches the one-shot output (chunk-split invariance, what production streaming actually relies on).
     ///
-    /// Full byte-idempotency is deliberately *not* asserted on soup: a
-    /// conversion can glue a new `$$` out of adjacent tokens (e.g. `$` + an
-    /// unmatched `\)` → `$$`), which a second pass would then scan as a
-    /// display opener. Production normalizes exactly once per stream (the
-    /// streaming renderer's `clone()` re-appends already-normalized source
-    /// verbatim), and idempotency for realistic documents is pinned by the
-    /// `idempotent` test's curated list.
+    /// Full byte-idempotency is deliberately *not* asserted on soup.
+    /// A conversion can glue a new `$$` out of adjacent tokens (e.g. `$` plus an unmatched `\)` becomes `$$`).
+    /// A second pass would then scan that as a display opener.
+    /// Production normalizes exactly once per stream: the streaming renderer's `clone()` re-appends already-normalized source verbatim.
+    /// Idempotency for realistic documents is pinned by the `idempotent` test's curated list.
     #[test]
     fn token_soup_never_panics_and_streams_consistently() {
         const TOKENS: [&str; 18] = [

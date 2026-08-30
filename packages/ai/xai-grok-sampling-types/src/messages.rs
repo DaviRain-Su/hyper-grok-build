@@ -248,6 +248,24 @@ pub enum StopReason {
     Unknown(String),
 }
 
+impl StopReason {
+    /// The verbatim wire string, derived from the serde `snake_case` renames
+    /// so it cannot drift from the wire contract; `Unknown` yields its inner
+    /// string unchanged.
+    pub fn wire_str(&self) -> String {
+        match serde_json::to_value(self) {
+            Ok(serde_json::Value::String(s)) => s,
+            other => {
+                debug_assert!(
+                    false,
+                    "StopReason must serialize to a string, got {other:?}"
+                );
+                "end_turn".to_string()
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessagesUsage {
     pub input_tokens: u32,
@@ -399,6 +417,18 @@ mod tests {
             StopReason::Unknown(s) => assert_eq!(s, "some_future_stop_reason"),
             other => panic!("unknown value must preserve the wire string, got {other:?}"),
         }
+
+        // wire_str is the inverse: known variants round-trip through the
+        // serde renames, Unknown yields its inner string unchanged.
+        assert_eq!(StopReason::MaxTokens.wire_str(), "max_tokens");
+        assert_eq!(
+            StopReason::ModelContextWindowExceeded.wire_str(),
+            "model_context_window_exceeded"
+        );
+        assert_eq!(
+            StopReason::Unknown("some_future_stop_reason".to_string()).wire_str(),
+            "some_future_stop_reason"
+        );
         assert_eq!(
             serde_json::to_string(&StopReason::Unknown("some_future_stop_reason".into())).unwrap(),
             "\"some_future_stop_reason\"",

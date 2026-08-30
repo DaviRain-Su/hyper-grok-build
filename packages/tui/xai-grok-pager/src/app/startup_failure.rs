@@ -1,5 +1,4 @@
-//! Startup failures as data. [`StartupFailure::user_report`] is the only place
-//! they become the text a reader sees.
+//! Startup failures are kept as data. [`StartupFailure::user_report`] is the only place they become the text a reader sees.
 
 mod render;
 
@@ -37,8 +36,7 @@ impl EarlierAttempt {
         self.wait.as_secs() > 0
     }
 
-    /// The leader is still running and still wedged, so clearing it is what
-    /// stops the next start paying the same wait.
+    /// The leader is still running and still wedged, so clearing it is what stops the next start paying the same wait.
     fn wedged_leader(&self) -> bool {
         self.outcome == StartupOutcome::Timeout
             && self.longest_step == Some(StartupPhase::LeaderConnect)
@@ -96,8 +94,7 @@ impl StartupFailure {
     }
 }
 
-// One clause: this lands in log fields and `{e:#}` chains, where the full
-// report does not belong.
+// One clause: this lands in log fields and `{e:#}` chains, where the full report does not belong
 impl fmt::Display for StartupFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.reason {

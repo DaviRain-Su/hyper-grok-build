@@ -9,10 +9,10 @@ use crate::views::session_picker_surface::SessionPickerHost;
 
 use xai_grok_shell::session::unified_list::ListScope;
 
-/// Kind facet for welcome multi-source history under `--chat`.
+/// The history `kind` filter for the welcome screen's multi-source history under `--chat`.
 ///
-/// Sandbox → `chat` (gateway); Local → `build` (local-disk). Modal / non-welcome
-/// fetches leave this `None` so the shell keeps its default chat-mode force.
+/// Sandbox maps to `chat` (gateway); Local maps to `build` (local-disk).
+/// Modal and non-welcome fetches get `None` so the shell keeps its default of forcing chat mode.
 pub(in crate::app::dispatch) fn welcome_history_kind_filter(app: &AppView) -> Option<Vec<String>> {
     #[cfg(feature = "local-workspace")]
     {
@@ -26,8 +26,7 @@ pub(in crate::app::dispatch) fn welcome_history_kind_filter(app: &AppView) -> Op
     None
 }
 
-/// Server-side headless policy for the picker surface that will consume the
-/// fetch (modal first, welcome fallback — same order as the loaded handler):
+/// Server-side headless policy for the picker that will consume the fetch (modal first, then welcome, the same order as the loaded handler).
 /// `Only` on the Headless page, `Exclude` everywhere else.
 pub(in crate::app::dispatch) fn active_picker_headless_policy(
     app: &AppView,
@@ -48,10 +47,8 @@ pub(in crate::app::dispatch) fn next_picker_list_generation(app: &mut AppView) -
 }
 
 pub(in crate::app::dispatch) fn dispatch_fetch_session_list(app: &mut AppView) -> Vec<Effect> {
-    // Incarnation boundary: the wipe below destroys whatever welcome
-    // incarnation an in-flight result was issued for, so the welcome
-    // generation reallocates on every call — even when the fetch belongs to
-    // an open modal, which gets its own fresh generation.
+    // The wipe below destroys the welcome picker state that any still-pending result was issued for
+    // So the welcome generation reallocates on every call, even when the fetch belongs to an open modal, which gets its own fresh generation
     app.session_picker_generation = app.alloc_picker_generation();
     let modal_generation = matches!(
         get_active_agent(app).and_then(|agent| agent.active_modal.as_ref()),
@@ -160,8 +157,7 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
         app.show_toast(&notice);
     } else if scope.is_relaxed()
         && app.session_picker_relaxed_notified_for.as_deref() != Some(app.cwd.as_path())
-        // Welcome view drops toasts; don't consume the one-shot notice unless
-        // it can render.
+        // Welcome view drops toasts; don't consume the one-shot notice unless it can render
         && !matches!(app.active_view, crate::app::app_view::ActiveView::Welcome)
     {
         // Notify once per directory; the browse is scoped to `app.cwd`.
@@ -174,8 +170,7 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
         };
         app.show_toast(message);
     }
-    // A cwd-scoped browse clears the latch so a later relax re-notifies; search
-    // responses leave it alone.
+    // A cwd-scoped browse clears `session_picker_relaxed_notified_for` so a later relax re-notifies; search responses leave it alone
     if !scope.is_relaxed() && is_browse {
         app.session_picker_relaxed_notified_for = None;
     }
@@ -216,8 +211,7 @@ pub(in crate::app::dispatch) fn handle_foreign_sessions_scanned(
     if app.chat_mode || seq != app.foreign_session_scan_seq {
         return vec![];
     }
-    // The scan is not host-routed: it keeps its own seq + coordinator
-    // discipline and applies modal-first, welcome-fallback.
+    // The scan is not routed by host: it keeps its own seq and coordinator, applying to the modal first and falling back to the welcome picker
     let list_seq = app.session_picker_list_seq;
     let mut scanned = Some(scanned);
     let mut notice = None;

@@ -94,7 +94,7 @@ async fn middle_click_pastes_primary_linux() {
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("PRIMARY prompt reaches the mock backend");
 
-    // Recorded requests repeat cumulative history, so wire presence is the stable assertion here.
+    // Recorded requests repeat cumulative history, so the stable assertion here is presence on the wire, not a count
     let user_messages = all_user_message_blobs(&content);
     assert!(
         user_messages

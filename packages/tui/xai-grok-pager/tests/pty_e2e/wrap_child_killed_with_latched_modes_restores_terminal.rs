@@ -2,16 +2,14 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Dirty-death e2e: when the wrapped child dies with DEC private modes still
-/// latched, `grok wrap` must emit the matching resets so the outer terminal is
-/// not left broken.
+/// Dirty-death e2e: when the wrapped child dies with DEC private modes still latched, `grok wrap` must emit the matching resets.
+/// Otherwise the outer terminal is left broken.
 ///
-/// The child SIGKILLs itself after enabling alt screen, all-motion mouse
-/// tracking, SGR mouse encoding, bracketed paste, and cursor hide. From wrap's
-/// perspective a child SIGKILL is byte-identical to the local ssh client dying
-/// on a transport drop (laptop sleep, `~.`, remote host gone): the PTY hits
-/// EOF with the enables' reset bytes never having arrived. Only wrap survives
-/// to clean up the local terminal.
+/// The child SIGKILLs itself after enabling alt screen, all-motion mouse tracking, SGR mouse encoding, bracketed paste, and cursor hide.
+/// From wrap's perspective a child SIGKILL is byte-identical to the local ssh client dying on a transport drop.
+/// Transport drops include laptop sleep, `~.`, and the remote host going away.
+/// The PTY hits EOF with the enables' reset bytes never having arrived.
+/// Only wrap survives to clean up the local terminal.
 #[test]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 #[cfg(unix)]
@@ -29,8 +27,7 @@ fn wrap_child_killed_with_latched_modes_restores_terminal() {
         "wrap must exit after the child is killed\nraw:\n{raw:?}"
     );
 
-    // All resets must appear after the last enable (the cursor hide): they can
-    // only have come from wrap's own restore path, not from the dead child.
+    // All resets must appear after the last enable (the cursor hide): they can only have come from wrap's own restore path, not the dead child
     let last_enable = raw
         .rfind("\x1b[?25l")
         .unwrap_or_else(|| panic!("child's mode enables must pass through\nraw:\n{raw:?}"));

@@ -2928,16 +2928,19 @@ fn remove_hooks_path_removes() {
     let tmp = tempfile::tempdir().unwrap();
     let paths_file = tmp.path().join("hooks-paths");
     let _ = add_hooks_path_to_file("/to/remove", &paths_file);
-    let _ = remove_hooks_path_from_file("/to/remove", &paths_file);
+    let removed = remove_hooks_path_from_file("/to/remove", &paths_file).unwrap();
+    assert!(removed);
     let content = std::fs::read_to_string(&paths_file).unwrap_or_default();
     assert!(!content.contains("/to/remove"));
 }
+/// Unregistered paths report `false` so surfaces refuse instead of
+/// claiming a removal that never happened.
 #[test]
-fn remove_hooks_path_is_noop_if_missing() {
+fn remove_hooks_path_reports_missing() {
     let tmp = tempfile::tempdir().unwrap();
     let paths_file = tmp.path().join("hooks-paths");
-    let result = remove_hooks_path_from_file("/nonexistent/path", &paths_file);
-    assert!(result.is_ok());
+    let removed = remove_hooks_path_from_file("/nonexistent/path", &paths_file).unwrap();
+    assert!(!removed);
 }
 #[test]
 fn remove_hooks_path_preserves_others() {
@@ -3242,7 +3245,7 @@ fn project_config_never_sources_feedback_user() {
         )
         .unwrap();
     let cwd = repo.path();
-    crate::agent::folder_trust::grant_folder_trust(cwd);
+    xai_grok_workspace::folder_trust::grant_folder_trust(cwd);
     assert!(
             resolve_effective_plugins_config(cwd)
                 .paths
@@ -3821,7 +3824,7 @@ fn resolve_effective_plugins_config_gates_project_paths_on_folder_trust() {
             untrusted.disabled.contains(&proj_disabled),
             "project [plugins].disabled must merge even when untrusted (fail-safe)"
         );
-    crate::agent::folder_trust::grant_folder_trust(cwd);
+    xai_grok_workspace::folder_trust::grant_folder_trust(cwd);
     let trusted = resolve_effective_plugins_config(cwd);
     assert!(
             trusted.paths.contains(&proj_path),
@@ -3901,7 +3904,7 @@ fn discover_plugins_excludes_untrusted_configpath_plugin_end_to_end() {
             !untrusted_found,
             "untrusted folder must EXCLUDE the ConfigPath plugin from discovery"
         );
-    crate::agent::folder_trust::grant_folder_trust(cwd);
+    xai_grok_workspace::folder_trust::grant_folder_trust(cwd);
     crate::agent::folder_trust::resolve_and_record(cwd, None, false);
     let trusted_dc = resolve_effective_plugins_config(cwd).to_discovery_config();
     let trusted_verdict = crate::agent::folder_trust::project_scope_allowed(cwd);

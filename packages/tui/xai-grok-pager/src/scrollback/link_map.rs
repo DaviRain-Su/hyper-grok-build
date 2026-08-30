@@ -1,8 +1,7 @@
-//! VisibleLinkMap — per-frame map of clickable link regions on screen.
+//! VisibleLinkMap: per-frame map of clickable link regions on screen.
 //!
-//! Populated during the scrollback render pass from the `LinkOverlay`
-//! (markdown hyperlinks) and citation URLs from web_search / web_fetch
-//! tool blocks. Used by the mouse handler for click-to-open.
+//! Populated during the scrollback render pass from the `LinkOverlay` (markdown hyperlinks) and from web_search / web_fetch citation URLs.
+//! Used by the mouse handler for click-to-open.
 
 use ratatui::layout::Rect;
 
@@ -10,8 +9,8 @@ use crate::render::osc8::{LinkOverlay, LinkTarget};
 
 /// A clickable link region on screen.
 ///
-/// A single logical link may span multiple screen rows when word-wrap
-/// splits it. Each row segment is a separate `Rect` in `rects`.
+/// A single logical link may span multiple screen rows when word-wrap splits it.
+/// Each row segment is a separate `Rect` in `rects`.
 #[derive(Debug, Clone)]
 pub struct VisibleLink {
     pub rects: Vec<Rect>,
@@ -20,16 +19,14 @@ pub struct VisibleLink {
 }
 
 impl VisibleLink {
-    /// Check whether screen position `(col, row)` falls inside any of
-    /// this link's row segments.
+    /// Check whether screen position `(col, row)` falls inside any of this link's row segments.
     pub fn contains(&self, col: u16, row: u16) -> bool {
         self.rects
             .iter()
             .any(|r| col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height)
     }
 
-    /// True when painted cell width equals the URL's display width (bare URL
-    /// text on screen, not a short label or wide citation block).
+    /// True when painted cell width equals the URL's display width (bare URL text on screen, not a short label or wide citation block).
     pub fn looks_like_bare_url_text(&self) -> bool {
         let LinkTarget::Url(url) = &self.target else {
             return false;
@@ -59,11 +56,9 @@ impl VisibleLinkMap {
 
     /// Rebuild the link map from a `LinkOverlay` and citation URLs.
     ///
-    /// Consecutive `OverlayLink`s with the same `id` **and** target (a
-    /// single link that word-wrapped across rows) are merged into one
-    /// `VisibleLink` with multiple `rects`. Same `id` alone is not enough:
-    /// markdown ids restart per document, so two visible messages can both
-    /// carry `id=0` for different URLs.
+    /// Consecutive `OverlayLink`s with the same `id` **and** target are merged into one `VisibleLink` with multiple `rects`.
+    /// Matching entries are segments of a single link that word-wrapped across rows.
+    /// Same `id` alone is not enough: markdown ids restart per document, so two visible messages can both carry `id=0` for different URLs.
     pub fn rebuild(
         &mut self,
         generation: u64,
@@ -104,24 +99,19 @@ impl VisibleLinkMap {
 
     /// Append overlay links (e.g. `/btw`) without changing generation.
     ///
-    /// Same-id+same-target merge applies only *within this append* —
-    /// markdown link ids are per-document, so they will not merge with
-    /// anything appended earlier this frame (whether that is the scrollback
-    /// prefix from [`Self::rebuild`] or a previous
-    /// [`Self::append_from_overlay`] call from another overlay source).
-    /// Wrapped segments of the same logical link inside `overlay` still
-    /// merge correctly.
+    /// The same-id, same-target merge applies only *within this append*.
+    /// Markdown link ids are per-document, so they will not merge with anything appended earlier this frame.
+    /// Earlier entries are the scrollback prefix from [`Self::rebuild`] or a previous [`Self::append_from_overlay`] call from another overlay source.
+    /// Wrapped segments of the same logical link inside `overlay` still merge correctly.
     ///
-    /// Callers that re-append the same source every frame must
-    /// [`Self::truncate`] back to the desired prefix length first, otherwise
-    /// each frame's links will accumulate.
+    /// Callers that re-append the same source every frame must [`Self::truncate`] back to the desired prefix length first.
+    /// Otherwise each frame's links will accumulate.
     pub fn append_from_overlay(&mut self, overlay: &LinkOverlay) {
         let start_len = self.links.len();
         self.push_overlay_links(overlay, start_len, crate::terminal::terminal_context());
     }
 
-    /// Push overlay segments, merging same-id+same-target only with entries
-    /// at indices `>= merge_from` (0 for rebuild; map length for append).
+    /// Push overlay segments, merging same-id, same-target links only with entries at indices `>= merge_from` (0 for rebuild; map length for append).
     fn push_overlay_links(
         &mut self,
         overlay: &LinkOverlay,
@@ -160,13 +150,11 @@ impl VisibleLinkMap {
         }
     }
 
-    /// Truncate to the first `n` links (used to drop previously-appended
-    /// overlay links before re-appending for the current frame).
+    /// Truncate to the first `n` links (used to drop previously-appended overlay links before re-appending for the current frame).
     pub fn truncate(&mut self, n: usize) {
         self.links.truncate(n);
     }
 
-    /// Number of links currently in the map.
     pub fn len(&self) -> usize {
         self.links.len()
     }
@@ -508,7 +496,7 @@ mod tests {
         ]);
         map.rebuild(1, &overlay, vec![]);
 
-        // Should be 1 logical link with 2 rects
+        // One logical link with 2 rects
         assert_eq!(map.links().len(), 1);
         assert_eq!(map.links()[0].rects.len(), 2);
         assert_eq!(

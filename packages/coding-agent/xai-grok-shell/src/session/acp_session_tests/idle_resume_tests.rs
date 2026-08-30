@@ -133,6 +133,9 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let actor = SessionActor {
+                transient_retry_enabled: true,
+                transient_retries_prompt_total: std::cell::Cell::new(0),
+                transient_episode_start: std::cell::Cell::new(None),
                 status_wake: Default::default(),
                 session_info: SessionInfo {
                     id: acp::SessionId::new("test-idle-resume"),
@@ -343,8 +346,9 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 title_refresh_enabled: false,
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
-                turn_stream_drained: parking_lot::Mutex::new(None),
-                pending_image_strip: parking_lot::Mutex::new(None),
+                turn_stream_drained: parking_lot::Mutex::new(std::collections::HashMap::new()),
+                pending_image_strip: parking_lot::Mutex::new(std::collections::HashMap::new()),
+                image_strip_rewrite_barrier: ImageStripRewriteBarrier::new(),
                 sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
                 sampling_gate: None,
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),

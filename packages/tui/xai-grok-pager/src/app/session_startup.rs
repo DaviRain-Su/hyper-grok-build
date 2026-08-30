@@ -1,17 +1,15 @@
 //! Canonical session-selection CLI intent.
 //!
-//! Built once from CLI flags and consumed by interactive resolve, the event
-//! loop, and headless mode so resume / new-with-id / fork are not re-derived
-//! in three places.
+//! Built once from CLI flags and consumed by interactive resolve, the event loop, and headless mode.
+//! Resume, new-with-id, and fork are thus not re-derived in three places.
 use super::cli::PagerArgs;
 use std::path::{Path, PathBuf};
 /// Session-create intent deferred until [`AppView::session_startup_allowed`].
 ///
-/// Replaces the prior matrix of `startup_load_session` + cwd + `startup_fork`
-/// tuple + ad-hoc preferred-only replay.
+/// Replaces the prior matrix of `startup_load_session`, cwd, the `startup_fork` tuple, and ad-hoc preferred-only replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeferredSessionStartup {
-    /// Strict resume (`-r` / `-c` / picker load).
+    /// Strict resume (`-r`, `-c`, picker load).
     Load {
         session_id: String,
         session_cwd: Option<PathBuf>,
@@ -156,7 +154,7 @@ pub enum SessionStartupIntent {
     NewAuto,
     /// Fresh session with a client-chosen ID (must not exist under cwd).
     NewWithId { session_id: String },
-    /// Load an existing session (strict — never create).
+    /// Load an existing session (strict; never create).
     Resume {
         /// `None` means resolve most-recent for cwd at materialize time.
         session_id: Option<String>,
@@ -172,9 +170,9 @@ pub enum SessionStartupIntent {
 /// Flag combinations that clap allows but we reject at runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupFlagError {
-    /// `--session-id` with resume/continue/load without `--fork-session`.
+    /// `--session-id` with resume, continue, or load without `--fork-session`.
     SessionIdRequiresFork,
-    /// `--fork-session` without resume/continue/load.
+    /// `--fork-session` without resume, continue, or load.
     ForkRequiresResumeOrContinue,
     /// `--fork-session` with `--worktree` (not supported yet).
     ForkWithWorktree,
@@ -287,11 +285,9 @@ pass --no-leader or disable [cli] use_leader in config";
 pub fn chat_mode_conflicts_with_leader(chat: bool, use_leader: bool) -> bool {
     chat && use_leader
 }
-/// User-facing error for `--fork-session` + `--chat` (forking is a Build disk
-/// concept; chat sessions have no local copy to fork).
+/// User-facing error for `--fork-session` with `--chat` (forking is a Build disk concept; chat sessions have no local copy to fork).
 pub const CHAT_MODE_FORK_CONFLICT: &str = "--fork-session is not supported with --chat";
-/// User-facing error for `--restore-code` + `--chat` (code restore is a
-/// Build/worktree concept; chat sessions carry no codebase).
+/// User-facing error for `--restore-code` with `--chat` (code restore is a Build and worktree concept; chat sessions carry no codebase).
 pub const CHAT_MODE_RESTORE_CODE_CONFLICT: &str = "--restore-code is not supported with --chat";
 /// Flag validation: Build-lifecycle flags that cannot combine with `--chat`.
 /// Always `None` when `chat_mode` is false, so call sites need no `cfg`.
@@ -311,8 +307,8 @@ pub fn chat_mode_flag_conflict(
     }
     None
 }
-/// Env: enable local workspace without CLI flags (`1`). Mode defaults to `own`
-/// unless `GROK_CHAT_LOCAL_WORKSPACE_MODE` / attach server id is set.
+/// Env: enable local workspace without CLI flags (`1`).
+/// Mode defaults to `own` unless `GROK_CHAT_LOCAL_WORKSPACE_MODE` or an attach server id is set.
 #[cfg(feature = "local-workspace")]
 pub const GROK_CHAT_LOCAL_WORKSPACE_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE";
 #[cfg(feature = "local-workspace")]
@@ -326,7 +322,7 @@ pub const GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV: &str = "GROK_CHAT_LOCAL_WORK
 /// Skip interactive first-run confirm (still prints the banner).
 #[cfg(feature = "local-workspace")]
 pub const GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE_ACK";
-/// Startup banner / first-run copy.
+/// Startup banner and first-run copy.
 #[cfg(feature = "local-workspace")]
 pub const LOCAL_WORKSPACE_BANNER: &str =
     "Local workspace runs tools on this machine (FS confined to <cwd>).";
@@ -410,7 +406,7 @@ fn env_nonempty(name: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
-/// Resolve CLI > env local-workspace intent (own or attach).
+/// Resolve local-workspace intent, CLI over env (own or attach).
 ///
 /// Returns `Ok(None)` when local workspace is not requested.
 #[cfg(feature = "local-workspace")]
@@ -490,10 +486,9 @@ pub fn resolve_local_workspace_config(
         }
     }
 }
-/// Canonicalize `path` and enforce the `/` + `$HOME` denylist.
+/// Canonicalize `path` and enforce the `/` and `$HOME` denylist.
 ///
-/// Returns the canonical directory so callers stamp/persist what was actually
-/// checked (symlinks / `..` must not diverge from validation).
+/// Returns the canonical directory so callers stamp and persist what was actually checked (symlinks and `..` must not diverge from validation).
 #[cfg(feature = "local-workspace")]
 pub fn validate_local_workspace_cwd(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let abs = if path.is_absolute() {
@@ -521,7 +516,7 @@ pub fn validate_local_workspace_cwd(path: &std::path::Path) -> anyhow::Result<st
     if canon == std::path::Path::new("/") {
         anyhow::bail!("{LOCAL_WORKSPACE_HOME_DENIED}");
     }
-    if let Some(home_path) = dirs::home_dir().or_else(|| std::env::var_os("HOME").map(Into::into)) {
+    if let Some(home_path) = xai_dirs::home_dir() {
         let home_canon = home_path.canonicalize().unwrap_or(home_path);
         if canon == home_canon {
             anyhow::bail!("{LOCAL_WORKSPACE_HOME_DENIED}");
@@ -529,7 +524,7 @@ pub fn validate_local_workspace_cwd(path: &std::path::Path) -> anyhow::Result<st
     }
     Ok(canon)
 }
-/// Banner + first-run confirm for local-workspace own/attach.
+/// Banner and first-run confirm for the local-workspace own and attach modes.
 ///
 /// Skip confirm only with `GROK_CHAT_LOCAL_WORKSPACE_ACK=1` or a prior ack file.
 /// Non-TTY without ACK refuses (fail closed).
@@ -592,7 +587,7 @@ pub fn write_local_workspace_ack() {
 ///
 /// Until diag exposes a real tool catalog, attach trusts operator attestation
 /// via `GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS` (comma-separated ids).
-/// Unset / empty → refuse.
+/// Unset or empty means refuse.
 #[cfg(feature = "local-workspace")]
 pub fn ensure_attach_fs_only_toolset(_server_id: &str) -> anyhow::Result<()> {
     let advertised = probe_advertised_tool_ids();
@@ -615,39 +610,28 @@ pub fn probe_advertised_tool_ids() -> Option<Vec<String>> {
 }
 #[cfg(feature = "local-workspace")]
 fn local_workspace_ack_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var("GROK_HOME")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            dirs::home_dir()
-                .or_else(|| std::env::var_os("HOME").map(Into::into))
-                .map(|h| h.join(".grok"))
-        })?;
-    Some(home.join("local_workspace_ack"))
+    Some(xai_dirs::resolve_grok_home()?.join("local_workspace_ack"))
 }
 /// Conservative shape check for a chat-mode `--resume <id>` passthrough.
 ///
-/// The id skips disk/GCS resolution and flows to the gateway, but it is also
-/// path-joined by the local cwd-collision check — so reject path separators,
-/// dots, and anything outside the conversation-id alphabet before it leaves
-/// materialization. Existence is still validated by the gateway at load.
+/// The id skips disk and GCS resolution and flows to the gateway, but the local cwd-collision check also path-joins it.
+/// So reject path separators, dots, and anything outside the conversation-id alphabet before it leaves materialization.
+/// Existence is still validated by the gateway at load.
 pub fn valid_conversation_id_shape(id: &str) -> bool {
     !id.is_empty()
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
-/// True when `session_id` resolves under the **cwd-scoped** local Build sessions
-/// tree. Deliberately does **not** use `resolve_local_session_any_cwd`: a gateway
-/// conversation id that collides with a Build session under another cwd must not
-/// false-refuse CLI resume / non-entry loads under `--chat`.
+/// True when `session_id` resolves under the **cwd-scoped** local Build sessions tree.
+/// Deliberately does **not** use `resolve_local_session_any_cwd`.
+/// A gateway conversation id colliding with a Build session under another cwd must not false-refuse CLI resume or non-entry loads under `--chat`.
 pub fn local_build_session_on_disk(session_id: &str, cwd: &Path) -> bool {
     let cwd_str = cwd.to_string_lossy();
     xai_grok_shell::session::resolve_local_session(session_id, &cwd_str).is_some()
 }
-/// Pure policy: process-wide `--chat` refuses a local Build disk row unless the
-/// caller marked an explicit conversation entry (picker `source == "conversation"`).
+/// Pure policy: process-wide `--chat` refuses a local Build disk row.
+/// The exception is a caller-marked explicit conversation entry (picker `source == "conversation"`).
 pub fn chat_mode_refuses_local_build(
     chat_mode: bool,
     conversation_entry: bool,
@@ -657,12 +641,10 @@ pub fn chat_mode_refuses_local_build(
 }
 /// Process-wide `--chat` must not load (or coerce) local Build disk rows.
 ///
-/// `conversation_entry` is true only for picker/list rows with
-/// `source == "conversation"` (or restore that preserved that bit) — **not**
-/// merely because sticky `--chat` / `chat_mode` is set.
+/// `conversation_entry` is true only for picker or list rows with `source == "conversation"` (or a restore that preserved that bit).
+/// It is **not** set merely because sticky `--chat` or `chat_mode` is on.
 ///
-/// Short-circuits before any disk walk when `--chat` is off or the row is a
-/// conversation entry.
+/// Short-circuits before any disk walk when `--chat` is off or the row is a conversation entry.
 pub fn chat_mode_refuses_local_build_load(
     chat_mode: bool,
     conversation_entry: bool,
@@ -674,7 +656,7 @@ pub fn chat_mode_refuses_local_build_load(
     }
     local_build_session_on_disk(session_id, cwd)
 }
-/// Outcome of async materialization (local resolve / remote restore / preflight).
+/// Outcome of async materialization (local resolve, remote restore, preflight).
 #[derive(Debug, Clone)]
 pub enum MaterializedStartup {
     /// Create a new session with an agent-chosen ID (or defer to welcome).
@@ -686,13 +668,11 @@ pub enum MaterializedStartup {
         session_id: String,
         original_cwd: Option<PathBuf>,
         title: Option<String>,
-        /// The target missed local id/title resolution and was deferred to
-        /// the worktree resume handler; worktree failure messages append the
-        /// no-match hint only for this outcome (never inferred from shape).
+        /// The target missed local id and title resolution and was deferred to the worktree resume handler.
+        /// Worktree failure messages append the no-match hint only for this outcome (never inferred from shape).
         deferred_local_miss: bool,
-        /// Pre-TUI conversation-only remote restore: follow-up `LoadSession`
-        /// must send `x.ai/restore_code: false` so agent `[cli] restore_code`
-        /// cannot checkout in-place on the new local child.
+        /// Pre-TUI conversation-only remote restore: the follow-up `LoadSession` must send `x.ai/restore_code: false`.
+        /// Agent `[cli] restore_code` must not checkout in-place on the new local child.
         suppress_code_restore: bool,
     },
     /// Fork from a resolved parent, then load the child.
@@ -701,50 +681,42 @@ pub enum MaterializedStartup {
         parent_cwd: Option<PathBuf>,
         parent_title: Option<String>,
         new_session_id: Option<String>,
-        /// Same one-shot as [`Self::Resume::suppress_code_restore`]: the
-        /// follow-up child `LoadSession` must not inherit agent restore-code.
+        /// Same one-shot as [`Self::Resume::suppress_code_restore`]: the follow-up child `LoadSession` must not inherit agent restore-code.
         suppress_code_restore: bool,
     },
 }
 /// Whether materialization may resolve a non-id resume arg by title locally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TitleResolution {
-    /// No pre-sandbox pin ran (direct callers, tests): materialization owns
-    /// title selection.
+    /// No pre-sandbox pin ran (direct callers, tests): materialization owns title selection.
     Allowed,
-    /// The composition root already pinned — or definitively missed — the
-    /// target before the irreversible OS sandbox. Re-selecting by title here
-    /// would race a concurrent rename/create and resume a session whose
-    /// persisted profile was never checked; a pinned id that vanished must
-    /// also never be reinterpreted as a title.
+    /// The composition root already pinned (or definitively missed) the target before the irreversible OS sandbox.
+    /// Re-selecting by title here would race a concurrent rename or create and resume a session whose persisted profile was never checked.
+    /// A pinned id that vanished must also never be reinterpreted as a title.
     PinnedPreSandbox,
 }
 /// Context for [`materialize_startup`] (interactive vs headless share this).
 #[derive(Debug, Clone, Copy)]
 pub struct MaterializeCtx {
-    /// When true, skip process-cwd preflight for `NewWithId` (worktree create
-    /// checks the final session cwd later).
+    /// When true, skip process-cwd preflight for `NewWithId` (worktree create checks the final session cwd later).
     pub has_worktree: bool,
     /// When true, attempt remote restore if the session is not on disk.
     pub allow_remote_restore: bool,
-    /// Process-wide flag: resume targets are grok.com conversations, not
-    /// the local disk store. Always `false` without the optional feature;
-    /// setting it anyway errors rather than silently falling back to disk.
+    /// Process-wide flag: resume targets are grok.com conversations, not the local disk store.
+    /// Always `false` without the optional feature; setting it anyway errors rather than silently falling back to disk.
     pub chat_mode: bool,
     /// See [`TitleResolution`]; carried from the pre-sandbox pin outcome.
     pub title_resolution: TitleResolution,
-    /// CLI `--restore-code`. Remote codebase restore is never applied in-place;
-    /// this flag either defers to `--worktree` or refuses the in-place path.
+    /// CLI `--restore-code`. Remote codebase restore is never applied in-place; this flag either defers to `--worktree` or refuses the in-place path.
     pub restore_code: bool,
-    /// Which rows a most-recent resume may select. Interactive startup excludes
-    /// headless rows; single-prompt continuation preserves the inclusive rule.
+    /// Which rows a most-recent resume may select.
+    /// Interactive startup excludes headless rows; single-prompt continuation preserves the inclusive rule.
     pub recent_session_selection: RecentSessionSelection,
-    /// Pre-TUI restore progress on stdout (interactive tty). Headless keeps
-    /// stdout as JSON/NDJSON and uses stderr instead.
+    /// Pre-TUI restore progress on stdout (interactive tty).
+    /// Headless keeps stdout as JSON or NDJSON and uses stderr instead.
     pub restore_progress_on_stdout: bool,
 }
 impl MaterializeCtx {
-    /// `--resume` miss bails fast.
     pub const fn default_allow_remote_restore() -> bool {
         false
     }
@@ -764,10 +736,9 @@ impl MaterializeCtx {
         }
     }
 }
-/// Cwd where a forked child session is written (interactive + headless SSOT).
+/// Cwd where a forked child session is written (the interactive and headless SSOT).
 ///
-/// When the parent lives under another directory, the fork effect sets
-/// `newCwd` to that parent session cwd — preflight must use the same path.
+/// When the parent lives under another directory, the fork effect sets `newCwd` to that parent session cwd; preflight must use the same path.
 pub fn effective_fork_new_cwd(process_cwd: &str, parent_cwd: Option<&Path>) -> String {
     parent_cwd
         .map(|p| p.to_string_lossy().into_owned())
@@ -791,10 +762,9 @@ async fn most_recent_session_id(
         })?;
     Ok((first.info.id.to_string(), first.display_title_opt()))
 }
-/// `AuthManager` for direct grok.com calls made outside the agent (pre-ACP
-/// `--continue` conversation listing, the GCS restore effect). Wires the
-/// auth-provider refresher before the first `auth()`: without it, environments
-/// that mint credentials via `auth_provider_command` report `NoOauth`.
+/// `AuthManager` for direct grok.com calls made outside the agent (pre-ACP `--continue` conversation listing, the GCS restore effect).
+/// Wires the auth-provider refresher before the first `auth()`.
+/// Without it, environments that mint credentials via `auth_provider_command` report `NoOauth`.
 pub(crate) fn pre_acp_auth_manager(
     agent_config: &xai_grok_shell::agent::config::Config,
 ) -> std::sync::Arc<xai_grok_shell::auth::AuthManager> {
@@ -808,8 +778,8 @@ pub(crate) fn pre_acp_auth_manager(
     );
     auth
 }
-/// Pre-TUI remote restore (session state + memory only). Codebase checkout is
-/// never applied on this path; `--restore-code` requires `--worktree`.
+/// Pre-TUI remote restore (session state and memory only).
+/// Codebase checkout is never applied on this path; `--restore-code` requires `--worktree`.
 const REMOTE_RESTORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 /// `--restore-code` without `--worktree` on a remote miss: refuse in-place checkout.
 const REMOTE_RESTORE_NEEDS_WORKTREE: &str = "--restore-code on a remote session requires --worktree \
@@ -841,7 +811,7 @@ pub async fn materialize_startup(
         .to_string();
     materialize_startup_for_cwd(ctx, intent, &cwd).await
 }
-/// Same as [`materialize_startup`] but with an explicit process cwd (tests / headless).
+/// Same as [`materialize_startup`] but with an explicit process cwd (tests, headless).
 pub async fn materialize_startup_for_cwd(
     ctx: MaterializeCtx,
     intent: SessionStartupIntent,
@@ -959,12 +929,11 @@ struct ResolvedExisting {
     id: String,
     original_cwd: Option<PathBuf>,
     title: Option<String>,
-    /// True only for the worktree-defer arm: the target missed local
-    /// id/title resolution.
+    /// True only for the worktree-defer arm: the target missed local id and title resolution.
     deferred_local_miss: bool,
     suppress_code_restore: bool,
 }
-/// Resolve an existing session for strict resume (local / any-cwd / remote / worktree defer).
+/// Resolve an existing session for strict resume (local, any-cwd, remote, or worktree defer).
 async fn resolve_existing_session(
     ctx: MaterializeCtx,
     session_id: &str,
@@ -1076,7 +1045,7 @@ pub(crate) enum RemoteMissPlan {
     RejectInPlaceCodeRestore {
         title_miss_hint: bool,
     },
-    /// Pre-TUI restore of session state + memory only (never codebase).
+    /// Pre-TUI restore of session state and memory only (never codebase).
     RestoreConversation,
     NotFound {
         title_miss_hint: bool,
@@ -1084,9 +1053,8 @@ pub(crate) enum RemoteMissPlan {
 }
 /// Whether `--restore-code` may run in-place for this local hit.
 ///
-/// `resolved_id != requested_id` means the CLI handle was a remote UUID that
-/// only exists as a previously restored child — still a remote session, so
-/// snapshot checkout requires `--worktree`.
+/// `resolved_id != requested_id` means the CLI handle was a remote UUID that only exists as a previously restored child.
+/// That is still a remote session, so snapshot checkout requires `--worktree`.
 pub(crate) fn in_place_restore_code_allowed(
     restore_code: bool,
     has_worktree: bool,
@@ -1116,15 +1084,12 @@ pub(crate) fn plan_remote_miss(ctx: MaterializeCtx, arg_is_uuid: bool) -> Remote
     }
     RemoteMissPlan::RestoreConversation
 }
-/// Remote-restore tail of [`resolve_existing_session`], split out so non-id
-/// targets can wrap every failure with the title-miss hint.
+/// Remote-restore tail of [`resolve_existing_session`], split out so non-id targets can wrap every failure with the title-miss hint.
 ///
-/// Always restores session state + memory only. Codebase checkout is refused
-/// in-place ([`RemoteMissPlan::RejectInPlaceCodeRestore`]) or deferred to the
-/// worktree handler.
+/// Always restores session state and memory only.
+/// Codebase checkout is refused in-place ([`RemoteMissPlan::RejectInPlaceCodeRestore`]) or deferred to the worktree handler.
 ///
-/// On timeout the future is cancelled; partial JSONL may already be on disk
-/// and is recovered via a local-child scan of the remote id.
+/// On timeout the future is cancelled; partial JSONL may already be on disk and is recovered via a local-child scan of the remote id.
 async fn restore_session_from_remote(
     session_id: &str,
     cwd: &str,
@@ -1302,10 +1267,9 @@ pub(crate) fn classify_remote_restore(
 }
 /// Resolve a non-id resume arg as a session title among local sessions for `cwd`.
 ///
-/// Matching/disambiguation rules live in [`super::session_title_resolve`]
-/// (shared with the pre-sandbox saved-profile peek); this adds the cwd-scoped
-/// listing and the resolved-id announcement. The arg is matched in memory and
-/// never used as a filesystem path.
+/// Matching and disambiguation rules live in [`super::session_title_resolve`] (shared with the pre-sandbox saved-profile peek).
+/// This adds the cwd-scoped listing and the resolved-id announcement.
+/// The arg is matched in memory and never used as a filesystem path.
 async fn resolve_session_by_title(
     arg: &str,
     cwd: &str,
@@ -1730,7 +1694,6 @@ mod tests {
     fn materialize_ctx_chat_mode_from_args() {
         assert!(!MaterializeCtx::from_pager_args(&parse(&["grok"])).chat_mode);
     }
-    /// hardcoded `false` here once disabled it everywhere.
     #[test]
     fn remote_restore_follows_compiled_restore_stack() {
         assert!(!MaterializeCtx::from_pager_args(&parse(&["grok"])).allow_remote_restore);
@@ -1991,8 +1954,7 @@ mod tests {
             other => panic!("expected Resume, got {other:?}"),
         }
     }
-    /// Explicit-id resume under `--chat` passes the id through untouched:
-    /// no disk resolution, no GCS restore (the cwd does not even exist).
+    /// Explicit-id resume under `--chat` passes the id through untouched: no disk resolution, no GCS restore (the cwd does not even exist).
     #[tokio::test]
     async fn materialize_chat_resume_id_is_conversation_direct() {
         let out = materialize_startup_for_cwd(
@@ -2019,8 +1981,7 @@ mod tests {
             other => panic!("expected Resume, got {other:?}"),
         }
     }
-    /// Chat-mode passthrough rejects ids that could escape the sessions tree
-    /// via the collision check's path join (or are junk for the gateway).
+    /// Chat-mode passthrough rejects ids that could escape the sessions tree via the collision check's path join (or are junk for the gateway).
     #[tokio::test]
     async fn materialize_chat_resume_id_rejects_unsafe_shapes() {
         for bad in ["../../../etc/passwd", "a/b", "conv id", "conv\u{7}", ""] {
@@ -2044,8 +2005,7 @@ mod tests {
         ));
         assert!(valid_conversation_id_shape("conv_abc123"));
     }
-    /// A no-feature build asked for chat most-recent must fail loudly, not
-    /// silently resolve a local Build session.
+    /// A no-feature build asked for chat most-recent must fail loudly, not silently resolve a local Build session.
     #[tokio::test]
     async fn materialize_chat_most_recent_without_feature_bails() {
         let err = materialize_startup_for_cwd(
@@ -2060,8 +2020,8 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("chat"), "unexpected error: {err}");
     }
-    /// Without `--chat` an unknown id still goes through disk/GCS resolution
-    /// (pinned via `allow_remote_restore: false` → strict "does not exist").
+    /// Without `--chat` an unknown id still goes through disk and GCS resolution.
+    /// Pinned via `allow_remote_restore: false`, so strict "does not exist".
     #[tokio::test]
     async fn materialize_resume_id_without_chat_still_resolves_on_disk() {
         let ctx = MaterializeCtx {
@@ -2108,8 +2068,7 @@ mod tests {
             assert_eq!(err.to_string(), CHAT_MODE_FORK_CONFLICT);
         }
     }
-    /// The chat passthrough does not bypass the cwd-collision refusal that
-    /// `app/mod.rs` runs on the materialized id.
+    /// The chat passthrough does not bypass the cwd-collision refusal that `app/mod.rs` runs on the materialized id.
     #[serial_test::serial(GROK_HOME)]
     #[tokio::test]
     async fn chat_resume_passthrough_keeps_cwd_collision_refusal() {
@@ -2231,8 +2190,7 @@ mod tests {
                 other => panic!("expected Resume, got {other:?}"),
             }
         }
-        /// Also covers letter-case insensitivity: the query case differs from
-        /// the stored title.
+        /// Also covers letter-case insensitivity: the query case differs from the stored title.
         #[serial_test::serial(GROK_HOME)]
         #[tokio::test]
         async fn title_fallback_resumes_single_match_case_insensitively() {
@@ -2263,9 +2221,8 @@ mod tests {
                 other => panic!("expected Resume, got {other:?}"),
             }
         }
-        /// Id resolution stays authoritative: when the arg is an on-disk
-        /// session id, the title fallback is never consulted even though
-        /// another session carries that exact title.
+        /// Id resolution stays authoritative: when the arg is an on-disk session id, the title fallback is never consulted.
+        /// That holds even though another session carries that exact title.
         #[serial_test::serial(GROK_HOME)]
         #[tokio::test]
         async fn id_hit_beats_title_fallback() {
@@ -2291,9 +2248,8 @@ mod tests {
                 other => panic!("expected Resume, got {other:?}"),
             }
         }
-        /// Provenance for the worktree failure hint: only the defer arm (a
-        /// local id/title miss under `--worktree`) flags the target; a
-        /// resolved local id — even a legacy non-UUID one — never does.
+        /// Provenance for the worktree failure hint: only the defer arm (a local id and title miss under `--worktree`) flags the target.
+        /// A resolved local id, even a legacy non-UUID one, never does.
         #[serial_test::serial(GROK_HOME)]
         #[tokio::test]
         async fn worktree_defer_flags_local_miss_and_local_hit_does_not() {

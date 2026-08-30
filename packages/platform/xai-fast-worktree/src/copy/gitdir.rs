@@ -31,6 +31,9 @@ pub(crate) struct GitDirCopyStats {
 const SKIP_TOP_LEVEL: &[&str] = &[
     // Linked worktree registrations — stale in a standalone copy
     "worktrees",
+    // The source's reflog is stale in a fresh copy and is usually the bulk of
+    // .git on a long-lived checkout. Git recreates logs/ on the first ref update.
+    "logs",
     // Transient HEAD-like state files
     "FETCH_HEAD",
     "ORIG_HEAD",
@@ -429,6 +432,24 @@ mod tests {
         assert!(dest_git.join("refs/heads/main").exists());
         assert!(!dest_git.join("refs/heads/main.lock").exists());
         assert!(stats.entries_skipped >= 1);
+    }
+
+    #[test]
+    fn test_copy_git_dir_skips_reflogs() {
+        let temp = TempDir::new().unwrap();
+        let source_git = temp.path().join("source/.git");
+        let dest_git = temp.path().join("dest/.git");
+
+        std::fs::create_dir_all(source_git.join("logs")).unwrap();
+        std::fs::create_dir_all(source_git.join("refs/heads")).unwrap();
+        std::fs::write(source_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(source_git.join("refs/heads/main"), "abc123\n").unwrap();
+        std::fs::write(source_git.join("logs/HEAD"), "reflog\n").unwrap();
+
+        copy_git_dir(&source_git, &dest_git).unwrap();
+
+        assert!(!dest_git.join("logs").exists());
+        assert!(dest_git.join("refs/heads/main").exists());
     }
 
     #[test]

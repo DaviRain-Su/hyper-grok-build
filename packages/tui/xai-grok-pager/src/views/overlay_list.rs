@@ -1,10 +1,7 @@
-//! Shared prompt-area list overlay: accent bar, bold title, and a
-//! scrollable single-line row list with a cursor.
+//! Shared prompt-area list overlay: accent bar, bold title, and a scrollable single-line row list with a cursor.
 //!
-//! One source of truth for the row geometry that `/rewind`'s picker phase
-//! and `/jump` previously each kept in sync by hand across their render,
-//! hit-test, and height functions. Row *content* stays with the caller
-//! (a closure); this owns chrome, cursor styling, and the scroll window.
+//! `/rewind`'s picker phase and `/jump` each used to keep this row geometry in sync by hand across their render, hit-test, and height functions.
+//! Row content stays with the caller (a closure); this module owns the accent bar, title, cursor styling, and the scroll window.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -16,9 +13,8 @@ use crate::theme::Theme;
 /// Rows shown before the list scrolls (matches the historical picker cap).
 const MAX_ROWS: usize = 15;
 
-/// List geometry: row count + cursor position. Construct per call; all
-/// methods derive the same scroll window from these two fields, so the
-/// render, hit-test, and height paths cannot drift.
+/// List geometry: row count and cursor position.
+/// Construct per call; every method derives the same scroll window from these two fields, so the render, hit-test, and height paths cannot drift.
 pub struct ListOverlay {
     pub len: usize,
     pub selected: usize,
@@ -34,8 +30,7 @@ pub struct RowCtx {
 }
 
 impl ListOverlay {
-    /// Overlay height: title + rows (≤ [`MAX_ROWS`]), capped at 60% of the
-    /// screen, plus one padding row.
+    /// Overlay height: title plus rows (at most [`MAX_ROWS`]), capped at 60% of the screen, plus one padding row.
     pub fn height(&self, screen_h: u16) -> u16 {
         let rows = self.len.min(MAX_ROWS) as u16;
         let h = 2 + rows;
@@ -43,7 +38,7 @@ impl ListOverlay {
         h.min(cap) + 1
     }
 
-    /// Rows that fit in `area` (title + padding excluded).
+    /// Rows that fit in `area` (title and padding excluded).
     fn visible_rows(area: Rect) -> usize {
         area.height.saturating_sub(3) as usize
     }
@@ -57,7 +52,7 @@ impl ListOverlay {
         }
     }
 
-    /// Row index under a screen position, or `None` off the rows.
+    /// Row index under a screen position, or `None` when the position misses the rows.
     pub fn row_at(&self, area: Rect, col: u16, row: u16) -> Option<usize> {
         if area.height == 0 || area.width < 10 {
             return None;
@@ -81,10 +76,9 @@ impl ListOverlay {
         (idx < self.len).then_some(idx)
     }
 
-    /// Render the overlay: bg fill, accent bar, title, then the visible
-    /// window of rows. `row_line(idx, ctx)` produces each row's content;
-    /// cursor/row backgrounds are painted here. Applies the standard
-    /// unfocus dim, so callers must not blend again.
+    /// Render the overlay: bg fill, accent bar, title, then the visible window of rows.
+    /// `row_line(idx, ctx)` produces each row's content; cursor and row backgrounds are painted here.
+    /// Applies the standard unfocus dim, so callers must not blend again.
     pub fn render(
         &self,
         buf: &mut Buffer,
@@ -155,8 +149,7 @@ impl ListOverlay {
             y += 1;
         }
 
-        // Unfocus dim: blend foregrounds toward the panel bg so the overlay
-        // recedes when the prompt area is unfocused (prompt_widget pattern).
+        // Unfocus dim: blend foregrounds toward the panel bg so the overlay recedes when the prompt area is unfocused (prompt_widget pattern)
         if !focused {
             crate::render::color::blend_area(buf, area, Some((bg, 0.66)), None);
         }
@@ -194,8 +187,7 @@ mod tests {
 
     #[test]
     fn row_at_respects_scroll_window() {
-        // 20 rows, 7 visible (height 10 - 3), cursor at the end: the window
-        // starts at 13 so the cursor stays visible.
+        // 20 rows, 7 visible (height 10 - 3), cursor at the end: the window starts at 13 so the cursor stays visible
         let list = ListOverlay {
             len: 20,
             selected: 19,

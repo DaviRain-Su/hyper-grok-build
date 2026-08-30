@@ -11,7 +11,7 @@ mod tests {
     fn passthrough_wraps_osc9_sequence() {
         let seq = "\x1b]9;task done\x07";
         let wrapped = tmux_passthrough(seq);
-        // ESC bytes doubled, wrapped in DCS tmux; ... ST
+        // Each ESC byte is doubled and the whole sequence is wrapped in DCS `tmux;` ... ST
         assert_eq!(wrapped, "\x1bPtmux;\x1b\x1b]9;task done\x07\x1b\\");
     }
 

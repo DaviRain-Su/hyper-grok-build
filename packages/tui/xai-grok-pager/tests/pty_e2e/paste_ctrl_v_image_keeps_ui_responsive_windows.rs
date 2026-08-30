@@ -2,21 +2,16 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Windows twin of `paste_ctrl_v_image_keeps_ui_responsive_macos`, exercised
-/// by the temporary PR-branch Windows smoke workflow: Ctrl+V (raw 0x16) with
-/// an IMAGE on the REAL clipboard must not block the UI thread. The clipboard
-/// read, image decode, and session persist all run off the event loop, so
-/// keys typed immediately after the chord echo while the `[Image #N]` chip
-/// attaches via a follow-up completion. Ordering is proven by the
-/// chip-absence check at echo time (a blocking inline probe attaches the chip
-/// before the burst is even processed).
+/// Windows twin of `paste_ctrl_v_image_keeps_ui_responsive_macos`, run by the temporary Windows CI workflow on PR branches.
+/// Ctrl+V (raw 0x16) with an IMAGE on the REAL clipboard must not block the UI thread.
+/// The clipboard read, image decode, and session persist all run off the event loop.
+/// So keys typed right after the chord echo promptly, and the `[Image #N]` chip attaches later via a follow-up completion.
+/// Ordering is proven by checking the chip is absent at echo time: a blocking inline probe would attach the chip before the burst is even processed.
 ///
-/// Skips (loudly) when the session has no usable clipboard — a CI runner
-/// without an interactive desktop can't exercise the real paste path.
+/// The test skips loudly when the session has no usable clipboard: a CI runner without an interactive desktop cannot exercise the real paste path.
 ///
 /// WARNING: this test OVERWRITES the machine-global clipboard with an image.
-/// The prior TEXT contents are restored best-effort on exit (drop guard); a
-/// prior IMAGE clipboard cannot be restored.
+/// The prior TEXT contents are restored best-effort on exit (drop guard); a prior IMAGE clipboard cannot be restored.
 #[cfg(target_os = "windows")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
@@ -24,8 +19,7 @@ use super::common::*;
 async fn paste_ctrl_v_image_keeps_ui_responsive_windows() {
     const ECHO: &str = "ZRESPONSIVEZ";
 
-    // Save BEFORE the roundtrip probe: the probe writes a nonce, and a guard
-    // taken after it would restore the nonce instead of the user's clipboard.
+    // Save BEFORE the roundtrip probe: the probe writes a nonce, and a guard taken after it would restore the nonce instead of the user's clipboard
     let _restore = HostClipboardTextGuard::save();
     if !clipboard_roundtrip_works() {
         eprintln!(
@@ -49,9 +43,8 @@ async fn paste_ctrl_v_image_keeps_ui_responsive_windows() {
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
 
-    // Ctrl+V then a typed burst in ONE injected buffer: the burst chases the
-    // chord with no settle, so it can only echo promptly if the paste's
-    // clipboard read/decode/persist is off the event loop.
+    // Ctrl+V then a typed burst in ONE injected buffer: the burst follows the chord with no settle delay
+    // The burst can only echo promptly if the paste's clipboard read, decode, and persist run off the event loop
     let start = Instant::now();
     let mut keys = vec![0x16];
     keys.extend_from_slice(ECHO.as_bytes());
@@ -64,8 +57,8 @@ async fn paste_ctrl_v_image_keeps_ui_responsive_windows() {
         .expect("typed burst echoes while the paste probe runs off-thread");
     let echo_elapsed = start.elapsed();
 
-    // Ordering guard: the chip must NOT already be on screen when the burst
-    // first echoes — an inline (blocking) probe attaches it before the burst.
+    // Ordering guard: the chip must NOT already be on screen when the burst first echoes
+    // An inline (blocking) probe would attach the chip before the burst
     assert!(
         !harness.contains_text("Image #"),
         "image chip attached before the typed burst echoed — the clipboard \

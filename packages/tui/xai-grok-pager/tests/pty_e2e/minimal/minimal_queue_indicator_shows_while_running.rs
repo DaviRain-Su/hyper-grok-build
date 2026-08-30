@@ -2,14 +2,11 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// Minimal status line: pressing Enter with a draft while a turn is
-/// running queues the prompt, and the status line reports the pending count
-/// ("N queued") together with the `/queue` inspection hint — minimal has no
-/// interactive queue pane, so without the hint the count is a dead end.
-/// Running `/queue` mid-turn commits the read-only snapshot listing the queued
-/// text. Standalone (no leader), so the queue is the client-local
-/// pending-prompts list. The queued prompt then promotes and runs once the
-/// first turn finishes.
+/// Pressing Enter with a draft while a turn is running queues the prompt, and the minimal status line reports "N queued" with a `/queue` hint.
+/// Minimal has no interactive queue pane, so without the hint the count is a dead end.
+/// Running `/queue` mid-turn commits a read-only snapshot listing the queued text.
+/// This runs standalone with no leader, so the queue is the client's own list of pending prompts.
+/// The queued prompt promotes and runs once the first turn finishes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_queue_indicator_shows_while_running() {
@@ -35,7 +32,7 @@ async fn minimal_queue_indicator_shows_while_running() {
         .wait_for_text("STEPONE", Duration::from_secs(30))
         .expect("turn 1 streaming in the live tail");
 
-    // Enter with a draft while the turn runs → queue it behind the running turn.
+    // Pressing Enter with a draft while the turn runs queues it behind the running turn
     harness
         .inject_keys(b"second queued prompt\r")
         .expect("queue a prompt mid-turn");
@@ -44,8 +41,7 @@ async fn minimal_queue_indicator_shows_while_running() {
         .wait_for_text("1 queued \u{b7} /queue", Duration::from_secs(10))
         .expect("info row reports the queued count with the /queue hint");
 
-    // `/queue` (slash commands run immediately, they don't queue) commits the
-    // read-only snapshot listing the queued prompt.
+    // `/queue` (slash commands run immediately, they don't queue) commits the read-only snapshot listing the queued prompt
     inject_keys_paced(&mut harness, b"/queue");
     harness.inject_keys(b"\r").expect("run /queue");
     harness

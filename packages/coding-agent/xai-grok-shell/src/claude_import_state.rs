@@ -124,11 +124,12 @@ fn compute_settings_hash(paths: &[PathBuf]) -> String {
 
 /// Compute hash for global Claude settings (`~/.claude/settings*.json`, `~/.claude.json`).
 ///
-/// Uses `dirs::home_dir()` to match the home directory resolution used by
-/// `load_claude_json_mcp_servers_as_configs()` in `util/config.rs`.
+/// `xai_dirs::home_dir()` resolves home the way the imported tool itself
+/// does (Node `os.homedir()`: `USERPROFILE` on Windows), so the hash covers
+/// the files that tool actually wrote even under a redirected profile.
 fn compute_global_hash() -> (String, Vec<PathBuf>) {
     let mut paths = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = xai_dirs::home_dir() {
         paths.push(home.join(".claude").join("settings.json"));
         paths.push(home.join(".claude").join("settings.local.json"));
         paths.push(home.join(".claude.json"));
@@ -139,13 +140,13 @@ fn compute_global_hash() -> (String, Vec<PathBuf>) {
 
 /// Compute hash for project-level Claude settings.
 ///
-/// Uses `dirs::home_dir()` to match the home directory resolution used by
-/// the scanner in `claude_import.rs`.
+/// The home used to exclude global paths must match the one the scanner in
+/// `claude_import.rs` uses, or a path could hash as both global and project.
 fn compute_project_hash(cwd: &Path) -> (String, Vec<PathBuf>) {
     // Use find_claude_settings_paths but filter to only project-level paths
     // (exclude global ~/.claude/ paths).
     let all_paths = find_claude_settings_paths(cwd);
-    let home = dirs::home_dir();
+    let home = xai_dirs::home_dir();
 
     let project_paths: Vec<PathBuf> = all_paths
         .into_iter()

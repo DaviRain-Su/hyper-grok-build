@@ -8,7 +8,6 @@ use xai_grok_telemetry::region;
 use xai_grok_telemetry::region::Parent;
 
 use agent_client_protocol as acp;
-use futures::StreamExt;
 use regex::Regex;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
@@ -33,6 +32,9 @@ use rmcp::{
     },
 };
 
+pub use crate::auth_status::McpOauthDiscovery;
+use crate::auth_status::{HttpAuthDecision, decide_http_auth_from_disk};
+use crate::oauth::OAUTH_DISCOVERY_TIMEOUT;
 use crate::oauth_config::McpOAuthConfig;
 
 use xai_grok_tools::types::{
@@ -448,6 +450,29 @@ struct AcpMcpRegistry {
 }
 
 /// Consolidated MCP state behind a single lock. Generation counter detects stale inits.
+/// Retry lifecycle of a server whose spawn failed as unreachable
+/// ([`McpError::Unreachable`]). `Cooling` waits out the backoff; `InFlight`
+/// marks a running respawn attempt and carries the token that attempt must
+/// present to settle — an in-flight server is never handed to another
+/// trigger, and a token invalidated by config teardown makes the stale
+/// attempt's results unusable.
+///
+/// `started_at` bounds an attempt's exclusivity: an attempt whose future was
+/// cancelled (turn cancel, session shutdown mid-await) never settles, so
+/// after [`McpState::UNREACHABLE_ATTEMPT_LEASE`] the server becomes takeable
+/// again with a fresh token. The zombie attempt's old token then no-ops on
+/// settle and its client (if any) is discarded on the failed `finish`.
+#[derive(Debug, Clone, Copy)]
+enum UnreachableRetry {
+    Cooling {
+        retry_at: std::time::Instant,
+    },
+    InFlight {
+        token: u64,
+        started_at: std::time::Instant,
+    },
+}
+
 pub struct McpState {
     pub configs: Vec<acp::McpServer>,
     pub meta_config_map: McpMetaConfigMap,
@@ -483,6 +508,15 @@ pub struct McpState {
     /// `tools/list` and registered zero tools — does not misleadingly show
     /// as `Ready`. Cleared when the server begins a fresh init attempt.
     pub init_failed: std::collections::HashMap<McpServerName, String>,
+    /// Servers whose last spawn failed because the endpoint was unreachable
+    /// (connectivity, not auth — see [`McpError::Unreachable`]). A subset
+    /// key-wise of [`Self::init_failed`]; cleared together with it. Drives
+    /// `retry_unreachable_servers` so a transient network blip during one
+    /// handshake does not strip the session of the server's tools for its
+    /// remaining lifetime.
+    unreachable_retry: std::collections::HashMap<McpServerName, UnreachableRetry>,
+    /// Monotonic source for [`UnreachableRetry::InFlight`] attempt tokens.
+    unreachable_attempt_counter: u64,
     /// Per-server set of unqualified tool names that the user has disabled.
     /// Persisted to `~/.grok/config.toml` under `[mcp_servers.<name>].disabled_tools`.
     pub disabled_tools: HashMap<McpServerName, std::collections::HashSet<ToolName>>,
@@ -536,6 +570,8 @@ impl McpState {
             mcp_tool_icons: HashMap::new(),
             auth_required: std::collections::HashSet::new(),
             init_failed: HashMap::new(),
+            unreachable_retry: HashMap::new(),
+            unreachable_attempt_counter: 0,
             disabled_tools: HashMap::new(),
             disabled_tool_registrations: HashMap::new(),
             event_writer: xai_grok_session_events::EventWriter::noop(),
@@ -701,6 +737,7 @@ impl McpState {
         self.init_progress.cancel();
         self.auth_required.clear();
         self.init_failed.clear();
+        self.unreachable_retry.clear();
         self.generation = self.generation.wrapping_add(1);
         true
     }
@@ -712,6 +749,7 @@ impl McpState {
         self.owned_clients.remove(name);
         self.auth_required.remove(name);
         self.init_failed.remove(name);
+        self.unreachable_retry.remove(name);
         self.init_progress.mark_handshake_complete(name);
         let prefix = format!("{}{}", name, MCP_TOOL_NAME_DELIMITER);
         self.mcp_tool_meta.retain(|k, _| !k.starts_with(&prefix));
@@ -887,8 +925,11 @@ impl McpState {
         let names: Vec<McpServerName> = names.into_iter().collect();
         // A fresh init attempt clears any prior failure for these servers so
         // a server that recovers on retry stops showing as `Unavailable`.
+        // Goes through clear_init_failed so the unreachable-respawn schedule
+        // is dropped with it (a fresh attempt supersedes the schedule; a
+        // failure re-records it).
         for name in &names {
-            self.init_failed.remove(name);
+            self.clear_init_failed(name);
         }
         self.init_progress.mark_handshaking(names);
     }
@@ -927,6 +968,149 @@ impl McpState {
     /// with a stale non-auth `detail`.
     pub fn clear_init_failed(&mut self, name: &str) {
         self.init_failed.remove(name);
+        self.unreachable_retry.remove(name);
+    }
+
+    /// Minimum wait between spawn attempts for an unreachable server, so the
+    /// retry triggers (tool batches, `x.ai/mcp/list` refreshes) cannot dogpile
+    /// the OAuth-discovery + probe timeout budget while a server is down.
+    pub const UNREACHABLE_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Upper bound on an attempt's exclusivity (see [`UnreachableRetry`]):
+    /// far above any bounded spawn + handshake, so it only fires for attempts
+    /// whose future was cancelled and can never settle.
+    pub const UNREACHABLE_ATTEMPT_LEASE: std::time::Duration = std::time::Duration::from_secs(600);
+
+    /// Record a spawn failure caused by an unreachable endpoint
+    /// ([`McpError::Unreachable`]): surfaces as `Unavailable` via
+    /// [`Self::init_failed`] like any other init failure, and additionally
+    /// schedules the server for a respawn attempt after
+    /// [`Self::UNREACHABLE_RETRY_COOLDOWN`]. Never demotes an in-flight
+    /// attempt: its settle call owns the next transition.
+    pub fn record_unreachable_failure(&mut self, name: &str, detail: String) {
+        self.record_unreachable_failure_at(
+            name,
+            detail,
+            std::time::Instant::now() + Self::UNREACHABLE_RETRY_COOLDOWN,
+        );
+    }
+
+    /// Explicit-instant twin of [`Self::record_unreachable_failure`] so tests
+    /// can place a candidate inside or beyond the cooldown window.
+    fn record_unreachable_failure_at(
+        &mut self,
+        name: &str,
+        detail: String,
+        retry_at: std::time::Instant,
+    ) {
+        self.init_failed.insert(name.to_string(), detail);
+        if let Some(UnreachableRetry::InFlight { .. }) = self.unreachable_retry.get(name) {
+            return;
+        }
+        self.unreachable_retry
+            .insert(name.to_string(), UnreachableRetry::Cooling { retry_at });
+    }
+
+    /// Servers due for an unreachable-respawn attempt: cooling finished and
+    /// the server is still configured. Each returned server transitions to
+    /// `InFlight` with a fresh attempt token — an in-flight server is not a
+    /// candidate, so concurrent triggers cannot double-spawn even while an
+    /// attempt outlives the cooldown. The token is the attempt's proof of
+    /// ownership: every settle path requires it, and config teardown
+    /// (`forget_server` / full replace) invalidates it, so a stale attempt
+    /// can neither install over a newer client nor re-pollute cleaned
+    /// records. The next cooldown starts when the attempt settles as failed.
+    pub fn take_unreachable_retry_candidates(&mut self) -> Vec<(McpServerName, u64)> {
+        self.take_unreachable_retry_candidates_at(std::time::Instant::now())
+    }
+
+    /// Explicit-instant twin of [`Self::take_unreachable_retry_candidates`]
+    /// so tests can exercise the attempt lease without waiting it out.
+    fn take_unreachable_retry_candidates_at(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Vec<(McpServerName, u64)> {
+        let configured: std::collections::HashSet<&str> =
+            self.configs.iter().map(mcp_server_name).collect();
+        let due: Vec<McpServerName> = self
+            .unreachable_retry
+            .iter()
+            .filter(|(name, state)| {
+                configured.contains(name.as_str())
+                    && match state {
+                        UnreachableRetry::Cooling { retry_at } => *retry_at <= now,
+                        // A cancelled attempt never settles; reclaim it once
+                        // its lease expires (the old token no-ops from here).
+                        UnreachableRetry::InFlight { started_at, .. } => {
+                            now.saturating_duration_since(*started_at)
+                                > Self::UNREACHABLE_ATTEMPT_LEASE
+                        }
+                    }
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        due.into_iter()
+            .map(|name| {
+                self.unreachable_attempt_counter += 1;
+                let token = self.unreachable_attempt_counter;
+                self.unreachable_retry.insert(
+                    name.clone(),
+                    UnreachableRetry::InFlight {
+                        token,
+                        started_at: now,
+                    },
+                );
+                (name, token)
+            })
+            .collect()
+    }
+
+    /// True when `name` currently holds an in-flight attempt with `token`.
+    fn owns_unreachable_attempt(&self, name: &str, token: u64) -> bool {
+        matches!(
+            self.unreachable_retry.get(name),
+            Some(UnreachableRetry::InFlight { token: t, .. }) if *t == token
+        )
+    }
+
+    /// Settle an attempt as recovered. Returns whether the attempt still owns
+    /// the server (token match) — a `false` means a config update tore the
+    /// server down mid-attempt and the caller must discard its client.
+    pub fn finish_unreachable_attempt(&mut self, name: &str, token: u64) -> bool {
+        if !self.owns_unreachable_attempt(name, token) {
+            return false;
+        }
+        self.unreachable_retry.remove(name);
+        self.init_failed.remove(name);
+        true
+    }
+
+    /// Settle an attempt as still-unreachable: restarts the cooldown (from
+    /// now, i.e. when the attempt finished) and refreshes the failure detail.
+    /// No-op for a stale token.
+    pub fn settle_unreachable_attempt_failed(&mut self, name: &str, token: u64, detail: String) {
+        if !self.owns_unreachable_attempt(name, token) {
+            return;
+        }
+        self.init_failed.insert(name.to_string(), detail);
+        self.unreachable_retry.insert(
+            name.to_string(),
+            UnreachableRetry::Cooling {
+                retry_at: std::time::Instant::now() + Self::UNREACHABLE_RETRY_COOLDOWN,
+            },
+        );
+    }
+
+    /// Settle an attempt without keeping it retryable (terminal non-connectivity
+    /// failure, or handoff to the auth-required flow). Returns whether the
+    /// attempt still owned the server so the caller knows its follow-up
+    /// records are legitimate. The `init_failed` entry is left to the caller.
+    pub fn settle_unreachable_attempt_unretryable(&mut self, name: &str, token: u64) -> bool {
+        if !self.owns_unreachable_attempt(name, token) {
+            return false;
+        }
+        self.unreachable_retry.remove(name);
+        true
     }
 
     /// Clear the entire handshaking set in one shot. Used by the
@@ -1087,14 +1271,12 @@ const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 30;
 /// Default timeout for individual tool calls.
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 6000;
 
+const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// How long a stdio server gets to exit after its transport closes before
 /// its process group is killed.
 const STDIO_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Timeout for OAuth metadata discovery when building an HTTP transport.
-/// Bounds transport setup for servers without OAuth support.
-const OAUTH_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-/// Budget for the anonymous-access tie-break request after an inconclusive OAuth probe.
 const ANONYMOUS_ACCESS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Per-MCP-server config overrides from `_meta.mcpConfig` in session/new or session/load.
@@ -1188,6 +1370,13 @@ pub enum McpError {
     )]
     AuthRequired { server: String },
 
+    /// Pre-spawn gate: neither OAuth discovery nor the anonymous-access probe
+    /// could reach the server. A connectivity failure, not an auth verdict —
+    /// recorded as a retryable init failure so a transient network blip does
+    /// not permanently strip the session of this server's tools.
+    #[error("MCP server '{server}': unreachable during startup (connection failed; will retry)")]
+    Unreachable { server: String },
+
     #[error("MCP service error: {0}")]
     ServiceError(#[from] ServiceError),
 }
@@ -1211,6 +1400,8 @@ impl McpError {
             Self::Timeout { .. } => McpErrorCategory::Timeout,
             Self::HandshakeFailed { .. } => McpErrorCategory::HandshakeFailed,
             Self::AuthRequired { .. } => McpErrorCategory::AuthRequired,
+            // Connectivity failure surfaced at spawn time.
+            Self::Unreachable { .. } => McpErrorCategory::SpawnFailed,
             Self::ClientError(_) | Self::ServiceError(_) => McpErrorCategory::ClientError,
         }
     }
@@ -1220,7 +1411,8 @@ impl McpError {
             Self::SpawnFailed { server, .. }
             | Self::Timeout { server, .. }
             | Self::HandshakeFailed { server, .. }
-            | Self::AuthRequired { server } => Some(server),
+            | Self::AuthRequired { server }
+            | Self::Unreachable { server } => Some(server),
             Self::ClientError(_) | Self::ServiceError(_) => None,
         }
     }
@@ -1234,9 +1426,92 @@ impl McpError {
             Self::HandshakeFailed { source, .. } => is_auth_rejection_message(&source.to_string()),
             Self::ServiceError(e) => is_auth_rejection_message(&e.to_string()),
             Self::ClientError(s) => is_auth_rejection_message(s),
-            Self::Timeout { .. } | Self::SpawnFailed { .. } => false,
+            Self::Timeout { .. } | Self::SpawnFailed { .. } | Self::Unreachable { .. } => false,
         }
     }
+
+    /// True if the server could not be reached at all during startup — a
+    /// retryable connectivity failure (see [`Self::Unreachable`]).
+    pub fn is_unreachable(&self) -> bool {
+        matches!(self, Self::Unreachable { .. })
+    }
+
+    /// True for failures that say nothing about the server being broken —
+    /// only about the path to it — and are therefore worth an automatic
+    /// respawn: the typed connectivity verdicts ([`Self::Unreachable`],
+    /// [`Self::Timeout`]) plus handshake/client errors whose message is a
+    /// transport-level failure (connection refused/reset mid-handshake).
+    /// Protocol rejections and malformed responses stay non-retryable.
+    pub fn is_transient_connectivity(&self) -> bool {
+        match self {
+            Self::Unreachable { .. } | Self::Timeout { .. } => true,
+            Self::HandshakeFailed { source, .. } => is_transport_error_message(&source.to_string()),
+            Self::ClientError(s) => is_transport_error_message(s),
+            Self::ServiceError(e) => is_transport_error_message(&e.to_string()),
+            Self::SpawnFailed { .. } | Self::AuthRequired { .. } => false,
+        }
+    }
+
+    /// The never-connected subset of [`Self::is_transient_connectivity`].
+    pub fn is_connect_failure(&self) -> bool {
+        match self {
+            Self::Unreachable { .. } => true,
+            Self::HandshakeFailed { source, .. } => {
+                init_error_is_connect_phase(source)
+                    || is_connect_failure_message(&source.to_string())
+            }
+            Self::ClientError(s) => is_connect_failure_message(s),
+            Self::ServiceError(e) => is_connect_failure_message(&e.to_string()),
+            Self::Timeout { .. } | Self::SpawnFailed { .. } | Self::AuthRequired { .. } => false,
+        }
+    }
+}
+
+fn init_error_is_connect_phase(err: &ClientInitializeError) -> bool {
+    use rmcp::transport::streamable_http_client::StreamableHttpError;
+    let ClientInitializeError::TransportError { error, .. } = err else {
+        return false;
+    };
+    matches!(
+        error
+            .error
+            .downcast_ref::<StreamableHttpError<reqwest::Error>>(),
+        Some(StreamableHttpError::Client(e)) if e.is_connect()
+    )
+}
+
+/// Connect-level subset of [`is_transport_error_message`].
+fn is_connect_failure_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "connection refused",
+        "dns error",
+        "network unreachable",
+        "host unreachable",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+/// Message-anchored detection of transport-level failures, for error types
+/// that don't carry a typed connectivity verdict (handshake and client
+/// errors). Same stable-Display-text approach as `is_auth_rejection_message`.
+fn is_transport_error_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "broken pipe",
+        "error sending request",
+        "network unreachable",
+        "host unreachable",
+        "timed out",
+        "transport closed",
+        "dns error",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 /// True when a failed refresh-token grant was a **network-level** failure
@@ -1846,62 +2121,68 @@ impl OauthInteractivity {
     }
 }
 
-/// Outcome of probing whether an HTTP/SSE MCP server needs OAuth and whether
-/// we have credentials usable without an interactive browser flow.
-enum HttpOauthPrep {
-    /// Server does not advertise OAuth (or discovery failed conservatively).
-    NoOauthSupport,
-    /// Ready to connect with an auth manager (stored token works, or interactive deferred auth).
-    ManagerReady(Arc<tokio::sync::Mutex<rmcp::transport::auth::AuthorizationManager>>),
-    /// OAuth is required but cannot complete in non-interactive mode — do not start unauthenticated.
-    NeedsInteractiveLogin,
-}
-
-/// Result of the proactive OAuth probe. `Inconclusive` (probe error or timeout in non-interactive
-/// mode) must be settled by the anonymous-access tie-break before a connection decision exists,
-/// which [`resolve_http_oauth_prep`] enforces by type.
 enum OauthProbeOutcome {
-    Resolved(HttpOauthPrep),
+    Resolved(HttpAuthDecision),
     Inconclusive,
 }
 
 impl OauthProbeOutcome {
-    /// Inconclusive probe: interactive proceeds as plain HTTP; non-interactive defers
-    /// to the anonymous-access tie-break instead of failing closed outright.
     fn on_probe_failure(mode: OauthInteractivity) -> Self {
         match mode {
-            OauthInteractivity::Interactive => Self::Resolved(HttpOauthPrep::NoOauthSupport),
+            OauthInteractivity::Interactive => Self::Resolved(HttpAuthDecision::NoOauthSupport),
             OauthInteractivity::NonInteractive => Self::Inconclusive,
         }
     }
 }
 
-/// Proactive OAuth discovery per RFC 8414 + 9728.
-///
-/// Creates an `AuthorizationManager` with our `CredentialStoreAdapter`,
-/// discovers server metadata, and loads stored tokens if available.
-///
-/// With no stored tokens but server OAuth support, behavior splits on `mode`:
-/// `Interactive` spawns the browser flow in the background (non-blocking; the
-/// first tool call picks up tokens via `force_reauth` → `initialize_from_store`
-/// once the user consents), while `NonInteractive` fails closed
-/// (`NeedsInteractiveLogin`) rather than start an unauthenticated worker that
-/// fatals with `Auth(AuthorizationRequired)` on stderr while the prompt still
-/// succeeds.
-///
-/// Known gap: rmcp `get_access_token` returns stored tokens as-is when expiry
-/// metadata is absent, so an expiry-less revoked token can still reach
-/// `ManagerReady`.
+async fn stored_token_disk_gate(
+    server_name: &str,
+    server_url: &str,
+    mode: OauthInteractivity,
+) -> Option<OauthProbeOutcome> {
+    let HttpAuthDecision::ManagerReady { manager, observed } =
+        decide_http_auth_from_disk(server_name, server_url).await
+    else {
+        return None;
+    };
+    match mode {
+        OauthInteractivity::Interactive => Some(OauthProbeOutcome::Resolved(
+            HttpAuthDecision::ManagerReady { manager, observed },
+        )),
+        OauthInteractivity::NonInteractive => {
+            let usable = manager.lock().await.get_access_token().await;
+            match usable {
+                Ok(_) => Some(OauthProbeOutcome::Resolved(
+                    HttpAuthDecision::ManagerReady { manager, observed },
+                )),
+                Err(e) => {
+                    tracing::info!(
+                        server = server_name,
+                        error = %e,
+                        "Stored token not usable without hydration; continuing to the network probe"
+                    );
+                    None
+                }
+            }
+        }
+    }
+}
+
 async fn discover_and_prepare_auth(
     server_name: &str,
     server_url: &str,
     mode: OauthInteractivity,
 ) -> OauthProbeOutcome {
+    if let Some(outcome) = stored_token_disk_gate(server_name, server_url, mode).await {
+        return outcome;
+    }
+
     let Ok(parsed_url) = url::Url::parse(server_url) else {
-        return OauthProbeOutcome::Resolved(HttpOauthPrep::NoOauthSupport);
+        return OauthProbeOutcome::Resolved(HttpAuthDecision::NoOauthSupport);
     };
     let adapter =
         crate::credentials::McpCredentialStoreAdapter::new(server_name.to_string(), parsed_url);
+    let observed = adapter.observed();
 
     let mut manager = match rmcp::transport::auth::AuthorizationManager::new(server_url).await {
         Ok(m) => m,
@@ -1912,10 +2193,8 @@ async fn discover_and_prepare_auth(
     };
     manager.set_credential_store(adapter);
 
-    if let Ok(true) = manager.initialize_from_store().await {
-        // Stored creds may be expired/unrefreshable; in non-interactive mode that
-        // still yields rmcp worker fatal AuthorizationRequired on stderr. This probe
-        // shares the caller's 5s discovery timeout budget.
+    let ready = crate::oauth::ensure_oauth_ready(server_name, &mut manager).await;
+    if ready.hydrated {
         if mode == OauthInteractivity::NonInteractive
             && let Err(e) = manager.get_access_token().await
         {
@@ -1924,35 +2203,36 @@ async fn discover_and_prepare_auth(
                 error = %e,
                 "Skipping OAuth MCP in non-interactive mode (stored credentials unusable); re-authenticate in TUI"
             );
-            return OauthProbeOutcome::Resolved(HttpOauthPrep::NeedsInteractiveLogin);
+            return OauthProbeOutcome::Resolved(HttpAuthDecision::NeedsInteractiveLogin);
         }
         tracing::info!(server = server_name, "Loaded stored OAuth credentials");
-        return OauthProbeOutcome::Resolved(HttpOauthPrep::ManagerReady(Arc::new(
-            tokio::sync::Mutex::new(manager),
-        )));
+        return OauthProbeOutcome::Resolved(HttpAuthDecision::ManagerReady {
+            manager: Arc::new(tokio::sync::Mutex::new(manager)),
+            observed,
+        });
     }
 
-    match manager.discover_metadata().await {
-        Ok(metadata) => {
-            manager.set_metadata(metadata);
+    match ready.discovery {
+        Ok(()) => {
             if mode == OauthInteractivity::NonInteractive {
                 tracing::warn!(
                     server = server_name,
                     "Skipping OAuth MCP in non-interactive mode (no stored tokens); authenticate in TUI or set an Authorization header"
                 );
-                return OauthProbeOutcome::Resolved(HttpOauthPrep::NeedsInteractiveLogin);
+                return OauthProbeOutcome::Resolved(HttpAuthDecision::NeedsInteractiveLogin);
             }
             tracing::info!(
                 server = server_name,
                 "Server supports OAuth but has no stored tokens"
             );
-            OauthProbeOutcome::Resolved(HttpOauthPrep::ManagerReady(Arc::new(
-                tokio::sync::Mutex::new(manager),
-            )))
+            OauthProbeOutcome::Resolved(HttpAuthDecision::ManagerReady {
+                manager: Arc::new(tokio::sync::Mutex::new(manager)),
+                observed,
+            })
         }
         Err(rmcp::transport::auth::AuthError::NoAuthorizationSupport) => {
             tracing::debug!(server = server_name, "Server does not support OAuth");
-            OauthProbeOutcome::Resolved(HttpOauthPrep::NoOauthSupport)
+            OauthProbeOutcome::Resolved(HttpAuthDecision::NoOauthSupport)
         }
         Err(e) => {
             tracing::warn!(server = server_name, %e, "OAuth discovery failed");
@@ -2038,16 +2318,13 @@ async fn probe_anonymous_access(
     }
 }
 
-/// OAuth discovery plus the anonymous-access tie-break for inconclusive results, so
-/// tokenless servers connect headless while auth-challenging (or unreachable) servers
-/// keep failing closed.
-async fn resolve_http_oauth_prep(
+async fn decide_http_auth_over_network(
     server_name: &str,
     url: &str,
     headers: &[(String, String)],
     ctx: &McpSpawnCtx<'_>,
     discovery_timeout: std::time::Duration,
-) -> HttpOauthPrep {
+) -> HttpAuthDecision {
     let outcome = {
         let _auth_discovery_timer =
             xai_grok_telemetry::instrumentation::timer("mcp_http_auth_discovery");
@@ -2076,29 +2353,30 @@ async fn resolve_http_oauth_prep(
         }
     };
     match outcome {
-        OauthProbeOutcome::Resolved(prep) => prep,
+        OauthProbeOutcome::Resolved(decision) => decision,
         OauthProbeOutcome::Inconclusive => {
-            let (verdict, prep) = match probe_anonymous_access(server_name, url, headers).await {
+            let (verdict, decision) = match probe_anonymous_access(server_name, url, headers).await
+            {
                 AnonymousAccess::Accepted => {
                     tracing::info!(
                         server = server_name,
                         "OAuth discovery was inconclusive but the server accepts unauthenticated requests; connecting without auth"
                     );
-                    ("accepted", HttpOauthPrep::NoOauthSupport)
+                    ("accepted", HttpAuthDecision::NoOauthSupport)
                 }
                 AnonymousAccess::AuthChallenged => {
                     tracing::warn!(
                         server = server_name,
                         "OAuth discovery was inconclusive and the server challenges unauthenticated requests; authenticate in TUI or set an Authorization header"
                     );
-                    ("auth_challenged", HttpOauthPrep::NeedsInteractiveLogin)
+                    ("auth_challenged", HttpAuthDecision::NeedsInteractiveLogin)
                 }
                 AnonymousAccess::Unreachable => {
                     tracing::warn!(
                         server = server_name,
-                        "OAuth discovery was inconclusive and the anonymous-access probe could not reach the server; failing closed as auth required"
+                        "OAuth discovery was inconclusive and the anonymous-access probe could not reach the server; failing closed as unreachable (retryable)"
                     );
-                    ("unreachable", HttpOauthPrep::NeedsInteractiveLogin)
+                    ("unreachable", HttpAuthDecision::Unreachable)
                 }
             };
             ctx.event_writer
@@ -2106,7 +2384,7 @@ async fn resolve_http_oauth_prep(
                     server_name: server_name.to_string(),
                     verdict: verdict.to_string(),
                 });
-            prep
+            decision
         }
     }
 }
@@ -2116,6 +2394,14 @@ async fn resolve_http_oauth_prep(
 pub struct HttpConfig {
     pub url: String,
     pub headers: Vec<(String, String)>,
+}
+
+impl HttpConfig {
+    fn has_authorization_header(&self) -> bool {
+        self.headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+    }
 }
 
 /// Newline-delimited JSON-RPC stdio transport whose read side survives a
@@ -2879,6 +3165,7 @@ pub struct McpClient {
     /// inside the transport holds a clone of this Arc so token updates are
     /// visible to both the transport and the re-auth path.
     auth_manager: Option<Arc<tokio::sync::Mutex<rmcp::transport::auth::AuthorizationManager>>>,
+    observed_token: Option<crate::credentials::ObservedAccessToken>,
     /// Stored for OAuth clients so we can rebuild the transport after re-auth.
     http_config: Option<HttpConfig>,
     /// BYO OAuth config for the full browser flow fallback (when refresh fails).
@@ -3035,6 +3322,7 @@ impl McpClient {
         overrides: Option<&McpClientTimeoutOverrides>,
         meta_config: Option<&McpServerMetaConfig>,
         auth_manager: Option<Arc<tokio::sync::Mutex<rmcp::transport::auth::AuthorizationManager>>>,
+        observed_token: Option<crate::credentials::ObservedAccessToken>,
         http_config: Option<HttpConfig>,
         byo_oauth_config: Option<McpOAuthConfig>,
     ) -> Self {
@@ -3052,6 +3340,7 @@ impl McpClient {
             tool_timeouts,
             expose_image_base64,
             auth_manager,
+            observed_token,
             http_config,
             byo_oauth_config,
             warn_budget: crate::mcp_http_client::WarnBudget::default(),
@@ -3062,10 +3351,11 @@ impl McpClient {
         }
     }
 
-    pub fn new_http_auth(
+    fn new_http_auth(
         server_name: String,
         config: HttpConfig,
         auth_manager: Arc<tokio::sync::Mutex<rmcp::transport::auth::AuthorizationManager>>,
+        observed_token: crate::credentials::ObservedAccessToken,
         byo_oauth_config: Option<McpOAuthConfig>,
         overrides: Option<&McpClientTimeoutOverrides>,
         meta_config: Option<&McpServerMetaConfig>,
@@ -3079,6 +3369,7 @@ impl McpClient {
             overrides,
             meta_config,
             Some(auth_manager),
+            Some(observed_token),
             Some(config),
             byo_oauth_config,
         )
@@ -3098,42 +3389,28 @@ impl McpClient {
             return false;
         };
 
-        // Token-changed gate: rmcp's `initialize_from_store` returns Ok(true)
-        // for any disk-resident creds regardless of expiry, so without
-        // comparing against the in-memory token we'd claim "fresh tokens from
-        // disk" on the same stale token that triggered this retry. The
-        // downstream handshake would catch it, but the log line would lie
-        // during incident debugging — and the divergence from `force_reauth`'s
-        // gate is the exact invariant drift we just fixed there.
         {
-            use oauth2::TokenResponse as _;
             let mut mgr = auth_mgr.lock().await;
-            let token_before = mgr
-                .get_credentials()
+            let token_before = self.observed_token.as_ref().and_then(|o| o.snapshot());
+            let ready = crate::oauth::ensure_oauth_ready(&self.server_name, &mut mgr)
                 .await
-                .ok()
-                .and_then(|(_, tok)| tok)
-                .map(|t| t.access_token().secret().to_string());
-            if let Ok(true) = mgr.initialize_from_store().await {
-                let token_after = mgr
-                    .get_credentials()
-                    .await
-                    .ok()
-                    .and_then(|(_, tok)| tok)
-                    .map(|t| t.access_token().secret().to_string());
-                if token_after.is_some() && token_after != token_before {
-                    tracing::info!(
-                        server = self.server_name.as_str(),
-                        "Loaded fresh tokens from disk"
-                    );
-                    drop(mgr);
-                    self.replace_state(ClientState::Pending(PendingTransport::HttpAuth {
-                        config: config.clone(),
-                        auth_manager: auth_mgr.clone(),
-                    }))
-                    .await;
-                    return true;
-                }
+                .hydrated;
+            let token_after = self.observed_token.as_ref().and_then(|o| o.snapshot());
+            if token_after.is_some() && token_after != token_before {
+                tracing::info!(
+                    server = self.server_name.as_str(),
+                    "Loaded fresh tokens from disk"
+                );
+                drop(mgr);
+                self.replace_state(ClientState::Pending(PendingTransport::HttpAuth {
+                    config: config.clone(),
+                    auth_manager: auth_mgr.clone(),
+                }))
+                .await;
+                return true;
+            }
+            if !ready {
+                return false;
             }
         }
 
@@ -3171,62 +3448,19 @@ impl McpClient {
             return false;
         };
 
-        // Check if another process/session wrote *fresh* tokens to disk. We
-        // must compare against the token we already had in memory — rmcp's
-        // `initialize_from_store` returns Ok(true) for any disk-resident
-        // credentials regardless of expiry, so without the token-changed
-        // check we'd short-circuit on the same stale token that triggered
-        // this re-auth in the first place (real bug: pressing the auth
-        // shortcut on a server with an expired bearer + no refresh_token
-        // would no-op and then 401 on the next handshake).
-        //
-        // Hold a single lock guard across `token_before` → `initialize_from_store`
-        // → `token_after` so the comparison's invariant ("snapshot, reload,
-        // re-read") can't be torn by an interleaved mutation.
-        {
-            use oauth2::TokenResponse as _;
+        let ready = {
             let mut mgr = auth_mgr.lock().await;
-            let token_before = mgr
-                .get_credentials()
+            let token_before = self.observed_token.as_ref().and_then(|o| o.snapshot());
+            let ready = crate::oauth::ensure_oauth_ready(&self.server_name, &mut mgr)
                 .await
-                .ok()
-                .and_then(|(_, tok)| tok)
-                .map(|t| t.access_token().secret().to_string());
-            if let Ok(true) = mgr.initialize_from_store().await {
-                let token_after = mgr
-                    .get_credentials()
-                    .await
-                    .ok()
-                    .and_then(|(_, tok)| tok)
-                    .map(|t| t.access_token().secret().to_string());
-                if token_after.is_some() && token_after != token_before {
-                    tracing::info!(
-                        server = self.server_name.as_str(),
-                        "Loaded fresh tokens from disk (background auth or other process)"
-                    );
-                    drop(mgr);
-                    self.replace_state(ClientState::Pending(PendingTransport::HttpAuth {
-                        config: config.clone(),
-                        auth_manager: auth_mgr.clone(),
-                    }))
-                    .await;
-                    return true;
-                }
-            }
-        }
-
-        // Try token refresh.
-        let refresh_result = {
-            let mgr = auth_mgr.lock().await;
-            mgr.refresh_token().await
-        };
-
-        match refresh_result {
-            Ok(_) => {
+                .hydrated;
+            let token_after = self.observed_token.as_ref().and_then(|o| o.snapshot());
+            if token_after.is_some() && token_after != token_before {
                 tracing::info!(
                     server = self.server_name.as_str(),
-                    "Token refreshed successfully (no browser)"
+                    "Loaded fresh tokens from disk (background auth or other process)"
                 );
+                drop(mgr);
                 self.replace_state(ClientState::Pending(PendingTransport::HttpAuth {
                     config: config.clone(),
                     auth_manager: auth_mgr.clone(),
@@ -3234,25 +3468,50 @@ impl McpClient {
                 .await;
                 return true;
             }
-            // Transient (network never reached the IdP): fail the attempt
-            // instead of discarding a presumed-good credential — the retry
-            // paths re-run the refresh once the network is back. An explicit
-            // user trigger (`force`) still opens the browser.
-            Err(ref e) if !force && mcp_refresh_failure_is_transient(e) => {
-                tracing::warn!(
-                    server = self.server_name.as_str(),
-                    error = %e,
-                    "Token refresh failed transiently (network); skipping browser escalation"
-                );
-                return false;
+            ready
+        };
+
+        if ready {
+            let refresh_result = {
+                let mgr = auth_mgr.lock().await;
+                mgr.refresh_token().await
+            };
+
+            match refresh_result {
+                Ok(_) => {
+                    tracing::info!(
+                        server = self.server_name.as_str(),
+                        "Token refreshed successfully (no browser)"
+                    );
+                    self.replace_state(ClientState::Pending(PendingTransport::HttpAuth {
+                        config: config.clone(),
+                        auth_manager: auth_mgr.clone(),
+                    }))
+                    .await;
+                    return true;
+                }
+                Err(ref e) if !force && mcp_refresh_failure_is_transient(e) => {
+                    tracing::warn!(
+                        server = self.server_name.as_str(),
+                        error = %e,
+                        "Token refresh failed transiently (network); skipping browser escalation"
+                    );
+                    return false;
+                }
+                Err(e) => {
+                    tracing::info!(
+                        server = self.server_name.as_str(),
+                        error = %e,
+                        "Token refresh failed terminally; falling back to browser auth"
+                    );
+                }
             }
-            Err(e) => {
-                tracing::info!(
-                    server = self.server_name.as_str(),
-                    error = %e,
-                    "Token refresh failed terminally; falling back to browser auth"
-                );
-            }
+        } else if !force {
+            tracing::warn!(
+                server = self.server_name.as_str(),
+                "OAuth client not ready (hydration failed); retrying later instead of browser auth"
+            );
+            return false;
         }
 
         // Full browser-based OAuth flow.
@@ -3315,6 +3574,15 @@ impl McpClient {
     /// for recovery gates (the proactive path only recovers HTTP clients).
     pub fn is_http(&self) -> bool {
         self.http_config.is_some()
+    }
+
+    /// `true` when the transport carries a config-provided `Authorization`
+    /// header: its 401s are a config problem OAuth login cannot fix (spawn
+    /// and the login rebuild both skip discovery for such servers).
+    pub fn has_configured_auth_header(&self) -> bool {
+        self.http_config
+            .as_ref()
+            .is_some_and(HttpConfig::has_authorization_header)
     }
 
     /// `true` for an in-process SDK client reached over the ACP reverse channel
@@ -3396,6 +3664,7 @@ impl McpClient {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -3417,6 +3686,7 @@ impl McpClient {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -3431,6 +3701,7 @@ impl McpClient {
             PendingTransport::Http(config.clone()),
             overrides,
             meta_config,
+            None,
             None,
             Some(config),
             None,
@@ -3643,8 +3914,11 @@ impl McpClient {
                 "Handshake failed, attempting token refresh and retry"
             );
             let refresh_ok = {
-                let mgr = auth_mgr.lock().await;
-                mgr.refresh_token().await.is_ok()
+                let mut mgr = auth_mgr.lock().await;
+                crate::oauth::ensure_oauth_ready(&self.server_name, &mut mgr)
+                    .await
+                    .hydrated
+                    && mgr.refresh_token().await.is_ok()
             };
             if refresh_ok {
                 let retry_transport = PendingTransport::HttpAuth {
@@ -3786,7 +4060,9 @@ impl McpClient {
                 // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
                 #[allow(clippy::disallowed_methods)]
                 let http_client = with_extra_root_certificates(
-                    reqwest::Client::builder().default_headers(headers),
+                    reqwest::Client::builder()
+                        .default_headers(headers)
+                        .connect_timeout(HTTP_CONNECT_TIMEOUT),
                 )
                 .build()
                 .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
@@ -4007,10 +4283,13 @@ impl McpClient {
         apply_user_agent_policy(&mut headers, server_name, &config.url);
         // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
         #[allow(clippy::disallowed_methods)]
-        let client =
-            with_extra_root_certificates(reqwest::Client::builder().default_headers(headers))
-                .build()
-                .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
+        let client = with_extra_root_certificates(
+            reqwest::Client::builder()
+                .default_headers(headers)
+                .connect_timeout(HTTP_CONNECT_TIMEOUT),
+        )
+        .build()
+        .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
         let mcp_http_client =
             crate::mcp_http_client::McpHttpClient::new(client, server_name, warn_budget);
         let transport_config = StreamableHttpClientTransportConfig::with_uri(config.url.as_str());
@@ -4535,6 +4814,7 @@ pub struct McpSpawnCtx<'a> {
     pub(crate) event_writer: &'a xai_grok_session_events::EventWriter,
     pub(crate) mode: OauthInteractivity,
     pub(crate) scope: Option<&'a ProcessScope>,
+    pub(crate) discovery: McpOauthDiscovery,
 }
 
 impl<'a> McpSpawnCtx<'a> {
@@ -4549,16 +4829,24 @@ impl<'a> McpSpawnCtx<'a> {
             event_writer,
             mode,
             scope,
+            discovery: McpOauthDiscovery::Disk,
         }
     }
 
-    pub fn session_less(event_writer: &'a xai_grok_session_events::EventWriter) -> Self {
+    pub fn standalone(event_writer: &'a xai_grok_session_events::EventWriter) -> Self {
         Self {
             session_id: None,
             event_writer,
             mode: OauthInteractivity::Interactive,
             scope: None,
+            discovery: McpOauthDiscovery::Disk,
         }
+    }
+
+    #[must_use]
+    pub fn with_oauth_discovery(mut self, discovery: McpOauthDiscovery) -> Self {
+        self.discovery = discovery;
+        self
     }
 }
 
@@ -4654,44 +4942,50 @@ pub async fn start_mcp_server(
                 headers,
             };
 
-            let has_existing_auth = http_config
-                .headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
-
-            let auth_prep = if has_existing_auth {
+            let auth_decision = if http_config.has_authorization_header() {
                 tracing::debug!(
                     server = %name,
                     "Skipping OAuth discovery: server already has Authorization header"
                 );
-                HttpOauthPrep::NoOauthSupport
+                HttpAuthDecision::NoOauthSupport
             } else {
-                resolve_http_oauth_prep(
-                    &name,
-                    &url,
-                    &http_config.headers,
-                    ctx,
-                    OAUTH_DISCOVERY_TIMEOUT,
-                )
-                .await
+                match ctx.discovery {
+                    McpOauthDiscovery::Disk => decide_http_auth_from_disk(&name, &url).await,
+                    McpOauthDiscovery::Network => {
+                        decide_http_auth_over_network(
+                            &name,
+                            &url,
+                            &http_config.headers,
+                            ctx,
+                            OAUTH_DISCOVERY_TIMEOUT,
+                        )
+                        .await
+                    }
+                }
             };
-            match auth_prep {
-                HttpOauthPrep::ManagerReady(auth_mgr) => Ok(McpClient::new_http_auth(
-                    name.clone(),
-                    http_config,
-                    auth_mgr,
-                    byo_config.cloned(),
-                    overrides,
-                    meta_config,
-                )),
-                HttpOauthPrep::NoOauthSupport => Ok(McpClient::new_http(
+            match auth_decision {
+                HttpAuthDecision::ManagerReady { manager, observed } => {
+                    Ok(McpClient::new_http_auth(
+                        name.clone(),
+                        http_config,
+                        manager,
+                        observed,
+                        byo_config.cloned(),
+                        overrides,
+                        meta_config,
+                    ))
+                }
+                HttpAuthDecision::NoOauthSupport => Ok(McpClient::new_http(
                     name.clone(),
                     http_config,
                     overrides,
                     meta_config,
                 )),
                 // Avoid starting an unauthenticated HTTP worker that fatals on server OAuth challenge.
-                HttpOauthPrep::NeedsInteractiveLogin => Err(McpError::AuthRequired {
+                HttpAuthDecision::NeedsInteractiveLogin => Err(McpError::AuthRequired {
+                    server: name.clone(),
+                }),
+                HttpAuthDecision::Unreachable => Err(McpError::Unreachable {
                     server: name.clone(),
                 }),
             }
@@ -4720,17 +5014,14 @@ pub async fn start_mcp_servers(
         );
     }
 
-    futures::stream::iter(mcp_servers)
-        .map(|server| {
-            let server_name = mcp_server_name(&server);
-            let overrides = overrides_map.get(server_name);
-            let mc = meta_config_map.get(server_name);
-            let byo = oauth_config_map.get(server_name);
-            start_mcp_server(server, overrides, mc, byo, ctx)
-        })
-        .buffer_unordered(8)
-        .collect::<Vec<_>>()
-        .await
+    futures::future::join_all(mcp_servers.into_iter().map(|server| {
+        let server_name = mcp_server_name(&server);
+        let overrides = overrides_map.get(server_name);
+        let mc = meta_config_map.get(server_name);
+        let byo = oauth_config_map.get(server_name);
+        start_mcp_server(server, overrides, mc, byo, ctx)
+    }))
+    .await
 }
 
 /// Extract the name from an MCP server enum variant.
@@ -4795,6 +5086,7 @@ impl McpClient {
                 headers: Vec::new(),
             }),
             Some(&overrides),
+            None,
             None,
             None,
             None,

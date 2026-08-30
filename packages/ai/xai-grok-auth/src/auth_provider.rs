@@ -1,26 +1,22 @@
-//! Credential dependency-inversion seam for outbound HTTP made by the
-//! data-collector. Shell installs `ShellAuthCredentialProvider` wrapping
-//! `AuthManager` + `TokenRefresher`; data-collector code holds an
-//! `Arc<dyn AuthCredentialProvider>`.
+//! Credentials for outbound HTTP made by the data-collector.
+//! Shell installs `ShellAuthCredentialProvider` wrapping `AuthManager` + `TokenRefresher`.
+//! Data-collector code holds an `Arc<dyn AuthCredentialProvider>`.
 
 use reqwest::RequestBuilder;
 
 use crate::visibility::HttpAuth;
 
-/// Snapshot of the currently effective credentials. Used by callers
-/// that build their own header maps (the OTel OTLP exporter) or that
-/// need the bearer prefix for 401-attribution telemetry.
+/// Snapshot of the currently effective credentials.
+/// Used by callers that build their own header maps (the OTel OTLP exporter) or that need the bearer prefix for 401-attribution telemetry.
 #[derive(Clone, Debug, Default)]
 pub struct CredentialSnapshot {
     /// Bearer token. `None` when no auth is configured (CI / `--api-key` headless).
     pub token: Option<String>,
-    /// User identifier matching the bearer token's owner. `None` when no auth
-    /// is configured or when the underlying provider has no concept of user
-    /// identity (`StaticAuthCredentialProvider`). Read by the OTel layer to
-    /// populate the `user.id` resource attribute.
+    /// User identifier matching the bearer token's owner.
+    /// `None` when no auth is configured or when the underlying provider has no concept of user identity (`StaticAuthCredentialProvider`).
+    /// Read by the OTel layer to populate the `user.id` resource attribute.
     pub user_id: Option<String>,
-    /// Team identifier from OAuth. `None` for personal accounts or when
-    /// no auth is configured.
+    /// Team identifier from OAuth. `None` for personal accounts or when no auth is configured.
     pub team_id: Option<String>,
     /// `uuidv5(NAMESPACE_OID, deployment_key)`, set only for deployment-key auth.
     pub deployment_id: Option<String>,
@@ -32,21 +28,17 @@ pub struct CredentialSnapshot {
 
 /// Source of truth for outbound auth on data-collector requests.
 ///
-/// Supertrait of `HttpAuth` so a single impl satisfies both this trait
-/// (refresh-aware snapshot + 401 recovery) and the visibility seam
-/// (header construction). Callers add headers via `HttpAuth::apply`.
+/// Supertrait of `HttpAuth` so a single impl satisfies both this trait (refresh-aware snapshot + 401 recovery) and `HttpAuth` (header construction).
+/// Callers add headers via `HttpAuth::apply`.
 #[async_trait::async_trait]
 pub trait AuthCredentialProvider: HttpAuth + Send + Sync + 'static {
-    /// Return the current credential snapshot. Implementations should
-    /// issue a cheap disk re-read (`AuthManager::refresh`) before
-    /// snapshotting so callers see updates from sibling processes
-    /// (`grok-desktop`, `grok login`). The `token` field MUST mirror
-    /// the bearer that `HttpAuth::apply` would send on the wire so
-    /// 401-attribution prefixes match the actual request.
+    /// Implementations should issue a cheap disk re-read (`AuthManager::refresh`) before snapshotting.
+    /// This lets callers see updates from sibling processes (`grok-desktop`, `grok login`).
+    /// The `token` field MUST mirror the bearer that `HttpAuth::apply` would send on the wire so 401-attribution prefixes match the actual request.
     fn snapshot(&self) -> CredentialSnapshot;
 
-    /// Attempt to obtain a fresh token. Returns `true` if a different
-    /// token was obtained -- caller should retry the failed request once.
+    /// Attempt to obtain a fresh token.
+    /// Returns `true` if a different token was obtained; the caller should retry the failed request once.
     /// Returns `false` if no refresher is configured or refresh failed.
     async fn refresh_after_unauthorized(&self) -> bool;
 
@@ -57,33 +49,26 @@ pub trait AuthCredentialProvider: HttpAuth + Send + Sync + 'static {
         true
     }
 
-    /// Whether the provider holds a credential worth a real outbound attempt —
-    /// an unexpired token (in memory or on disk), or a static key. Default
-    /// `true` always attempts.
+    /// Whether the provider holds a credential worth a real outbound attempt: an unexpired token (in memory or on disk), or a static key.
+    /// The default `true` always attempts.
     fn has_usable_credential(&self) -> bool {
         true
     }
 }
 
-/// Static credential provider. Used by tests and by callers that pass a
-/// raw `&str` token with no `AuthManager` available.
+/// Static credential provider. Used by tests and by callers that pass a raw `&str` token with no `AuthManager` available.
 ///
-/// `apply()` delegates to the underlying `HttpAuth::apply()`.
-/// `refresh_after_unauthorized()` always returns `false`.
-///
-/// `bearer` is the wire bearer the inner `HttpAuth` will send in the
-/// `Authorization` header. Stored alongside the inner so `snapshot().token`
-/// returns the same prefix that goes out on the wire (used by
-/// 401-attribution telemetry). `None` when no bearer is configured.
+/// `bearer` is the wire bearer the inner `HttpAuth` will send in the `Authorization` header.
+/// Stored alongside the inner so `snapshot().token` returns the same prefix that goes out on the wire (used by 401-attribution telemetry).
+/// `None` when no bearer is configured.
 pub struct StaticAuthCredentialProvider {
     inner: Box<dyn HttpAuth>,
     bearer: Option<String>,
 }
 
 impl StaticAuthCredentialProvider {
-    /// Wrap `inner` so callers see it as an `AuthCredentialProvider`. Pass
-    /// the bearer token that `inner.apply()` will send in the `Authorization`
-    /// header so `snapshot().token` reflects the wire bearer truthfully.
+    /// Wrap `inner` so callers see it as an `AuthCredentialProvider`.
+    /// Pass the bearer token that `inner.apply()` will send in the `Authorization` header so `snapshot().token` reflects the wire bearer truthfully.
     pub fn new(inner: Box<dyn HttpAuth>, bearer: Option<String>) -> Self {
         Self { inner, bearer }
     }

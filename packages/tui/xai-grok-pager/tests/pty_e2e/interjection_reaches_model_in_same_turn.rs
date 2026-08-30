@@ -4,17 +4,14 @@ use super::common::*;
 
 /// 19. **Send-now chord delivers the composer text as its own next turn.**
 /// (Historical name: the chord used to interject into the SAME turn.)
-/// Ctrl+Enter with text mid-stream is cancel-and-send: the running turn is
-/// cancelled silently and the text runs as the next turn with the
-/// interjection preamble, rendered as a "❯ "
-/// user block via the turn-start adoption.
+/// Ctrl+Enter with text mid-stream is cancel-and-send: the running turn is cancelled silently and the text runs as the next turn.
+/// That turn carries the interjection preamble, and turn-start adoption renders the text as a "❯ " user block.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn interjection_reaches_model_in_same_turn() {
     let content = ContentController::start().await.expect("start content");
-    // Gate turn 1's terminal event so the typed text + chord provably land
-    // mid-turn regardless of suite load. Chunk delay widens the mid-stream
-    // window under remote CI load (same shape as cancel_discards_*).
+    // Gate turn 1's final event so the typed text and the chord provably land mid-turn regardless of suite load
+    // The chunk delay widens the mid-stream window under remote CI load (same shape as cancel_discards_*)
     let mut turn_one = content
         .expect_agent_turn_blocked("running turn before send-now", slow_turn_text("TURNONE"));
     content.set_chunk_delay(Some(Duration::from_millis(100)));
@@ -38,7 +35,7 @@ async fn interjection_reaches_model_in_same_turn() {
     tokio::time::timeout(Duration::from_secs(10), turn_one.wait_blocked())
         .await
         .expect("turn 1 reached completion barrier");
-    // Still mid-stream (hold gates completion) — not "Worked for".
+    // The hold gates turn 1's completion, so it is provably still mid-stream here
     assert!(
         !harness.contains_text("Worked for"),
         "turn must still be open before send-now\nscreen:\n{}",
@@ -54,8 +51,7 @@ async fn interjection_reaches_model_in_same_turn() {
     harness.inject_keys(CTRL_ENTER).expect("send-now chord");
     turn_one.release();
 
-    // Cancel-and-send: message leaves the composer and commits as a scrollback
-    // user block (not just the draft line that also carries ❯).
+    // Cancel-and-send: the message leaves the composer and commits as a scrollback user block (not just the draft line that also carries ❯)
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         harness.update(Duration::from_millis(100));
@@ -75,7 +71,6 @@ async fn interjection_reaches_model_in_same_turn() {
         .wait_for_text("TURNTWO", Duration::from_secs(40))
         .expect("sent-now message ran as the next turn");
 
-    // The send-now cancel of turn 1 is silent.
     assert!(
         !harness.contains_text("Turn cancelled by user"),
         "send-now cancel must not render a cancelled marker\nscreen:\n{}",

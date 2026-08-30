@@ -5,17 +5,15 @@ use super::common::*;
 const DONE_SENTINEL: &str = "VERB_GROUP_STREAM_DONE";
 
 /// PTY: verb-group folding happens IN PLACE while the run is still streaming.
-/// With three scripted read turns paced by `set_chunk_delay` (which scripted
-/// SSE honors), the header exists from the FIRST read on (a singleton run
-/// already folds, so no fold-in jump when the second arrives), the "Read 2
-/// files" label must be on screen while the third turn is still in flight —
-/// before the 3-file label or the final completion exists — and the settled
-/// transcript then shows the final "Read 3 files".
+/// Three scripted read turns are paced by `set_chunk_delay`, which scripted SSE honors.
+/// The header exists from the FIRST read on: a singleton run already folds, so nothing jumps in when the second read arrives.
+/// The "Read 2 files" label must be on screen while the third turn is still streaming, before the 3-file label or the final completion exists.
+/// The settled transcript then shows the final "Read 3 files".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn verb_group_streaming_fold_pty() {
     let content = ContentController::start().await.expect("start content");
-    // Pin ON via the config tier so the test doesn't ride the client default.
+    // Pin group_tool_verbs on via the config tier so the test does not depend on the client default
     seed_ui_config(&content, "group_tool_verbs = true");
 
     // Seed real files under the isolated HOME so the reads succeed.
@@ -38,9 +36,8 @@ async fn verb_group_streaming_fold_pty() {
         })
         .collect();
     content.set_response(DONE_SENTINEL);
-    // Hold each scripted turn open (4 SSE events x 350ms ≈ 1.4s) so the
-    // mid-flight window is pollable; cleared after capture so the tail
-    // settles fast.
+    // Hold each scripted turn open (four SSE events at 350ms each, about 1.4s) so the poll below can catch the mid-run screen
+    // Cleared after the capture so the tail settles fast
     content.set_chunk_delay(Some(Duration::from_millis(350)));
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -55,11 +52,9 @@ async fn verb_group_streaming_fold_pty() {
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit prompt");
 
-    // Mid-flight: the FIRST read already folds into a singleton header
-    // ("Reading 1 file" / "Read 1 file"), then two completed reads keep the
-    // same header while turn 3 streams. The negative conditions pin "still in
-    // flight" — if the poll only ever saw the settled screen, the DONE break
-    // trips and the asserts fail.
+    // The FIRST read already folds into a singleton header ("Reading 1 file" or "Read 1 file")
+    // Two completed reads then keep the same header while turn 3 streams
+    // The negative conditions prove the run was still streaming: a poll that only saw the settled screen hits the DONE break and the asserts fail
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut saw_singleton = false;
     let mut saw_midflight = false;

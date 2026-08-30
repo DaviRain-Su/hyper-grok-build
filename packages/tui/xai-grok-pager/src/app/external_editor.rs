@@ -1,6 +1,4 @@
-//! External-editor request and prompt-draft lifecycle.
-//!
-//! Prompt files are materialized at TTY handoff and removed by `Drop`.
+//! Prompt files are created just before the editor child takes the TTY and removed by `Drop`.
 
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -288,9 +286,8 @@ pub(crate) fn finish(
             file,
             ..
         } => {
-            // Editors append a final newline on save only when the buffer
-            // doesn't already end with one, so it is editor-added exactly
-            // when the draft lacked one — strip that single newline.
+            // Editors append a final newline on save only when the buffer doesn't already end with one
+            // The newline is editor-added exactly when the draft lacked one, so strip that single one
             let strip_editor_newline = !original_text.ends_with('\n');
             let outcome = match editor_result {
                 Ok(status) if status.success() => file.read().map(|mut text| {
@@ -587,11 +584,9 @@ mod tests {
         );
     }
 
-    /// The trailing-newline strip discriminates editor-added from
-    /// draft-owned: editors append a final newline only when the buffer
-    /// doesn't already end with one, so a draft that ended with '\n' keeps
-    /// it, and a blank line added in the editor to a newline-less draft
-    /// survives as exactly one '\n' (only the editor-added one is stripped).
+    /// The trailing-newline strip tells an editor-added newline from one the draft already had.
+    /// Editors append a final newline only when the buffer doesn't already end with one.
+    /// So a draft that ended with '\n' keeps it, and a blank line the user adds to a newline-less draft survives as exactly one '\n'.
     #[test]
     fn finish_preserves_a_drafts_own_trailing_newline() {
         let id = AgentId(0);
@@ -601,7 +596,7 @@ mod tests {
         app.agents.insert(id, agent);
         app.active_view = ActiveView::Agent(id);
 
-        // Draft ends with '\n': the file was saved as-is — no strip.
+        // The draft ends with '\n': the file was saved as-is, so nothing is stripped
         app.agents.get_mut(&id).unwrap().prompt.set_text("line\n");
         let file = PromptEditorFile::create("edited\n").unwrap();
         let prepared = PreparedEditorRequest::PromptDraft {
@@ -620,8 +615,7 @@ mod tests {
             "a draft's own trailing newline survives the round trip"
         );
 
-        // Newline-less draft, user appends a blank line: the editor
-        // saved "text\n\n"; only the editor-added final '\n' is stripped.
+        // Newline-less draft, the user appends a blank line: the editor saved "text\n\n"; only the editor-added final '\n' is stripped
         app.agents.get_mut(&id).unwrap().prompt.set_text("text");
         let file = PromptEditorFile::create("text\n\n").unwrap();
         let prepared = PreparedEditorRequest::PromptDraft {

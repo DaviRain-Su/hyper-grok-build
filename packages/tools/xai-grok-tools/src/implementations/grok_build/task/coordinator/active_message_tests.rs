@@ -7,7 +7,9 @@ use tokio_util::sync::CancellationToken;
 use super::super::*;
 use super::*;
 use crate::implementations::grok_build::task::active_message::SubagentActiveMessageRequest;
-use crate::implementations::grok_build::task::types::ActiveAgentMessageRequest;
+use crate::implementations::grok_build::task::types::{
+    ActiveAgentMessageOperation, ActiveAgentMessageRequest,
+};
 
 const TEST_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -306,9 +308,34 @@ async fn two_sequential_admissions_keep_child_open() {
     let (mut coordinator, command_tx, admission_tx, mut admissions) = fixture();
     insert_child(&mut coordinator, admission_tx, "child", "parent");
     for _ in 0..2 {
-        let response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+        let (respond_to, response) = oneshot::channel();
+        let request = SubagentActiveMessageRequest {
+            request: ActiveAgentMessageRequest::try_new_with_operation(
+                "child",
+                "follow up",
+                ActiveAgentMessageOperation::Steer,
+            )
+            .unwrap(),
+            parent_session_id: "parent".to_owned(),
+            respond_to,
+        };
+        command_tx
+            .try_send_active_message(request)
+            .expect("active-message ingress open");
+        let ingress = coordinator
+            .active_message_ingress
+            .as_mut()
+            .expect("paired active-message ingress")
+            .try_recv()
+            .expect("active-message command queued");
+        coordinator.handle_send_active_message(ingress);
+
         let call = recv_with_timeout(&mut admissions).await;
         let message_id = call.message_id.clone();
+        assert_eq!(
+            call.late_delivery.operation(),
+            ActiveAgentMessageOperation::Steer
+        );
         release_admission(&mut coordinator, call, ActiveMessageAdmission::Admitted).await;
         assert_eq!(
             ActiveAgentMessageOutcome::Accepted { message_id },

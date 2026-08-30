@@ -16,23 +16,20 @@ pub(super) const PAYWALL_AUTO_CHECK_TIMEOUT: Duration = Duration::from_secs(10 *
 
 /// Whether the user is at the highest subscription tier (SuperGrok Heavy).
 ///
-/// Returns `true` only when `subscription_tier` **positively matches** a
-/// known max-tier identifier. When the tier is unknown (`None`) or any
-/// other value, returns `false` — the user gets the Q&A modal so lower-
-/// tier users always see the upgrade option.
+/// Returns `true` only when `subscription_tier` positively matches a known max-tier identifier.
+/// An unknown (`None`) or unrecognized tier returns `false`, so lower-tier users always get the Q&A modal with the upgrade option.
 pub(super) fn is_max_tier(subscription_tier: Option<&str>) -> bool {
     let Some(t) = subscription_tier else {
-        return false; // Unknown — default to Q&A.
+        return false; // Unknown: default to Q&A.
     };
-    // Normalize: lowercase + spaces→underscores to match both JWT-derived
-    // keys ("supergrok_heavy") and CCP display names ("SuperGrok Heavy").
+    // Lowercase and replace spaces with underscores to match both JWT-derived keys ("supergrok_heavy") and CCP display names ("SuperGrok Heavy")
     t.to_ascii_lowercase().replace(' ', "_") == "supergrok_heavy"
 }
 
 /// URL for upgrading the subscription tier.
 pub(crate) const UPSELL_URL_UPGRADE: &str = "https://grok.com/supergrok?referrer=grok-build";
 
-/// URL for managing pay-as-you-go / on-demand spending / purchasing credits.
+/// URL for managing pay-as-you-go or on-demand spending and purchasing credits.
 pub(crate) const UPSELL_URL_PAYG: &str = "https://grok.com?_s=usage";
 
 /// Internal free-usage modal action: clear the sticky block and open `/model`.
@@ -43,18 +40,17 @@ pub(crate) const UPSELL_ACTION_DISMISS: &str = "hyper:dismiss-paywall";
 /// Billing mode for credit-limit upsell copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CreditLimitUpsellMode {
-    /// Unified usage pool — suggest purchasing prepaid credits.
+    /// Unified usage pool: suggest purchasing prepaid credits.
     UnifiedCredits,
-    /// Legacy on-demand / PAYG (`enabled` = on-demand cap already active).
+    /// Legacy on-demand PAYG (`enabled` means the on-demand cap is already active).
     LegacyPayg { enabled: bool },
 }
 
 /// Resolve upsell copy mode from credits config.
 ///
-/// Prefers explicit `is_unified_billing_user` (`Option` — do not treat a
-/// missing field as legacy). Positive `pay_as_you_go` (on-demand cap &gt; 0)
-/// only selects legacy when the unified flag is absent. Unknown defaults to
-/// unified (buy credits) so pool users never get “enable on-demand” wrongly.
+/// An explicit `is_unified_billing_user` wins; a missing field is not treated as legacy.
+/// A positive `pay_as_you_go` (an on-demand cap over 0) only selects legacy when the unified flag is absent.
+/// Unknown defaults to unified (buy credits) so pool users are never told to enable on-demand.
 pub(super) fn credit_limit_upsell_mode(
     balance: Option<&crate::views::credit_bar::CreditBalance>,
 ) -> CreditLimitUpsellMode {
@@ -63,40 +59,34 @@ pub(super) fn credit_limit_upsell_mode(
         Some(b) if b.is_unified_billing_user == Some(false) => CreditLimitUpsellMode::LegacyPayg {
             enabled: b.pay_as_you_go,
         },
-        // Flag absent: only treat as legacy PAYG when we have a positive
-        // on-demand cap (pay_as_you_go is derived from cap &gt; 0).
+        // Flag absent: only treat as legacy PAYG on a positive on-demand cap (`pay_as_you_go` derives from that cap)
         Some(b) if b.pay_as_you_go => CreditLimitUpsellMode::LegacyPayg { enabled: true },
         _ => CreditLimitUpsellMode::UnifiedCredits,
     }
 }
 
-/// Whether an API / retry error is a credit-limit / spend-block denial.
+/// Whether an API or retry error is a credit-limit or spend-block denial.
 ///
-/// - **402** Payment Required — always credit/spend block on this surface
-///   (Build pool and IC spend blocks); no message filter.
-/// - **403** — only when the body contains "run out of credits" (legacy IC
-///   spend wording); other 403s (content-safety, ZDR, …) are excluded.
+/// - 402 Payment Required always means a credit or spend block here (Build pool and IC spend blocks); no message filter.
+/// - 403 counts only when the body contains "run out of credits" (legacy IC spend wording); other 403s (content-safety, ZDR, …) are excluded.
 pub(crate) fn is_credit_limit_error(http_status: Option<u16>, message: &str) -> bool {
     let m = message.to_ascii_lowercase();
     let legacy = m.contains("run out of credits");
     match http_status {
         Some(402) => true,
         Some(403) if legacy => true,
-        // Retry notifications embed "status 402" / "status 403" in the body
-        // without a separate status field.
+        // Retry notifications embed "status 402" / "status 403" in the body without a separate status field
         None | Some(_) => m.contains("status 402") || (m.contains("status 403") && legacy),
     }
 }
 
 /// Open the credit-limit upsell on the given agent.
 ///
-/// **`max_tier = false`** (default): shows the Q&A question modal with
-/// two options ("Upgrade tier" + buy-credits or PAYG). Each option's `id`
-/// carries the target URL so the submit handler is position-independent.
+/// With `max_tier` false (the default) it shows the Q&A question modal with two options ("Upgrade tier" and buy-credits or PAYG).
+/// Each option's `id` carries the target URL so the submit handler is position-independent.
 ///
-/// **`max_tier = true`** (positively identified as SuperGrok Heavy):
-/// pushes an inline scrollback card (`CreditLimitBlock`) with a single
-/// continue action. No Q&A modal — the user can't upgrade further.
+/// With `max_tier` true (the user is SuperGrok Heavy) it pushes an inline scrollback card (`CreditLimitBlock`) with one continue action.
+/// No Q&A modal: the user can't upgrade further.
 pub(super) fn open_credit_limit_upsell(
     agent: &mut AgentView,
     mode: CreditLimitUpsellMode,
@@ -222,22 +212,18 @@ pub(super) fn open_credit_limit_upsell(
     agent.prompt.set_text("");
 }
 
-/// Open the free-usage paywall on the given agent: a Q&A modal in the
-/// [`open_credit_limit_upsell`] style with two upgrade options. Each
-/// option's `id` carries its target URL so the submit handler is
-/// position-independent.
+/// Open the free-usage paywall on the given agent: a Q&A modal in the [`open_credit_limit_upsell`] style with two upgrade options.
+/// Each option's `id` carries its target URL so the submit handler is position-independent.
 ///
-/// Driver-only by construction (called from the PromptResponse handler,
-/// which viewers never receive). `auth_method` feeds the
-/// `SuperGrokUpsellShown` funnel event.
+/// Only the driver can reach this: the PromptResponse handler calls it, and viewers never receive that response.
+/// `auth_method` feeds the `SuperGrokUpsellShown` funnel event.
 pub(super) fn open_free_usage_upsell(agent: &mut AgentView, auth_method: Option<String>) {
     open_supergrok_upsell(agent, UpsellReason::FreeUsageLimit, auth_method);
 }
 
-/// Open the SuperGrok upsell for a tier-restricted slash command
-/// (`/usage`, `/imagine`, …). Returns whether the modal opened (`false`
-/// when another question modal is already up) so the caller can decide
-/// whether to consume the input that triggered it.
+/// Open the SuperGrok upsell for a tier-restricted slash command (`/usage`, `/imagine`, …).
+/// Returns whether the modal opened (`false` when another question modal is already up).
+/// The caller uses that to decide whether to consume the input that triggered it.
 pub(super) fn open_restricted_command_upsell(
     agent: &mut AgentView,
     auth_method: Option<String>,
@@ -245,8 +231,7 @@ pub(super) fn open_restricted_command_upsell(
     open_supergrok_upsell(agent, UpsellReason::RestrictedCommand, auth_method)
 }
 
-/// Which situation opened the SuperGrok upsell modal. Controls the heading
-/// and the telemetry source.
+/// Which situation opened the SuperGrok upsell modal; it controls the heading and the telemetry source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UpsellReason {
     /// Free-usage quota exhausted (429 paywall).
@@ -255,10 +240,8 @@ pub(super) enum UpsellReason {
     RestrictedCommand,
 }
 
-/// Shared builder behind [`open_free_usage_upsell`] /
-/// [`open_restricted_command_upsell`]: a Q&A modal in the
-/// [`open_credit_limit_upsell`] style. Upgrade options carry their target
-/// URL in the option `id` (position-independent submit handling).
+/// Shared builder behind [`open_free_usage_upsell`] and [`open_restricted_command_upsell`]: a Q&A modal in the [`open_credit_limit_upsell`] style.
+/// Upgrade options carry their target URL in the option `id`, so submit handling does not depend on option position.
 fn open_supergrok_upsell(
     agent: &mut AgentView,
     reason: UpsellReason,
@@ -269,8 +252,8 @@ fn open_supergrok_upsell(
         Question, QuestionOption,
     };
 
-    // Never displace an already-open question modal. Callers that consume
-    // input on open must check this `false` and keep the input instead.
+    // Never displace an already-open question modal
+    // Callers that consume input on open must check this `false` and keep the input instead
     if agent.question_view.is_some() {
         return false;
     }
@@ -354,9 +337,8 @@ fn open_supergrok_upsell(
     true
 }
 
-/// Apply an [`AutoTopupFetch`] outcome to a cached `auto_topup` slot: `Resolved`
-/// sets it, `Cleared` resets it to "unknown" (no credits), and `Unchanged` keeps
-/// the last-known-good value (the fetch failed).
+/// Apply an [`AutoTopupFetch`] outcome to a cached `auto_topup` slot.
+/// `Resolved` sets it, `Cleared` resets it to "unknown" (no credits), and `Unchanged` keeps the last-known-good value (the fetch failed).
 pub(super) fn apply_auto_topup(
     slot: &mut Option<crate::views::credit_bar::AutoTopupInfo>,
     fetch: &crate::views::credit_bar::AutoTopupFetch,
@@ -380,14 +362,9 @@ pub(super) fn handle_billing_fetched(
     autotopup: crate::views::credit_bar::AutoTopupFetch,
     nonce: u64,
 ) -> Vec<Effect> {
-    // Parse/transport failures route to `BillingError`, so a `None`
-    // balance here means the response carried no billing config. Clear
-    // the cached balance + polling so the status bar agrees with the
-    // "No billing data available." message rather than showing a stale
-    // value.
+    // Parse/transport failures route to `BillingError`, so a `None` balance here means the response carried no billing config
+    // Clear the cached balance and polling so the status bar agrees with the "No billing data available." message rather than showing a stale value
     app.credit_balance = balance.clone();
-    // `Resolved` updates the cached rule, `Cleared` resets it to unknown
-    // (no credits), `Unchanged` keeps the last-known-good (fetch failed).
     apply_auto_topup(&mut app.auto_topup, &autotopup);
     app.billing_poll_wanted = balance
         .as_ref()
@@ -404,9 +381,8 @@ pub(super) fn handle_billing_fetched(
         let mut topup = agent.auto_topup.clone();
         apply_auto_topup(&mut topup, &autotopup);
         agent.apply_credit_balance(balance.clone(), topup);
-        // The open usage modal renders from the mirrors updated above; only
-        // its own fetch generation may settle the loading/error flags
-        // (background refreshes carry nonce 0).
+        // The open usage modal renders from the mirrors updated above
+        // Only its own fetch generation may settle the loading/error flags (background refreshes carry nonce 0)
         if let Some(state) = super::status::usage_modal_state_mut(agent)
             && state.fetch_nonce == nonce
         {
@@ -446,10 +422,10 @@ pub(super) fn handle_gate_refreshed(
     }
 }
 
-/// `x.ai/auth/check_subscription` completed. Meta is authoritative
-/// (`apply_auth_meta` also drops any deferred gate). A failed check only
-/// promotes the deferred gate it was verifying (`verify` generation);
-/// generic watch/focus/paywall-chain failures never touch it.
+/// `x.ai/auth/check_subscription` completed.
+/// Meta is authoritative (`apply_auth_meta` also drops any deferred gate).
+/// A failed check only promotes the deferred gate it was verifying (the `verify` generation).
+/// Generic watch, focus, and paywall-chain failures never touch it.
 pub(super) fn handle_check_subscription_complete(
     app: &mut AppView,
     verify: Option<u64>,
@@ -464,9 +440,8 @@ pub(super) fn handle_check_subscription_complete(
                     true
                 }
                 Err(e) => {
-                    // Shell sent meta we can't decode — a protocol bug, not
-                    // a transient failure. The check result is lost, so a
-                    // verify deferral falls through to promotion below.
+                    // The shell sent meta we can't decode, a protocol bug rather than a transient failure
+                    // The check result is lost, so a verify deferral falls through to promotion below
                     crate::unified_log::error(
                         "subscription.check.meta_parse_failed",
                         None,
@@ -479,8 +454,7 @@ pub(super) fn handle_check_subscription_complete(
                 }
             }
         }
-        // meta: None = shell reports "not authenticated" or the check RPC
-        // failed (already logged as subscription.check.rpc_failed).
+        // A `None` meta means the shell reports "not authenticated" or the check RPC failed (already logged as subscription.check.rpc_failed)
         None => false,
     };
     if !applied && let Some(generation) = verify {
@@ -500,18 +474,16 @@ pub(super) fn handle_check_subscription_complete(
     maybe_start_paywall_chain(app, was_blocked)
 }
 
-/// Safety net for a hung verification check: show the still-pending
-/// deferred gate (err on blocking).
+/// Safety net for a hung verification check: show the still-pending deferred gate, erring on the side of blocking.
 pub(super) fn handle_gate_verify_timeout(app: &mut AppView, generation: u64) -> Vec<Effect> {
     let was_blocked = !app.has_access();
     app.promote_deferred_gate(generation, "verify_timeout");
     maybe_start_paywall_chain(app, was_blocked)
 }
 
-/// Arm the 5s paywall auto-check chain on an ungated→gated transition, so a
-/// paywall shown by verify-before-paywall self-lifts exactly like the
-/// login-path one. Guarded so steady-state paywall-poller responses and
-/// repeated checks can't fan out extra timers.
+/// Start the 5s paywall auto-check chain when the app goes from ungated to gated.
+/// A paywall shown after a failed verification check then lifts itself exactly like the one shown at login.
+/// The guard keeps repeated checks and steady-state paywall-poller responses from starting extra timers.
 fn maybe_start_paywall_chain(app: &mut AppView, was_blocked: bool) -> Vec<Effect> {
     if !was_blocked && !app.has_access() && app.paywall_check_started.is_none() {
         app.paywall_check_started = Some(std::time::Instant::now());
@@ -537,9 +509,8 @@ pub(super) fn handle_credit_limit_recheck_complete(
         return vec![];
     };
 
-    // If the user already submitted another prompt while the
-    // recheck was in flight, don't retry the stashed one — they've
-    // moved on. The tier update (above) still takes effect.
+    // If the user already submitted another prompt while the recheck ran, don't retry the stashed one; they've moved on
+    // The tier update (above) still takes effect
     let user_moved_on = !agent.session.state.is_idle() || !agent.session.pending_prompts.is_empty();
 
     if tier_changed && !user_moved_on {
@@ -584,12 +555,9 @@ pub(super) fn dispatch_open_supergrok_url(app: &mut AppView) -> Vec<Effect> {
         .as_ref()
         .and_then(|g| g.url.as_deref())
         .unwrap_or("https://grok.com/supergrok?referrer=grok-build");
-    // Funnel attribution: tag CLI-originated SuperGrok upsell clicks
-    // with `referrer=grok-build`, matching the OAuth consent flow and
-    // x.ai/cli marketing links. Applied even when the URL came from
-    // remote settings's `gate_url`, so we don't depend on the remote flag
-    // being correctly configured. If the URL already specifies a
-    // referrer it's left alone.
+    // Funnel attribution: tag SuperGrok upsell clicks from the CLI with `referrer=grok-build`, matching the OAuth consent flow and x.ai/cli links
+    // It applies even when the URL came from remote settings's `gate_url`, so nothing depends on the remote flag being configured correctly
+    // If the URL already specifies a referrer it's left alone
     let url = crate::app::link_opener::ensure_query_param(url, "referrer", "grok-build");
     super::ctx::open_url_or_show(app, &url);
     vec![]

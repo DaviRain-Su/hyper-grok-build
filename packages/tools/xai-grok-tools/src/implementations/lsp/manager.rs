@@ -287,9 +287,36 @@ impl LspManager {
             .collect()
     }
 
-    /// Only called after `search_replace`; other mutations (bash, git) are not tracked.
+    /// A structured edit we ourselves made (search_replace / apply_patch).
     pub fn notify_file_changed(&mut self, path: &Path, content: &str) {
-        let (server_name, lang_id) = match super::config::resolve_server(&self.servers, path) {
+        self.notify_file_event(path, Some(content), super::DiskChangeKind::Changed);
+    }
+
+    pub fn notify_file_event(
+        &mut self,
+        path: &Path,
+        content: Option<&str>,
+        kind: super::DiskChangeKind,
+    ) {
+        let typ = kind.to_lsp();
+        // A `.csproj` must still reach the C# server even though only `.cs` is
+        // mapped — but only if that server registered a matching watcher.
+        for client in self.clients.values_mut() {
+            client.notify_watched_path_event(path, typ);
+        }
+        let owner = super::config::resolve_server(&self.servers, path);
+        if kind == super::DiskChangeKind::Deleted {
+            if let Some((server_name, _)) = owner
+                && let Some(client) = self.clients.get_mut(&server_name)
+            {
+                client.close_document(path);
+            }
+            return;
+        }
+        let Some(content) = content else {
+            return;
+        };
+        let (server_name, lang_id) = match owner {
             Some(pair) => pair,
             None => return,
         };

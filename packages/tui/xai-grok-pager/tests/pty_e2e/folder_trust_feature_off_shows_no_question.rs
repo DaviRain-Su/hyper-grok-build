@@ -2,9 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 15. **Feature off => no trust question.**
-/// With `GROK_FOLDER_TRUST=0` (explicit opt-out) the feature is off, so the repo
-/// boots straight to the welcome (the default is now on).
+/// 15. **Feature off means no trust question.**
+/// With `GROK_FOLDER_TRUST=0` (explicit opt-out) the feature is off, so booting in the repo goes straight to the welcome (the default is on).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn folder_trust_feature_off_shows_no_question() {

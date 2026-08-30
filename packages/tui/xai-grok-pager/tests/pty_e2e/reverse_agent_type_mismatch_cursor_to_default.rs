@@ -2,9 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 10. **Reverse direction mismatch.**
-/// Switching between models with mismatched agent types mid-session
-/// should also show the modal (both directions).
+/// Switching mid-session between models whose agent types differ shows the "requires starting a new session" modal in both directions.
+/// This drives the reverse leg, cursor to grok-build.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn reverse_agent_type_mismatch_cursor_to_default() {
@@ -20,7 +19,6 @@ async fn reverse_agent_type_mismatch_cursor_to_default() {
 
     let binary = pager_binary().expect("resolve pager binary");
 
-    // Start with a model as default via --model flag.
     let mut harness = PtyHarness::spawn_with_content(
         &binary,
         DEFAULT_ROWS,
@@ -42,12 +40,11 @@ async fn reverse_agent_type_mismatch_cursor_to_default() {
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("response rendered");
 
-    // Switch to default-model (different agent type: cursor → grok-build).
+    // Switch to default-model, which crosses agent types from cursor to grok-build
     harness
         .inject_keys(b"/model default-model\r")
         .expect("type model switch");
 
-    // The question modal should appear.
     harness
         .wait_for_text("requires starting a new session", Duration::from_secs(15))
         .expect("agent type mismatch modal should appear for reverse direction");

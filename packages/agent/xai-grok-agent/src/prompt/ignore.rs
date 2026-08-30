@@ -33,5 +33,5 @@ fn get_global_gitignore_path() -> Option<PathBuf> {
     git2::Config::open_default()
         .ok()
         .and_then(|cfg| cfg.get_path("core.excludesFile").ok())
-        .or_else(|| dirs::home_dir().map(|h| h.join(".gitignore")))
+        .or_else(|| xai_dirs::home_dir().map(|home| home.join(".gitignore")))
 }

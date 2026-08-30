@@ -2,7 +2,7 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Single whitespace-containing argv → `$SHELL -i -c` (same hop as OSC 52).
+/// A single argv containing whitespace routes through `$SHELL -i -c`, the same hop OSC 52 takes.
 const PRINT_APPEARANCE: &str =
     "printf 'grok=%s lc=%s\\n' \"$GROK_APPEARANCE\" \"$LC_GROK_APPEARANCE\"";
 
@@ -13,11 +13,11 @@ fn parse_printed_appearance(raw: &str) -> Option<(String, String)> {
     Some((grok.to_owned(), lc.to_owned()))
 }
 
-/// Appearance stamp e2e through the interactive shell hop.
+/// End-to-end check that the appearance stamp survives the interactive shell hop.
 ///
-/// Parent pins GROK/LC empty. `COLORFGBG` is a dark hint `detect()` would
-/// honor, so a wrap that invented polarity from it would stamp `dark`.
-/// Do not call `detect_desktop()` here — two live portal probes can disagree.
+/// The parent pins GROK_APPEARANCE and LC_GROK_APPEARANCE empty.
+/// `COLORFGBG` is a dark hint `detect()` would honor, so a wrap that invented polarity from it would stamp `dark`.
+/// Do not call `detect_desktop()` here: two live portal probes can disagree.
 #[test]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 #[cfg(unix)]
@@ -47,9 +47,9 @@ fn wrap_appearance_env_advertised_through_shell() {
     );
 }
 
-/// Parent `GROK_APPEARANCE=light` with LC pinned empty: desktop Some overrides
-/// both names to the same polarity; desktop None inherits GROK and must not
-/// invent LC. No second live desktop probe.
+/// The parent sets `GROK_APPEARANCE=light` and pins LC empty.
+/// A desktop probe that answers overrides both names to the same polarity; one that answers `None` inherits GROK and must not invent LC.
+/// The test itself never probes the desktop; a second live probe could disagree.
 #[test]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 #[cfg(unix)]

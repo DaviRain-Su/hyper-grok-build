@@ -1,8 +1,7 @@
 //! In-app how-to documentation data (embedded markdown).
 //!
-//! Single source of truth: two static arrays (`USER_GUIDE`, `REFERENCE_DOCS`)
-//! hold every doc. All lookups are zero-allocation; `DocEntry` exists only for
-//! backward compatibility with the TUI doc picker.
+//! Single source of truth: two static arrays (`USER_GUIDE`, `REFERENCE_DOCS`) hold every doc.
+//! All lookups are zero-allocation; `DocEntry` exists only for backward compatibility with the TUI doc picker.
 
 /// A compile-time document entry. All fields are `&'static str`.
 #[derive(Debug)]
@@ -216,10 +215,10 @@ pub static USER_GUIDE: &[Doc] = &[
     },
 ];
 
-/// Non-user-guide reference docs. Separate from USER_GUIDE because they
-/// live under `docs/` (not `docs/user-guide/`), are not extracted to disk,
-/// and do not follow the NN-*.md managed naming pattern. Bundled via
-/// `include_str!` so they are available at runtime without a docs path.
+/// Non-user-guide reference docs.
+/// Separate from USER_GUIDE: they live under `docs/` (not `docs/user-guide/`) and are not extracted to disk.
+/// They also skip the NN-*.md managed naming pattern.
+/// Bundled via `include_str!` so they are available at runtime without a docs path.
 static REFERENCE_DOCS: &[Doc] = &[
     Doc {
         filename: "hooks-and-plugins.md",

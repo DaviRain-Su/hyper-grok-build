@@ -1,4 +1,4 @@
-//! Top bar component — renders cwd and git info.
+//! Top bar component: renders cwd and git info.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -39,17 +39,15 @@ pub fn render_top_bar(
     }
 }
 
-/// Build the `{git branch} {worktree} {cwd}` line for the welcome top bar,
-/// reading the live process cwd.
+/// Build the `{git branch} {worktree} {cwd}` line for the welcome top bar, reading the live process cwd.
 pub(crate) fn location_line(theme: &Theme) -> Line<'static> {
     location_line_at(theme, &process_cwd())
 }
 
-/// As [`location_line`], but for an explicit `cwd`. The dashboard header
-/// passes its staged `app.cwd` so the line tracks a `/cd` immediately,
-/// before (or even if) `Effect::SetWorkingDir` moves the process cwd.
-///
-/// Render-safe: reads the per-cwd git cache; never blocks or spawns `git`.
+/// As [`location_line`], but for an explicit `cwd`.
+/// The dashboard header passes its staged `app.cwd` so the line tracks a `/cd` immediately.
+/// That holds before (or even if) `Effect::SetWorkingDir` moves the process cwd.
+/// Safe to call during render: it reads the per-cwd git cache and never blocks or spawns `git`.
 /// The caller width-truncates the returned line.
 pub(crate) fn location_line_at(theme: &Theme, cwd: &Path) -> Line<'static> {
     let info_style = Style::default().fg(theme.gray);
@@ -70,8 +68,7 @@ pub(crate) fn location_line_at(theme: &Theme, cwd: &Path) -> Line<'static> {
         parts.push(Span::styled(git_text, git_style));
         parts.push(Span::styled(" ", info_style));
     }
-    // Worktree badge — matches the session status bar's `worktree ` marker
-    // (accent_user) before the path when the cwd is a linked worktree.
+    // Worktree badge: matches the session status bar's `worktree ` marker (accent_user) before the path when the cwd is a linked worktree
     if info.as_ref().is_some_and(|i| i.is_worktree) {
         parts.push(Span::styled(
             "worktree ",
@@ -88,22 +85,16 @@ fn process_cwd() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Format the cwd for the welcome top bar / dashboard header: the actual
-/// working directory (tilde-collapsed), with a `(worktree of …)` suffix
-/// when `info` reports a linked worktree's main repo. Matches the session
-/// status bar (the `worktree ` badge itself is painted by [`location_line`]).
-///
-/// Pure formatting over the per-cwd git probe — never spawns `git`. On a
-/// cache miss (`info == None`, e.g. the very first frame) it still shows the
-/// raw cwd path with `~` collapsed; the worktree suffix fills in once the
-/// probe lands.
+/// The tilde-collapsed cwd, with a `(worktree of …)` suffix when `info` reports a linked worktree's main repo.
+/// Matches the session status bar; the `worktree ` badge itself is painted by [`location_line`].
+/// Pure formatting over the per-cwd git probe; nothing here spawns `git`.
 fn format_cwd_display(cwd: &Path, info: Option<&git_info::CwdGitInfo>) -> String {
     let display = collapse_home(cwd);
     let main_repo = info.and_then(|i| i.main_repo.as_deref());
     format_cwd_parts(&display, main_repo)
 }
 
-/// Pure formatting for the cwd display — no global state, easy to test.
+/// Pure formatting for the cwd display; no global state.
 fn format_cwd_parts(display: &str, main_repo: Option<&str>) -> String {
     if let Some(main_repo) = main_repo {
         format!("{display} (worktree of {main_repo})")
@@ -113,14 +104,9 @@ fn format_cwd_parts(display: &str, main_repo: Option<&str>) -> String {
 }
 
 fn collapse_home(dir: &std::path::Path) -> String {
-    let path = dir.display().to_string();
-    match git_info::home_dir() {
-        Some(home) => path
-            .strip_prefix(&home)
-            .map(|s| format!("~{s}"))
-            .unwrap_or(path),
-        None => path,
-    }
+    // Match the session status bar: Path::strip_prefix via abbreviate_path, not a string prefix of USERPROFILE
+    // `C:\Users\foo` must not collapse neighbor `C:\Users\foobar` to `~bar`
+    crate::util::abbreviate_path(&dir.to_string_lossy()).into_owned()
 }
 
 #[cfg(test)]
@@ -132,9 +118,8 @@ mod tests {
         assert_eq!(format_cwd_parts("~/xai", None), "~/xai");
     }
 
-    /// A linked worktree shows the `(worktree of …)` suffix — matching the
-    /// session status bar — regardless of the worktree's human label (the
-    /// label is no longer shown here; the `worktree ` badge stands in for it).
+    /// A linked worktree shows the `(worktree of …)` suffix (matching the session status bar) regardless of the worktree's human label.
+    /// The label is no longer shown here; the `worktree ` badge stands in for it.
     #[test]
     fn format_cwd_worktree_shows_main_repo() {
         assert_eq!(
@@ -143,9 +128,8 @@ mod tests {
         );
     }
 
-    /// The header shows the ACTUAL cwd, not the git repo root: switching
-    /// into a subdirectory of a repo reflects the subdirectory. (`/work/...`
-    /// is outside `$HOME`, so `collapse_home` leaves it verbatim.)
+    /// The header shows the ACTUAL cwd, not the git repo root: switching into a subdirectory of a repo reflects the subdirectory.
+    /// (`/work/...` is outside `$HOME`, so `collapse_home` leaves it verbatim.)
     #[test]
     fn format_cwd_display_shows_subdir_not_repo_root() {
         let info = git_info::CwdGitInfo {
@@ -160,8 +144,7 @@ mod tests {
         );
     }
 
-    /// A worktree subdirectory shows the `(worktree of …)` suffix (matching
-    /// the session status bar) while still showing the real subdirectory path.
+    /// A worktree subdirectory shows the `(worktree of …)` suffix (matching the session status bar) while still showing the real subdirectory path.
     #[test]
     fn format_cwd_display_worktree_subdir_shows_main_repo() {
         let info = git_info::CwdGitInfo {
@@ -183,5 +166,28 @@ mod tests {
             format_cwd_display(Path::new("/work/xai/frontend/apps"), None),
             "/work/xai/frontend/apps",
         );
+    }
+
+    /// String-prefix `strip_prefix($HOME)` would collapse a neighbor profile (`$HOMEbar`) into `~bar`.
+    /// Path-component matching must leave it intact while still collapsing a real child of `$HOME`.
+    #[test]
+    fn collapse_home_does_not_eat_neighbor_profile() {
+        let Some(home) = git_info::home_dir() else {
+            return;
+        };
+        if home.is_empty() {
+            return;
+        }
+        let neighbor = PathBuf::from(format!("{home}bar")).join("src");
+        let collapsed_neighbor = collapse_home(&neighbor);
+        assert_eq!(
+            collapsed_neighbor,
+            neighbor.display().to_string(),
+            "string prefix would produce ~bar/src (or ~bar\\src)"
+        );
+
+        let child = PathBuf::from(&home).join("src");
+        let expected = format!("~/{}", Path::new("src").display());
+        assert_eq!(collapse_home(&child), expected);
     }
 }

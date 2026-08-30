@@ -1,10 +1,7 @@
-//! Markdown-aware semantic chunking.
-//!
 //! Splits markdown content into chunks suitable for embedding and search.
-//! Chunks respect markdown structure (headers, paragraphs, code blocks)
-//! and include ancestor headers for self-containment.
 //!
-//! Character counts are used as a proxy for token counts (chars / 4 ≈ tokens).
+//! Chunks respect markdown structure (headers, paragraphs, code blocks) and include ancestor headers so each chunk stands alone.
+//! Character counts stand in for token counts, at about 4 characters per token.
 
 use xai_grok_config_types::MemoryIndexConfig;
 
@@ -27,14 +24,11 @@ pub fn chunk_hash(text: &str) -> String {
 /// Split markdown content into chunks, respecting structure.
 ///
 /// Strategy:
-/// 1. Split on `##` headers — each section is a candidate chunk
+/// 1. Split on `##` headers; each section is a candidate chunk
 /// 2. If a section exceeds `max_chunk_chars`, split on paragraph boundaries (`\n\n`)
 /// 3. If a paragraph still exceeds `max_chunk_chars`, split on line boundaries
-/// 4. Continuation chunks are prefixed with ancestor header context
 ///
-/// When a section is split into multiple sub-chunks, each continuation chunk
-/// is prefixed with the last `chunk_overlap_chars` of the previous chunk for
-/// embedding continuity, plus ancestor header context.
+/// Continuation chunks are prefixed with the last `chunk_overlap_chars` of the previous chunk for embedding continuity, plus ancestor header context.
 pub fn chunk_markdown(content: &str, config: &MemoryIndexConfig) -> Vec<Chunk> {
     if content.is_empty() {
         return vec![];
@@ -47,7 +41,6 @@ pub fn chunk_markdown(content: &str, config: &MemoryIndexConfig) -> Vec<Chunk> {
         return vec![];
     }
 
-    // If the entire content fits in one chunk, return it directly.
     if content.len() <= max_chars {
         return vec![Chunk {
             text: content.to_string(),
@@ -56,7 +49,6 @@ pub fn chunk_markdown(content: &str, config: &MemoryIndexConfig) -> Vec<Chunk> {
         }];
     }
 
-    // Split into sections by ## headers
     let sections = split_by_headers(&lines);
     let mut chunks = Vec::new();
 
@@ -70,7 +62,7 @@ pub fn chunk_markdown(content: &str, config: &MemoryIndexConfig) -> Vec<Chunk> {
                 end_line: section.start_line + section.lines.len(),
             });
         } else {
-            // Section too large — split on paragraph boundaries
+            // Section too large: split on paragraph boundaries
             let sub_chunks =
                 split_section_by_paragraphs(section, max_chars, config.chunk_overlap_chars);
             chunks.extend(sub_chunks);
@@ -109,7 +101,7 @@ fn split_by_headers<'a>(lines: &[&'a str]) -> Vec<Section<'a>> {
             }
             current_start = i;
 
-            // Update header stack: pop headers at same or deeper level
+            // Pop same-or-deeper headers so only ancestors stay on the stack
             while header_stack.last().is_some_and(|(l, _)| *l >= level) {
                 header_stack.pop();
             }
@@ -131,8 +123,7 @@ fn split_by_headers<'a>(lines: &[&'a str]) -> Vec<Section<'a>> {
 }
 
 /// Split a large section into sub-chunks by paragraph boundaries (`\n\n`).
-/// Continuation chunks are prefixed with the last `overlap_chars` of the
-/// previous chunk for embedding continuity.
+/// Continuation chunks are prefixed with the last `overlap_chars` of the previous chunk for embedding continuity.
 fn split_section_by_paragraphs(
     section: &Section<'_>,
     max_chars: usize,
@@ -155,7 +146,7 @@ fn split_section_by_paragraphs(
                 start_line: current_start,
                 end_line: section.start_line + i,
             });
-            // Apply overlap: start next chunk with tail of previous
+            // The next chunk starts with the last `overlap_chars` of the flushed text
             current_text = if overlap_chars > 0 {
                 let tail: String = flushed
                     .chars()
@@ -181,7 +172,7 @@ fn split_section_by_paragraphs(
 
         // If single line pushes us over max, flush what we have
         if current_text.len() > max_chars && i > line_offset {
-            // Split at the previous line
+            // Split before the just-added line; it carries over to the next chunk
             let split_at = current_text.rfind('\n').unwrap_or(current_text.len());
             let (keep, remainder) = current_text.split_at(split_at);
             chunks.push(Chunk {
@@ -214,7 +205,7 @@ pub(crate) fn header_level(line: &str) -> Option<usize> {
         return None;
     }
     let level = trimmed.chars().take_while(|&c| c == '#').count();
-    // Must be followed by a space or end of line to be a valid header
+    // The hashes must be followed by a space or end of line to count as a header
     let rest = &trimmed[level..];
     if rest.is_empty() || rest.starts_with(' ') {
         Some(level)
@@ -228,7 +219,7 @@ fn format_header_context(stack: &[(usize, String)]) -> String {
     if stack.len() <= 1 {
         return String::new();
     }
-    // Skip the last entry (it's the current section's own header)
+    // The last entry is the current section's own header, not an ancestor
     stack[..stack.len() - 1]
         .iter()
         .map(|(_, text)| text.trim().to_string())
@@ -258,7 +249,7 @@ mod tests {
         let h1 = chunk_hash("hello world");
         let h2 = chunk_hash("hello world");
         assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 64); // blake3 hex = 64 chars
+        assert_eq!(h1.len(), 64); // A blake3 hash is 32 bytes, so 64 hex chars.
     }
 
     #[test]
@@ -308,7 +299,6 @@ mod tests {
             chunk_overlap_chars: 0,
         };
         let chunks = chunk_markdown(content, &config);
-        // The child section chunk should have parent context
         let child_chunk = chunks.iter().find(|c| c.text.contains("Child content"));
         assert!(child_chunk.is_some(), "should have a child chunk");
         assert!(
@@ -340,10 +330,10 @@ mod tests {
         assert_eq!(header_level("# Title"), Some(1));
         assert_eq!(header_level("## Section"), Some(2));
         assert_eq!(header_level("### Subsection"), Some(3));
-        assert_eq!(header_level("#hashtag"), None); // no space after #
+        assert_eq!(header_level("#hashtag"), None); // No space after the '#'.
         assert_eq!(header_level("not a header"), None);
         assert_eq!(header_level(""), None);
-        assert_eq!(header_level("##"), Some(2)); // header with no text
+        assert_eq!(header_level("##"), Some(2)); // Header with no text.
     }
 
     #[test]

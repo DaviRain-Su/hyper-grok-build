@@ -25,8 +25,7 @@ fn sent_texts(effects: &[Effect]) -> Vec<String> {
         .collect()
 }
 
-/// Force the local drip-feed send path so a mid-turn Enter enqueues locally
-/// instead of the server-authoritative send.
+/// Forces the local queue path (`FollowUpBehavior::Queue`) so a mid-turn Enter enqueues locally instead of handing the send to the server.
 struct LocalQueueMode {
     previous: crate::appearance::FollowUpBehavior,
 }
@@ -46,8 +45,7 @@ impl Drop for LocalQueueMode {
     }
 }
 
-/// Sending while parked must go through even when the last thing the user
-/// did was `/btw` (the overlay is still open).
+/// Sending while parked must go through even when the last thing the user did was `/btw` (the overlay is still open).
 #[test]
 fn send_while_waiting_goes_through_when_btw_overlay_is_open() {
     let mut app = running_turn_app();
@@ -76,9 +74,8 @@ fn send_while_waiting_goes_through_when_btw_overlay_is_open() {
     );
 }
 
-/// A prompt queued *before* `/btw` (a thinking-turn follow-up) must stay
-/// queued when the answer lands. The send path is what releases a message
-/// typed while parked; `/btw` completion must not flush the queue.
+/// A prompt queued *before* `/btw` (a follow-up typed while the model was thinking) must stay queued when the answer lands.
+/// The send path is what releases a message typed while parked; `/btw` completion must not flush the queue.
 #[test]
 fn btw_response_does_not_flush_an_unrelated_queued_prompt() {
     let mut app = running_turn_app();
@@ -121,8 +118,7 @@ fn btw_response_does_not_flush_an_unrelated_queued_prompt() {
     );
 }
 
-/// Enter during a wait must interject the message just typed, not an
-/// earlier follow-up that was queued while the model was still thinking.
+/// Enter during a wait must interject the message just typed, not an earlier follow-up that was queued while the model was still thinking.
 #[test]
 fn send_while_waiting_releases_the_new_prompt_not_an_older_queued_row() {
     let mut app = running_turn_app();

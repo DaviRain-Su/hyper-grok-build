@@ -1,8 +1,7 @@
 // Per-test-case module for the `pty_e2e` integration test crate.
 //
-// A plain prompt with a mid-text `/skill` token must keep
-// the composer's teal token highlight in the scrollback echo — live, with the
-// real shell advertising the skill from an on-disk SKILL.md.
+// A plain prompt with a mid-text `/skill` token must keep the composer's teal token highlight in the scrollback echo
+// This runs live, with the real shell advertising the skill from an on-disk SKILL.md
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -12,13 +11,13 @@ use xai_grok_pager_pty_harness::StyledLine;
 const TYPED: &str = "great /test-skill do it";
 /// The token the composer (and the echo) must render in the skill accent.
 const TOKEN: &str = "/test-skill";
-/// Leading word of the prompt — must stay in the plain body color.
+/// Leading word of the prompt; it must stay in the plain body color.
 const BODY_WORD: &str = "great";
 
 const DONE_SENTINEL: &str = "MIDTEXT_SKILL_ECHO_DONE";
 
-/// On the first screen row whose text contains `row_marker`, return the fg of
-/// the styled run containing `needle`. `None` until the row (or run) exists.
+/// On the first screen row whose text contains `row_marker`, return the fg of the styled run containing `needle`.
+/// Returns `None` until the row (or run) exists.
 fn run_fg_on_row(rows: &[StyledLine], row_marker: &str, needle: &str) -> Option<Option<String>> {
     for row in rows {
         let text: String = row.runs.iter().map(|r| r.text.as_str()).collect();
@@ -35,9 +34,8 @@ fn run_fg_on_row(rows: &[StyledLine], row_marker: &str, needle: &str) -> Option<
 }
 
 /// Seed a user-invocable skill under `dir/.grok/skills`. The workspace must
-/// be a git repo: the live session advertises workspace-local skills only for
-/// git workspaces (offline `grok inspect` scans plain dirs too) — same shape
-/// as the mid_text_skill_token_echo.yaml scenario's `git_init: true`.
+/// be a git repo: the live session advertises workspace-local skills only for git workspaces (offline `grok inspect` scans plain dirs too).
+/// The mid_text_skill_token_echo.yaml scenario sets `git_init: true` for the same reason.
 fn seed_test_skill(dir: &Path) {
     let skill_dir = dir.join(".grok").join("skills").join("test-skill");
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
@@ -48,9 +46,8 @@ fn seed_test_skill(dir: &Path) {
     .expect("write SKILL.md");
 }
 
-/// Type `great /test-skill do it`, wait for the composer to highlight the
-/// advertised skill token, submit, and assert the scrollback echo renders the
-/// SAME token in the same accent fg while the body word stays a different fg.
+/// Type `great /test-skill do it`, wait for the composer to highlight the advertised skill token, then submit.
+/// The scrollback echo must render the SAME token in the same accent fg while the body word stays a different fg.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn mid_text_skill_token_echo_styled_pty() {
@@ -81,8 +78,8 @@ async fn mid_text_skill_token_echo_styled_pty() {
         .wait_for_text(TYPED, Duration::from_secs(10))
         .expect("typed prompt echoed in the composer");
 
-    // Wait for the shell to advertise the skill: once the registry syncs, the
-    // composer restyles the token — its fg diverges from the body word's fg.
+    // Wait for the shell to advertise the skill
+    // Once the registry syncs, the composer restyles the token and its fg diverges from the body word's fg
     let composer_deadline = Instant::now() + Duration::from_secs(30);
     let composer_token_fg = loop {
         harness.update(Duration::from_millis(100));
@@ -106,8 +103,8 @@ async fn mid_text_skill_token_echo_styled_pty() {
         .wait_for_text(DONE_SENTINEL, Duration::from_secs(30))
         .expect("mock response rendered (turn finished)");
 
-    // The composer cleared on submit, so the only row with the full typed
-    // text is the scrollback echo. It may take a paint to settle.
+    // The composer cleared on submit, so the only row with the full typed text is the scrollback echo
+    // It may take a paint to settle
     let echo_deadline = Instant::now() + Duration::from_secs(10);
     let (echo_token_fg, echo_body_fg) = loop {
         harness.update(Duration::from_millis(100));

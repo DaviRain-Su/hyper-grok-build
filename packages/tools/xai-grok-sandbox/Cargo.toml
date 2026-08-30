@@ -8,7 +8,7 @@ description = "OS-level sandboxing for Grok Build using kernel primitives (Landl
 [dependencies]
 anyhow = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
-dirs = "5.0"
+xai-dirs = { workspace = true }
 dunce = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

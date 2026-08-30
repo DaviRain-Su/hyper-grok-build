@@ -4,62 +4,51 @@ use super::common::*;
 #[allow(unused_imports)]
 use super::scroll::*;
 
-// ── Regression: wheel-path cap — a misclassified flood must not teleport ──
+// ── Regression: wheel-path cap (a misclassified flood must not teleport) ──
 //
-// The parent capped only confirmed-trackpad flushes; wheel and Unknown
-// streams flushed their whole backlog in one 16ms slot on the assumption
-// that "wheel desired is bounded by physical notches". That assumption
-// fails under misclassification (a trackpad the brand table prices as
-// ept=3 that never promotes) and terminal-generated momentum bursts: one
-// flush teleported the viewport by hundreds of rows. The fix routes every
-// stream kind through the proportional cap (max(6, viewport/2) per flush)
-// with the excess carried into later cadence slots.
+// The parent capped only confirmed-trackpad flushes
+// Wheel and Unknown streams flushed their whole backlog in one 16ms slot, assuming "wheel desired is bounded by physical notches"
+// That assumption fails under misclassification (a trackpad the brand table prices as ept=3 that never promotes)
+// It also fails under terminal-generated momentum bursts
+// One flush teleported the viewport by hundreds of rows
+// The fix routes every stream kind through the proportional cap (max(6, viewport/2) per flush) with the excess carried into later cadence slots
 //
-// Driver shape: 60 back-to-back wheel-up reports (`Duration::ZERO` — no
-// host sleeps) at GROK_SCROLL_SPEED=100 (6x, the existing user setting as
-// a demand amplifier). Under the harness terminal (`TerminalName::Unknown`,
-// ept=3) the first 3 events land within microseconds, promoting the stream
-// to Wheel; desired = 60 x (3/3) x 6.0 = 360 rows. Determinism: the writer
-// finishes in microseconds and the reports queue in the PTY buffer, so
-// reader-side delays only COMPRESS arrival timing (per the driver contract
-// in `scroll.rs`) — a mid-burst >80ms arrival gap (stream split) is
-// impossible, and promotion jitter is irrelevant because Unknown prices
-// identically on ept=3.
+// Driver shape: 60 back-to-back wheel-up reports (`Duration::ZERO`, no host sleeps) at GROK_SCROLL_SPEED=100
+// The 6x speed is the existing user setting acting as a demand amplifier
+// Under the harness terminal (`TerminalName::Unknown`, ept=3) the first 3 events land within microseconds, promoting the stream to Wheel
+// Desired travel = 60 x (3/3) x 6.0 = 360 rows
+// Determinism: the writer finishes in microseconds and the reports queue in the PTY buffer
+// Reader-side delays therefore only COMPRESS arrival timing (per the driver contract in `scroll.rs`)
+// A mid-burst >80ms arrival gap (stream split) is impossible, and promotion jitter is irrelevant because Unknown prices identically on ept=3
 //
-// The teleport guard asserts rows-per-painted-frame, which is timing
-// independent:
-// - New code: every flush (the promotion flush included) passes through
-//   the per-flush cap, <= viewport/2 <= 25 rows on the 50-row PTY, so
-//   travel/frames <= 25 in every flush pacing/stall regime.
-// - Parent: the uncapped backlog lands in the promotion frame plus one or
-//   two catch-up flushes (finalize was uncapped too) — ~360 rows over 2-4
-//   frames, a ratio >= ~90. Verified against a parent-built binary.
+// The teleport guard asserts rows-per-painted-frame, which is timing independent:
+// - New code: every flush (the promotion flush included) passes through the per-flush cap, <= viewport/2 <= 25 rows on the 50-row PTY
+//   Travel/frames therefore stays <= 25 in every flush pacing/stall regime
+// - Parent: the uncapped backlog lands in the promotion frame plus one or two catch-up flushes (finalize was uncapped too)
+//   That is ~360 rows over 2-4 frames, a ratio >= ~90. Verified against a parent-built binary.
 //
-// Only byte-deterministic quantities are asserted (marker indices, frame
-// count from the preamble's reset_timing() capture); per-flush cap math is
-// pinned by the synthetic-clock unit tests in `src/input/mouse.rs`.
+// Only byte-deterministic quantities are asserted (marker indices, frame count from the preamble's reset_timing() capture)
+// Per-flush cap math is pinned by the synthetic-clock unit tests in `src/input/mouse.rs`
 
-/// Marker count: tall enough that even the parent's uncapped 360-row jump
-/// cannot clamp at the transcript top (which would mask its teleport).
+/// Marker count: tall enough that even the parent's uncapped 360-row jump cannot clamp at the transcript top (which would mask its teleport).
 const MARKER_COUNT: usize = 700;
 
-/// 60 back-to-back reports: 360 rows of demand at 6x speed, several times
-/// more than the capped pipeline can deliver inside one stream's lifetime.
+/// 60 back-to-back reports: 360 rows of demand at 6x speed, several times more than the capped pipeline can deliver inside one stream's lifetime.
 const BURST_EVENTS: usize = 60;
 
-/// Teleport signature threshold on rows scrolled per painted frame. Capped
-/// delivery is bounded by 25 (see header); the parent's uncapped flood
-/// averages >= ~90. 30 splits the bands with margin on both sides.
+/// Teleport signature threshold on rows scrolled per painted frame.
+/// Capped delivery is bounded by 25 (see header); the parent's uncapped flood averages >= ~90.
+/// 30 splits the bands with margin on both sides.
 const MAX_ROWS_PER_FRAME: f64 = 30.0;
 
-/// The flood must visibly scroll: even a fully batched arrival delivers
-/// the first-event flush (6), the promotion flush (12) and a capped
-/// finalize flush (>= 6); 20 leaves slack for odd viewport rounding.
+/// The flood must visibly scroll.
+/// Even a fully batched arrival delivers the first-event flush (6), the promotion flush (12) and a capped finalize flush (>= 6).
+/// 20 leaves slack for odd viewport rounding.
 const TRAVEL_FLOOR: usize = 20;
 
-/// **Misclassified-flood teleport regression.** A dense wheel-classified
-/// flood at high scroll speed must deliver its travel in viewport-capped
-/// per-frame steps — never as one uncapped multi-hundred-row jump.
+/// **Misclassified-flood teleport regression.**
+/// A dense wheel-classified flood at high scroll speed must deliver its travel in viewport-capped per-frame steps.
+/// It must never land as one uncapped multi-hundred-row jump.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn misclassified_wheel_flood_does_not_teleport_viewport() {
@@ -77,8 +66,7 @@ async fn misclassified_wheel_flood_does_not_teleport_viewport() {
         WHEEL_COL,
         Duration::ZERO,
     );
-    // Drain window: outlasts the 80ms stream gap plus the post-stop cadence
-    // flushes and the finalize flush.
+    // Drain window: outlasts the 80ms stream gap plus the post-stop cadence flushes and the finalize flush
     harness.update(Duration::from_millis(800));
 
     assert!(

@@ -66,3 +66,16 @@ fn request_enforces_utf8_byte_cap() {
         }
     );
 }
+
+#[test]
+fn try_new_defaults_to_queue_and_preserves_explicit_operation() {
+    let queued = ActiveAgentMessageRequest::try_new("sub-1", "follow up").unwrap();
+    assert_eq!(queued.operation(), ActiveAgentMessageOperation::Queue);
+    let steered = ActiveAgentMessageRequest::try_new_with_operation(
+        "sub-1",
+        "follow up",
+        ActiveAgentMessageOperation::Steer,
+    )
+    .unwrap();
+    assert_eq!(steered.operation(), ActiveAgentMessageOperation::Steer);
+}

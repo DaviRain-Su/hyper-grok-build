@@ -34,14 +34,8 @@ use parking_lot::Mutex;
 use xai_grok_workspace::trust::{TrustStore, is_unsafe_trust_root, workspace_key};
 
 // Decision-side (scan/decide/prompt/store) relocated to `xai-grok-workspace`
-// (client crate). `grant_folder_trust` is the ONLY moved item referenced from
-// OUTSIDE this module (shell call sites + the pager's
-// `xai_grok_shell::agent::folder_trust::grant_folder_trust`), so only it is
-// re-published; the rest are private imports used within this module. A glob
-// re-export is deliberately avoided: it would silently re-publish the
-// cache-SKIPPING `revoke_folder_trust_store` next to the real
-// `revoke_folder_trust` wrapper, inviting a stale-untrust security bug.
-pub use xai_grok_workspace::folder_trust::grant_folder_trust;
+// (client crate). Only the helpers used by this consume-side module are
+// imported; callers should use the workspace API for explicit trust decisions.
 use xai_grok_workspace::folder_trust::{
     DecideInputs, TrustOutcome, claude_project_mcp_names, decide, decide_inputs,
     decide_inputs_with_interactive, feature_enabled, folder_trust_inert, persist_trust,
@@ -63,19 +57,15 @@ use crate::util::config::{MCP_SCOPE_PROJECT, RemoteSettings};
 static DECISIONS: LazyLock<Mutex<HashMap<PathBuf, bool>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Revoke trust for `cwd`'s workspace: downgrade the in-process decision cache
-/// so a mid-session untrust takes effect immediately, while the store half —
-/// persisting an explicit `set_untrusted` ONLY when the folder was actually
-/// trusted — is delegated to
-/// [`xai_grok_workspace::folder_trust::revoke_folder_trust_store`].
+/// Compatibility alias; new call sites should use the workspace API directly.
+pub use xai_grok_workspace::folder_trust::grant_folder_trust;
+
+/// Revoke trust for `cwd`'s workspace and downgrade the consume-side cache.
 ///
 /// Without the cache downgrade a cached grant would short-circuit
-/// [`resolve_and_record`] (which only reconciles untrusted→trusted), so hooks
-/// would keep loading until restart. Unrecordable roots ($HOME / fs-root) are
-/// refused instead: [`decide`] always trusts them and the store refuses both
-/// their grants and denies, so a cache deny would be the one verdict nothing
-/// (grant, store, prompt) could ever lift. Returns whether the folder had been
-/// trusted. Symmetric with [`grant_folder_trust`].
+/// [`resolve_and_record`], so hooks would keep loading until restart.
+/// Unrecordable roots ($HOME / fs-root) are refused because no later grant can
+/// lift a cache deny for them. Returns whether the folder had been trusted.
 pub(crate) fn revoke_folder_trust(cwd: &Path) -> bool {
     // Local/dev builds are fully inert: nothing was trusted-via-gate to revoke,
     // and recording `false` here would make `project_scope_allowed` wrongly gate.
@@ -133,7 +123,7 @@ pub(crate) fn project_scope_allowed(cwd: &Path) -> bool {
         // Re-read the store so a grant issued after the untrusted resolve is
         // honored without a restart (mirrors `resolve_and_record_inner`).
         Some(false) => {
-            if TrustStore::load().is_trusted(&key) {
+            if xai_grok_workspace::folder_trust::is_trusted_this_process(&key) {
                 record(&key, true);
                 true
             } else {
@@ -242,7 +232,7 @@ pub(crate) fn resolve_and_record(
     let key = workspace_key(cwd);
     resolve_and_record_inner(
         &key,
-        || TrustStore::load().is_trusted(&key),
+        || xai_grok_workspace::folder_trust::is_trusted_this_process(&key),
         || compute(cwd, &key, remote, allow_prompt),
     )
 }
@@ -283,7 +273,7 @@ pub(crate) fn resolve_launch_dir_trust(cwd: &Path, remote: Option<&RemoteSetting
     // resolve_and_record without repeating the expensive repo_configs scan.
     resolve_and_record_inner(
         &key,
-        || TrustStore::load().is_trusted(&key),
+        || xai_grok_workspace::folder_trust::is_trusted_this_process(&key),
         || compute_from_inputs(&inputs, feature, &key, false),
     )
 }
@@ -538,6 +528,23 @@ mod tests {
         assert!(project_scope_allowed(&key));
         record(&workspace_key(&key), false);
         assert!(!project_scope_allowed(&key));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn grant_folder_trust_seeds_decisions_cache() {
+        let _sim = simulate_release_build();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
+        let tmp = repo_tmp();
+        std::fs::create_dir_all(tmp.path().join(".grok").join("hooks")).unwrap();
+        grant_folder_trust(tmp.path());
+        let key = workspace_key(tmp.path());
+        assert!(
+            xai_grok_workspace::folder_trust::is_trusted_this_process(&key),
+            "explicit grant must be visible to consume-side resolution"
+        );
     }
 
     #[test]

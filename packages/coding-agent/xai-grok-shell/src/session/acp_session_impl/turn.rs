@@ -9,10 +9,10 @@ use xai_grok_tools::types::tool::ToolKind;
 /// Synthetic tool the model calls to return its schema-constrained final answer
 /// on backends that can't constrain output natively (Messages API). Intercepted
 /// in the loop, never executed as a real tool.
-pub(crate) const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
+const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
 /// Max times the model may re-call `StructuredOutput` with non-conforming args
 /// before the turn ends with the last validation error.
-pub(crate) const STRUCTURED_OUTPUT_MAX_RETRIES: u32 = 3;
+const STRUCTURED_OUTPUT_MAX_RETRIES: u32 = 3;
 /// What a `StructuredOutput` tool call means for the turn (see
 /// `handle_structured_output_tool_call`).
 enum StructuredOutputStep {
@@ -28,7 +28,7 @@ enum StructuredOutputStep {
 /// turn. Returns the value on success, or a human-readable error (surfaced to
 /// the model on retry and to the client as `structuredOutputError`). A `validator`
 /// of `Err` means the user's schema itself was invalid.
-pub(crate) fn validate_structured_output(
+fn validate_structured_output(
     validator: &Result<jsonschema::Validator, String>,
     raw: &str,
 ) -> Result<serde_json::Value, String> {
@@ -39,26 +39,6 @@ pub(crate) fn validate_structured_output(
         Ok(()) => Ok(value),
         Err(e) => Err(format!("output does not match the required schema: {e}")),
     }
-}
-
-/// Pin a large turn future on the heap from a **thin, never-inlined**
-/// stack frame.
-///
-/// `Box::pin(fut)` still constructs `fut` on the *caller* stack before the
-/// move. Calling that construction from an `#[inline(never)]` helper keeps
-/// the outer `handle_prompt` / recovery frames small so the default 2 MiB
-/// thread stack has room for the temporary. Pair with structural splits of
-/// huge async fns (setup vs loop) so no single future exceeds ~2 MiB.
-///
-/// No `stacker` / permanent `RUST_MIN_STACK` — see docs/test-isolation.md §8.3.
-#[inline(never)]
-pub(crate) fn box_turn_future<'a, F, T>(
-    build: impl FnOnce() -> F,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>
-where
-    F: std::future::Future<Output = T> + 'a,
-{
-    Box::pin(build())
 }
 /// Result of the turn-end usage drain (and cancel's no-drain snapshot).
 ///
@@ -131,7 +111,52 @@ impl TurnSpanTotals {
         }
         self.has_tool_call |= !response.tool_calls().is_empty();
         span.record("response.has_tool_call", self.has_tool_call);
+        record_last_sample(
+            span,
+            response
+                .stop_reason
+                .map_or(LAST_SAMPLE_STOP_REASON_UNREPORTED, |sr| sr.as_str()),
+            !response.tool_calls().is_empty(),
+            response
+                .usage
+                .as_ref()
+                .map_or(0, |u| i64::from(u.completion_tokens)),
+        );
     }
+}
+/// Single writer for the `last_sample.*` fields, shared by the delivered and
+/// failed paths so the field set cannot drift between them.
+fn record_last_sample(
+    span: &tracing::Span,
+    stop_reason: &str,
+    has_tool_call: bool,
+    output_tokens: i64,
+) {
+    debug_assert!(
+        span.is_disabled() || span.has_field("last_sample.stop_reason"),
+        "current span does not declare last_sample.* fields"
+    );
+    span.record("last_sample.stop_reason", stop_reason);
+    span.record("last_sample.has_tool_call", has_tool_call);
+    span.record("last_sample.output_tokens", output_tokens);
+}
+/// Recorded when a response reports no stop reason, so no stale previous-sample value survives.
+const LAST_SAMPLE_STOP_REASON_UNREPORTED: &str = "unreported";
+/// `last_sample.stop_reason` for a failed call with no reported stop reason.
+const LAST_SAMPLE_STOP_REASON_ERROR: &str = "error";
+/// Record `last_sample.*` for a failed call `TurnSpanTotals::record` never sees —
+/// otherwise the span keeps describing the previous sample; a resubmit's next response overwrites.
+pub(super) fn record_failed_sample_on_turn_span(
+    span: &tracing::Span,
+    kind: xai_grok_sampler::SamplingErrorKind,
+) {
+    let stop_reason = match kind {
+        xai_grok_sampler::SamplingErrorKind::MaxTokensTruncation => {
+            xai_grok_sampling_types::StopReason::Length.as_str()
+        }
+        _ => LAST_SAMPLE_STOP_REASON_ERROR,
+    };
+    record_last_sample(span, stop_reason, false, 0);
 }
 /// How the turn's per-block user-message echo is published to clients /
 /// `updates.jsonl`.
@@ -267,17 +292,7 @@ impl SessionActor {
                 crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
             ));
     }
-    #[tracing::instrument(
-        name = "session.handle_prompt",
-        skip_all,
-        fields(
-            session_id = %self.session_info.id.0,
-            prompt_id = %prompt_id,
-            prompt_length = tracing::field::Empty,
-            command_name = tracing::field::Empty,
-            command_source = tracing::field::Empty,
-        )
-    )]
+    #[cfg(test)]
     pub(super) async fn handle_prompt(
         self: &Arc<Self>,
         prompt_id: &str,
@@ -329,15 +344,13 @@ impl SessionActor {
                 &serde_json::json!({ "traceparent": tp }),
             );
         }
-        // Fork: pin the large inner state machine from a thin never-inlined
-        // frame so construction does not sit under the caller's stack load
-        // (docs/test-isolation.md §8.3).
-        box_turn_future(|| self.handle_turn_input_inner(request).instrument(span)).await
+        self.handle_turn_input_inner(request).instrument(span).await
     }
     async fn handle_turn_input_inner(
         self: &Arc<Self>,
         request: TurnInputRequest,
     ) -> PromptTurnResult {
+        let _active = xai_grok_telemetry::activity::TURNS_ACTIVE.enter();
         let TurnInputRequest {
             prompt_id,
             input_origin,
@@ -433,10 +446,6 @@ impl SessionActor {
         } else {
             LoopFireMode::InSession
         };
-        // Hyper fork: wasm/scheme-registered slash commands participate in
-        // human-intent resolution alongside built-ins, skills and workflows.
-        let wasm_cmds = self.wasm_registered_commands.borrow().clone();
-        let scheme_cmds = self.scheme_registered_commands.borrow().clone();
         let (resolved, slash_skills, workflow_registry) = match policy.authority {
             InputAuthority::HumanIntent => {
                 let slash_skills = self.slash_skills_for_resolve().await;
@@ -457,8 +466,6 @@ impl SessionActor {
                     skill_rewrite,
                     &named_workflows,
                     loop_fire_mode,
-                    &wasm_cmds,
-                    &scheme_cmds,
                 );
                 (resolved, slash_skills, Some(workflow_registry))
             }
@@ -648,10 +655,15 @@ impl SessionActor {
                 original_blocks
             }
         };
+        *self.doom_loop_turn_tally.lock() = Default::default();
+        self.retain_timed_out_image_strips_for_new_turn();
+        self.turn_stream_drained.lock().clear();
         self.events.begin_turn();
         let model_id = self.current_model_id().await;
         let turn_number = self.chat_state_handle.get_prompt_index().await as u64;
         self.current_turn_number.set(turn_number);
+        self.transient_retries_prompt_total.set(0);
+        self.transient_episode_start.set(None);
         let yolo_mode = self.permissions.is_yolo_mode();
         let msg_count = self.chat_state_handle.get_conversation_len().await;
         let redirect_kind = if policy.authority.is_human_intent() {
@@ -735,7 +747,8 @@ impl SessionActor {
                     tracing::info!(%hook_name, %reason, "user_prompt_submit block ignored for non-user origin");
                     self.send_hook_annotation(
                             &format!(
-                        "\u{26a0} `{hook_name}` requested a prompt block (not enforced for this origin): {reason}"
+                        "\u{26a0} Prompt block requested by {} (not enforced for this origin): {reason}",
+                        xai_grok_hooks::config::hook_display_name(&hook_name)
                     ),
                         )
                         .await;
@@ -746,12 +759,7 @@ impl SessionActor {
         } else {
             None
         };
-        // Text observed by hooks / wasm / scheme extensions (post-truncation,
-        // post-image-transcription — the exact text pushed into chat state).
-        // Empty when the prompt gate blocked the turn.
-        let prompt_text_for_hook: String;
         if prompt_block.is_some() {
-            prompt_text_for_hook = String::new();
             if let Some(ack) = persist_ack.take() {
                 let _ = ack.send(());
             }
@@ -1035,110 +1043,39 @@ impl SessionActor {
                     user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
                 }
             }
-            if let Some(ack) = persist_ack.take() {
+            if self
+                .chat_state_handle
+                .push_user_message_and_ack(user_chat)
+                .await
+                .is_some()
+            {
+                self.mark_front_message_committed().await;
+                let (flush_tx, flush_rx) = oneshot::channel();
                 if self
-                    .chat_state_handle
-                    .push_user_message_and_ack(user_chat)
-                    .await
-                    .is_some()
+                    .notifications
+                    .persistence_tx
+                    .send(PersistenceMsg::FlushAndAck {
+                        respond_to: flush_tx,
+                    })
+                    .is_ok()
+                    && matches!(flush_rx.await, Ok(Ok(())))
                 {
-                    self.mark_front_message_committed().await;
-                    let (flush_tx, flush_rx) = oneshot::channel();
-                    if self
-                        .notifications
-                        .persistence_tx
-                        .send(PersistenceMsg::FlushAndAck {
-                            respond_to: flush_tx,
-                        })
-                        .is_ok()
-                        && matches!(flush_rx.await, Ok(Ok(())))
-                    {
+                    if let Some(ack) = persist_ack {
                         let _ = ack.send(());
-                    } else {
-                        tracing::error!(
-                            session_id = %self.session_info.id.0,
-                            prompt_id = %prompt_id,
-                            "persist_ack flush barrier failed"
-                        );
                     }
                 } else {
                     tracing::error!(
                         session_id = %self.session_info.id.0,
                         prompt_id = %prompt_id,
-                        "persist_ack skipped: chat-state actor unavailable"
+                        "user prompt flush barrier failed"
                     );
                 }
             } else {
-                self.chat_state_handle.push_user_message(user_chat);
-                self.mark_front_message_committed().await;
-            }
-            prompt_text_for_hook = text;
-        }
-        // Scheme extensions observe the submitted prompt (fail-open, no gating).
-        {
-            let scheme_rt = self.scheme_runtime.clone();
-            if !scheme_rt.is_empty() {
-                let results = scheme_rt
-                    .dispatch_user_prompt_submit(&prompt_text_for_hook)
-                    .await;
-                crate::session::scheme_ext::log_observe_failures("user_prompt_submit", &results);
-            }
-        }
-        // Pi-style before_agent_start: wasm guests may inject context / append
-        // system notes (design-wasm-extensions Phase 2). Uses system-reminder
-        // messages so we do not rewrite the durable system prompt blob.
-        {
-            let ext_rt = self.extension_runtime.borrow().clone();
-            if !ext_rt.is_empty() {
-                let d = ext_rt
-                    .dispatch_before_agent_start(&xai_grok_extension_api::BeforeAgentStartIn {
-                        prompt: prompt_text_for_hook.clone(),
-                    })
-                    .await;
-                if let Some(ctx) = d.out.inject_context.as_deref() {
-                    self.push_system_reminder(ctx);
-                    tracing::info!(
-                        session_id = %self.session_info.id.0,
-                        bytes = ctx.len(),
-                        "wasm before_agent_start inject_context applied"
-                    );
-                }
-                if let Some(sys) = d.out.append_system.as_deref() {
-                    self.push_system_reminder_with_tag(sys, "system-extension");
-                    tracing::info!(
-                        session_id = %self.session_info.id.0,
-                        bytes = sys.len(),
-                        "wasm before_agent_start append_system applied"
-                    );
-                }
-            }
-        }
-        // Scheme extensions after wasm: same before_agent_start inject contract
-        // (system-reminder messages, host-capped, fail-open).
-        {
-            let scheme_rt = self.scheme_runtime.clone();
-            if !scheme_rt.is_empty() {
-                let d = scheme_rt
-                    .dispatch_before_agent_start(&xai_grok_extension_api::BeforeAgentStartIn {
-                        prompt: prompt_text_for_hook.clone(),
-                    })
-                    .await;
-                if let Some(ctx) = d.out.inject_context.as_deref() {
-                    self.push_system_reminder(ctx);
-                    tracing::info!(
-                        session_id = %self.session_info.id.0,
-                        bytes = ctx.len(),
-                        "scheme before_agent_start inject_context applied"
-                    );
-                }
-                if let Some(sys) = d.out.append_system.as_deref() {
-                    self.push_system_reminder_with_tag(sys, "system-extension");
-                    tracing::info!(
-                        session_id = %self.session_info.id.0,
-                        bytes = sys.len(),
-                        "scheme before_agent_start append_system applied"
-                    );
-                }
+                tracing::error!(
+                    session_id = %self.session_info.id.0,
+                    prompt_id = %prompt_id,
+                    "user prompt commit skipped: chat-state actor unavailable"
+                );
             }
         }
         let turn_scope_guard =
@@ -1154,9 +1091,11 @@ impl SessionActor {
             }
             xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::HookBlocked {
                 hook_name: hook_name.clone(),
+                cause: xai_grok_telemetry::events::HookBlockCause::PromptBlocked,
             });
             self.send_hook_annotation(&format!(
-                "\u{26a0} prompt blocked by hook `{hook_name}`: {reason}"
+                "\u{26a0} Prompt blocked by {}: {reason}",
+                xai_grok_hooks::config::hook_display_name(&hook_name)
             ))
             .await;
             Ok(TurnOutcome::Cancelled {
@@ -1168,19 +1107,89 @@ impl SessionActor {
                 }),
             })
         } else {
-            // Outer loop (goal / stop_gate) always shell-side. Each round uses
-            // Hypercore when enabled (incl. json_schema since P4), else legacy.
-            // Pin large outer-loop future from a thin frame — see `box_turn_future`.
-            box_turn_future(|| {
-                self.run_turn_outer_loop(
-                    prompt_id,
-                    prompt_text_for_hook.trim(),
-                    trace_gcs_config,
-                    artifact_tracker,
-                    json_schema,
-                )
-            })
-            .await
+            let mut round_trace = trace_gcs_config;
+            let mut round_artifact = artifact_tracker;
+            let mut stop_continuations_this_turn: u32 = 0;
+            loop {
+                if self.goal_harness_enabled() {
+                    let goal_loop_active = self.goal_tracker.lock().status()
+                        == Some(crate::session::goal_tracker::GoalStatus::Active);
+                    self.set_goal_loop_active_resource(goal_loop_active).await;
+                }
+                let round = self
+                    .process_conversation_turn_with_recovery(
+                        prompt_id,
+                        round_trace.take(),
+                        round_artifact.take(),
+                        json_schema.clone(),
+                    )
+                    .await;
+                if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
+                    break round;
+                }
+                if matches!(
+                    round,
+                    Ok(TurnOutcome::Completed {
+                        refusal: Some(_),
+                        ..
+                    })
+                ) {
+                    self.auto_pause_goal_if_active_with_message(
+                        crate::session::goal_tracker::GoalPauseReason::Infra,
+                        "The model provider refused this goal round. Use /goal resume to retry."
+                            .to_string(),
+                    )
+                    .await;
+                    break round;
+                }
+                let goal_active = laziness_injection_active(
+                    self.goal_harness_enabled(),
+                    self.goal_tracker.lock().status(),
+                );
+                if goal_active {
+                    if self.has_runnable_queued_user_row().await {
+                        xai_grok_telemetry::unified_log::info(
+                            "shell.goal.yielded_to_queued_input",
+                            Some(self.session_info.id.0.as_ref()),
+                            Some(serde_json::json!({ "prompt_id": prompt_id })),
+                        );
+                        tracing::info!(
+                            "goal turn: yielding to queued user prompts; continuation re-arms \
+                             at turn end"
+                        );
+                        break round;
+                    }
+                    if crate::session::PromptOrigin::from_prompt_id(prompt_id).is_synthetic()
+                        || !self.has_pending_goal_continuation().await
+                    {
+                        let decision = if self.goal_runs_on_workflow_engine() {
+                            self.run_goal_round_end().await
+                        } else {
+                            self.run_goal_round_end_legacy().await
+                        };
+                        if let GoalRoundDecision::Continue(directive) = decision {
+                            self.inject_goal_continuation_message(directive).await;
+                            continue;
+                        }
+                    } else {
+                        tracing::info!(
+                            "goal turn: user prompt runs standalone; a queued continuation \
+                             resumes the goal"
+                        );
+                    }
+                }
+                match self
+                    .run_stop_gate(prompt_id, stop_continuations_this_turn)
+                    .await
+                {
+                    StopGateDecision::AllowStop => break round,
+                    StopGateDecision::KeepWorking { feedback } => {
+                        stop_continuations_this_turn += 1;
+                        self.chat_state_handle
+                            .push_user_message(ConversationItem::stop_hook_feedback(feedback));
+                    }
+                }
+            }
         };
         if matches!(
             result,
@@ -1214,7 +1223,7 @@ impl SessionActor {
             result = Err(error);
         }
         let turn_duration_ms =
-            super::tasks_cancel::elapsed_ms_saturating(turn_timer, std::time::Instant::now());
+            super::turn_task::elapsed_ms_saturating(turn_timer, std::time::Instant::now());
         let handle_prompt_elapsed_ms = handle_prompt_start.elapsed().as_millis() as u64;
         xai_grok_telemetry::unified_log::info(
             "shell.handle_prompt.done",
@@ -1432,6 +1441,23 @@ impl SessionActor {
             },
         );
         let doom_tally = std::mem::take(&mut *self.doom_loop_turn_tally.lock());
+        if doom_tally.detected() {
+            let summary = doom_tally.detection_summary();
+            xai_grok_telemetry::session_ctx::log_session_event(
+                crate::agent::session_metrics::DoomLoopDetected {
+                    session_id: self.session_info.id.0.to_string(),
+                    turn_number: current_prompt_index as u64,
+                    trigger_count: doom_tally.triggers.len() as u32,
+                    detector_kinds: summary.detector_kinds,
+                    channels: summary.channels,
+                    tightest_tail_threshold: summary.tightest_tail_threshold,
+                    max_exact_sequence_tokens: summary.max_exact_sequence_tokens,
+                    max_exact_repeat_count: summary.max_exact_repeat_count,
+                    recovery_attempts: doom_tally.attempts,
+                    model: doom_event_model.clone(),
+                },
+            );
+        }
         if doom_tally.fired() {
             xai_grok_telemetry::session_ctx::log_session_event(
                 crate::agent::session_metrics::DoomLoopRecovery {
@@ -1785,202 +1811,6 @@ impl SessionActor {
             }
         }
     }
-    /// Shell outer loop: goal continuation + stop gate around each agent round.
-    ///
-    /// Each round is Hypercore (when enabled) or legacy `process_conversation_turn`.
-    /// Outer rounds use stable unique Hypercore turn ids (`r0`, `r1`, …).
-    async fn run_turn_outer_loop(
-        self: &Arc<Self>,
-        prompt_id: &str,
-        user_text: &str,
-        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-        artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
-        json_schema: Option<serde_json::Value>,
-    ) -> Result<TurnOutcome, acp::Error> {
-        let mut round_trace = trace_gcs_config;
-        let mut round_artifact = artifact_tracker;
-        let mut stop_continuations_this_turn: u32 = 0;
-        // First outer-loop round uses the original user text for Hypercore seed
-        // stripping; goal/stop continuations inject new user rows that Hypercore
-        // must see as the current turn text.
-        let mut round_user_text = user_text.to_string();
-        let mut outer_round: u32 = 0;
-        loop {
-            // Per-round extension inject (`BeforeModelInject`): wasm then scheme,
-            // both as system reminders — never a history rewrite. Fires on every
-            // outer round (incl. goal/stop continuations), unlike the once-per-
-            // prompt before_agent_start inject.
-            {
-                let input = xai_grok_extension_api::BeforeAgentStartIn {
-                    prompt: round_user_text.clone(),
-                };
-                let ext_rt = self.extension_runtime.borrow().clone();
-                if ext_rt.has_capability(xai_grok_extension_api::Capability::BeforeModelInject) {
-                    let d = ext_rt.dispatch_before_model(&input).await;
-                    if let Some(ctx) = d.out.inject_context.as_deref() {
-                        self.push_system_reminder(ctx);
-                    }
-                    if let Some(sys) = d.out.append_system.as_deref() {
-                        self.push_system_reminder_with_tag(sys, "system-extension");
-                    }
-                }
-                let scheme_rt = self.scheme_runtime.clone();
-                if scheme_rt.has_capability(xai_grok_extension_api::Capability::BeforeModelInject)
-                {
-                    let d = scheme_rt.dispatch_before_model(&input).await;
-                    if let Some(ctx) = d.out.inject_context.as_deref() {
-                        self.push_system_reminder(ctx);
-                    }
-                    if let Some(sys) = d.out.append_system.as_deref() {
-                        self.push_system_reminder_with_tag(sys, "system-extension");
-                    }
-                }
-            }
-            if self.goal_harness_enabled() {
-                let goal_loop_active = self.goal_tracker.lock().status()
-                    == Some(crate::session::goal_tracker::GoalStatus::Active);
-                self.set_goal_loop_active_resource(goal_loop_active).await;
-            }
-            let round = self
-                .run_one_agent_round(
-                    prompt_id,
-                    &round_user_text,
-                    round_trace.take(),
-                    round_artifact.take(),
-                    json_schema.clone(),
-                    outer_round,
-                )
-                .await;
-            if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
-                break round;
-            }
-            if matches!(
-                round,
-                Ok(TurnOutcome::Completed {
-                    refusal: Some(_),
-                    ..
-                })
-            ) {
-                self.auto_pause_goal_if_active_with_message(
-                    crate::session::goal_tracker::GoalPauseReason::Infra,
-                    "The model provider refused this goal round. Use /goal resume to retry."
-                        .to_string(),
-                )
-                .await;
-                break round;
-            }
-            let goal_active = laziness_injection_active(
-                self.goal_harness_enabled(),
-                self.goal_tracker.lock().status(),
-            );
-            if goal_active {
-                let decision = if self.goal_runs_on_workflow_engine() {
-                    self.run_goal_round_end().await
-                } else {
-                    self.run_goal_round_end_legacy().await
-                };
-                if let GoalRoundDecision::Continue(directive) = decision {
-                    round_user_text = directive.clone();
-                    self.inject_goal_continuation_message(directive).await;
-                    outer_round = outer_round.saturating_add(1);
-                    continue;
-                }
-            }
-            match self
-                .run_stop_gate(prompt_id, stop_continuations_this_turn)
-                .await
-            {
-                StopGateDecision::AllowStop => break round,
-                StopGateDecision::KeepWorking { feedback } => {
-                    stop_continuations_this_turn += 1;
-                    round_user_text = feedback.clone();
-                    self.chat_state_handle
-                        .push_user_message(ConversationItem::stop_hook_feedback(feedback));
-                    outer_round = outer_round.saturating_add(1);
-                }
-            }
-        }
-    }
-
-    /// One agent round: legacy by default, experimental Hypercore on explicit opt-in.
-    ///
-    /// P6 containment: legacy remains the default production path and is selected
-    /// only by capability / path decision **before** entering Hypercore. Once
-    /// Hypercore is entered, non-Abort errors propagate (no same-round legacy
-    /// fallback).
-    async fn run_one_agent_round(
-        self: &Arc<Self>,
-        prompt_id: &str,
-        user_text: &str,
-        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-        artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
-        json_schema: Option<serde_json::Value>,
-        outer_round: u32,
-    ) -> Result<TurnOutcome, acp::Error> {
-        let conversation = self.chat_state_handle.get_conversation().await;
-        let decision = super::hypercore_turn::hypercore_path_decision_for_conversation(
-            user_text,
-            &conversation,
-        );
-        if decision.uses_hypercore() {
-            let core_turn_id =
-                super::hypercore_turn::hypercore_round_turn_id(prompt_id, outer_round, None);
-            debug_assert_eq!(
-                super::hypercore_turn::hypercore_post_entry_error_policy(),
-                "propagate"
-            );
-            // Entered Hypercore: any non-Abort error propagates upward.
-            let outcome = self
-                .run_hypercore_plain_turn(prompt_id, user_text, json_schema.clone(), &core_turn_id)
-                .await?;
-            tracing::info!(
-                session_id = %self.session_info.id.0,
-                path = "hypercore",
-                outer_round,
-                core_turn_id = %core_turn_id,
-                "agent round succeeded"
-            );
-            xai_grok_telemetry::unified_log::info(
-                "shell.turn.path",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({
-                    "path": "hypercore",
-                    "prompt_id": prompt_id,
-                    "core_turn_id": core_turn_id,
-                    "outer_round": outer_round,
-                    "ok": true,
-                })),
-            );
-            return Ok(outcome);
-        }
-
-        tracing::info!(
-            session_id = %self.session_info.id.0,
-            path = "legacy",
-            reason = decision.as_str(),
-            "agent round using legacy path"
-        );
-        xai_grok_telemetry::unified_log::info(
-            "shell.turn.path",
-            Some(self.session_info.id.0.as_ref()),
-            Some(serde_json::json!({
-                "path": "legacy",
-                "reason": decision.as_str(),
-                "prompt_id": prompt_id,
-                "outer_round": outer_round,
-            })),
-        );
-        box_turn_future(|| {
-            self.process_conversation_turn_with_recovery(
-                prompt_id,
-                trace_gcs_config,
-                artifact_tracker,
-                json_schema,
-            )
-        })
-        .await
-    }
-
     /// Wraps `process_conversation_turn` with auto-recovery for agents that opt in.
     ///
     /// Agents with a `completion_requirement` in their definition require the model
@@ -2013,7 +1843,7 @@ impl SessionActor {
             Some(req) => req,
             None => {
                 return self
-                    .process_conversation_turn_boxed(
+                    .process_conversation_turn(
                         req_id,
                         trace_gcs_config,
                         artifact_tracker.as_ref(),
@@ -2026,7 +1856,7 @@ impl SessionActor {
             Some(r) => r.clone(),
             None => {
                 return self
-                    .process_conversation_turn_boxed(
+                    .process_conversation_turn(
                         req_id,
                         trace_gcs_config,
                         artifact_tracker.as_ref(),
@@ -2038,7 +1868,7 @@ impl SessionActor {
         let required_tool = completion_req.tool.clone();
         let recovery_prompt = completion_req.reminder.clone();
         let mut result = self
-            .process_conversation_turn_boxed(
+            .process_conversation_turn(
                 req_id,
                 trace_gcs_config.clone(),
                 artifact_tracker.as_ref(),
@@ -2105,7 +1935,7 @@ impl SessionActor {
             let recovery_message = ConversationItem::auto_recovery(recovery_prompt.clone());
             self.chat_state_handle.push_user_message(recovery_message);
             result = self
-                .process_conversation_turn_boxed(
+                .process_conversation_turn(
                     req_id,
                     trace_gcs_config.clone(),
                     artifact_tracker.as_ref(),
@@ -2134,26 +1964,6 @@ impl SessionActor {
             }
         }
     }
-    /// Heap-allocate the legacy turn future and poll it under a temporary
-    /// heap pin from thin frame. See [`box_turn_future`] / docs §8.3.
-    fn process_conversation_turn_boxed<'a>(
-        self: &'a Arc<Self>,
-        req_id: &'a str,
-        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-        artifact_tracker: Option<&'a crate::upload::manifest::ArtifactTracker>,
-        json_schema: Option<serde_json::Value>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TurnOutcome, acp::Error>> + 'a>>
-    {
-        box_turn_future(|| {
-            self.process_conversation_turn_body(
-                req_id,
-                trace_gcs_config,
-                artifact_tracker,
-                json_schema,
-            )
-        })
-    }
-
     pub(super) fn is_first_turn_memory_score_visible(score: f64) -> bool {
         format!("{score:.2}") != "0.00"
     }
@@ -2422,6 +2232,9 @@ impl SessionActor {
             cache_read_tokens = tracing::field::Empty,
             stop_reason = tracing::field::Empty,
             response.has_tool_call = tracing::field::Empty,
+            last_sample.stop_reason = tracing::field::Empty,
+            last_sample.has_tool_call = tracing::field::Empty,
+            last_sample.output_tokens = tracing::field::Empty,
             request_id = tracing::field::Empty,
             ttft_ms = tracing::field::Empty,
             mcp_server.name = tracing::field::Empty,
@@ -2434,34 +2247,7 @@ impl SessionActor {
             parent_agent_id = tracing::field::Empty,
         )
     )]
-    /// Legacy full agent loop (tools / compact / recovery details).
-    ///
-    /// **Default path:** Hypercore is experimental and only entered through
-    /// [`Self::run_one_agent_round`] after an explicit `HYPERCORE_TURN=1` opt-in.
-    /// Keep this legacy loop as the safe production path until Hypercore reaches
-    /// parity and its canary gate is deliberately enabled.
     async fn process_conversation_turn(
-        self: &Arc<Self>,
-        req_id: &str,
-        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-        artifact_tracker: Option<&crate::upload::manifest::ArtifactTracker>,
-        json_schema: Option<serde_json::Value>,
-    ) -> Result<TurnOutcome, acp::Error> {
-        // Pin the large body from a never-inlined frame (docs §8.3).
-        box_turn_future(|| {
-            self.process_conversation_turn_body(
-                req_id,
-                trace_gcs_config,
-                artifact_tracker,
-                json_schema,
-            )
-        })
-        .await
-    }
-
-    /// Legacy agentic turn body (setup + tool/sample loop).
-    #[inline(never)]
-    async fn process_conversation_turn_body(
         self: &Arc<Self>,
         req_id: &str,
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
@@ -2504,10 +2290,6 @@ impl SessionActor {
         let mut prompt_timing = Some(crate::session::prompt_timing::PromptTiming::start());
         let tool_prep_start = std::time::Instant::now();
         let (tool_definitions, mcp_wait_ms) = self.prepare_tool_definitions_timed().await;
-        // Heap-allocate large turn-scoped values so the async state machine
-        // holds pointers across awaits instead of multi-KB enum variants
-        // (root cause of default-stack overflow in auth_retry_budget_tests).
-        let tool_definitions = std::sync::Arc::new(tool_definitions);
         let total_prep_ms = tool_prep_start.elapsed().as_millis() as u64;
         if let Some(ref mut pt) = prompt_timing {
             pt.record_tool_prep(mcp_wait_ms, total_prep_ms);
@@ -2524,7 +2306,7 @@ impl SessionActor {
         );
         if let Some(ref gcs_config) = trace_gcs_config {
             let gcs_cfg = gcs_config.clone();
-            let tool_defs = tool_definitions.as_ref().clone();
+            let tool_defs = tool_definitions.clone();
             let manifest_clone = artifact_tracker.cloned();
             let auth_manager = self.auth_manager.clone();
             tokio::spawn(async move {
@@ -2544,17 +2326,20 @@ impl SessionActor {
         let mut loop_index: u32 = 0;
         let mut identical_tool_calls = IdenticalToolCallRun::default();
         let mut todo_gate_fires: u32 = 0;
+        let mut length_salvage_streak = LengthSalvageStreak::default();
         let mut auth_retry_schedule = AuthRetrySchedule::new();
         let mut rate_limit_waits = self.rate_limit_wait_budget();
+        let mut transient_retry_attempts: u32 = 0;
+        let transient_retry_enabled =
+            self.transient_retry_enabled && !self.attach_non_interactive.get();
         let mut turn_span_totals = TurnSpanTotals::default();
         let mut model_fingerprint: Option<String> = None;
         let mut structured_output_retries: u32 = 0;
         let mut media_gen_resamples: u32 = 0;
-        // Validator is large; keep it on the heap for the whole turn.
-        let structured_output_validator = std::sync::Arc::new(json_schema.as_ref().map(|schema| {
+        let structured_output_validator = json_schema.as_ref().map(|schema| {
             jsonschema::validator_for(schema).map_err(|e| format!("invalid output schema: {e}"))
-        }));
-        let schema_ok = matches!(structured_output_validator.as_ref(), Some(Ok(_)));
+        });
+        let schema_ok = matches!(structured_output_validator, Some(Ok(_)));
         let native_backend = if json_schema.is_some() {
             match self.chat_state_handle.get_sampling_config().await {
                 Some(c) => c.api_backend.supports_native_schema(),
@@ -2701,7 +2486,7 @@ impl SessionActor {
                     return Err(self.surface_compact_auth_failure(e).await);
                 }
             }
-            let backend_search_active = self.backend_search_active().await;
+            let backend_search_active = self.backend_search_active();
             tracing::debug!(
                 backend_search_active,
                 "backend_search: turn tool resolution"
@@ -2720,7 +2505,7 @@ impl SessionActor {
                     }
                     tools
                 } else {
-                    let tools = self.turn_base_tool_specs(tool_definitions.as_ref()).await;
+                    let tools = self.turn_base_tool_specs(&tool_definitions);
                     if self.startup_hints.is_subagent {
                         let bridge = self.agent.borrow().tool_bridge().clone();
                         child_tool_projection::child_safe_tool_specs(
@@ -2771,13 +2556,13 @@ impl SessionActor {
                     "loop_index": loop_index,
                 })),
             );
-            // Box request/response: ConversationRequest holds the full item
-            // history + tool specs and is live across the sampler await.
-            let mut request = Box::new(request);
+            let mut request = request;
             request.x_grok_session_id = Some(self.session_info.id.to_string());
             request.x_grok_turn_idx =
                 Some(self.chat_state_handle.get_prompt_index().await.to_string());
             request.x_grok_agent_id = Some(xai_grok_telemetry::id::agent_id());
+            request.x_grok_transient_retry =
+                (transient_retry_attempts > 0).then(|| transient_retry_attempts.to_string());
             if request.x_grok_deployment_id.is_none() {
                 request.x_grok_deployment_id = crate::managed_config::resolve_deployment_id(
                     crate::managed_config::resolve_deployment_key().as_deref(),
@@ -2786,7 +2571,7 @@ impl SessionActor {
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }
-            request.hosted_tools = self.hosted_tools_for_turn().await;
+            request.hosted_tools = self.hosted_tools_for_turn();
             request.max_output_tokens = self
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
@@ -2807,20 +2592,76 @@ impl SessionActor {
                 Some(serde_json::json!({
                     "loop_index": loop_index,
                     "elapsed_since_turn_start_ms": conv_turn_start.elapsed().as_millis() as u64,
+                    // Nonzero = this submission is a transient resubmit.
+                    "transient_retry_attempts": transient_retry_attempts,
                 })),
             );
             let model_timer = std::time::Instant::now();
             let (response, latency) = match self
-                .run_turn_via_sampler((*request).clone(), &mut rate_limit_waits)
+                .run_turn_via_sampler(
+                    request.clone(),
+                    &mut rate_limit_waits,
+                    TransientRetryState {
+                        step_attempts: transient_retry_attempts,
+                        prompt_attempts: self.transient_retries_prompt_total.get(),
+                        episode_start: self.transient_episode_start.get(),
+                        enabled: transient_retry_enabled,
+                    },
+                )
                 .await
             {
-                Ok(SamplerTurnOutcome::Response(r, latency)) => (Box::new(r), latency),
+                Ok(SamplerTurnOutcome::Response(r, latency)) => (r, latency),
                 Err(error) => {
                     self.tool_context.fail_task_output_usage_closed();
                     return Err(error);
                 }
+                Ok(SamplerTurnOutcome::RetryTransient { kind, status_code }) => {
+                    if matches!(kind, xai_grok_sampler::SamplingErrorKind::Api) {
+                        auth_retry_schedule.reset_on_success();
+                    }
+                    let delay = xai_grok_sampler::jitter_backoff(transient_backoff_delay(
+                        transient_retry_attempts,
+                    ));
+                    transient_retry_attempts += 1;
+                    let prompt_total = self.transient_retries_prompt_total.get() + 1;
+                    self.transient_retries_prompt_total.set(prompt_total);
+                    if self.transient_episode_start.get().is_none() {
+                        self.transient_episode_start
+                            .set(Some(tokio::time::Instant::now()));
+                    }
+                    let display_max =
+                        transient_display_ceiling(transient_retry_attempts, prompt_total);
+                    xai_grok_telemetry::unified_log::warn(
+                        "shell.turn.transient_retry_backoff",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "loop_index": loop_index,
+                            "kind": kind.as_str(),
+                            "status_code": status_code,
+                            "attempt": transient_retry_attempts,
+                            "max_retries": display_max,
+                            "delay_ms": delay.as_millis() as u64,
+                        })),
+                    );
+                    let cause = match kind {
+                        xai_grok_sampler::SamplingErrorKind::IdleTimeout => "Response stalled",
+                        xai_grok_sampler::SamplingErrorKind::Http => "Connection problem",
+                        _ => "Server error",
+                    };
+                    self.send_xai_notification(XaiSessionUpdate::RetryState(
+                        crate::extensions::notification::RetryState::Retrying {
+                            attempt: transient_retry_attempts,
+                            max_retries: display_max,
+                            reason: format!("{cause}; retrying request"),
+                        },
+                    ))
+                    .await;
+                    sleep(delay).await;
+                    continue;
+                }
                 Ok(SamplerTurnOutcome::CompactAndResubmit) => {
                     auth_retry_schedule.reset_on_success();
+                    transient_retry_attempts = 0;
                     continue;
                 }
                 Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store }) => {
@@ -2952,6 +2793,8 @@ impl SessionActor {
                 }
             };
             auth_retry_schedule.reset_on_success();
+            transient_retry_attempts = 0;
+            self.transient_episode_start.set(None);
             let model_elapsed_ms = model_timer.elapsed().as_millis() as u64;
             let usage = response.usage.as_ref();
             let prompt_tokens = usage.map(|u| u.prompt_tokens);
@@ -3111,6 +2954,26 @@ impl SessionActor {
                 stop_reason == Some(xai_grok_sampling_types::StopReason::ContentFilter);
             let refusal_explanation = response.stop_message.clone();
             let final_answer_text = json_schema.is_some().then(|| response.assistant_text());
+            match length_salvage_streak.on_sample(
+                stop_reason == Some(xai_grok_sampling_types::StopReason::Length)
+                    && !tool_calls.is_empty(),
+            ) {
+                LengthSalvageAction::Exhausted => {
+                    tracing::error!(
+                        session_id = %self.session_info.id,
+                        max = MAX_OUTPUT_TOKEN_LIMIT_RETRIES,
+                        "consecutive Length-salvaged tool-call samples hit the cap — failing the turn"
+                    );
+                    self.tool_context.fail_task_output_usage_closed();
+                    return Err(self.fail_turn_length_salvage_exhausted().await);
+                }
+                LengthSalvageAction::Proceed { inject_reminder } => {
+                    if inject_reminder {
+                        self.push_system_reminder(OUTPUT_TOKEN_LIMIT_REMINDER);
+                    }
+                }
+                LengthSalvageAction::NotSalvage => {}
+            }
             let usage_reported = response.usage.is_some();
             self.record_response_items(response.items, usage_reported)
                 .await;
@@ -3237,8 +3100,7 @@ impl SessionActor {
                     refusal: turn_refused.then(|| refusal_explanation.clone().unwrap_or_default()),
                 });
             }
-            if structured_output_tool
-                && let Some(validator) = structured_output_validator.as_ref().as_ref()
+            if structured_output_tool && let Some(validator) = structured_output_validator.as_ref()
             {
                 match self
                     .handle_structured_output_tool_call(
@@ -3821,5 +3683,188 @@ mod structured_output_validation_tests {
         let bad: Result<jsonschema::Validator, String> = Err("invalid output schema: boom".into());
         let err = validate_structured_output(&bad, r#"{"name":"alice","age":1}"#).unwrap_err();
         assert_eq!(err, "invalid output schema: boom");
+    }
+}
+#[cfg(test)]
+mod last_sample_span_tests {
+    use super::{TurnSpanTotals, record_failed_sample_on_turn_span};
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use xai_grok_sampling_types::conversation::{
+        ConversationItem, ConversationResponse, StopReason, TokenUsage, ToolCall,
+    };
+    /// Last-write value per field — the view the OTel bridge exports.
+    #[derive(Default)]
+    struct Fields {
+        strs: BTreeMap<String, String>,
+        i64s: BTreeMap<String, i64>,
+        bools: BTreeMap<String, bool>,
+    }
+    struct FieldVisitor<'a>(&'a mut Fields);
+    impl Visit for FieldVisitor<'_> {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0
+                .strs
+                .insert(field.name().to_string(), value.to_string());
+        }
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.0.i64s.insert(field.name().to_string(), value);
+        }
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.0.bools.insert(field.name().to_string(), value);
+        }
+        fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+    }
+    struct RecordCapture {
+        fields: Arc<Mutex<Fields>>,
+    }
+    impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for RecordCapture {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::Id,
+            _ctx: Context<'_, S>,
+        ) {
+            attrs.record(&mut FieldVisitor(&mut self.fields.lock().unwrap()));
+        }
+        fn on_record(
+            &self,
+            _id: &tracing::Id,
+            values: &tracing::span::Record<'_>,
+            _ctx: Context<'_, S>,
+        ) {
+            values.record(&mut FieldVisitor(&mut self.fields.lock().unwrap()));
+        }
+    }
+    fn capture() -> (Arc<Mutex<Fields>>, tracing::subscriber::DefaultGuard) {
+        let fields = Arc::new(Mutex::new(Fields::default()));
+        let subscriber = tracing_subscriber::registry().with(RecordCapture {
+            fields: fields.clone(),
+        });
+        (fields, subscriber.set_default())
+    }
+    /// Declares the same fields as the real turn span's `#[instrument]`.
+    fn turn_span() -> tracing::Span {
+        tracing::info_span!(
+            "session.process_conversation_turn",
+            input_tokens = tracing::field::Empty,
+            output_tokens = tracing::field::Empty,
+            cache_read_tokens = tracing::field::Empty,
+            stop_reason = tracing::field::Empty,
+            response.has_tool_call = tracing::field::Empty,
+            last_sample.stop_reason = tracing::field::Empty,
+            last_sample.has_tool_call = tracing::field::Empty,
+            last_sample.output_tokens = tracing::field::Empty,
+        )
+    }
+    fn sample(
+        stop_reason: Option<StopReason>,
+        with_tool_call: bool,
+        completion_tokens: u32,
+    ) -> ConversationResponse {
+        let mut response = ConversationResponse {
+            items: vec![ConversationItem::assistant("")],
+            stop_reason,
+            usage: Some(TokenUsage {
+                prompt_tokens: 100,
+                completion_tokens,
+                total_tokens: 100 + completion_tokens,
+                reasoning_tokens: 0,
+                cached_prompt_tokens: 0,
+                cache_creation_prompt_tokens: 0,
+            }),
+            cost_usd_ticks: None,
+            message_chunks_emitted: 0,
+            doom_loop_signals: Vec::new(),
+            stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
+        };
+        if with_tool_call && let Some(a) = response.assistant_mut() {
+            a.tool_calls.push(ToolCall {
+                id: "call-1".into(),
+                name: "bash".to_string(),
+                arguments: "{}".into(),
+            });
+        }
+        response
+    }
+    /// Two delivered samples: legacy fields aggregate, `last_sample.*` tracks the final one.
+    #[test]
+    fn last_sample_fields_track_final_sample_while_legacy_fields_aggregate() {
+        let (fields, _guard) = capture();
+        let span = turn_span();
+        let mut totals = TurnSpanTotals::default();
+        totals.record(&span, &sample(Some(StopReason::ToolCalls), true, 40));
+        totals.record(&span, &sample(Some(StopReason::Length), false, 7));
+        let f = fields.lock().unwrap();
+        assert_eq!(
+            f.strs.get("stop_reason").map(String::as_str),
+            Some(StopReason::Length.as_str())
+        );
+        assert_eq!(f.bools.get("response.has_tool_call"), Some(&true));
+        assert_eq!(f.i64s.get("output_tokens"), Some(&47));
+        assert_eq!(
+            f.strs.get("last_sample.stop_reason").map(String::as_str),
+            Some(StopReason::Length.as_str())
+        );
+        assert_eq!(f.bools.get("last_sample.has_tool_call"), Some(&false));
+        assert_eq!(f.i64s.get("last_sample.output_tokens"), Some(&7));
+    }
+    /// tool_calls success then MaxTokensTruncation failure: `last_sample.*` attributes the dying sample.
+    #[test]
+    fn failed_length_sample_is_attributed_while_legacy_stop_reason_keeps_last_write() {
+        let (fields, _guard) = capture();
+        let span = turn_span();
+        let mut totals = TurnSpanTotals::default();
+        totals.record(&span, &sample(Some(StopReason::ToolCalls), true, 40));
+        record_failed_sample_on_turn_span(
+            &span,
+            xai_grok_sampler::SamplingErrorKind::MaxTokensTruncation,
+        );
+        let f = fields.lock().unwrap();
+        assert_eq!(
+            f.strs.get("stop_reason").map(String::as_str),
+            Some(StopReason::ToolCalls.as_str())
+        );
+        assert_eq!(f.bools.get("response.has_tool_call"), Some(&true));
+        assert_eq!(f.i64s.get("output_tokens"), Some(&40));
+        assert_eq!(
+            f.strs.get("last_sample.stop_reason").map(String::as_str),
+            Some(StopReason::Length.as_str())
+        );
+        assert_eq!(f.bools.get("last_sample.has_tool_call"), Some(&false));
+        assert_eq!(f.i64s.get("last_sample.output_tokens"), Some(&0));
+    }
+    /// `error` / `unreported` sentinels overwrite — no stale previous-sample value survives.
+    #[test]
+    fn non_length_failure_and_unreported_stop_reason_overwrite_last_sample() {
+        let (fields, _guard) = capture();
+        let span = turn_span();
+        let mut totals = TurnSpanTotals::default();
+        totals.record(&span, &sample(Some(StopReason::ToolCalls), true, 40));
+        record_failed_sample_on_turn_span(&span, xai_grok_sampler::SamplingErrorKind::Api);
+        assert_eq!(
+            fields
+                .lock()
+                .unwrap()
+                .strs
+                .get("last_sample.stop_reason")
+                .map(String::as_str),
+            Some(super::LAST_SAMPLE_STOP_REASON_ERROR)
+        );
+        totals.record(&span, &sample(None, true, 3));
+        let f = fields.lock().unwrap();
+        assert_eq!(
+            f.strs.get("last_sample.stop_reason").map(String::as_str),
+            Some(super::LAST_SAMPLE_STOP_REASON_UNREPORTED)
+        );
+        assert_eq!(f.bools.get("last_sample.has_tool_call"), Some(&true));
+        assert_eq!(f.i64s.get("last_sample.output_tokens"), Some(&3));
     }
 }

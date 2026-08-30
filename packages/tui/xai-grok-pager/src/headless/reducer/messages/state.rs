@@ -1,5 +1,4 @@
-//! The `streaming-messages-json` reducer state: the per-response phase state
-//! machine, partial-framing state, terminal metadata buffer, and session facts.
+//! The `streaming-messages-json` reducer state: the per-response phase machine, partial-framing state, terminal metadata buffer, and session facts.
 
 use crate::headless::reducer::McpServer;
 
@@ -16,9 +15,8 @@ pub(super) struct PendingResponse {
     pub(super) stop_sequence: Option<String>,
 }
 
-/// The real per-response identity from `ResponseStarted`: `message.id`, `model`,
-/// and input-side usage. Retained (cloned, never moved) so both the partial
-/// `message_start` and the final frame recover the same id/model/usage.
+/// The real per-response identity from `ResponseStarted`: `message.id`, `model`, and input-side usage.
+/// It is retained (cloned, never moved) so both the partial `message_start` and the final frame recover the same id/model/usage.
 #[derive(Clone, Default)]
 pub(super) struct ResponseIdentity {
     pub(super) message_id: Option<String>,
@@ -68,9 +66,8 @@ impl PartialFraming {
     }
 }
 
-/// The lifecycle phase of the current model response. The retained identity and
-/// pending metadata are dropped only when the response flushes, so one response's
-/// id, usage, and signature cannot leak onto the next.
+/// The retained identity and pending metadata are dropped only when the response flushes.
+/// One response's id, usage, and signature therefore cannot leak onto the next.
 #[derive(Default)]
 pub(super) enum ResponseState {
     /// No response is open.
@@ -78,8 +75,7 @@ pub(super) enum ResponseState {
     Idle,
     /// A `ResponseStarted` opened this response; its identity is retained until flush.
     Started(ResponseIdentity),
-    /// A `ResponseCompleted` closed this response; awaiting flush. Retains the
-    /// identity and whether a `ResponseStarted` opened it.
+    /// A `ResponseCompleted` closed this response; it awaits flush and retains the identity and whether a `ResponseStarted` opened it.
     Completed {
         identity: ResponseIdentity,
         pending: PendingResponse,
@@ -88,7 +84,7 @@ pub(super) enum ResponseState {
 }
 
 impl ResponseState {
-    /// This response's retained identity (default when none was surfaced).
+    /// This response's retained identity (default when none was received).
     pub(super) fn identity(&self) -> ResponseIdentity {
         match self {
             ResponseState::Idle => ResponseIdentity::default(),
@@ -130,8 +126,8 @@ impl ResponseState {
         }
     }
 
-    /// Open the response with a real identity from `ResponseStarted`. A well-formed
-    /// stream always transitions from `Idle`; the debug assertion catches a skipped flush.
+    /// Open the response with a real identity from `ResponseStarted`.
+    /// A well-formed stream always transitions from `Idle`; the debug assertion catches a skipped flush.
     pub(super) fn open(&mut self, identity: ResponseIdentity) {
         debug_assert!(
             matches!(self, ResponseState::Idle),
@@ -164,8 +160,7 @@ impl ResponseState {
     }
 }
 
-/// The session facts captured at `MessagesReducer::begin`; `model` is `Option`
-/// because a backend may not surface it until the first `ResponseStarted`.
+/// The session facts captured at `MessagesReducer::begin`; `model` is `Option` because a backend may not send it until the first `ResponseStarted`.
 pub(super) struct SessionState {
     pub(super) session_id: String,
     pub(super) model: Option<String>,

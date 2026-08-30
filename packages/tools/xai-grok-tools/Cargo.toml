@@ -8,7 +8,7 @@ description = "Grok tools library"
 [dependencies]
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
-dirs = { workspace = true }
+xai-dirs = { workspace = true }
 derive_more = { workspace = true, features = ["from", "try_into"] }
 dunce = { workspace = true }
 encoding_rs = { workspace = true, optional = true }
@@ -106,7 +106,6 @@ libc = { workspace = true }
 windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-dirs = { workspace = true }
 pretty_assertions = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }

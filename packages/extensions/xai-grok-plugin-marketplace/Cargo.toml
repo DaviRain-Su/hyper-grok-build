@@ -5,7 +5,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-dirs = { workspace = true }
+xai-dirs = { workspace = true }
 dunce = { workspace = true }
 fs2 = { workspace = true }
 serde = { workspace = true }

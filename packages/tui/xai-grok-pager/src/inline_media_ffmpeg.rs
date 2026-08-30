@@ -4,7 +4,7 @@ use crate::prompt_images::InlineMediaInfo;
 
 pub const FFMPEG_HINT_TEXT: &str = "Install ffmpeg to view inline";
 
-/// Latches positives; re-probes negatives so mid-session install recovers posters.
+/// Caches the first success and keeps re-probing failures, so installing ffmpeg mid-session recovers posters.
 pub fn ffmpeg_available() -> bool {
     #[cfg(test)]
     if let Some(v) = TEST_FFMPEG_OVERRIDE.with(|c| c.get()) {
@@ -47,7 +47,7 @@ impl Drop for FfmpegTestGuard {
     }
 }
 
-/// First on-PATH package manager wins; `None` → hint-only banner (no install line).
+/// The first package manager found on PATH wins; when none is found the banner shows only the hint, no install line.
 fn ffmpeg_install_candidates() -> &'static [(&'static str, &'static str)] {
     if cfg!(target_os = "macos") {
         &[("brew", "! brew install ffmpeg")]
@@ -69,7 +69,7 @@ fn ffmpeg_install_candidates() -> &'static [(&'static str, &'static str)] {
     }
 }
 
-/// Latches positives; re-probes negatives so mid-session PM install recovers the cmd line.
+/// Caches the first success and keeps re-probing failures, so installing a package manager mid-session recovers the install line.
 pub fn ffmpeg_install_cmd() -> Option<&'static str> {
     #[cfg(test)]
     if let Some(v) = TEST_FFMPEG_INSTALL_CMD_OVERRIDE.with(|c| c.get()) {
@@ -118,8 +118,8 @@ fn ffmpeg_hint_banner_rows() -> u16 {
     if ffmpeg_install_cmd().is_some() { 2 } else { 1 }
 }
 
-/// `(image_area, total)` rows for an inline-media preview. Shared by entry-height
-/// reservation and block placement so they cannot drift.
+/// `(image_area, total)` rows for an inline-media preview.
+/// Shared by the code that reserves entry height and the code that places the block, so the two cannot drift.
 pub fn inline_media_reserved_rows(info: &InlineMediaInfo, content_width: u16) -> (u16, u16) {
     use crate::terminal::image::fit_image_to_cells;
 

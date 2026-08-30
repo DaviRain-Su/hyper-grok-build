@@ -29,8 +29,8 @@ fn hook_log_chimed(log: &Path) -> bool {
     std::fs::read_to_string(log).is_ok_and(|body| body.contains(CHIME))
 }
 
-/// Notification `permission_prompt` hook (Claude-style finish chime) must not
-/// fire on auto-allowed tools, and must fire while a real permission UI waits.
+/// Notification `permission_prompt` hook (Claude-style finish chime) must not fire on auto-allowed tools.
+/// It must fire while a real permission UI waits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn permission_prompt_hook_chimes_only_on_real_wait() {

@@ -2,10 +2,9 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// Minimal + Apple Terminal: Ctrl+O is the send-now chord. With an empty
-/// composer and a mid-turn queued follow-up it must send that row now —
-/// cancel-and-send: turn 1 is cancelled silently and the row runs as its own
-/// next turn (with the interjection preamble) — not open the transcript pager remap.
+/// In minimal mode under Apple Terminal, Ctrl+O is the send-now chord.
+/// With an empty composer and a mid-turn queued follow-up it must send that row now instead of opening the transcript pager remap.
+/// Send-now cancels turn 1 silently and runs the row as its own next turn, with the interjection preamble.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_ctrl_o_send_now_queued_apple_terminal() {
@@ -22,8 +21,7 @@ async fn minimal_ctrl_o_send_now_queued_apple_terminal() {
     let binary = pager_binary().expect("resolve pager binary");
     let mut overrides: Vec<(String, String)> =
         vec![("TERM_PROGRAM".into(), "Apple_Terminal".into())];
-    // Non-interactive $PAGER so a mistaken transcript open fails fast rather
-    // than hanging in `less` if the predicate regresses.
+    // A non-interactive $PAGER makes a mistaken transcript open fail fast rather than hang in `less` if the predicate regresses
     overrides.push(("PAGER".into(), "cat".into()));
     let env_refs: Vec<(&str, &str)> = overrides
         .iter()
@@ -59,15 +57,13 @@ async fn minimal_ctrl_o_send_now_queued_apple_terminal() {
         .wait_for_text("1 queued", Duration::from_secs(10))
         .expect("queue indicator");
 
-    // Empty composer + queue: Ctrl+O must yield to send-now, not transcript.
-    // Cancel-and-send: the shell silently cancels turn 1 (its held completion
-    // is irrelevant — the abort wins) and the row commits as a standard "❯ "
-    // prompt block for its own turn. Turn 1 is still gated open here, so the
-    // queued row cannot have promoted FIFO.
+    // With an empty composer and a queued row, Ctrl+O must trigger send-now, not the transcript
+    // The shell silently cancels turn 1; its held completion is irrelevant because the abort wins
+    // The row commits as a standard "❯ " prompt block for its own turn
+    // Turn 1 is still gated open here, so the queued row cannot have promoted in FIFO order yet
     harness.inject_keys(CTRL_O).expect("Ctrl+O send-now");
-    // Generous deadline: with turn 1 gated open there is no promotion race
-    // left to mask — this wait is pure render latency, which under heavy
-    // parallel-suite load can exceed the old 15s budget.
+    // Generous deadline: with turn 1 gated open there is no promotion race left to mask
+    // This wait is pure render latency, which under heavy parallel-suite load can take more than 15s
     harness
         .wait_for_text("\u{276F} minimal send-now payload", Duration::from_secs(60))
         .expect("send-now chrome (not a silent transcript open)");
@@ -78,8 +74,7 @@ async fn minimal_ctrl_o_send_now_queued_apple_terminal() {
         .wait_for_text("STEPTWO", Duration::from_secs(40))
         .expect("send-now turn reply");
 
-    // The send-now cancel of turn 1 is silent (scrollback-aware check:
-    // minimal commits blocks into native history).
+    // The send-now cancel of turn 1 is silent; the check reads the full scrollback because minimal commits blocks into native history
     assert!(
         !harness.contains_full_text("Turn cancelled by user"),
         "send-now cancel must not render a cancelled marker\nfull contents:\n{}",

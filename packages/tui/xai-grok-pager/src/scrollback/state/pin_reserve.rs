@@ -1,5 +1,5 @@
-//! Turn-scoped bottom padding that makes a page-flipped prompt's pinned pose a
-//! real scroll bottom, preventing layout clamping from jumping to the tail.
+//! Bottom padding, held for one turn, that makes the page-flip pose (the last user prompt at the top of the viewport) a real scroll bottom.
+//! Without the pad, clamping the scroll offset to the content height would jump the view to the tail.
 
 use super::ScrollbackState;
 
@@ -17,13 +17,12 @@ impl ScrollbackState {
     pub(super) fn arm_pin_reserve(&mut self) {
         self.pin_reserve_active = true;
         self.pin_reserve_after_turn = false;
-        // Without a target, release checks stay inert until positioning captures the pose.
+        // Without a target, the release checks do nothing until positioning captures the pose
         self.pin_reserve_target = None;
         self.pin_reserve_prompt_id = None;
     }
 
-    /// The armed turn is over, so finish-time height changes and the "Worked for…" marker
-    /// must not consume follow-preserve after this point.
+    /// The armed turn is over, so height changes at finish and the "Worked for…" marker must not consume follow-preserve after this point.
     pub(crate) fn note_pin_reserve_turn_finished(&mut self) {
         if self.pin_reserve_active {
             self.pin_reserve_after_turn = true;
@@ -35,10 +34,9 @@ impl ScrollbackState {
             .or_else(|| self.pin_reserve_prompt_scroll_target())
     }
 
-    /// Shift the captured pin pose by any height change ABOVE the pinned prompt, which moves
-    /// the prompt's virtual_y and so must move the captured offset (relative to the visible
-    /// range top) with it. Changes at or below the prompt leave its offset put, so this is a
-    /// no-op for ordinary streaming, where the response grows below the prompt.
+    /// Shift the captured pin pose by any height change ABOVE the pinned prompt.
+    /// Growth above moves the prompt's virtual_y, so the captured offset (relative to the visible range top) must move with it.
+    /// Changes at or below the prompt leave its offset put, so this is a no-op for ordinary streaming, where the response grows below the prompt.
     pub(super) fn shift_pin_reserve_target_for_changes(&mut self, changes: &[(usize, i32)]) {
         if !self.pin_reserve_active {
             return;
@@ -64,7 +62,7 @@ impl ScrollbackState {
         }
     }
 
-    /// Clear reserve identity and lifecycle state without changing scroll totals.
+    /// Clear the reserve's flags, target, and prompt id without changing scroll totals.
     pub(super) fn clear_pin_reserve(&mut self) {
         self.pin_reserve_active = false;
         self.pin_reserve_target = None;
@@ -72,23 +70,23 @@ impl ScrollbackState {
         self.pin_reserve_after_turn = false;
     }
 
-    /// Index of the prompt the pin targets. Resolves the stable id captured at
-    /// arm time so a mid-turn interjection cannot move it; falls back to the
-    /// last user prompt only when no id is stored (e.g. a resize re-derive).
+    /// Index of the prompt the pin targets.
+    /// Resolves the stable id captured at arm time so a mid-turn interjection cannot move it.
+    /// Falls back to the last user prompt only when no id is stored (e.g. when a resize re-derives the target).
     fn pin_reserve_prompt_index(&self) -> Option<usize> {
         self.pin_reserve_prompt_id
             .and_then(|id| self.entries.get_index_of(&id))
             .or_else(|| self.last_user_prompt_index())
     }
 
-    /// Release when the captured pin pose is fully below the viewport. The captured pose
-    /// makes this O(1); without one, remain armed because remeasurement can move a derived target.
+    /// Release when the captured pin pose is fully below the viewport.
+    /// The captured pose makes this O(1); without one, remain armed because remeasurement can move a derived target.
     pub(super) fn release_pin_reserve_if_below_fold(&mut self) -> bool {
         if !self.pin_reserve_active {
             return false;
         }
-        // Use `>=`: when the pose sits exactly on the first row past the viewport the prompt
-        // is already fully off-screen, so release then rather than one row later.
+        // Use `>=`: a pose exactly on the first row past the viewport is already fully off-screen
+        // Release then rather than one row later
         let below_fold = self.pin_reserve_target.is_some_and(|target| {
             target
                 >= self
@@ -129,16 +127,15 @@ impl ScrollbackState {
         let Some(target) = self.pin_reserve_scroll_target() else {
             return 0;
         };
-        // max_offset = content + pad - viewport must be at least `target`
-        // so the last user prompt can sit at the top.
+        // max_offset = content + pad - viewport must be at least `target` so the last user prompt can sit at the top
         target
             .saturating_add(self.viewport_height as usize)
             .saturating_sub(content_height)
     }
 
-    /// Sticky-adjusted scroll target of the prompt the pin is armed for, resolved by the
-    /// captured id so a mid-turn interjection cannot retarget the pad or the resize re-derive
-    /// to a later prompt. Falls back to the last user prompt only when no id is stored.
+    /// Scroll target of the prompt the pin is armed for, adjusted for sticky headers.
+    /// Resolving by the captured id keeps a mid-turn interjection or a resize re-derive from retargeting the pad to a later prompt.
+    /// Falls back to the last user prompt only when no id is stored.
     pub(super) fn pin_reserve_prompt_scroll_target(&self) -> Option<usize> {
         let idx = self.pin_reserve_prompt_index()?;
         let cache = self.layout_cache.as_ref()?;
@@ -149,9 +146,9 @@ impl ScrollbackState {
         let base = *cache.virtual_y.get(range.start)?;
         let y = *cache.virtual_y.get(idx)?;
         let entry_y = y.saturating_sub(base);
-        // Same sticky-header fixed point as `scroll_to_entry_top`. Using raw `entry_y` would
-        // over-state the pad whenever an earlier prompt is still sticky, making max_offset >
-        // scroll_offset and consuming follow-preserve on the next frame.
+        // Same sticky-header fixed point as `scroll_to_entry_top`
+        // Raw `entry_y` would over-state the pad whenever an earlier prompt is still sticky
+        // That would make max_offset > scroll_offset and consume follow-preserve on the next frame
         Some(self.sticky_adjusted_entry_top(cache, &range, entry_y))
     }
 
@@ -499,8 +496,8 @@ mod tests {
         state.prepare_layout(80, 8);
         assert!(state.is_pin_reserve_active());
 
-        // A narrower resize re-wraps every entry taller, moving the pin pose
-        // down in the new coordinate space. The reserve must survive it.
+        // A narrower resize re-wraps every entry taller, moving the pin pose down in the new coordinate space
+        // The reserve must survive it
         state.prepare_layout(40, 8);
         assert!(
             state.is_pin_reserve_active(),

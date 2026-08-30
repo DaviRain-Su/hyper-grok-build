@@ -1,24 +1,27 @@
-//! Pure construction of the durable, replayable turn-completion terminal.
+//! Pure construction of the two turn-terminal signals.
 //!
 //! `TurnCompleted` is the persisted + replayed twin of the fire-and-forget
 //! `x.ai/session/prompt_complete` notification: it rides the
 //! `_x.ai/session/update` rail so a viewer that re-attaches mid-turn finalizes
-//! the turn from replay instead of stranding on "Waiting…". The
-//! `(stop_reason, agent_result)` pair is the SAME pair `prompt_complete`
-//! carries (from [`crate::sampling::error::prompt_complete_fields`]), so the
-//! two signals never disagree.
+//! the turn from replay instead of stranding on "Waiting…". Both builders
+//! live here and derive their fields from
+//! [`crate::sampling::error::prompt_complete_fields`], so the two signals
+//! never disagree.
 
 use crate::extensions::notification::SessionUpdate;
+use xai_grok_sampler::SamplingErrorKind;
 
 /// Build a `TurnCompleted` from a prompt id and the `(stop_reason, agent_result)`
 /// JSON pair produced by [`crate::sampling::error::prompt_complete_fields`].
 /// `stop_reason` is always a JSON string; `agent_result` is a string or null.
 /// Non-string inputs fall back to their JSON text so a terminal is never
-/// dropped for a shape mismatch.
+/// dropped for a shape mismatch. `error_kind` (a failed stop's typed kind)
+/// hits the wire as its stable `as_str` name.
 pub(crate) fn build_turn_completed(
     prompt_id: String,
     stop_reason: serde_json::Value,
     agent_result: serde_json::Value,
+    error_kind: Option<SamplingErrorKind>,
     usage: Option<crate::extensions::notification::PromptUsage>,
     elapsed_ms: Option<u64>,
 ) -> SessionUpdate {
@@ -29,9 +32,35 @@ pub(crate) fn build_turn_completed(
             serde_json::Value::Null => None,
             other => Some(json_to_string(other)),
         },
+        error_kind: error_kind.map(|k| k.as_str().to_string()),
         usage,
         elapsed_ms,
     }
+}
+
+/// Base `x.ai/session/prompt_complete` payload shared by every producer
+/// (live prompt, chat bridge, gateway remote turn): the terminal fields from
+/// [`crate::sampling::error::prompt_complete_fields`] plus the optional typed
+/// `errorKind` stamp. Producers append their rail-specific fields (`turnId`,
+/// cancel meta).
+pub(crate) fn prompt_complete_payload(
+    session_id: &agent_client_protocol::SessionId,
+    prompt_id: &str,
+    result: &std::result::Result<agent_client_protocol::StopReason, agent_client_protocol::Error>,
+) -> serde_json::Value {
+    let (stop_reason, agent_result, error_kind) =
+        crate::sampling::error::prompt_complete_fields(result);
+    let mut payload = serde_json::json!({
+        "sessionId": session_id.to_string(),
+        "promptId": prompt_id,
+        "stopReason": stop_reason,
+        "agentResult": agent_result,
+    });
+    if let Some(kind) = error_kind {
+        payload[crate::extensions::notification::PROMPT_COMPLETE_ERROR_KIND_KEY] =
+            serde_json::json!(kind.as_str());
+    }
+    payload
 }
 
 /// A JSON string yields its inner text; any other shape falls back to its JSON
@@ -55,6 +84,7 @@ mod tests {
             serde_json::json!("end_turn"),
             serde_json::Value::Null,
             None,
+            None,
             Some(1500),
         );
         assert_eq!(
@@ -63,6 +93,7 @@ mod tests {
                 prompt_id: "p-1".into(),
                 stop_reason: "end_turn".into(),
                 agent_result: None,
+                error_kind: None,
                 usage: None,
                 elapsed_ms: Some(1500),
             }
@@ -77,6 +108,7 @@ mod tests {
             serde_json::json!("error"),
             serde_json::json!("connection reset"),
             None,
+            None,
             Some(0),
         );
         assert_eq!(
@@ -85,6 +117,7 @@ mod tests {
                 prompt_id: "p-2".into(),
                 stop_reason: "error".into(),
                 agent_result: Some("connection reset".into()),
+                error_kind: None,
                 usage: None,
                 elapsed_ms: Some(0),
             }
@@ -97,6 +130,7 @@ mod tests {
             "p-3".into(),
             serde_json::json!("cancelled"),
             serde_json::Value::Null,
+            None,
             None,
             Some(42),
         );
@@ -118,6 +152,7 @@ mod tests {
             serde_json::json!(42),
             serde_json::json!({ "k": "v" }),
             None,
+            None,
             Some(7),
         );
         assert_eq!(
@@ -126,6 +161,7 @@ mod tests {
                 prompt_id: "p-4".into(),
                 stop_reason: "42".into(),
                 agent_result: Some("{\"k\":\"v\"}".into()),
+                error_kind: None,
                 usage: None,
                 elapsed_ms: Some(7),
             }
@@ -140,6 +176,7 @@ mod tests {
             serde_json::Value::Null,
             None,
             None,
+            None,
         );
         assert!(matches!(
             update,
@@ -148,5 +185,48 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn typed_error_kind_lands_in_the_typed_field() {
+        let update = build_turn_completed(
+            "p-6".into(),
+            serde_json::json!("error"),
+            serde_json::json!("truncated"),
+            Some(SamplingErrorKind::MaxTokensTruncation),
+            None,
+            Some(3),
+        );
+        assert!(matches!(
+            update,
+            SessionUpdate::TurnCompleted { error_kind: Some(k), .. } if k == "max_tokens_truncation"
+        ));
+    }
+
+    /// One payload builder feeds all three `prompt_complete` producers: the
+    /// typed kind is stamped for kinded failures and absent otherwise.
+    #[test]
+    fn prompt_complete_payload_stamps_error_kind_for_truncation_only() {
+        use agent_client_protocol as acp;
+
+        let sid = acp::SessionId::new("s1".to_string());
+        let result = Err(crate::sampling::error::map_sampling_err_to_acp(
+            crate::sampling::error::SamplingError::MaxTokensTruncation,
+        ));
+        let payload = prompt_complete_payload(&sid, "p1", &result);
+        assert_eq!(payload["sessionId"], "s1");
+        assert_eq!(payload["promptId"], "p1");
+        assert_eq!(payload["stopReason"], "error");
+        assert_eq!(payload["errorKind"], "max_tokens_truncation");
+
+        let ok: std::result::Result<acp::StopReason, acp::Error> = Ok(acp::StopReason::EndTurn);
+        let payload = prompt_complete_payload(&sid, "p2", &ok);
+        assert_eq!(payload["stopReason"], "end_turn");
+        assert!(payload.get("errorKind").is_none());
+
+        let generic = Err(acp::Error::internal_error().data("boom"));
+        let payload = prompt_complete_payload(&sid, "p3", &generic);
+        assert_eq!(payload["stopReason"], "error");
+        assert!(payload.get("errorKind").is_none());
     }
 }

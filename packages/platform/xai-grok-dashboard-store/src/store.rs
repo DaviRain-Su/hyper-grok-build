@@ -17,9 +17,7 @@ use crate::types::{
 const MEMBER_EXISTS_SQL: &str =
     "SELECT EXISTS(SELECT 1 FROM members WHERE session_id = ?1 AND kind = ?2)";
 
-// The conflict arm touches metadata columns only: origin and the rank
-// columns are absent, so adopting an existing member can never rewrite
-// them.
+// The conflict arm touches metadata columns only: origin and the rank columns are absent, so adopting an existing member can never rewrite them
 const UPSERT_MEMBER_SQL: &str = "
 INSERT INTO members (session_id, kind, origin, cwd, title, model,
                      last_turn_summary, is_worktree, last_change_unix_ms)
@@ -30,10 +28,9 @@ ON CONFLICT(session_id, kind) DO UPDATE SET
     is_worktree = excluded.is_worktree,
     last_change_unix_ms = excluded.last_change_unix_ms";
 
-// Row-value IN (not `DELETE ... LIMIT`, which needs a non-default SQLite
-// compile flag); ties on last_change_unix_ms break on (session_id, kind)
-// ascending so two processes racing the same insert converge on the same
-// victim. `:excess` > 1 self-heals an overfull file.
+// The delete uses a row-value IN, not `DELETE ... LIMIT`, which needs a non-default SQLite compile flag.
+// Ties on last_change_unix_ms break on (session_id, kind) ascending, so two processes racing the same insert converge on the same victim
+// An `:excess` above 1 heals an overfull file
 const EVICT_SQL: &str = "
 DELETE FROM members
 WHERE (session_id, kind) IN (
@@ -59,12 +56,11 @@ enum InsertTransactionOutcome {
     },
 }
 
-/// Owns the single connection. `Send` but not `Sync` (`rusqlite::Connection`);
-/// no interior locks — writes take `&mut self` and consumers serialize
-/// access on one owned handle per process.
+/// Owns the single connection. `Send` but not `Sync` (`rusqlite::Connection`), with no interior locks.
+/// Writes take `&mut self`, and consumers serialize access on one owned handle per process.
 ///
-/// Opening is creating: `open` makes the parent directory and database file
-/// exist. A caller that must not create the store must not call it.
+/// Opening is creating: `open` makes the parent directory and database file exist.
+/// A caller that must not create the store must not call it.
 #[derive(Debug)]
 pub struct WorkspaceStore {
     pub(super) conn: rusqlite::Connection,
@@ -73,8 +69,8 @@ pub struct WorkspaceStore {
 }
 
 impl WorkspaceStore {
-    /// The handle's current schema-gate state. A guarded write can transition
-    /// it to [`SchemaState::NewerReadOnly`] after a peer upgrades the store.
+    /// The handle's current schema-gate state.
+    /// A guarded write can transition it to [`SchemaState::NewerReadOnly`] after a peer upgrades the store.
     pub fn schema_state(&self) -> SchemaState {
         self.schema
     }
@@ -84,14 +80,12 @@ impl WorkspaceStore {
         &self.path
     }
 
-    /// One consistent view: grouping, members in primary-key order, and the
-    /// `data_version` observed by the same read transaction. Works in both
-    /// schema states.
+    /// One consistent view: grouping, members in primary-key order, and the `data_version` observed by the same read transaction.
+    /// Works in both schema states.
     ///
     /// # Errors
     ///
-    /// [`StoreError::Busy`] when the busy budget elapses,
-    /// [`StoreError::Sqlite`] otherwise.
+    /// [`StoreError::Busy`] when the busy budget elapses, [`StoreError::Sqlite`] otherwise.
     pub fn snapshot(&self) -> Result<WorkspaceSnapshot> {
         let started = Instant::now();
         self.snapshot_inner()
@@ -139,24 +133,18 @@ impl WorkspaceStore {
         })
     }
 
-    /// `PRAGMA data_version` on this store's connection (autocommit, never
-    /// inside a held transaction, so WAL snapshot pinning cannot freeze the
-    /// value). SQLite's contract:
+    /// `PRAGMA data_version` on this store's connection, in autocommit and never inside a held transaction, so WAL snapshot pinning cannot freeze it.
+    /// SQLite's contract:
     ///
-    /// - The value changes between two reads on a connection iff another
-    ///   connection committed to the database in the interim.
-    /// - Commits made on the same connection do not change the value that
-    ///   connection observes — a process that both writes and polls through
-    ///   one handle sees only *foreign* changes, with no self-echo
-    ///   suppression needed.
-    /// - The value is only meaningful compared against a previous read on
-    ///   the same connection; after a reopen, re-seed the baseline from a
-    ///   fresh [`Self::snapshot`].
+    /// - The value changes between two reads on a connection exactly when another connection committed to the database in the interim.
+    /// - Commits made on the same connection do not change the value that connection observes.
+    ///   A process that both writes and polls through one handle sees only *foreign* changes and never has to filter out its own.
+    /// - The value is only meaningful compared against a previous read on the same connection.
+    ///   After a reopen, re-seed the baseline from a fresh [`Self::snapshot`].
     ///
     /// # Errors
     ///
-    /// [`StoreError::Busy`] when the busy budget elapses,
-    /// [`StoreError::Sqlite`] otherwise.
+    /// [`StoreError::Busy`] when the busy budget elapses, [`StoreError::Sqlite`] otherwise.
     pub fn data_version(&self) -> Result<i64> {
         let started = Instant::now();
         self.conn
@@ -165,18 +153,15 @@ impl WorkspaceStore {
             .map_err(|e| classify_busy(e, "data_version", started))
     }
 
-    /// Insert a member, or update the metadata columns of an existing one
-    /// (never its `origin` or ranks). At capacity, the least-recently-changed
-    /// unpinned members are evicted inside the same transaction.
+    /// Insert a member, or update the metadata columns of an existing one (never its `origin` or ranks).
+    /// At capacity, the least-recently-changed unpinned members are evicted inside the same transaction.
     ///
     /// # Errors
     ///
     /// [`StoreError::NewerSchema`] on a read-only handle,
-    /// [`StoreError::CwdRequired`] / [`StoreError::CwdNotAbsolute`] /
-    /// [`StoreError::CwdTooLong`] from validation, [`StoreError::AllPinned`]
-    /// when the workspace is full and
-    /// every member is pinned (nothing is written), [`StoreError::Busy`] /
-    /// [`StoreError::Sqlite`] from the database.
+    /// [`StoreError::CwdRequired`] / [`StoreError::CwdNotAbsolute`] / [`StoreError::CwdTooLong`] from validation,
+    /// [`StoreError::AllPinned`] when the workspace is full and every member is pinned (nothing is written),
+    /// [`StoreError::Busy`] / [`StoreError::Sqlite`] from the database.
     pub fn insert_member(&mut self, member: NewMember) -> Result<InsertOutcome> {
         let NewMember {
             key,
@@ -270,9 +255,8 @@ impl WorkspaceStore {
             return Ok(InsertOutcome::UpdatedExisting);
         };
 
-        // Eviction is silent in the UI by product decision, so these lines
-        // are the only trace of the data removal — emitted only after the
-        // commit, so a rollback cannot leave a false destruction record.
+        // Eviction is silent in the UI by product decision, so these log lines are the only trace of the data removal
+        // They are emitted only after the commit, so a rollback cannot leave a false destruction record
         let eviction_ran = !victims.is_empty();
         let mut evicted = Vec::with_capacity(victims.len());
         for victim in victims {
@@ -288,9 +272,8 @@ impl WorkspaceStore {
             evicted.push(MemberKey { session_id, kind });
         }
         if remaining_overage > 0 {
-            // Refusing here would block a user action to make up for a
-            // past bug; pinned exemption is never weakened, so the
-            // overage drains as members are unpinned or removed.
+            // Refusing here would block a user action to make up for a past bug
+            // Pinned members stay exempt, so the overage drains as members are unpinned or removed
             tracing::warn!(
                 capacity = WORKSPACE_CAPACITY,
                 count = previous_count,
@@ -305,17 +288,15 @@ impl WorkspaceStore {
         })
     }
 
-    /// Update the metadata columns of an existing member. Cannot touch
-    /// `origin` or the rank columns: the parameter type does not carry them.
+    /// Update the metadata columns of an existing member.
+    /// Cannot touch `origin` or the rank columns: the parameter type does not carry them.
     ///
     /// # Errors
     ///
     /// [`StoreError::NewerSchema`] on a read-only handle,
-    /// [`StoreError::CwdRequired`] / [`StoreError::CwdNotAbsolute`] /
-    /// [`StoreError::CwdTooLong`] from validation,
-    /// [`StoreError::MemberNotFound`] when the row does not
-    /// exist, [`StoreError::Busy`] / [`StoreError::Sqlite`] from the
-    /// database.
+    /// [`StoreError::CwdRequired`] / [`StoreError::CwdNotAbsolute`] / [`StoreError::CwdTooLong`] from validation,
+    /// [`StoreError::MemberNotFound`] when the row does not exist,
+    /// [`StoreError::Busy`] / [`StoreError::Sqlite`] from the database.
     pub fn update_member_metadata(
         &mut self,
         key: &MemberKey,
@@ -354,14 +335,13 @@ impl WorkspaceStore {
         Ok(())
     }
 
-    /// Remove a member. Idempotent: an already-removed member returns
-    /// [`RemoveOutcome::NotPresent`], never an error, so two windows racing
-    /// the same archive both succeed.
+    /// Remove a member.
+    /// Idempotent: an already-removed member returns [`RemoveOutcome::NotPresent`], never an error.
+    /// Two windows racing the same archive both succeed.
     ///
     /// # Errors
     ///
-    /// [`StoreError::NewerSchema`] on a read-only handle,
-    /// [`StoreError::Busy`] / [`StoreError::Sqlite`] from the database.
+    /// [`StoreError::NewerSchema`] on a read-only handle, [`StoreError::Busy`] / [`StoreError::Sqlite`] from the database.
     pub fn remove_member(&mut self, key: &MemberKey) -> Result<RemoveOutcome> {
         let started = Instant::now();
         let changed = self
@@ -386,23 +366,19 @@ impl WorkspaceStore {
         Ok(outcome)
     }
 
-    /// Write `pin_rank` for every assignment in one all-or-nothing
-    /// transaction; a batch is the shape because renumbering a partition
-    /// whose rank gap ran out must be atomic. A pin toggle passes one
-    /// element.
+    /// Write `pin_rank` for every assignment in one all-or-nothing transaction.
+    /// The API takes a batch because renumbering a partition whose rank gap ran out must be atomic; a pin toggle passes one element.
     ///
     /// # Errors
     ///
     /// [`StoreError::NewerSchema`] on a read-only handle,
-    /// [`StoreError::MemberNotFound`] when any assignment matches no row
-    /// (the whole batch rolls back), [`StoreError::Busy`] /
-    /// [`StoreError::Sqlite`] from the database.
+    /// [`StoreError::MemberNotFound`] when any assignment matches no row (the whole batch rolls back),
+    /// [`StoreError::Busy`] / [`StoreError::Sqlite`] from the database.
     pub fn set_pin_rank(&mut self, assignments: &[RankAssignment]) -> Result<()> {
         self.set_ranks(RankColumn::Pin, assignments)
     }
 
-    /// Write `order_rank` for every assignment; same contract as
-    /// [`Self::set_pin_rank`].
+    /// Write `order_rank` for every assignment; same contract as [`Self::set_pin_rank`].
     ///
     /// # Errors
     ///
@@ -448,12 +424,11 @@ impl WorkspaceStore {
     ///
     /// # Errors
     ///
-    /// [`StoreError::NewerSchema`] on a read-only handle,
-    /// [`StoreError::Busy`] / [`StoreError::Sqlite`] from the database.
+    /// [`StoreError::NewerSchema`] on a read-only handle, [`StoreError::Busy`] / [`StoreError::Sqlite`] from the database.
     pub fn set_grouping(&mut self, grouping: &Grouping) -> Result<()> {
         let started = Instant::now();
         self.with_write("set_grouping", |tx| {
-            // The row is guaranteed by the schema-init seed.
+            // Schema init seeds the meta row, so the UPDATE always matches row 0
             tx.execute(
                 "UPDATE meta SET grouping = ?1 WHERE id = 0",
                 params![grouping.as_str()],
@@ -465,18 +440,15 @@ impl WorkspaceStore {
         Ok(())
     }
 
-    /// Move a member to a new session id in one transaction, ranks
-    /// included. When a row with the target key already exists, the two
-    /// merge deterministically: the target keeps its `origin` and metadata
-    /// (it is the live truth), its NULL ranks are filled from the old row,
-    /// and the old row is deleted.
+    /// Move a member to a new session id in one transaction, ranks included.
+    /// When a row with the target key already exists, the two merge deterministically: the target keeps its `origin` and metadata as the live truth.
+    /// Its NULL ranks are filled from the old row, and the old row is deleted.
     ///
     /// # Errors
     ///
     /// [`StoreError::NewerSchema`] on a read-only handle,
-    /// [`StoreError::MemberNotFound`] when `old` does not exist (nothing is
-    /// changed), [`StoreError::Busy`] / [`StoreError::Sqlite`] from the
-    /// database.
+    /// [`StoreError::MemberNotFound`] when `old` does not exist (nothing is changed),
+    /// [`StoreError::Busy`] / [`StoreError::Sqlite`] from the database.
     pub fn rekey(&mut self, old: &MemberKey, new_session_id: SessionId) -> Result<RekeyOutcome> {
         let started = Instant::now();
         let outcome = self
@@ -504,8 +476,7 @@ impl WorkspaceStore {
             let Some((old_pin, old_order)) = old_ranks else {
                 return Err(member_not_found(old));
             };
-            // Short-circuit before the merge arm: there the "target" would be
-            // the old row itself and the final delete would destroy it.
+            // Short-circuit before the merge arm: there the "target" would be the old row itself and the final delete would destroy it
             if old.session_id == *new_session_id {
                 return Ok(RekeyOutcome::NoChange);
             }
@@ -593,8 +564,7 @@ impl WorkspaceStore {
     }
 }
 
-/// The two gapped-rank partitions; both setters share one write shape
-/// because gap exhaustion (and its atomic renumber) applies to either.
+/// The two gapped-rank columns; both setters share this code because gap exhaustion (and its atomic renumber) applies to either.
 #[derive(Clone, Copy)]
 enum RankColumn {
     Pin,

@@ -1,18 +1,3 @@
-//! Client-registered hooks for [`SessionActor`].
-//!
-//! Hooks registered at `session/new` (`_meta["x.ai/hooks"]`) come in two flavors,
-//! both matched by the agent ([`xai_grok_hooks::matcher::HookMatcher`], shared with
-//! file hooks):
-//! - **Gates** (awaited reverse *requests* `x.ai/hooks/run`):
-//!   - `PreToolUse`: a `deny` blocks the tool.
-//!   - `Stop` / `SubagentStop` (turn-end gate): a `deny` blocks the agent from
-//!     stopping (its `systemMessage` becomes the feedback), `continue: false`
-//!     (+ `stopReason`) force-stops overriding blocks, and `additionalContext`
-//!     keeps the agent working with non-error feedback: the same vocabulary
-//!     file hooks produce, aggregated in [`Self::run_stop_client_hooks`].
-//! - **All other events**: fire-and-forget *notifications* `x.ai/hooks/event`,
-//!   observe-only (the callback's return is ignored). Sent per matching callback.
-
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +7,7 @@ use agent_client_protocol::Client as _;
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use serde_json::value::RawValue;
 use xai_grok_hooks::event::{HookEventEnvelope, HookEventName, HookPayload};
-use xai_grok_telemetry::events::ClientHookGateOutcome;
+use xai_grok_telemetry::events::{ClientHookGateOutcome, HookBlockCause};
 
 use super::{SessionActor, ToolLoop};
 use crate::extensions::hooks::{
@@ -33,72 +18,77 @@ use crate::sampling::types::ToolCallResponse;
 const HOOK_EVENT_METHOD: &str = "x.ai/hooks/event";
 const HOOK_RUN_METHOD: &str = "x.ai/hooks/run";
 
-/// Default reply deadline for the `PreToolUse` client gate: short because it
-/// sits in the interactive tool hot path. On timeout the gate fails open (the
-/// tool proceeds). Stop gates use `CLIENT_STOP_GATE_TIMEOUT` instead.
 const CLIENT_HOOK_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Default reply deadline for the `Stop`/`SubagentStop` client gate. A
-/// timed-out gate fails open (the agent stops), so too short a default would
-/// silently drop a ported goal policy that runs a build or test suite.
 const CLIENT_STOP_GATE_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Outcome of the `x.ai/hooks/run` reverse request, before interpreting it as a
-/// decision. Separate so [`classify`] stays pure and unit-testable.
+pub(super) enum RewriteProblem {
+    FailsSchema(String),
+    RetargetsCall,
+}
+
+impl std::fmt::Display for RewriteProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FailsSchema(error) => {
+                write!(f, "the updatedInput failed the tool's schema: {error}")
+            }
+            Self::RetargetsCall => write!(f, "the updatedInput may not change which tool runs"),
+        }
+    }
+}
+
 enum ReverseOutcome {
     Responded(Arc<RawValue>),
     Transport(acp::Error),
     Timeout,
 }
 
-/// Map a reverse-request outcome to a decision. Malformed / transport / timeout
-/// all fail open (the `Default` response = proceed).
 fn classify(outcome: ReverseOutcome) -> (ClientHookResponse, ClientHookGateOutcome) {
-    match outcome {
-        ReverseOutcome::Responded(raw) => {
-            match serde_json::from_str::<ClientHookResponse>(raw.get()) {
-                Ok(resp) => {
-                    // An unknown `decision` fails open like Continue, but is almost always a
-                    // client bug (typo / version skew), so surface it rather than allow silently.
-                    let label = match resp.decision {
-                        ClientHookDecision::Deny => ClientHookGateOutcome::Denied,
-                        ClientHookDecision::Other => {
-                            tracing::warn!(
-                                "x.ai/hooks/run returned an unknown decision value; failing open"
-                            );
-                            ClientHookGateOutcome::UnknownDecision
-                        }
-                        ClientHookDecision::Continue => ClientHookGateOutcome::Proceeded,
-                    };
-                    (resp, label)
-                }
-                Err(err) => {
-                    tracing::warn!(%err, "malformed x.ai/hooks/run response; failing open");
-                    (
-                        ClientHookResponse::default(),
-                        ClientHookGateOutcome::Malformed,
-                    )
-                }
-            }
-        }
+    let raw = match outcome {
+        ReverseOutcome::Responded(raw) => raw,
         ReverseOutcome::Transport(err) => {
             tracing::warn!(%err, "x.ai/hooks/run transport error (no client wired?); failing open");
-            (
-                ClientHookResponse::default(),
-                ClientHookGateOutcome::TransportError,
-            )
+            return fail_open(ClientHookGateOutcome::TransportError);
         }
         ReverseOutcome::Timeout => {
             tracing::warn!("x.ai/hooks/run timed out; failing open");
-            (
-                ClientHookResponse::default(),
-                ClientHookGateOutcome::TimedOut,
-            )
+            return fail_open(ClientHookGateOutcome::TimedOut);
+        }
+    };
+    match serde_json::from_str::<ClientHookResponse>(raw.get()) {
+        Ok(resp) => {
+            let label = decision_label(resp.decision);
+            (resp, label)
+        }
+        Err(err) => {
+            tracing::warn!(%err, "malformed x.ai/hooks/run response; failing open");
+            fail_open(ClientHookGateOutcome::Malformed)
         }
     }
 }
 
-/// Callback ids that fire for an event, in registration order.
+fn fail_open(outcome: ClientHookGateOutcome) -> (ClientHookResponse, ClientHookGateOutcome) {
+    (ClientHookResponse::default(), outcome)
+}
+
+fn decision_label(decision: ClientHookDecision) -> ClientHookGateOutcome {
+    match decision {
+        ClientHookDecision::Deny => ClientHookGateOutcome::Denied,
+        ClientHookDecision::Continue => ClientHookGateOutcome::Proceeded,
+        ClientHookDecision::Ask => {
+            tracing::warn!(
+                "x.ai/hooks/run returned 'ask'; client hooks cannot ask yet — failing open"
+            );
+            ClientHookGateOutcome::UnknownDecision
+        }
+        ClientHookDecision::Other => {
+            tracing::warn!("x.ai/hooks/run returned an unknown decision value; failing open");
+            ClientHookGateOutcome::UnknownDecision
+        }
+    }
+}
+
 fn matching_callback_ids<'a>(
     groups: &'a [ClientHookGroup],
     match_value: Option<&str>,
@@ -112,9 +102,6 @@ fn matching_callback_ids<'a>(
         .collect()
 }
 
-/// Serialize a [`ClientHookDispatch`] to reverse-RPC params, or `None` (logged) on the
-/// should-never-happen serialization failure; callers then skip that callback (fail open)
-/// rather than panic the session actor.
 fn dispatch_params(dispatch: &ClientHookDispatch<'_>) -> Option<Arc<RawValue>> {
     serde_json::value::to_raw_value(dispatch)
         .inspect_err(|err| tracing::warn!(%err, "failed to serialize client hook dispatch"))
@@ -123,10 +110,6 @@ fn dispatch_params(dispatch: &ClientHookDispatch<'_>) -> Option<Arc<RawValue>> {
 }
 
 impl SessionActor {
-    /// Build a [`HookEventEnvelope`] with this session's common fields filled (session id,
-    /// cwd, workspace root, timestamp). Single source of truth for envelope shape; every
-    /// fire site goes through here. The event name is canonicalized so alias
-    /// fire sites (`SubagentEnd`) serialize the canonical `hookEventName`.
     pub(super) fn make_hook_envelope(
         &self,
         hook_event_name: HookEventName,
@@ -147,17 +130,11 @@ impl SessionActor {
         }
     }
 
-    /// Whether any hook source could consume `event`, letting the hot path skip
-    /// building a payload when nothing is listening. Deliberately coarse: any
-    /// on-disk registry activates every event (see [`Self::has_enabled_hooks_for`] for
-    /// the precise check), while client hooks are checked per event.
     pub(super) fn may_have_hooks_for(&self, event: HookEventName) -> bool {
         self.hook_registry.borrow().is_some()
             || self.client_hooks.borrow().contains_key(&event.canonical())
     }
 
-    /// Whether a hook is registered and enabled for `event` specifically, checking the on-disk
-    /// registry per event rather than treating any registry as active.
     pub(super) fn has_enabled_hooks_for(&self, event: HookEventName) -> bool {
         self.hook_registry
             .borrow()
@@ -166,9 +143,6 @@ impl SessionActor {
             || self.client_hooks.borrow().contains_key(&event.canonical())
     }
 
-    /// Build the envelope for an observe-only event, fire observe client hooks for it, and
-    /// return the envelope for any subsequent file-hook dispatch. One call so a fire site
-    /// can't build the envelope but forget to notify.
     pub(super) fn fire_hook(
         &self,
         hook_event_name: HookEventName,
@@ -180,38 +154,77 @@ impl SessionActor {
         envelope
     }
 
-    /// Block a tool call denied by a `PreToolUse` hook (file- or client-side),
-    /// emitting the shared telemetry + UI side-effects and returning the
-    /// [`ToolLoop::HookDenied`] the caller should propagate.
     pub(super) async fn deny_tool(
         &self,
         model_call_id: &str,
         tool_call_id: &acp::ToolCallId,
-        tool_name: String,
+        tool_name: &str,
         hook_name: String,
         reason: String,
     ) -> Result<ToolLoop, acp::Error> {
         tracing::info!(%tool_name, %hook_name, %reason, "tool call denied by pre_tool_use hook");
+        self.block_tool_call(
+            model_call_id,
+            tool_call_id,
+            tool_name,
+            hook_name,
+            HookBlockCause::Denied,
+            &reason,
+        )
+        .await
+    }
+
+    pub(super) async fn block_unusable_rewrite(
+        &self,
+        model_call_id: &str,
+        tool_call_id: &acp::ToolCallId,
+        tool_name: &str,
+        hook_name: String,
+        problem: RewriteProblem,
+    ) -> Result<ToolLoop, acp::Error> {
+        tracing::warn!(
+            %tool_name,
+            %hook_name,
+            hook_failure = %problem,
+            "pre_tool_use hook returned an unusable updatedInput"
+        );
+        self.block_tool_call(
+            model_call_id,
+            tool_call_id,
+            tool_name,
+            hook_name,
+            HookBlockCause::UnusableRewrite,
+            &problem.to_string(),
+        )
+        .await
+    }
+
+    async fn block_tool_call(
+        &self,
+        model_call_id: &str,
+        tool_call_id: &acp::ToolCallId,
+        tool_name: &str,
+        hook_name: String,
+        cause: HookBlockCause,
+        detail: &str,
+    ) -> Result<ToolLoop, acp::Error> {
         xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::HookBlocked {
             hook_name: hook_name.clone(),
+            cause,
         });
         self.handle_tool_not_executed(
             model_call_id,
             tool_call_id,
-            format!("Hook denied: {reason}"),
+            format!("Hook denied: {detail}"),
         )
         .await?;
         self.send_hook_annotation(&format!(
-            "\u{26a0} `{tool_name}` blocked by hook `{hook_name}`: {reason}"
+            "\u{26a0} `{tool_name}` blocked by hook `{hook_name}`: {detail}"
         ))
         .await;
         Ok(ToolLoop::HookDenied { hook_name })
     }
 
-    /// Fan one `x.ai/hooks/run` gate dispatch out to every matching callback,
-    /// yielding `(callback_id, response)` in completion order. Independent
-    /// per-callback timeouts stop one slow callback starving another; timeout,
-    /// transport error, and malformed replies fail open per callback.
     fn client_gate_responses<'a>(
         &'a self,
         groups: &'a [ClientHookGroup],
@@ -226,7 +239,6 @@ impl SessionActor {
             } else {
                 CLIENT_HOOK_TIMEOUT
             };
-        // Dedupe callback ids registered in multiple groups: one dispatch each.
         let mut seen = std::collections::HashSet::new();
         groups
             .iter()
@@ -265,19 +277,12 @@ impl SessionActor {
             .collect()
     }
 
-    /// Run the client-registered `PreToolUse` hooks for `call`, firing
-    /// `x.ai/hooks/run` once per matching callback with the shared `envelope` (the
-    /// same payload file hooks and observe events receive).
-    ///
-    /// Returns `Some(ToolLoop::HookDenied)` on the first deny, else `None`.
     pub(super) async fn run_pre_tool_use_client_hook(
         &self,
         call: &ToolCallResponse,
         tool_call_id: &acp::ToolCallId,
         envelope: &HookEventEnvelope,
     ) -> Result<Option<ToolLoop>, acp::Error> {
-        // Clone the matched groups so we don't hold the `client_hooks` borrow across the
-        // dispatch awaits below.
         let Some(groups) = self
             .client_hooks
             .borrow()
@@ -286,9 +291,6 @@ impl SessionActor {
         else {
             return Ok(None);
         };
-        // Match on the resolved target (in the envelope) so a client deny matcher
-        // keyed on the real MCP tool gates a meta-dispatch call, matching the
-        // observe path (`notify_client_hooks`). Equals `function.name` otherwise.
         let tool_name = envelope
             .payload
             .match_value()
@@ -305,9 +307,7 @@ impl SessionActor {
                     self.deny_tool(
                         &call.id,
                         tool_call_id,
-                        tool_name.to_owned(),
-                        // Name the specific callback so telemetry / the UI annotation can
-                        // attribute the block, not collapse every client hook to "client".
+                        tool_name,
                         format!("client:{callback_id}"),
                         reason,
                     )
@@ -318,9 +318,6 @@ impl SessionActor {
         Ok(None)
     }
 
-    /// Run the client `Stop`/`SubagentStop` gate for a turn-end envelope.
-    /// Unlike the `PreToolUse` gate (first deny wins), every callback's response
-    /// is aggregated into a [`StopDispatchResult`] (a `deny` maps to a block).
     pub(super) async fn run_stop_client_hooks(
         &self,
         envelope: &HookEventEnvelope,
@@ -328,7 +325,6 @@ impl SessionActor {
         use xai_grok_hooks::result::HookRunResult;
 
         let mut out = xai_grok_hooks::dispatcher::StopDispatchResult::default();
-        // Clone: don't hold the borrow across awaits (see run_pre_tool_use_client_hook).
         let Some(groups) = self
             .client_hooks
             .borrow()
@@ -339,8 +335,6 @@ impl SessionActor {
         };
 
         let match_value = envelope.payload.match_value();
-        // Aggregate in registration order so the attributed force-stop winner is
-        // deterministic (completion order is not).
         let mut pending = self.client_gate_responses(&groups, match_value, envelope);
         let mut responses = std::collections::HashMap::new();
         while let Some((callback_id, response, elapsed, gate_outcome)) = pending.next().await {
@@ -370,8 +364,6 @@ impl SessionActor {
                 stop_reason.as_deref(),
                 block_reason.as_deref(),
             );
-            // A hook that never answered did not observe the turn end, so the gate must not
-            // count it as one that ran.
             let unanswered = match gate_outcome {
                 ClientHookGateOutcome::TimedOut => Some("timed out"),
                 ClientHookGateOutcome::TransportError => Some("transport error"),
@@ -386,17 +378,20 @@ impl SessionActor {
                     detail,
                     elapsed,
                     http_info: None,
+                    system_message: None,
                 },
                 (None, Some(why)) => HookRunResult::Failed {
                     hook_name: hook_name.clone(),
                     error: format!("client hook {why}"),
                     elapsed,
                     http_info: None,
+                    system_message: None,
                 },
                 (None, None) => HookRunResult::Success {
                     hook_name: hook_name.clone(),
                     elapsed,
                     http_info: None,
+                    system_message: None,
                 },
             });
 
@@ -414,7 +409,6 @@ impl SessionActor {
         out
     }
 
-    /// Issue one `x.ai/hooks/run` reverse request, bounded by a per-callback `timeout`.
     async fn send_hook_run(
         &self,
         dispatch: &ClientHookDispatch<'_>,
@@ -433,10 +427,6 @@ impl SessionActor {
         }
     }
 
-    /// Fire observe-only client hooks for `envelope`'s event: send an
-    /// `x.ai/hooks/event` notification to each matching registered callback.
-    /// Fire-and-forget (no decision is consumed); independent of file hooks, so it
-    /// runs even when no on-disk hook registry exists. No-op when nothing is registered.
     pub(super) fn notify_client_hooks(&self, envelope: &HookEventEnvelope) {
         let hooks = self.client_hooks.borrow();
         let Some(groups) = hooks.get(&envelope.hook_event_name.canonical()) else {
@@ -465,10 +455,8 @@ mod tests {
         serde_json::value::to_raw_value(&value).unwrap().into()
     }
 
-    /// Only an explicit `deny` blocks; malformed/transport/timeout all proceed. The second
-    /// tuple element is the telemetry outcome, distinct per fail-open mode.
     #[test]
-    fn classify_only_deny_blocks() {
+    fn classify_only_deny_blocks_and_every_failure_mode_reports_a_distinct_outcome() {
         let (denied, outcome) = classify(ReverseOutcome::Responded(raw(
             serde_json::json!({ "decision": "deny" }),
         )));
@@ -481,14 +469,17 @@ mod tests {
         assert_eq!(cont.decision, ClientHookDecision::Continue);
         assert!(matches!(outcome, ClientHookGateOutcome::Proceeded));
 
-        // Unknown decision fails open (proceeds) but reports a distinct outcome.
-        let (unknown, outcome) = classify(ReverseOutcome::Responded(raw(
-            serde_json::json!({ "decision": "maybe_later" }),
-        )));
-        assert_ne!(unknown.decision, ClientHookDecision::Deny);
-        assert!(matches!(outcome, ClientHookGateOutcome::UnknownDecision));
+        for decision in ["maybe_later", "ask"] {
+            let (unknown, outcome) = classify(ReverseOutcome::Responded(raw(
+                serde_json::json!({ "decision": decision }),
+            )));
+            assert_ne!(unknown.decision, ClientHookDecision::Deny, "{decision}");
+            assert!(
+                matches!(outcome, ClientHookGateOutcome::UnknownDecision),
+                "{decision}"
+            );
+        }
 
-        // Every failure mode falls open to Continue, but reports a distinct outcome.
         let (malformed, outcome) = classify(ReverseOutcome::Responded(raw(
             serde_json::json!({ "decision": 123 }),
         )));
@@ -505,9 +496,6 @@ mod tests {
         assert!(matches!(outcome, ClientHookGateOutcome::TimedOut));
     }
 
-    /// `may_have_hooks_for` is the inert-when-unused guard: `false` with no file registry and
-    /// no client hook for the event; `true` once a client hook for that event is registered;
-    /// and `true` for any event whenever a file registry is present.
     #[tokio::test(flavor = "current_thread")]
     async fn may_have_hooks_for_inert_vs_active() {
         use xai_grok_hooks::event::HookEventName;
@@ -526,12 +514,10 @@ mod tests {
                 )
                 .await;
 
-                // Inert: no file registry, no client hooks.
                 assert!(actor.hook_registry.borrow().is_none());
                 assert!(actor.client_hooks.borrow().is_empty());
                 assert!(!actor.may_have_hooks_for(HookEventName::PreToolUse));
 
-                // A registered client hook activates exactly its event.
                 actor.client_hooks.borrow_mut().insert(
                     HookEventName::PreToolUse,
                     vec![ClientHookGroup {
@@ -543,7 +529,6 @@ mod tests {
                 assert!(actor.may_have_hooks_for(HookEventName::PreToolUse));
                 assert!(!actor.may_have_hooks_for(HookEventName::Stop));
 
-                // A present file registry activates every event, even ones with no client hook.
                 *actor.hook_registry.borrow_mut() = Some(std::sync::Arc::new(
                     xai_grok_hooks::discovery::HookRegistry::default(),
                 ));
@@ -553,8 +538,6 @@ mod tests {
             .await;
     }
 
-    /// Tool events filter by matcher (matcher-less groups always fire); a non-tool
-    /// event (`None`) fires every group regardless of its matcher.
     #[test]
     fn matching_callback_ids_filters_by_matcher() {
         use xai_grok_hooks::matcher::HookMatcher;

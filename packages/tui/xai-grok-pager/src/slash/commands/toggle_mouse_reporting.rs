@@ -1,32 +1,24 @@
-//! `/toggle-mouse-reporting` — flip terminal mouse capture from anywhere.
+//! `/toggle-mouse-reporting`: flip terminal mouse capture from anywhere.
 //!
-//! Opt-in companion to the `Ctrl+R` (scrollback-focused) shortcut. Disabling
-//! capture hands mouse selection back to the terminal for native click-drag
-//! copy/paste; re-enabling restores in-app mouse support. Unlike the keybinding,
-//! the command runs from the prompt or scrollback without defocusing input.
+//! Opt-in companion to the `Ctrl+R` (scrollback-focused) shortcut.
+//! Disabling capture hands mouse selection back to the terminal for native click-drag copy/paste; re-enabling restores in-app mouse support.
+//! Unlike the keybinding, the command runs from the prompt or scrollback without defocusing input.
 //!
-//! Gated on `[ui] mouse_reporting_toggle = true` (cached at startup in
-//! [`crate::app::mouse_reporting_toggle_enabled`]): hidden from the dropdown and
-//! inert (prints a hint) when the feature is off.
+//! Gated on `[ui] mouse_reporting_toggle = true` (cached at startup in [`crate::app::mouse_reporting_toggle_enabled`]).
+//! Hidden from the dropdown and inert (prints a hint) when the feature is off.
 
 use crate::app::actions::Action;
-use crate::slash::command::{AppCtx, CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{AppCtx, CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
-/// Toggle terminal mouse reporting (mouse capture). Mirrors the `Ctrl+R`
-/// scrollback shortcut via the same `Action::ToggleMouseCapture` path.
+/// Toggle terminal mouse reporting (mouse capture).
+/// Mirrors the `Ctrl+R` scrollback shortcut via the same `Action::ToggleMouseCapture` path.
 pub struct ToggleMouseReportingCommand;
 
 impl SlashCommand for ToggleMouseReportingCommand {
-    fn name(&self) -> &str {
-        "toggle-mouse-reporting"
-    }
-
-    fn description(&self) -> &str {
-        "Toggle terminal mouse reporting (native click-drag copy/paste)"
-    }
-
-    fn usage(&self) -> &str {
-        "/toggle-mouse-reporting"
+    slash_meta! {
+        name: "toggle-mouse-reporting",
+        description: "Toggle terminal mouse reporting (native click-drag copy/paste)",
+        usage: "/toggle-mouse-reporting",
     }
 
     /// Only offered when the opt-in feature is enabled in config.

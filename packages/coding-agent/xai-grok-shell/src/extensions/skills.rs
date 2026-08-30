@@ -149,17 +149,13 @@ fn count_skills_from(skills: &[SkillInfo], dir: &std::path::Path) -> usize {
 fn resolve_skill_path(raw: &str, cwd: &str) -> String {
     use std::path::PathBuf;
 
-    // Expand ~ to $HOME
+    // Expand ~ to the home directory
     let expanded = if let Some(rest) = raw.strip_prefix("~/") {
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(|home| PathBuf::from(home).join(rest))
+        xai_dirs::home_dir()
+            .map(|home| home.join(rest))
             .unwrap_or_else(|| PathBuf::from(raw))
     } else if raw == "~" {
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(raw))
+        xai_dirs::home_dir().unwrap_or_else(|| PathBuf::from(raw))
     } else {
         PathBuf::from(raw)
     };
@@ -231,9 +227,7 @@ fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)
         try_add_source(grok_home.join(subdir), None);
     }
 
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    if let Some(ref h) = home {
-        let home_path = std::path::PathBuf::from(h);
+    if let Some(home_path) = xai_dirs::home_dir() {
         for subdir in &subdirs {
             try_add_source(home_path.join(".agents").join(subdir), None);
         }
@@ -627,31 +621,21 @@ mod tests {
         );
     }
 
-    /// Hermetic tilde expansion: pin HOME to a temp dir so remote sandboxes
-    /// (missing HOME, symlink-resolved homes, pre-existing ~/my-skills) cannot
-    /// make `starts_with($HOME)` fail spuriously. Serial because env mutation
-    /// is process-global.
+    /// Hermetic tilde expansion: pin both HOME and USERPROFILE to the temp dir
+    /// (`xai_dirs::home_dir()` prefers USERPROFILE on Windows) so remote
+    /// sandboxes (missing HOME, symlink-resolved homes, pre-existing
+    /// ~/my-skills) cannot make `starts_with($HOME)` fail spuriously. Serial
+    /// because env mutation is process-global.
     #[test]
     #[serial_test::serial]
     fn test_resolve_tilde_path() {
+        use xai_grok_test_support::env::EnvGuard;
+
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
-        let prev_home = std::env::var_os("HOME");
-        let prev_userprofile = std::env::var_os("USERPROFILE");
-        // SAFETY: serial test; restored in the same scope below.
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::remove_var("USERPROFILE");
-        }
+        let _home = EnvGuard::set("HOME", &home);
+        let _userprofile = EnvGuard::set("USERPROFILE", &home);
         let resolved = resolve_skill_path("~/my-skills", "/ignored");
-        match prev_home {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        match prev_userprofile {
-            Some(v) => unsafe { std::env::set_var("USERPROFILE", v) },
-            None => unsafe { std::env::remove_var("USERPROFILE") },
-        }
         let expected = home.join("my-skills");
         assert_eq!(
             std::path::PathBuf::from(&resolved),

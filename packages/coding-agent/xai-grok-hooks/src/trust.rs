@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 /// (`<user_grok_home>/trusted-hook-projects`), or `None` when no user grok home
 /// resolves. Retained only for the one-time migration into folder-trust.
 pub fn legacy_trust_file_path() -> Option<PathBuf> {
-    Some(xai_grok_config::user_grok_home()?.join("trusted-hook-projects"))
+    Some(xai_grok_config::user_grok_home()?.join(xai_grok_config::TRUSTED_HOOK_PROJECTS_FILENAME))
 }
 
 /// Parse the legacy trusted-projects file into a list of project paths.

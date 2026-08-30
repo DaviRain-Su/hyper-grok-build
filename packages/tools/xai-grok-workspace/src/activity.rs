@@ -747,6 +747,8 @@ impl ActivityTracker {
                 outcome,
                 tool_call_id: call_id.to_owned(),
                 source: ToolCompletedSource::Workspace,
+                // The hub hop never rewrites; rewrites are recorded on the shell row.
+                rewriting_hook: None,
             });
         }
     }

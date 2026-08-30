@@ -85,7 +85,7 @@ impl RepoDirChain {
 /// from `xai-grok-workspace`, which depends on THIS crate) to keep the dep edge
 /// one-way; backs the home-is-dotfiles guard in [`RepoDirChain::resolve`].
 fn is_home_dir(path: &Path) -> bool {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = xai_dirs::home_dir() else {
         return false;
     };
     let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
@@ -186,12 +186,13 @@ mod tests {
     fn resolve_treats_home_git_repo_as_no_repo() {
         // Home-is-a-git-repo (dotfiles in $HOME): discovery walks up to $HOME,
         // but the guard drops that root so a subdir resolves as no-repo (probe
-        // cwd only) instead of spanning the whole home subtree. $HOME is guarded
-        // (dirs::home_dir reads it) and canonicalized to match the guard.
+        // cwd only) instead of spanning the whole home subtree. Pin HOME and
+        // USERPROFILE: xai_dirs::home_dir reads USERPROFILE on Windows.
         let tmp = tempfile::tempdir().unwrap();
         let home = dunce::canonicalize(tmp.path()).unwrap();
         git2::Repository::init(&home).unwrap();
         let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
         let sub = home.join("proj");
         std::fs::create_dir_all(&sub).unwrap();
 
@@ -204,9 +205,11 @@ mod tests {
     #[serial(home_env)]
     fn resolve_keeps_non_home_git_root() {
         // The guard is home-EXACT: a git root that is NOT $HOME still resolves
-        // normally (no over-trigger), so $HOME points at an unrelated dir here.
+        // normally (no over-trigger). Pin both HOME and USERPROFILE so Windows
+        // home_dir() sees the unrelated tempdir too.
         let home = tempfile::tempdir().unwrap();
         let _home_guard = EnvVarGuard::set("HOME", home.path());
+        let _userprofile_guard = EnvVarGuard::set("USERPROFILE", home.path());
         let repo = tempfile::tempdir().unwrap();
         git2::Repository::init(repo.path()).unwrap();
         let sub = repo.path().join("pkg");

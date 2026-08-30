@@ -1,18 +1,15 @@
 //! Full-text search over scrollback text, scanned on a background thread.
 //!
-//! [`ScrollbackSearchIndex`] caches each entry's [`searchable_text`] (rendered
-//! plain text for markdown blocks, stored source for the rest) keyed by the
-//! scrollback's `content_generation`. It holds one owned `String` per entry
-//! (never a per-rendered-line `Vec`), so memory tracks total searchable-text
-//! size rather than rendered-line count.
+//! [`ScrollbackSearchIndex`] caches each entry's [`searchable_text`], keyed by the scrollback's `content_generation`.
+//! The searchable text is rendered plain text for markdown blocks and the stored source for the rest.
+//! It holds one owned `String` per entry (never a per-rendered-line `Vec`).
+//! Memory therefore tracks total searchable-text size rather than rendered-line count.
 //!
-//! The cache is shared as an `Arc<[IndexedEntry]>` so it can be handed to a
-//! background [`SearchDaemon`] without re-cloning the strings. The daemon runs
-//! the regex scan off the input thread: query mutations only enqueue the latest
-//! corpus and query (O(1) on the UI thread), and
+//! The cache is shared as an `Arc<[IndexedEntry]>` so it can be handed to a background [`SearchDaemon`] without re-cloning the strings.
+//! The daemon runs the regex scan off the input thread.
+//! Query mutations only enqueue the latest corpus and query (O(1) on the UI thread).
 //! [`ScrollbackSearchState::poll`] picks up results once the scan completes.
-//! This keeps per-keystroke typing responsive on long sessions where a
-//! synchronous scan would stall the input thread.
+//! This keeps per-keystroke typing responsive on long sessions where a synchronous scan would stall the input thread.
 //!
 //! [`searchable_text`]: super::block::RenderBlock::searchable_text
 
@@ -37,17 +34,16 @@ pub struct ScrollbackMatch {
     pub entry_id: EntryId,
     /// Zero-based line index of the match within the entry's searchable text.
     pub line_in_entry: usize,
-    /// Byte range within the entry's searchable text; distinguishes matches
-    /// that share a `line_in_entry`.
+    /// Byte range within the entry's searchable text; distinguishes matches that share a `line_in_entry`.
     pub byte_range: Range<usize>,
 }
 
 /// Per-entry cache of searchable source text plus a query scan over it.
 ///
-/// [`sync`](Self::sync) rebuilds the cache only when scrollback content changes;
-/// [`find`](Self::find) scans the cache without touching the scrollback. The
-/// cache is stored as an `Arc<[IndexedEntry]>` so [`entries_arc`](Self::entries_arc)
-/// can hand it to the background daemon with a cheap pointer clone.
+/// [`sync`](Self::sync) rebuilds the cache only when scrollback content changes.
+/// [`find`](Self::find) scans the cache without touching the scrollback.
+/// The cache is stored as an `Arc<[IndexedEntry]>`.
+/// [`entries_arc`](Self::entries_arc) hands it to the background daemon with a cheap pointer clone.
 #[derive(Debug, Default)]
 pub struct ScrollbackSearchIndex {
     entries: Arc<[IndexedEntry]>,
@@ -66,15 +62,13 @@ impl ScrollbackSearchIndex {
         Self::default()
     }
 
-    /// Rebuild the cached text when scrollback content changed since the last
-    /// sync, returning `true` if it rebuilt and `false` on the no-op early
-    /// return. A no-op when `content_generation` is unchanged, so scrolling and
-    /// viewport changes never trigger work.
+    /// Rebuild the cached text when scrollback content changed since the last sync.
+    /// Returns `true` if it rebuilt and `false` on the no-op early return.
+    /// A no-op when `content_generation` is unchanged, so scrolling and viewport changes never trigger work.
     ///
-    /// Re-derives every entry's source text wholesale, and content changes
-    /// (e.g. streaming) bump the key often, so callers should sync on query
-    /// change or search open — not every frame. Per-entry incremental updates
-    /// are left until profiling on large sessions calls for them.
+    /// Re-derives every entry's source text wholesale, and content changes (e.g. streaming) bump the key often.
+    /// Callers should therefore sync on query change or search open, not every frame.
+    /// Per-entry incremental updates are left until profiling on large sessions calls for them.
     pub fn sync(&mut self, state: &ScrollbackState) -> bool {
         if self.built_generation == Some(state.content_generation()) {
             return false;
@@ -98,14 +92,12 @@ impl ScrollbackSearchIndex {
         self.entries.clone()
     }
 
-    /// All matches for `matcher`, in scrollback order. Call [`sync`](Self::sync)
-    /// first so the cache reflects current content.
+    /// All matches for `matcher`, in scrollback order.
+    /// Call [`sync`](Self::sync) first so the cache reflects current content.
     ///
-    /// Retained for the benchmark and unit tests; the production path scans on
-    /// the daemon thread via [`scan_matches`].
+    /// Retained for the benchmark and unit tests; the production path scans on the daemon thread via [`scan_matches`].
     ///
-    /// An empty query yields nothing (an empty pattern would otherwise match at
-    /// every byte); zero-width matches are skipped for the same reason.
+    /// An empty query yields nothing (an empty pattern would otherwise match at every byte); zero-width matches are skipped for the same reason.
     pub fn find(&self, matcher: &TextMatcher) -> Vec<ScrollbackMatch> {
         scan_matches(&self.entries, matcher)
     }
@@ -113,10 +105,8 @@ impl ScrollbackSearchIndex {
 
 /// Scan `entries` for every match of `matcher`, in scrollback order.
 ///
-/// Shared by the synchronous [`ScrollbackSearchIndex::find`] and the background
-/// [`SearchDaemon`]. An empty query yields nothing (an empty pattern would
-/// otherwise match at every byte); zero-width matches are skipped for the same
-/// reason.
+/// Shared by the synchronous [`ScrollbackSearchIndex::find`] and the background [`SearchDaemon`].
+/// An empty query yields nothing (an empty pattern would otherwise match at every byte); zero-width matches are skipped for the same reason.
 fn scan_matches(entries: &[IndexedEntry], matcher: &TextMatcher) -> Vec<ScrollbackMatch> {
     if matcher.query().is_empty() {
         return Vec::new();
@@ -124,8 +114,7 @@ fn scan_matches(entries: &[IndexedEntry], matcher: &TextMatcher) -> Vec<Scrollba
     let regex = matcher.compiled_regex();
     let mut matches = Vec::new();
     for entry in entries {
-        // Matches arrive in ascending byte order, so walk newlines forward
-        // once per entry to label each match's line instead of rescanning.
+        // Matches arrive in ascending byte order, so walk newlines forward once per entry to label each match's line instead of rescanning
         let mut line = 0usize;
         let mut counted_to = 0usize;
         for m in regex.find_iter(&entry.text) {
@@ -150,25 +139,22 @@ fn scan_matches(entries: &[IndexedEntry], matcher: &TextMatcher) -> Vec<Scrollba
 
 /// Latest scan results published by the daemon for the UI thread to pick up.
 ///
-/// `request_generation` is assigned synchronously by the UI and identifies the
-/// exact query/corpus request that produced this snapshot.
+/// `request_generation` is assigned synchronously by the UI and identifies the exact query/corpus request that produced this snapshot.
 #[derive(Clone, Default, Debug)]
 struct SearchSnapshot {
     matches: Arc<[ScrollbackMatch]>,
     request_generation: u64,
-    /// The query these matches were computed for. `poll` compares it against
-    /// the live editor and drops results for a query the user has already
-    /// typed past (the scan was in flight while they kept editing), so the
-    /// match count / cursor never desync from the visible query.
+    /// The query these matches were computed for.
+    /// `poll` compares it against the live editor and drops results for a query the user typed past while the scan was in flight.
+    /// The match count and cursor therefore never desync from the visible query.
     query: String,
 }
 
 /// Work sent from the UI thread to the daemon.
 ///
-/// Each keystroke is one atomic `Update` carrying the latest query plus, only
-/// when content changed, the new corpus. Bundling them means the daemon can
-/// never wake having seen a new corpus but not yet the matching query (a
-/// split-snapshot that would publish one stale result before correcting).
+/// Each keystroke is one atomic `Update` carrying the latest query plus, only when content changed, the new corpus.
+/// Bundling them means the daemon can never wake having seen a new corpus but not yet the matching query.
+/// A split like that would publish one stale result before correcting.
 enum SearchMsg {
     Update {
         /// New corpus to scan, or `None` to keep the corpus the daemon holds.
@@ -191,11 +177,10 @@ struct DrainedUpdate {
     stop: bool,
 }
 
-/// Coalesce all currently-pending messages, keeping the newest corpus and the
-/// newest query so a burst of keystrokes triggers a single scan of the latest
-/// query. A later `None` corpus means "unchanged" and must not clobber a corpus
-/// carried by an earlier message in the burst. `Stop` always wins and ends
-/// draining immediately.
+/// Coalesce all currently-pending messages, keeping the newest corpus and the newest query.
+/// A burst of keystrokes then triggers a single scan of the latest query.
+/// A later `None` corpus means "unchanged" and must not clobber a corpus carried by an earlier message in the burst.
+/// `Stop` always wins and ends draining immediately.
 fn drain_to_latest(first: SearchMsg, rx: &Receiver<SearchMsg>) -> DrainedUpdate {
     let mut out = DrainedUpdate::default();
     let mut msg = first;
@@ -229,9 +214,8 @@ fn drain_to_latest(first: SearchMsg, rx: &Receiver<SearchMsg>) -> DrainedUpdate 
 struct SearchDaemon {
     shared: Arc<Mutex<SearchSnapshot>>,
     tx: Sender<SearchMsg>,
-    /// Deliberately detached, never joined: closing a search must not block the
-    /// UI on an in-flight scan. `Stop` plus channel-disconnect both end the
-    /// thread, and the worker owns its `Arc` clones, so dropping this is safe.
+    /// Deliberately detached, never joined: closing a search must not block the UI on an in-flight scan.
+    /// `Stop` and channel-disconnect both end the thread, and the worker owns its `Arc` clones, so dropping this is safe.
     _handle: JoinHandle<()>,
 }
 
@@ -239,10 +223,8 @@ impl SearchDaemon {
     fn new() -> Self {
         let shared = Arc::new(Mutex::new(SearchSnapshot::default()));
         // Unbounded so `update_query`'s send never blocks the input thread.
-        // A bounded channel could stall the 257th keystroke on a full buffer,
-        // and dropping on full (try_send) could lose the final query. Messages
-        // are tiny (an Arc pointer + the query) and the daemon drains the whole
-        // queue on each wakeup, so it stays short in practice.
+        // A bounded channel could stall the 257th keystroke on a full buffer, and dropping on full (try_send) could lose the final query
+        // Messages are tiny (an Arc pointer and the query) and the daemon drains the whole queue on each wakeup, so it stays short in practice
         let (tx, rx) = channel::<SearchMsg>();
 
         let out = shared.clone();
@@ -265,8 +247,7 @@ impl SearchDaemon {
                 };
 
                 // Every non-`Stop` burst carries a query, so rescan once here.
-                // Compile + scan off the lock; the mutex only guards the quick
-                // snapshot swap below, never the scan itself.
+                // Compile and scan off the lock; the mutex only guards the quick snapshot swap below, never the scan itself
                 let matcher = TextMatcher::new(query.as_str(), QueryKind::Regex);
                 let matches: Arc<[ScrollbackMatch]> = if query.is_empty() || matcher.is_error() {
                     Arc::from([])
@@ -296,27 +277,24 @@ impl Drop for SearchDaemon {
     }
 }
 
-/// An interactive search session over the scrollback: owns the query editor,
-/// derived matcher, cached index, background scan daemon, latest match list,
-/// and a cursor into it.
+/// An interactive search session over the scrollback.
+/// Owns the query editor, derived matcher, cached index, background scan daemon, latest match list, and a cursor into it.
 ///
-/// Matching runs off-thread. [`update_query`](Self::update_query) only enqueues
-/// the corpus and query for the daemon (it never scans); results arrive later
-/// via [`poll`](Self::poll). `n` / `N` navigation ([`next`](Self::next) /
-/// [`prev`](Self::prev)) stays synchronous since the match list is already in
-/// hand by then.
+/// Matching runs off-thread.
+/// [`update_query`](Self::update_query) only enqueues the corpus and query for the daemon; it never scans.
+/// Results arrive later via [`poll`](Self::poll).
+/// `n` / `N` navigation ([`next`](Self::next) / [`prev`](Self::prev)) stays synchronous since the match list is already in hand by then.
 ///
-/// The lifecycle has two phases. While **composing**, the user is still editing
-/// the query and each edit re-queries. [`accept`](Self::accept) freezes the
-/// query and switches to **browsing**. Canceling is simply dropping the state
-/// (the owner holds it as an `Option`), which stops the daemon thread, so there
-/// is deliberately no `cancel` method.
+/// The lifecycle has two phases.
+/// While **composing**, the user is still editing the query and each edit re-queries.
+/// [`accept`](Self::accept) freezes the query and switches to **browsing**.
+/// Canceling is dropping the state (the owner holds it as an `Option`), which stops the daemon thread, so there is no `cancel` method.
 #[derive(Debug)]
 pub struct ScrollbackSearchState {
     /// Canonical editable query and cursor.
     editor: LineEditor,
-    /// Cached searchable text; re-synced lazily on content change, never per
-    /// frame. Lives on the UI thread and is handed to the daemon as an `Arc`.
+    /// Cached searchable text; re-synced lazily on content change, never per frame.
+    /// Lives on the UI thread and is handed to the daemon as an `Arc`.
     index: ScrollbackSearchIndex,
     /// Compiled query derived from `editor` for highlighting and error state.
     matcher: TextMatcher,
@@ -324,21 +302,19 @@ pub struct ScrollbackSearchState {
     matches: Arc<[ScrollbackMatch]>,
     /// Cursor into `matches`; `None` when there are no matches.
     current: Option<usize>,
-    /// `true` while the query is still being edited (search bar), `false` once
-    /// accepted (browsing with `n` / `N`).
+    /// `true` while the query is still being edited (search bar), `false` once accepted (browsing with `n` / `N`).
     composing: bool,
     /// Background scan thread; dropped (and stopped) when the session closes.
     daemon: SearchDaemon,
     /// Snapshot request generation last observed by `poll`.
     last_seen_generation: u64,
-    /// Monotonic UI-owned request generation, incremented only when enqueuing
-    /// query/corpus work.
+    /// Monotonic UI-owned request generation, incremented only when enqueuing query/corpus work.
     request_generation: u64,
 }
 
 impl ScrollbackSearchState {
-    /// Open an empty session in the composing phase. No matches exist until the
-    /// first [`update_query`](Self::update_query) result is [`poll`](Self::poll)ed in.
+    /// Open an empty session in the composing phase.
+    /// No matches exist until the first [`update_query`](Self::update_query) result is [`poll`](Self::poll)ed in.
     pub fn open() -> Self {
         Self {
             editor: LineEditor::default(),
@@ -353,11 +329,10 @@ impl ScrollbackSearchState {
         }
     }
 
-    /// Replace the canonical query, recompile its derived matcher, and enqueue
-    /// the latest corpus/query snapshot for the background scan.
+    /// Replace the canonical query, recompile its derived matcher, and enqueue the latest corpus/query snapshot for the background scan.
     ///
-    /// The corpus is only re-synced and re-sent when scrollback content changed
-    /// since the last send, so steady-state keystrokes just push a query string.
+    /// The corpus is only re-synced and re-sent when scrollback content changed since the last send.
+    /// Steady-state keystrokes therefore just push a query string.
     pub fn update_query(&mut self, query: &str, state: &ScrollbackState) {
         self.editor.set_text(query);
         self.update_derived_query(state);
@@ -365,21 +340,18 @@ impl ScrollbackSearchState {
 
     fn update_derived_query(&mut self, state: &ScrollbackState) {
         let query = self.editor.text().to_owned();
-        // Compile UI-side: the render layer highlights from this matcher, and it
-        // backs `query` / `has_error`, all of which must update immediately.
+        // Compile UI-side: the render layer highlights from this matcher, and it backs `query` / `has_error`, all of which must update immediately
         self.matcher = TextMatcher::new(query.as_str(), QueryKind::Regex);
-        // Keep the last settled result navigable while the next scan is in
-        // flight. Empty and malformed queries are known synchronously to have
-        // no matches, so those can clear immediately.
+        // Keep the last settled result navigable while the next scan is in flight
+        // Empty and malformed queries are known synchronously to have no matches, so those can clear immediately
         if query.is_empty() || self.matcher.is_error() {
             self.matches = Arc::from([]);
             self.current = None;
         }
 
-        // Re-send the corpus only when `sync` actually rebuilt it (content
-        // changed); otherwise `None` tells the daemon to keep the corpus it
-        // already holds. The index itself guards the rebuild on
-        // `content_generation`, so no separate generation tracking is needed.
+        // Re-send the corpus only when `sync` actually rebuilt it (content changed)
+        // Otherwise `None` tells the daemon to keep the corpus it already holds
+        // The index itself guards the rebuild on `content_generation`, so no separate generation tracking is needed
         let corpus = self.index.sync(state).then(|| self.index.entries_arc());
         let Some(request_generation) = self.request_generation.checked_add(1) else {
             tracing::debug!("scrollback search request generation exhausted; dropping update");
@@ -391,8 +363,7 @@ impl ScrollbackSearchState {
             query,
             request_generation,
         }) {
-            // A failed send means the daemon thread is gone (panicked or already
-            // stopped) — search has silently stopped working, so leave a trace.
+            // A failed send means the daemon thread is gone (panicked or already stopped); search has silently stopped working, so leave a trace
             tracing::debug!(%err, "scrollback search daemon unavailable; dropping query update");
         }
     }
@@ -426,24 +397,21 @@ impl ScrollbackSearchState {
         self.apply_query_key(key, state) != LineEditOutcome::Unhandled
     }
 
-    /// Pick up the latest scan results from the daemon. Returns `true` when the
-    /// results changed (so the caller can redraw / reveal the new match).
+    /// Pick up the latest scan results from the daemon.
+    /// Returns `true` when the results changed (so the caller can redraw / reveal the new match).
     ///
-    /// On a change the cursor parks on the first match, preserving the old
-    /// "jump to the first match when the query changes" behavior.
+    /// On a change the cursor parks on the first match, preserving the old "jump to the first match when the query changes" behavior.
     pub fn poll(&mut self) -> bool {
-        // Hold the lock only for the cheap compares (and, on a real change, an
-        // Arc-pointer clone). Never clone the whole snapshot: that would heap-
-        // allocate its `query: String` on every no-change tick at ~30 Hz.
+        // Hold the lock only for the cheap compares (and, on a real change, an Arc-pointer clone)
+        // Never clone the whole snapshot: that would heap-allocate its `query: String` on every no-change tick at ~30 Hz
         let guard = self.daemon.shared.lock().unwrap();
         if guard.request_generation == self.last_seen_generation {
             return false;
         }
         self.last_seen_generation = guard.request_generation;
-        // Drop a scan that finished for a superseded query: while it was in
-        // flight the user kept typing, so the editor and derived matcher have
-        // already moved on. Applying it would desync the match count and
-        // cursor from the visible query until the current query's scan lands.
+        // Drop a scan that finished for a superseded query
+        // While it was in flight the user kept typing, so the editor and derived matcher have already moved on
+        // Applying it would desync the match count and cursor from the visible query until the current query's scan lands
         if guard.request_generation != self.request_generation || guard.query != self.query() {
             return false;
         }
@@ -454,14 +422,14 @@ impl ScrollbackSearchState {
         true
     }
 
-    /// Move the cursor to the next match, wrapping past the end. No-op when
-    /// there are no matches.
+    /// Move the cursor to the next match, wrapping past the end.
+    /// No-op when there are no matches.
     pub fn next(&mut self) {
         self.step(1);
     }
 
-    /// Move the cursor to the previous match, wrapping past the front. No-op
-    /// when there are no matches.
+    /// Move the cursor to the previous match, wrapping past the front.
+    /// No-op when there are no matches.
     pub fn prev(&mut self) {
         self.step(-1);
     }
@@ -477,8 +445,8 @@ impl ScrollbackSearchState {
         self.current = Some((from + delta).rem_euclid(len as isize) as usize);
     }
 
-    /// Freeze the query and switch from composing to browsing. The matcher and
-    /// match list are retained so `n` / `N` can step through them.
+    /// Freeze the query and switch from composing to browsing.
+    /// The matcher and match list are retained so `n` / `N` can step through them.
     pub fn accept(&mut self) {
         self.composing = false;
     }
@@ -507,9 +475,8 @@ impl ScrollbackSearchState {
         self.editor.viewport(width)
     }
 
-    /// The compiled query regex for the highlight pass, or `None` when the
-    /// query is empty or fails to compile (nothing to highlight). Decoupled
-    /// from the index — the render layer re-runs it per visible row.
+    /// The compiled query regex for the highlight pass, or `None` when the query is empty or fails to compile (nothing to highlight).
+    /// Decoupled from the index; the render layer re-runs it per visible row.
     pub fn highlight_regex(&self) -> Option<regex::Regex> {
         (!self.query().is_empty() && !self.matcher.is_error())
             .then(|| self.matcher.compiled_regex().clone())
@@ -520,8 +487,7 @@ impl ScrollbackSearchState {
         self.matcher.is_error()
     }
 
-    /// Whether the query is still being edited (`true`) versus accepted and
-    /// being browsed (`false`).
+    /// Whether the query is still being edited (`true`) versus accepted and being browsed (`false`).
     pub fn is_composing(&self) -> bool {
         self.composing
     }
@@ -574,10 +540,9 @@ mod tests {
 
     #[test]
     fn find_matches_markdown_phrase_spanning_emphasis() {
-        // Regression for "highlighted but no matches": the index searches the
-        // rendered text, so a phrase that spans markdown emphasis is found —
-        // matching what the on-screen highlight shows. Over the raw source
-        // `this is **really** important` the phrase would be missed.
+        // Regression for "highlighted but no matches": the index searches the rendered text
+        // A phrase that spans markdown emphasis is therefore found, matching what the on-screen highlight shows
+        // Over the raw source `this is **really** important` the phrase would be missed
         let mut state = ScrollbackState::new();
         let id = state.push_block(RenderBlock::agent_message("this is **really** important"));
 
@@ -712,10 +677,8 @@ mod tests {
 
     /// Send a query and wait for the daemon to publish its result.
     ///
-    /// One `update_query` is one atomic `Update`, so it yields exactly one
-    /// snapshot bump; break on the first `poll` that observes it. Panics if the
-    /// daemon never responds so a wedged daemon surfaces here, not as a
-    /// confusing downstream assertion.
+    /// One `update_query` is one atomic `Update`, so it yields exactly one snapshot bump; break on the first `poll` that observes it.
+    /// Panics if the daemon never responds so a wedged daemon shows up here, not as a confusing downstream assertion.
     fn update_and_wait(search: &mut ScrollbackSearchState, query: &str, state: &ScrollbackState) {
         search.update_query(query, state);
         for _ in 0..1000 {
@@ -755,8 +718,7 @@ mod tests {
         let state = state_with(&["foo bar"]);
         let mut search = ScrollbackSearchState::open();
 
-        // The daemon publishes an empty snapshot (with a bumped generation) even
-        // when nothing matches, so the no-match result still arrives via poll.
+        // The daemon publishes an empty snapshot (with a bumped generation) even when nothing matches, so the no-match result still arrives via poll
         update_and_wait(&mut search, "nope", &state);
 
         assert_eq!(search.match_count(), 0);
@@ -783,8 +745,7 @@ mod tests {
         let state = state_with(&["[brackets]"]);
         let mut search = ScrollbackSearchState::open();
 
-        // The query is always interpreted as a regex; a malformed one matches
-        // nothing but is still echoed back for the search bar to display.
+        // The query is always interpreted as a regex; a malformed one matches nothing but is still echoed back for the search bar to display
         update_and_wait(&mut search, "[invalid", &state);
 
         assert_eq!(search.query(), "[invalid");
@@ -873,8 +834,7 @@ mod tests {
 
     #[test]
     fn update_query_picks_up_content_added_mid_session() {
-        // Content appended while a session is open changes `content_generation`,
-        // so the next query re-syncs the corpus to the daemon and finds it.
+        // Content appended while a session is open changes `content_generation`, so the next query re-syncs the corpus to the daemon and finds it
         let mut state = state_with(&["foo one"]);
         let mut search = ScrollbackSearchState::open();
         update_and_wait(&mut search, "foo", &state);
@@ -889,8 +849,7 @@ mod tests {
 
     #[test]
     fn async_scan_delivers_results_and_navigation_wraps() {
-        // End-to-end of the async path: open → enqueue query → poll in results →
-        // synchronous navigation over the delivered match list.
+        // End-to-end of the async path: open, enqueue a query, poll in results, then navigate synchronously over the delivered match list
         let state = state_with(&["foo bar", "baz foo"]);
         let mut search = ScrollbackSearchState::open();
 
@@ -969,8 +928,7 @@ mod tests {
     #[test]
     fn update_query_refinds_against_cached_corpus() {
         // Changing the query without changing content re-scans the same corpus
-        // (no new corpus is sent — `Update.corpus` is `None` — so the daemon
-        // reuses the corpus it holds).
+        // No new corpus is sent (`Update.corpus` is `None`), so the daemon reuses the corpus it holds
         let state = state_with(&["alpha beta", "beta gamma"]);
         let mut search = ScrollbackSearchState::open();
 
@@ -1071,9 +1029,8 @@ mod tests {
 
     #[test]
     fn poll_rejects_same_query_and_aba_stale_snapshots() {
-        // The daemon parks on recv() until a message is sent; since this test
-        // never calls update_query, the shared snapshot is uncontested and we
-        // can publish snapshots in a deterministic order.
+        // The daemon parks on recv() until a message is sent
+        // This test never calls update_query, so the shared snapshot is uncontested and we can publish snapshots in a deterministic order
         let mut search = ScrollbackSearchState::open();
         search.editor.set_text("A");
         search.matcher = TextMatcher::new("A", QueryKind::Regex);
@@ -1096,7 +1053,7 @@ mod tests {
         assert!(!search.poll(), "same-query stale corpus result is dropped");
         assert_eq!(search.match_count(), 0);
 
-        // Generation 2 is the intermediate B in an A→B→A sequence.
+        // Generation 2 is the intermediate B in the A-B-A sequence
         *search.daemon.shared.lock().unwrap() = SearchSnapshot {
             matches: std::sync::Arc::from([a_match.clone()]),
             request_generation: 2,
@@ -1117,10 +1074,9 @@ mod tests {
 
     #[test]
     fn poll_without_new_generation_keeps_navigation_cursor() {
-        // The generation guard's load-bearing job: once results land and the
-        // user navigates, repeated polls that observe no new daemon write must
-        // not snap the cursor back to the first match. (Deleting the guard would
-        // regress this without tripping any other test.)
+        // This is the generation guard's load-bearing job
+        // Once results land and the user navigates, polls that observe no new daemon write must not snap the cursor back to the first match
+        // Deleting the guard would regress this without tripping any other test
         let state = state_with(&["foo", "foo", "foo"]);
         let mut search = ScrollbackSearchState::open();
         update_and_wait(&mut search, "foo", &state);
@@ -1130,8 +1086,7 @@ mod tests {
         search.next();
         assert_eq!(search.current_index(), Some(1));
 
-        // No further daemon write happened, so each poll sees the same
-        // generation and must be a no-op that preserves the cursor.
+        // No further daemon write happened, so each poll sees the same generation and must be a no-op that preserves the cursor
         for _ in 0..5 {
             assert!(
                 !search.poll(),
@@ -1147,12 +1102,10 @@ mod tests {
 
     #[test]
     fn coalesced_burst_carries_corpus_forward_to_last_query() {
-        // Settle once so the daemon holds the corpus, then fire a burst of
-        // queries back-to-back without polling between sends so they coalesce in
-        // the channel. None of the burst updates carry a corpus (content is
-        // unchanged), so the daemon must reuse the corpus it holds and settle on
-        // the LAST query — drain_to_latest coalescing + corpus carry-forward
-        // (`Update.corpus` is `None`) exercised end-to-end through the daemon.
+        // Settle once so the daemon holds the corpus, then fire a burst of queries back-to-back
+        // No polling happens between sends, so the messages coalesce in the channel
+        // None of the burst updates carry a corpus (content is unchanged), so the daemon must reuse the corpus it holds and settle on the LAST query
+        // This exercises drain_to_latest coalescing and corpus carry-forward (`Update.corpus` is `None`) end-to-end through the daemon
         let state = state_with(&["alpha", "alpha beta", "beta gamma"]);
         let mut search = ScrollbackSearchState::open();
         update_and_wait(&mut search, "alpha", &state);
@@ -1162,9 +1115,8 @@ mod tests {
         search.update_query("alpha", &state);
         search.update_query("gamma", &state);
 
-        // poll() drops snapshots for the superseded earlier queries (the matcher
-        // already moved to "gamma"), so the first true poll is the last query's
-        // result — proving the corpus survived the None-corpus burst.
+        // poll() drops snapshots for the superseded earlier queries (the matcher already moved to "gamma")
+        // The first true poll is therefore the last query's result, proving the corpus survived the None-corpus burst
         let mut settled = false;
         for _ in 0..1000 {
             if search.poll() {

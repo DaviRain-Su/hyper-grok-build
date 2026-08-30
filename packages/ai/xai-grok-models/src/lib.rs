@@ -3,8 +3,7 @@
 //! - xAI defaults live in `default_models.json`
 //! - Moonshot open platforms (Phase 1) live in [`platforms`]
 //!
-//! At runtime each model is resolved via:
-//!   CLI flag > ENV var > config.toml > remote settings > these defaults
+//! At runtime each model is resolved from the first of these that is set: CLI flag, ENV var, config.toml, remote settings, these defaults.
 
 mod platforms;
 mod provider_compat;
@@ -40,9 +39,8 @@ pub use provider_compat::{
 
 use std::sync::LazyLock;
 
-/// The raw JSON, embedded at compile time. Re-exported through the
-/// `xai_grok_shell::models` facade and consumed by `agent::config`, so it must
-/// be `pub` (was `pub(crate)` when this lived inside the shell crate).
+/// The raw JSON, embedded at compile time.
+/// It is `pub` because `xai_grok_shell::models` re-exports it and `agent::config` reads it.
 pub const DEFAULT_MODELS_JSON: &str = include_str!("../default_models.json");
 
 #[derive(serde::Deserialize)]
@@ -66,7 +64,7 @@ static DEFAULTS: LazyLock<DefaultModels> = LazyLock::new(|| {
     let defaults: DefaultModels = serde_json::from_str(DEFAULT_MODELS_JSON)
         .expect("default_models.json: invalid JSON or missing 'default' field");
 
-    // Baked-in JSON — a mismatch here is a developer error, not a runtime condition.
+    // Baked-in JSON: a mismatch here is a developer error
     let model_ids: Vec<&str> = defaults.models.iter().map(|m| m.model.as_str()).collect();
     assert!(
         model_ids.contains(&defaults.default.as_str()),

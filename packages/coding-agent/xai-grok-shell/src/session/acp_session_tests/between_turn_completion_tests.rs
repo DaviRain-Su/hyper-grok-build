@@ -13,6 +13,7 @@ fn summary(
         subagent_id: id.into(),
         subagent_type: typ.into(),
         description: desc.into(),
+        loop_task_id: None,
         success,
         duration_ms: ms,
         tool_calls: tools,
@@ -31,7 +32,7 @@ fn single_successful_completion_with_poll_tool() {
         12300,
         5,
     )];
-    let result = format_between_turn_completions(&completions, Some("get_task_output"));
+    let result = format_between_turn_completions(&completions, Some("get_task_output"), None);
     assert!(result.starts_with("While you were idle, 1 background subagent completed:\n"));
     assert!(result.contains("[explore]"));
     assert!(result.contains("completed successfully"));
@@ -39,6 +40,20 @@ fn single_successful_completion_with_poll_tool() {
     assert!(result.contains("5 tool calls"));
     assert!(result.contains("abc-123"));
     assert!(result.contains("get_task_output"));
+}
+
+#[test]
+fn scheduled_completion_includes_resolved_cleanup_tool() {
+    let mut completion = summary("abc-123", "explore", "Monitor work", true, 12300, 5);
+    completion.loop_task_id = Some("loop-123".into());
+
+    let result = format_between_turn_completions(
+        &[completion],
+        Some("get_task_output"),
+        Some("renamed_scheduler_delete"),
+    );
+
+    assert!(result.contains("renamed_scheduler_delete(\"loop-123\")"));
 }
 
 #[test]
@@ -51,7 +66,7 @@ fn failed_completion_with_poll_tool() {
         45200,
         12,
     )];
-    let result = format_between_turn_completions(&completions, Some("get_task_output"));
+    let result = format_between_turn_completions(&completions, Some("get_task_output"), None);
     assert!(result.contains("failed"));
     assert!(result.contains("45.2s"));
     assert!(result.contains("12 tool calls"));
@@ -64,7 +79,7 @@ fn multiple_completions_batched_with_poll_tool() {
         summary("b", "general-purpose", "task 2", false, 5000, 8),
         summary("c", "explore", "task 3", true, 3000, 4),
     ];
-    let result = format_between_turn_completions(&completions, Some("get_task_output"));
+    let result = format_between_turn_completions(&completions, Some("get_task_output"), None);
     assert!(result.starts_with("While you were idle, 3 background subagents completed:\n"));
     // All three entries should appear
     assert!(result.contains("subagent_id: a."));
@@ -85,7 +100,7 @@ fn no_poll_tool_inlines_output() {
         12300,
         5,
     )];
-    let result = format_between_turn_completions(&completions, None);
+    let result = format_between_turn_completions(&completions, None, None);
     assert!(result.contains("[explore]"));
     assert!(result.contains("abc-123"));
     assert!(

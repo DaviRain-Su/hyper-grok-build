@@ -1,8 +1,6 @@
-//! Dream lock file and session counting infrastructure.
-//!
-//! Coordination primitives for background memory consolidation ("dream"):
-//! - [`DreamLock`]: PID-based lock file with mtime tracking
-//! - [`sessions_since`]: counts session files modified after a given timestamp
+//! Coordination for background memory consolidation ("dream").
+//! [`DreamLock`] is a PID-based lock file whose mtime records the last consolidation.
+//! [`sessions_since`] counts session files modified after a given timestamp.
 
 use std::fs;
 use std::io;
@@ -11,10 +9,7 @@ use std::time::SystemTime;
 
 const LOCK_FILE_NAME: &str = ".dream-lock";
 
-/// Whether a process with the given PID is alive.
-///
-/// Local copy kept dependency-free of `crate::util` so the memory subsystem
-/// can be extracted into its own crate. Mirrors `crate::util::is_process_alive`.
+/// Copy of `crate::util::is_process_alive`, kept local so the memory subsystem can move to its own crate.
 #[cfg(unix)]
 fn is_process_alive(pid: u32) -> bool {
     use nix::errno::Errno;
@@ -61,7 +56,7 @@ impl DreamLock {
         }
     }
 
-    /// Read the last consolidation timestamp (lock file mtime).
+    /// Reads the last consolidation timestamp (the lock file's mtime).
     /// Returns `None` if the lock file doesn't exist.
     pub fn last_consolidated_at(&self) -> io::Result<Option<SystemTime>> {
         match fs::metadata(&self.path) {
@@ -71,18 +66,12 @@ impl DreamLock {
         }
     }
 
-    /// Try to acquire the lock for consolidation.
+    /// Returns `Ok(Some(prior))` on success, where `prior` is the previous mtime (`None` if the file didn't exist).
+    /// Pass `prior` to [`Self::rollback`] if the dream fails.
+    /// Returns `Ok(None)` when a live process holds a lock younger than `stale_secs`; a dead PID or older file is reclaimed.
     ///
-    /// Returns `Ok(Some(prior))` on success, where `prior` is the previous mtime
-    /// (`None` if the file didn't exist). Pass to [`Self::rollback`] on failure.
-    /// Returns `Ok(None)` if held by a live, non-stale process.
-    ///
-    /// Reclaims stale locks when the holder PID is dead or age exceeds `stale_secs`.
-    ///
-    /// Note: this is best-effort coordination, not mutual exclusion. The
-    /// write-then-verify protocol reduces but cannot eliminate races — two
-    /// processes may rarely both believe they acquired. Callers must tolerate
-    /// duplicate consolidation (dream is idempotent).
+    /// Acquisition is best-effort: the write-then-verify step narrows the race, but two processes can rarely both believe they won.
+    /// Callers must tolerate duplicate consolidation (dream is idempotent).
     pub fn try_acquire(&self, stale_secs: u64) -> io::Result<Option<Option<SystemTime>>> {
         let prior = match fs::metadata(&self.path) {
             Ok(meta) => {
@@ -110,7 +99,7 @@ impl DreamLock {
         let our_pid = std::process::id();
         fs::write(&self.path, our_pid.to_string())?;
 
-        // Re-read to verify we won the race
+        // A concurrent acquirer may have overwritten our PID, so re-read to see who won
         let content = fs::read_to_string(&self.path)?;
         if content.trim().parse::<u32>().ok() == Some(our_pid) {
             Ok(Some(prior))
@@ -119,7 +108,7 @@ impl DreamLock {
         }
     }
 
-    /// Restore lock state after a failed dream.
+    /// Restores the lock to its pre-acquire state after a failed dream.
     /// If `prior` is `None` (no prior file), deletes the lock file.
     pub fn rollback(&self, prior: Option<SystemTime>) -> io::Result<()> {
         match prior {
@@ -140,7 +129,7 @@ impl DreamLock {
         }
     }
 
-    /// Stamp the lock file with the current time to record a consolidation.
+    /// Rewrites the lock file so its mtime records the consolidation time.
     pub fn record_consolidation(&self) -> io::Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
@@ -149,9 +138,7 @@ impl DreamLock {
     }
 }
 
-/// Count session files modified after `since`, excluding the current session.
-///
-/// Returns sorted file stems of matching `.md` files in `sessions_dir`.
+/// Returns sorted file stems of `.md` files in `sessions_dir` modified after `since`, excluding the current session (`exclude_sid8`).
 pub fn sessions_since(
     sessions_dir: &Path,
     since: SystemTime,
@@ -240,7 +227,7 @@ mod tests {
         let lock = DreamLock::new(dir.path());
 
         let old_time = SystemTime::now() - Duration::from_secs(7200);
-        fs::write(&lock.path, "4000000000").unwrap(); // dead PID
+        fs::write(&lock.path, "4000000000").unwrap(); // Dead PID
         filetime::set_file_mtime(&lock.path, FileTime::from_system_time(old_time)).unwrap();
 
         let prior = lock
@@ -249,7 +236,7 @@ mod tests {
             .expect("should reclaim dead PID");
         let prior_mtime = prior.expect("prior file existed");
 
-        // mtime after acquire is fresh (from fs::write)
+        // The acquire above rewrote the file, so its mtime is roughly now
         let fresh = lock.last_consolidated_at().unwrap().unwrap();
         let fresh_age = SystemTime::now().duration_since(fresh).unwrap_or_default();
         assert!(fresh_age.as_secs() < 5);
@@ -300,7 +287,7 @@ mod tests {
         let old = SystemTime::now() - Duration::from_secs(600);
         filetime::set_file_mtime(&lock.path, FileTime::from_system_time(old)).unwrap();
 
-        // stale_secs=300, age=600 → stale, should reclaim
+        // Age 600 exceeds stale_secs 300, so the live PID does not block
         assert!(
             lock.try_acquire(300).unwrap().is_some(),
             "stale lock should be reclaimable"
@@ -358,7 +345,7 @@ mod tests {
     fn rollback_on_nonexistent_file_is_noop() {
         let dir = TempDir::new().unwrap();
         let lock = DreamLock::new(dir.path());
-        lock.rollback(None).unwrap(); // no file to delete, should be fine
+        lock.rollback(None).unwrap();
     }
 
     #[test]

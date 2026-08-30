@@ -203,7 +203,7 @@ pub fn collect_skill_config_dirs(
     // be overridden), so it's handled separately; `.agents` is always added,
     // while `.claude`/`.cursor` are gated by the skills compat cells.
     try_add(grok_home);
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = xai_dirs::home_dir() {
         try_add(home.join(".agents"));
         if compat.claude.skills {
             try_add(home.join(".claude"));
@@ -232,7 +232,7 @@ pub fn collect_skill_config_dirs(
 /// relative to `cwd`, `git_root`, and the user's home directory.
 fn scope_for_config_dir(dir: &Path, cwd: Option<&Path>, git_root: Option<&Path>) -> SkillScope {
     // Home-level dirs (e.g. ~/.grok/, ~/.agents/, ~/.claude/) are User scope.
-    if let Some(home) = dirs::home_dir()
+    if let Some(home) = xai_dirs::home_dir()
         && dir.parent() == Some(home.as_path())
     {
         return SkillScope::User;
@@ -333,9 +333,9 @@ async fn list_skills_with_options(
 /// Expand a `~`-prefixed path string to an absolute `PathBuf`.
 fn expand_tilde(raw: &str) -> PathBuf {
     if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        && let Some(home) = xai_dirs::home_dir()
     {
-        return PathBuf::from(home).join(rest);
+        return home.join(rest);
     }
     PathBuf::from(raw)
 }

@@ -1,8 +1,5 @@
-//! Hook data types and rendering helpers for tool call blocks.
-//!
-//! Hook runs are displayed as part of tool call blocks rather than
-//! as standalone scrollback entries. The tool header comes first,
-//! then pre_tool_use hooks, then post_tool_use hooks.
+//! Hook runs are displayed as part of tool call blocks rather than as standalone scrollback entries.
+//! The tool header comes first, then pre_tool_use hooks, then post_tool_use hooks.
 
 use std::time::Duration;
 
@@ -20,7 +17,7 @@ pub enum HookRunStatus {
         elapsed: Duration,
     },
     Skipped,
-    /// The hook ran and blocked (a stop-gate decision, not a failure).
+    /// The hook ran and chose to block the tool (a decision, not a failure).
     Blocked {
         detail: String,
         elapsed: Duration,
@@ -47,12 +44,11 @@ pub enum HookPhase {
     Post,
 }
 
-/// Hook data attached to a tool call block.
 #[derive(Debug, Clone, Default)]
 pub struct ToolCallHookData {
     pub pre_hooks: Vec<HookRunEntry>,
     pub post_hooks: Vec<HookRunEntry>,
-    /// Lifecycle hooks (session_start, session_end, stop) — rendered with their own event name.
+    /// Lifecycle hooks (session_start, session_end, stop), rendered with their own event name.
     pub lifecycle: Vec<(String, Vec<HookRunEntry>)>,
 }
 
@@ -124,8 +120,7 @@ impl HookRunCounts {
 
 #[derive(Debug, Clone, Copy)]
 enum HookCountShape {
-    /// Individual rows preserve the established completed/failed contract:
-    /// blocked hooks completed normally and remain in the green numerator.
+    /// Individual rows keep the completed/failed pair: blocked hooks completed normally, so they count in the green completed number.
     Compact,
     /// Aggregate rows name every outcome because no member detail is visible.
     Labeled,
@@ -206,9 +201,9 @@ pub fn render_hooks_inline_suffix(data: &ToolCallHookData) -> Option<Vec<Span<'s
     )
 }
 
-/// Right-side summary for stop hooks merged onto a turn-terminal marker line:
-/// `stop  [hooks: 2]` per group (bold muted event name + colored counts),
-/// groups joined by two spaces. Returns `None` when nothing ran.
+/// Right-side summary for stop hooks merged onto the marker line that ends a turn.
+/// Each group renders as `stop  [hooks: 2]` (bold muted event name and colored counts); groups are joined by two spaces.
+/// Returns `None` when nothing ran.
 pub fn render_stop_hooks_summary(
     groups: &[(String, Vec<HookRunEntry>)],
 ) -> Option<Vec<Span<'static>>> {
@@ -244,8 +239,6 @@ fn render_separator() -> BlockLine {
     .into()
 }
 
-/// Render hook details as expanded lines.
-///
 /// Format:
 ///   **pre_tool_use**
 ///     \u2713 hook-name (12ms)
@@ -273,7 +266,6 @@ fn render_hooks_expanded(event: &str, runs: &[HookRunEntry]) -> Vec<BlockLine> {
         .into(),
     );
 
-    // Per-hook detail lines
     lines.extend(render_hooks_expanded_inner(runs));
 
     lines
@@ -345,7 +337,7 @@ fn render_hooks_expanded_inner(runs: &[HookRunEntry]) -> Vec<BlockLine> {
                     ])
                     .into(),
                 );
-                // Error text — strip redundant hook name prefix if present
+                // Strip the redundant hook name prefix from the error text if present
                 let cleaned = error
                     .strip_prefix(&format!("hook '{}' ", run.name))
                     .unwrap_or(error);
@@ -380,7 +372,6 @@ fn render_hooks_expanded_inner(runs: &[HookRunEntry]) -> Vec<BlockLine> {
     lines
 }
 
-/// Render hook lines for a given display mode.
 pub fn render_hooks_for_mode(
     event: &str,
     runs: &[HookRunEntry],
@@ -396,9 +387,7 @@ pub fn render_hooks_for_mode(
 }
 
 /// Render hook detail lines (no section header) for expanded/truncated modes.
-///
-/// Used by lifecycle blocks where the block header already shows the event name,
-/// so repeating it as a section header would be redundant.
+/// Used by lifecycle blocks where the block header already shows the event name, so repeating it as a section header would be redundant.
 pub fn render_hooks_detail(runs: &[HookRunEntry], mode: DisplayMode) -> Vec<BlockLine> {
     if runs.is_empty() {
         return Vec::new();

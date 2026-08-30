@@ -7,10 +7,8 @@ const GAPDEEP_LINE: &str = "GAPDEEP alpha beta gamma delta epsilon";
 
 const ENTRY_WORD: &str = "epsilon";
 
-/// Wait until the post-turn layout is stable enough that mouse coordinates
-/// from `locate_screen_text` still match the next frame. Turn-end relayout
-/// (spinner/hint teardown) used to shift rows between a fixed 1500ms settle
-/// and the SGR burst under `--test-threads=4`.
+/// Wait until the post-turn layout is stable enough that mouse coordinates from `locate_screen_text` still match the next frame.
+/// Turn-end relayout (spinner/hint teardown) used to shift rows between a fixed 1500ms settle and the SGR burst under `--test-threads=4`.
 fn wait_for_stable_gap_layout(harness: &mut PtyHarness) -> (u16, u16, u16) {
     let mut last: Option<(u16, u16, u16)> = None;
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -68,20 +66,17 @@ fn wait_for_stable_gap_layout(harness: &mut PtyHarness) -> (u16, u16, u16) {
     }
 }
 
-/// PTY: a mouse-down on the blank gap below the conversation (between the
-/// turn marker and the prompt box) arms an anchor-less drag — dead space
-/// is a valid drag start — and the anchor materializes at the first drag
-/// position that lands on selectable text: here a word inside the last
-/// message. The payload is the entry-to-release slice of that single line
-/// — not a snap to the press-nearest text, not a block copy.
+/// PTY: a mouse-down on the blank gap below the conversation (between the turn marker and the prompt box) starts an anchor-less drag.
+/// Dead space is a valid drag start.
+/// The anchor appears at the first drag position that lands on selectable text: here a word inside the last message.
+/// The payload is the entry-to-release slice of that single line, not a snap to the text nearest the press, not a block copy.
 ///
 /// `SSH_CONNECTION` forces the OSC 52 clipboard route for readback.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn drag_enters_content_from_gap_pty() {
     let content = ContentController::start().await.expect("start content");
-    // Copy-on-release (OSC 52) only in flash. Pin it so suite siblings that
-    // seed hold/word_select cannot change semantics if config leaks.
+    // Copy-on-release (OSC 52) only in flash. Pin it so sibling tests that seed hold/word_select cannot change the behavior if config leaks.
     seed_ui_config(&content, "keep_text_selection = \"flash\"");
     content.set_response(GAPDEEP_LINE.to_string());
 
@@ -128,13 +123,11 @@ async fn drag_enters_content_from_gap_pty() {
 
     let (entry_row, entry_col, gap_row) = wait_for_stable_gap_layout(&mut harness);
 
-    // PRESS in the gap, then drag up into the message. The motion samples
-    // jump the marker row deliberately (terminals coalesce motion): the
-    // same-row column clamp makes the marker's line hittable at any column
-    // of its row, so a sample there would anchor the drag on the marker —
-    // the correct first-text-entered answer for that path, but not this
-    // test's subject. First sample on the message = anchor at the word's
-    // first column; then extend to its last column and release.
+    // PRESS in the gap, then drag up into the message
+    // The motion samples jump the marker row deliberately (terminals coalesce motion)
+    // The column clamp within a row makes the marker's line hittable at any column of its row, so a sample there would anchor the drag on the marker
+    // That anchor would be correct (the first text entered wins), but it is not this test's subject
+    // First sample on the message anchors at the word's first column; then extend to its last column and release
     let head_col = entry_col + ENTRY_WORD.len() as u16 - 1;
     let seen = decode_osc52_payloads(harness.raw_output()).len();
     let mut drag = String::new();

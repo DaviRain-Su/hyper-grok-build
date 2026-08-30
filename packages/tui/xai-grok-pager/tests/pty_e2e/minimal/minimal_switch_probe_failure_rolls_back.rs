@@ -2,8 +2,7 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// An unanswered inline CPR probe rolls `/minimal` back to a working
-/// fullscreen session instead of leaving a half-switched terminal.
+/// An unanswered inline cursor-position (CPR) probe rolls `/minimal` back to a working fullscreen session instead of a half-switched terminal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_switch_probe_failure_rolls_back() {

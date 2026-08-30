@@ -85,7 +85,7 @@ pub fn load_sources(config: &toml::Value) -> Vec<MarketplaceSource> {
             } else if let Some(path_str) = raw.path {
                 // Expand ~ to home directory.
                 let expanded = if let Some(rest) = path_str.strip_prefix('~') {
-                    dirs::home_dir()
+                    xai_dirs::home_dir()
                         .map(|h| {
                             h.join(rest.strip_prefix('/').unwrap_or(rest))
                                 .to_string_lossy()
@@ -160,7 +160,7 @@ fn extract_marketplace_entries(
             }
             SettingsSource::Local { path: path_str } => {
                 let expanded = if let Some(rest) = path_str.strip_prefix('~') {
-                    dirs::home_dir()
+                    xai_dirs::home_dir()
                         .map(|h| {
                             h.join(rest.strip_prefix('/').unwrap_or(rest))
                                 .to_string_lossy()
@@ -186,7 +186,7 @@ fn extract_marketplace_entries(
 pub fn load_extra_sources_from_settings(existing: &[MarketplaceSource]) -> Vec<MarketplaceSource> {
     let roots: Vec<PathBuf> = [
         xai_grok_config::user_grok_home(),
-        dirs::home_dir().map(|h| h.join(".claude")),
+        xai_dirs::home_dir().map(|h| h.join(".claude")),
     ]
     .into_iter()
     .flatten()

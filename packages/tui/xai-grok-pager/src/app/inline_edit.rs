@@ -1,8 +1,7 @@
 //! Inline edit-and-resubmit of a previous user prompt.
 //!
 //! Double-click (or Enter on) a previous user message to edit it in place.
-//! Enter with changed text rewinds the conversation to that prompt
-//! (conversation-only) and resubmits; unchanged/empty Enter or Esc exits.
+//! Enter with changed text rewinds the conversation to that prompt (conversation-only) and resubmits; unchanged/empty Enter or Esc exits.
 //! Structure mirrors `queue_edit.rs`.
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -25,18 +24,16 @@ use super::app_view::InputOutcome;
 
 /// Master switch for the in-place prompt edit feature.
 ///
-/// Disabled while we resolve an unsolved scroll jump on enter (see
-/// `x/agottumukkala/inline-edit-scroll-jank.md`). Gates the user entry points
-/// (Enter in `agent_view/panes.rs`, double-click in `agent_view/selection.rs`).
-/// Everything else stays wired and unit-tested, so flipping this to `true`
-/// re-enables the feature in one place.
+/// Disabled while we resolve an unsolved scroll jump on enter (see `x/agottumukkala/inline-edit-scroll-jank.md`).
+/// Gates the user entry points (Enter in `agent_view/panes.rs`, double-click in `agent_view/selection.rs`).
+/// Everything else stays wired and unit-tested, so flipping this to `true` re-enables the feature in one place.
 pub(crate) const INLINE_EDIT_ENABLED: bool = false;
 
 /// State of an in-place edit of a previous user prompt.
 pub struct InlineEditState {
     /// Stable id of the edited entry (indices shift; re-resolve per use).
     pub entry_id: EntryId,
-    /// Shell-side prompt index — the rewind target.
+    /// Shell-side prompt index: the rewind target.
     pub prompt_index: usize,
     /// Original text, for dirty detection.
     pub original: String,
@@ -58,10 +55,9 @@ impl std::fmt::Debug for InlineEditState {
 }
 
 impl AgentView {
-    /// Start editing the user prompt at `entry_idx` in place. Allowed even
-    /// mid-turn (a running turn only matters at submit time). Returns `false`
-    /// for non-editable entries (bash/cron, no rewind target) so callers can
-    /// fall back to their old behavior.
+    /// Start editing the user prompt at `entry_idx` in place.
+    /// Allowed even mid-turn (a running turn only matters at submit time).
+    /// Returns `false` for non-editable entries (bash/cron, no rewind target) so callers can fall back to their old behavior.
     pub(super) fn enter_inline_edit(&mut self, entry_idx: usize) -> bool {
         if self.inline_edit.is_some() {
             return true;
@@ -72,8 +68,7 @@ impl AgentView {
         let RenderBlock::UserPrompt(ref block) = entry.block else {
             return false;
         };
-        // Interjections resolve to the enclosing turn's index — editing one
-        // would rewind the wrong prompt.
+        // Interjections resolve to the enclosing turn's index; editing one would rewind the wrong prompt
         if block.is_bash || block.is_cron || block.is_interjection {
             return false;
         }
@@ -85,8 +80,7 @@ impl AgentView {
             return false;
         };
 
-        // Inline edit takes input priority over the `/jump` picker; close a
-        // lingering one first so it can't reappear (stale) after edit exits.
+        // Inline edit takes input priority over the `/jump` picker; close a lingering one first so it can't reappear (stale) after edit exits
         self.dismiss_jump_picker();
 
         let mut textarea = TextArea::new();
@@ -113,9 +107,8 @@ impl AgentView {
         }
     }
 
-    /// Key intercept while editing: bare Enter submits when changed, exits
-    /// when unchanged/empty; Esc (or Ctrl+C on empty) discards; everything
-    /// else (incl. Shift/Alt-Enter newlines) goes to the textarea.
+    /// Key intercept while editing: bare Enter submits when changed, exits when unchanged/empty.
+    /// Esc (or Ctrl+C on empty) discards; everything else (incl. Shift/Alt-Enter newlines) goes to the textarea.
     pub(super) fn handle_inline_edit_key(&mut self, key: &KeyEvent) -> InputOutcome {
         let Some(ref mut edit) = self.inline_edit else {
             return InputOutcome::Unchanged;
@@ -141,8 +134,7 @@ impl AgentView {
         InputOutcome::Changed
     }
 
-    /// Mouse intercept while editing: click inside moves the cursor, click
-    /// outside discards, wheel scrolls the transcript.
+    /// Mouse intercept while editing: click inside moves the cursor, click outside discards, wheel scrolls the transcript.
     pub(super) fn handle_inline_edit_mouse(&mut self, mouse: &MouseEvent) -> InputOutcome {
         match mouse.kind {
             MouseEventKind::ScrollUp => {
@@ -182,9 +174,8 @@ impl AgentView {
         }
     }
 
-    /// Per-frame layout sync (before `prepare_layout`): refresh the height
-    /// override (textarea height), abandon the edit if the entry vanished,
-    /// and return the dim-from entry index.
+    /// Per-frame layout sync (before `prepare_layout`): refresh the height override (textarea height) and abandon the edit if the entry vanished.
+    /// Returns the dim-from entry index.
     pub(super) fn sync_inline_edit_layout(&mut self, scrollback_width: u16) -> Option<usize> {
         let entry_id = self.inline_edit.as_ref()?.entry_id;
         let Some(idx) = self.scrollback.index_of_id(entry_id) else {
@@ -206,16 +197,14 @@ impl AgentView {
         content_w.saturating_sub(prefix_w).max(1)
     }
 
-    /// Overlay-draw the editor over the edited entry (after the scrollback
-    /// pane renders, same rect) and return the hardware cursor position.
+    /// Overlay-draw the editor over the edited entry (after the scrollback pane renders, same rect) and return the hardware cursor position.
     pub(super) fn render_inline_edit(
         &mut self,
         buf: &mut Buffer,
         scrollback_area: Rect,
     ) -> Option<(u16, u16)> {
-        // Drop last frame's rects up front: when the overlay doesn't draw
-        // this frame (entry scrolled off-viewport), clicks must not hit-test
-        // against where the editor used to be.
+        // Drop last frame's rects up front
+        // When the overlay doesn't draw this frame (entry scrolled off-viewport), clicks must not hit-test against where the editor used to be
         let edit = self.inline_edit.as_mut()?;
         edit.last_text_area = None;
         edit.last_rect = None;
@@ -287,8 +276,7 @@ mod tests {
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
     }
 
-    /// Idle agent with one user prompt ("fix the bug") followed by an agent
-    /// message, laid out at 80x40.
+    /// Idle agent with one user prompt ("fix the bug") followed by an agent message, laid out at 80x40.
     fn agent_with_prompt() -> AgentView {
         let mut agent = make_agent();
         agent
@@ -301,8 +289,7 @@ mod tests {
         agent
     }
 
-    /// Entering edit mode on a plain user prompt captures the original text,
-    /// resolves the rewind target, and selects the entry.
+    /// Entering edit mode on a plain user prompt captures the original text, resolves the rewind target, and selects the entry.
     #[test]
     fn enter_inline_edit_on_user_prompt_starts_editing() {
         let mut agent = agent_with_prompt();
@@ -314,8 +301,7 @@ mod tests {
         assert_eq!(agent.scrollback.selected(), Some(0));
     }
 
-    /// Bash and cron prompts are not editable — callers fall back to the old
-    /// double-click/Enter behavior.
+    /// Bash and cron prompts are not editable; callers fall back to the old double-click/Enter behavior.
     #[test]
     fn enter_inline_edit_rejects_bash_and_cron_prompts() {
         let mut agent = make_agent();
@@ -329,8 +315,7 @@ mod tests {
         assert!(agent.inline_edit.is_none());
     }
 
-    /// Enter with unchanged text exits editing mode without dispatching
-    /// anything — no rewind, no resubmit.
+    /// Enter with unchanged text exits editing mode without dispatching anything (no rewind, no resubmit).
     #[test]
     fn enter_with_unchanged_text_just_exits_editing() {
         let mut agent = agent_with_prompt();
@@ -340,8 +325,7 @@ mod tests {
         assert!(agent.inline_edit.is_none(), "editing mode must exit");
     }
 
-    /// Enter after emptying the editor also just exits (an empty prompt can
-    /// never be submitted).
+    /// Enter after emptying the editor also just exits (an empty prompt can never be submitted).
     #[test]
     fn enter_with_emptied_text_just_exits_editing() {
         let mut agent = agent_with_prompt();
@@ -352,8 +336,7 @@ mod tests {
         assert!(agent.inline_edit.is_none());
     }
 
-    /// Enter with changed text dispatches the submit action (the rewind +
-    /// resubmit is driven by dispatch, tested in dispatch.rs).
+    /// Enter with changed text dispatches the submit action (the rewind and resubmit are driven by dispatch, tested in dispatch.rs).
     #[test]
     fn enter_with_changed_text_dispatches_submit() {
         let mut agent = agent_with_prompt();
@@ -375,8 +358,7 @@ mod tests {
         );
     }
 
-    /// Esc discards the edit; the transcript entry (and its layout height)
-    /// are restored.
+    /// Esc discards the edit; the transcript entry (and its layout height) are restored.
     #[test]
     fn esc_discards_edit_and_clears_height_override() {
         let mut agent = agent_with_prompt();
@@ -401,8 +383,7 @@ mod tests {
         assert_eq!(block.text, "fix the bug");
     }
 
-    /// Typed keys reach the textarea (the intercept only handles
-    /// Enter/Esc/Ctrl+C).
+    /// Typed keys reach the textarea (the intercept only handles Enter/Esc/Ctrl+C).
     #[test]
     fn typing_reaches_the_inline_textarea() {
         let mut agent = agent_with_prompt();
@@ -415,8 +396,7 @@ mod tests {
         );
     }
 
-    /// Editing opens immediately even while a turn is running — the
-    /// cancel-offer only appears at submit time (see dispatch tests).
+    /// Editing opens immediately even while a turn is running; the cancel-offer only appears at submit time (see dispatch tests).
     #[test]
     fn enter_inline_edit_while_busy_opens_editor_immediately() {
         let mut agent = agent_with_prompt();
@@ -426,9 +406,8 @@ mod tests {
         assert!(agent.rewind_state.is_none(), "no cancel-offer on entry");
     }
 
-    /// When the edited entry scrolls out of the viewport, render drops the
-    /// previous frame's hit-test rects — a click where the editor *used* to
-    /// be must count as click-outside (discard), not move the edit cursor.
+    /// When the edited entry scrolls out of the viewport, render drops the previous frame's hit-test rects.
+    /// A click where the editor *used* to be must count as click-outside (discard), not move the edit cursor.
     #[test]
     fn render_clears_stale_mouse_rects_when_entry_scrolls_off_screen() {
         let mut agent = make_agent();
@@ -438,8 +417,7 @@ mod tests {
         agent
             .scrollback
             .push_block(RenderBlock::agent_message("done"));
-        // A later prompt + enough content that entry 0 leaves the viewport
-        // (and is not the sticky header) when scrolled to the bottom.
+        // A later prompt and enough content that entry 0 leaves the viewport (and is not the sticky header) when scrolled to the bottom
         agent
             .scrollback
             .push_block(RenderBlock::user_prompt("second question"));
@@ -459,8 +437,7 @@ mod tests {
         assert!(agent.inline_edit.as_ref().unwrap().last_rect.is_some());
         assert!(agent.inline_edit.as_ref().unwrap().last_text_area.is_some());
 
-        // Entry scrolls off-viewport: the stale rects are dropped, so a
-        // click at the old rect discards the edit instead of hitting it.
+        // Entry scrolls off-viewport: the stale rects are dropped, so a click at the old rect discards the edit instead of hitting it
         agent.scrollback.goto_bottom();
         agent.scrollback.prepare_layout(80, 10);
         let mut buf = Buffer::empty(area);
@@ -470,8 +447,7 @@ mod tests {
         assert!(edit.last_text_area.is_none(), "stale textarea rect dropped");
     }
 
-    /// The per-frame layout sync reserves the textarea's height and abandons
-    /// the edit when the entry disappears (e.g. transcript replaced).
+    /// The per-frame layout sync reserves the textarea's height and abandons the edit when the entry disappears (e.g. transcript replaced).
     #[test]
     fn sync_layout_reserves_height_and_survives_entry_removal() {
         let mut agent = agent_with_prompt();
@@ -494,7 +470,7 @@ mod tests {
         let (_, h) = agent.scrollback.inline_edit_height().expect("override");
         assert_eq!(h, 3, "3 text rows");
 
-        // Entry vanishes → edit is abandoned and the override cleared.
+        // Entry vanishes: the edit is abandoned and the override cleared
         agent.scrollback.remove_from(0);
         assert_eq!(agent.sync_inline_edit_layout(80), None);
         assert!(agent.inline_edit.is_none());

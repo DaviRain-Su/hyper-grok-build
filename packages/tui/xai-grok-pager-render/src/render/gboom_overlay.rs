@@ -9,7 +9,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Widget};
 
-use crate::gboom::GboomHud;
+use xai_grok_gboom::GboomHud;
+
 use crate::render::safe_buf::SafeBuf;
 
 /// Render the GBOOM popup chrome. Returns the popup `Rect`,
@@ -51,7 +52,7 @@ pub fn render_gboom_overlay(
 
     // Title centered in the top border, in the iconic logo red.
     let title = " GBOOM ";
-    let [r, g, b] = crate::gboom::GBOOM_RED;
+    let [r, g, b] = xai_grok_gboom::GBOOM_RED;
     let title_style = Style::default()
         .fg(Color::Rgb(r, g, b))
         .bg(bg)
@@ -82,7 +83,7 @@ fn render_hud_bar(buf: &mut Buffer, popup_rect: Rect, hud: &GboomHud, dim_fg: Co
     } else if hud.hp > 30 {
         Color::Rgb(235, 198, 82)
     } else {
-        let [r, g, b] = crate::gboom::GBOOM_RED;
+        let [r, g, b] = xai_grok_gboom::GBOOM_RED;
         Color::Rgb(r, g, b)
     };
     let stats = format!(

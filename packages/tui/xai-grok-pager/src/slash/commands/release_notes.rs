@@ -1,26 +1,14 @@
-//! `/release-notes` -- view release notes for the current version.
-
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
-/// Show release notes for the current pager version.
 pub struct ReleaseNotesCommand;
 
 impl SlashCommand for ReleaseNotesCommand {
-    fn name(&self) -> &str {
-        "release-notes"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["changelog"]
-    }
-
-    fn description(&self) -> &str {
-        "View release notes for the current version"
-    }
-
-    fn usage(&self) -> &str {
-        "/release-notes"
+    slash_meta! {
+        name: "release-notes",
+        aliases: ["changelog"],
+        description: "View release notes for the current version",
+        usage: "/release-notes",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {

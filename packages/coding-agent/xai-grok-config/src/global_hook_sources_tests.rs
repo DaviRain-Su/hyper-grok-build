@@ -129,10 +129,44 @@ fn ensure_creates_hooks_dir_and_empty_registry() {
     assert!(hooks.is_dir());
     assert!(reg.is_file());
     assert_eq!(std::fs::read(&reg).unwrap(), b"");
+    for name in TRUST_BOUNDARY_FILENAMES {
+        let path = dir.join(name);
+        assert!(path.is_file(), "{name} must be a real file");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"",
+            "{name} first-run is empty"
+        );
+    }
     // Idempotent — does not truncate existing registry content.
     std::fs::write(&reg, b"/abs/extra\n").unwrap();
+    std::fs::write(dir.join("config.toml"), b"model = \"keep\"\n").unwrap();
     ensure_grok_hook_slots(&dir).unwrap();
     assert_eq!(std::fs::read(&reg).unwrap(), b"/abs/extra\n");
+    assert_eq!(
+        std::fs::read(dir.join("config.toml")).unwrap(),
+        b"model = \"keep\"\n"
+    );
+}
+
+#[test]
+fn trust_boundary_sources_are_not_discovery() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("grok");
+    std::fs::create_dir_all(&dir).unwrap();
+    ensure_grok_trust_boundary_slots(&dir).unwrap();
+    let sources = resolve_trust_boundary_sources(&dir).unwrap();
+    assert_eq!(sources.len(), TRUST_BOUNDARY_FILENAMES.len());
+    for name in TRUST_BOUNDARY_FILENAMES {
+        let path = dir.join(name);
+        let source = sources
+            .iter()
+            .find(|s| s.path == path)
+            .unwrap_or_else(|| panic!("missing trust-boundary file {name}"));
+        assert_eq!(source.kind, GlobalHookSourceKind::TrustBoundaryFile);
+        assert!(!source.is_dir());
+        assert!(!source.is_discovery_source());
+    }
 }
 
 #[test]
@@ -171,6 +205,31 @@ fn ensure_rejects_preexisting_symlink_registry() {
             | GlobalHookSourceError::CreateRegistryFile { .. }
     ));
     // Attacker target must remain unchanged (no write-through).
+    assert_eq!(std::fs::read(&target).unwrap(), b"attacker\n");
+}
+
+#[test]
+#[cfg(unix)]
+fn ensure_trust_boundary_rejects_preexisting_symlink_persist_file() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("grok");
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = tmp.path().join("evil-persist");
+    std::fs::write(&target, b"attacker\n").unwrap();
+    let persist = dir.join(TRUST_BOUNDARY_FILENAMES[0]);
+    std::os::unix::fs::symlink(&target, &persist).unwrap();
+    let err = ensure_grok_trust_boundary_slots(&dir).unwrap_err();
+    // create_new hits EEXIST on the symlink → require_real_file rejects it;
+    // or O_NOFOLLOW path — never write through the symlink.
+    assert!(
+        matches!(
+            err,
+            GlobalHookSourceError::InvalidRegistryFile { .. }
+                | GlobalHookSourceError::SymlinkedSource { .. }
+                | GlobalHookSourceError::CreateRegistryFile { .. }
+        ),
+        "symlink trust-boundary file must be rejected, got {err:?}"
+    );
     assert_eq!(std::fs::read(&target).unwrap(), b"attacker\n");
 }
 

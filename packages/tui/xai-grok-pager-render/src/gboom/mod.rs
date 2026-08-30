@@ -21,7 +21,7 @@ mod assets;
 mod engine;
 mod game;
 
-pub(crate) use assets::GBOOM_RED;
+pub use assets::GBOOM_RED;
 
 use std::time::Instant;
 
@@ -72,10 +72,10 @@ pub enum GboomKeyOutcome {
 
 /// HUD values for the overlay chrome.
 pub struct GboomHud {
-    pub(crate) hp: i32,
-    pub(crate) kills: u32,
-    pub(crate) total: u32,
-    pub(crate) playing: bool,
+    pub hp: i32,
+    pub kills: u32,
+    pub total: u32,
+    pub playing: bool,
 }
 
 /// Modal state for the `/gboom` easter egg. Owned by the agent view like
@@ -102,15 +102,8 @@ pub struct GboomState {
 
 impl GboomState {
     pub fn new() -> Self {
-        let mut game = Game::new();
-        // On terminals that report key releases (Kitty keyboard protocol),
-        // latch keys on press/release so the player can move and turn at
-        // once; otherwise fall back to the repeat-bridging timer model.
-        // Deliberately `kitty_flags_pushed`, not `kitty_releases_reported`: the
-        // game pushes its own REPORT_ALL_KEYS layer over a downgraded base.
-        game.set_release_aware(crate::terminal::kitty_flags_pushed());
         Self {
-            game,
+            game: Game::new(),
             renderer: Renderer::new(),
             fire: FireSim::new(),
             phase: Phase::Title,
@@ -123,6 +116,14 @@ impl GboomState {
             last_mouse_col: None,
             mouse_region: None,
         }
+    }
+
+    /// On terminals that report key releases (Kitty keyboard protocol),
+    /// latch keys on press/release so the player can move and turn at
+    /// once; otherwise fall back to the repeat-bridging timer model.
+    /// Defaults to off; the host sets it right after construction.
+    pub fn set_release_aware(&mut self, release_aware: bool) {
+        self.game.set_release_aware(release_aware);
     }
 
     pub fn set_mouse_region(&mut self, x: u16, y: u16, width: u16, height: u16) {
@@ -465,8 +466,8 @@ mod tests {
         state.tick();
         let png = state.frame_png(320, 200).expect("png frame").to_vec();
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
-        let dims = crate::prompt_images::decode_image_dimensions(&png).expect("decodable");
-        assert_eq!(dims, (320, 200));
+        let img = image::load_from_memory(&png).expect("decodable");
+        assert_eq!((img.width(), img.height()), (320, 200));
     }
 
     #[test]
@@ -665,7 +666,7 @@ mod tests {
     }
 
     /// Dumps representative frames to a temp dir for eyeballing.
-    /// Run manually: `cargo test -p xai-grok-pager gboom::tests::dump -- --ignored`
+    /// Run manually: `cargo test -p xai-grok-gboom tests::dump -- --ignored`
     #[test]
     #[ignore]
     fn dump_frames_for_visual_inspection() {

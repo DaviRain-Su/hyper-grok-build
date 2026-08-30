@@ -13,7 +13,7 @@ use indexmap::IndexMap;
 
 use crate::agent::config::{self, ModelEntry, resolve_credentials, sampling_config_for_model};
 use crate::auth::{AuthManager, GrokAuth, GrokComConfig};
-use crate::remote::{FetchModelsResult, fetch_models_blocking};
+use crate::remote::{FetchModelsResult, ModelSource, active_model_source};
 use crate::sampling::SamplerConfig as SamplingConfig;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
@@ -338,7 +338,7 @@ impl ModelsManager {
             cache
                 .load_fresh(
                     &fetch_auth.cache_auth_method(),
-                    &crate::remote::models_list_url(&cfg.endpoints, fetch_auth),
+                    &active_model_source(&cfg.endpoints, fetch_auth).cache_origin(),
                 )
                 .map(|c| {
                     cached_etag = c.etag;
@@ -1116,11 +1116,10 @@ impl ModelsManager {
         )
     }
 
-    /// Disk-cache origin key for this manager's current endpoints/auth shape
     fn cache_origin(&self) -> String {
         let endpoints = self.inner.cfg.read().endpoints.clone();
         let fetch_auth = *self.inner.fetch_auth.read();
-        crate::remote::models_list_url(&endpoints, fetch_auth)
+        active_model_source(&endpoints, fetch_auth).cache_origin()
     }
 
     /// A catalog-fetch session refresh bounded by `STARTUP_AUTH_REFRESH_TIMEOUT`.

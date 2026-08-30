@@ -220,10 +220,9 @@ fn doctor_tmux_fix_kills_term_ignoring_redirected_descendants() {
     std::fs::create_dir_all(&fake_bin).unwrap();
     let tmux = fake_bin.join("tmux");
     let pid_file = temp.path().join("descendant.pid");
-    // Publish the descendant pid from the leader *before* it exits. Writing
-    // `echo $$ > pid` inside the redirected child races doctor teardown:
-    // `>` truncates first, then SIGKILL can land before the digits are written,
-    // leaving an empty file (`ParseIntError { kind: Empty }`).
+    // Publish the descendant pid from the leader *before* it exits
+    // Writing `echo $$ > pid` inside the redirected child races doctor teardown
+    // `>` truncates first, then SIGKILL can land before the digits are written, leaving an empty file (`ParseIntError { kind: Empty }`)
     std::fs::write(
         &tmux,
         format!(

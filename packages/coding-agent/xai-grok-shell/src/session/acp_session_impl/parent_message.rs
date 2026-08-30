@@ -1,5 +1,6 @@
 //! Admission of protected messages from an owning parent agent.
 
+use super::prompt_queue::PreparedDelivery;
 use super::*;
 use xai_grok_tools::implementations::grok_build::task::coordinator::ActiveMessageAdmission;
 use xai_grok_tools::implementations::grok_build::task::types::{
@@ -13,7 +14,7 @@ impl SessionActor {
         receipt_sink: mpsc::Sender<crate::agent::subagent::PromptTurnReceipt>,
         parent_telemetry_ctx: xai_grok_telemetry::TelemetryCtx,
         respond_to: oneshot::Sender<ActiveMessageAdmission>,
-        completion_tx: mpsc::UnboundedSender<super::tasks_cancel::TurnCompletionMsg>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
         let message = delivery.message().clone();
         self.admit_parent_agent_message_with(
@@ -22,9 +23,9 @@ impl SessionActor {
             parent_telemetry_ctx,
             respond_to,
             completion_tx,
-            |actor, state, item| {
+            |actor, state, prepared| {
                 delivery
-                    .commit_admission(|| actor.insert_parent_agent_message(state, item))
+                    .commit_admission(|| actor.commit_queued_delivery(state, prepared))
                     .is_some()
             },
         )
@@ -37,8 +38,8 @@ impl SessionActor {
         receipt_sink: mpsc::Sender<crate::agent::subagent::PromptTurnReceipt>,
         parent_telemetry_ctx: xai_grok_telemetry::TelemetryCtx,
         respond_to: oneshot::Sender<ActiveMessageAdmission>,
-        completion_tx: mpsc::UnboundedSender<super::tasks_cancel::TurnCompletionMsg>,
-        commit: impl FnOnce(&Self, &mut State, InputItem) -> bool,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
+        commit: impl FnOnce(&Self, &mut State, PreparedDelivery) -> bool,
     ) {
         let receipt_permit = match receipt_sink.reserve_owned().await {
             Ok(permit) => permit,
@@ -89,9 +90,10 @@ impl SessionActor {
             send_now: false,
             traceparent: None,
         };
+        let prepared = PreparedDelivery(item);
         let mut state = self.state.lock().await;
         let admitted_at = std::time::Instant::now();
-        if !commit(self, &mut state, item) {
+        if !commit(self, &mut state, prepared) {
             let _ = respond_to.send(ActiveMessageAdmission::Rejected);
             return;
         }
@@ -109,18 +111,13 @@ impl SessionActor {
         Self::maybe_start_running_task(self.clone(), completion_tx).await;
     }
 
-    fn insert_parent_agent_message(&self, state: &mut State, item: InputItem) {
-        state.pending_inputs.push_back(item);
-        self.broadcast_queue_changed(state);
-    }
-
     #[cfg(test)]
     async fn admit_parent_agent_message_for_test(
         self: &Arc<Self>,
         message: ActiveAgentMessage,
         receipt_sink: mpsc::Sender<crate::agent::subagent::PromptTurnReceipt>,
         respond_to: oneshot::Sender<ActiveMessageAdmission>,
-        completion_tx: mpsc::UnboundedSender<super::tasks_cancel::TurnCompletionMsg>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
         self.admit_parent_agent_message_with(
             message,
@@ -131,8 +128,8 @@ impl SessionActor {
             ),
             respond_to,
             completion_tx,
-            |actor, state, item| {
-                actor.insert_parent_agent_message(state, item);
+            |actor, state, prepared| {
+                actor.commit_queued_delivery(state, prepared);
                 true
             },
         )

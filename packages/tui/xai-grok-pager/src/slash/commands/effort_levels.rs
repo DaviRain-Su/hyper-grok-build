@@ -4,8 +4,8 @@ use xai_grok_shell::sampling::types::{ReasoningEffort, ReasoningEffortOption};
 
 use crate::slash::command::ArgItem;
 
-/// Effort levels in the built-in fallback menu (strongest first). `none`/`minimal`
-/// are still accepted by `ReasoningEffort::from_str` for power users.
+/// Effort levels in the built-in fallback menu (strongest first).
+/// `none`/`minimal` are still accepted by `ReasoningEffort::from_str` for power users.
 pub(crate) const EFFORT_LEVELS: &[ReasoningEffort] = &[
     ReasoningEffort::Xhigh,
     ReasoningEffort::High,
@@ -26,10 +26,9 @@ pub(crate) fn effort_description(level: ReasoningEffort) -> &'static str {
     }
 }
 
-/// The built-in menu used when the server sends no `reasoningEfforts`. Reproduces
-/// the historical rows: labels are the lowercase level (via `Display`),
-/// descriptions from `effort_description`. The active row is matched by value
-/// against the session effort at render time, so `default` is left unset here.
+/// The built-in menu used when the server sends no `reasoningEfforts`.
+/// Reproduces the historical rows: labels are the lowercase level (via `Display`), descriptions from `effort_description`.
+/// The active row is matched by value against the session effort at render time, so `default` is left unset here.
 pub(crate) fn legacy_effort_options() -> Vec<ReasoningEffortOption> {
     EFFORT_LEVELS
         .iter()
@@ -45,13 +44,12 @@ pub(crate) fn legacy_effort_options() -> Vec<ReasoningEffortOption> {
 
 /// Build effort rows for autocomplete from a per-model option list.
 ///
-/// - `mark_active` + `current_effort` mark the current session effort with `(active)`.
+/// - `mark_active` and `current_effort` mark the current session effort with `(active)`.
 /// - `insert_text_for` controls what is inserted on select:
 ///   - `/effort`: the option id (`"deep"`)
 ///   - `/model` chained phase: `"ModelName deep"`
 ///
-/// `match_text` gets an `a `/`b `/…` sort prefix so the matcher's alphabetical
-/// tiebreak preserves the option order.
+/// `match_text` gets an `a `/`b `/…` sort prefix so the matcher's alphabetical tiebreak preserves the option order.
 pub(crate) fn build_effort_arg_items(
     options: &[ReasoningEffortOption],
     current_effort: Option<ReasoningEffort>,
@@ -65,8 +63,8 @@ pub(crate) fn build_effort_arg_items(
             let active = mark_active && current_effort == Some(option.value);
             let active_suffix = if active { " (active)" } else { "" };
             let insert_text = insert_text_for(option);
-            // Sort-key prefix: 'a' for top row, 'b' for next, etc. Only
-            // affects matcher tiebreak ordering, never rendered.
+            // Sort-key prefix: 'a' for top row, 'b' for next, etc
+            // Only affects matcher tiebreak ordering, never rendered
             let sort_prefix = char::from(b'a' + idx as u8);
             ArgItem {
                 display: format!("{}{active_suffix}", option.label),

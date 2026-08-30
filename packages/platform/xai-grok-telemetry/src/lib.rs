@@ -31,6 +31,7 @@ pub mod region;
 pub mod sampling_log;
 pub mod sentry;
 pub mod session_ctx;
+pub mod session_end;
 pub mod session_metrics;
 pub mod span_profile;
 pub mod startup;

@@ -30,7 +30,7 @@ struct Candidate {
 pub(super) fn scan(cwd: &Path, now: SystemTime) -> Vec<ForeignSessionSummary> {
     let Some(config_dir) = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+        .or_else(|| xai_dirs::home_dir().map(|home| home.join(".claude")))
     else {
         return Vec::new();
     };
@@ -44,7 +44,7 @@ pub(super) fn most_recent(
 ) -> RecentProbe<RecentCandidate> {
     let Some(config_dir) = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+        .or_else(|| xai_dirs::home_dir().map(|home| home.join(".claude")))
     else {
         return RecentProbe::Complete(None);
     };

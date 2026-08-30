@@ -1,6 +1,6 @@
-//! Turning a script's bytes into the lines the frame paints. Separate from
-//! `xai-grok-pager-render`'s `vte::Perform`, which discards OSC and quantizes
-//! colour; this row needs OSC 8 spans in absolute screen columns.
+//! Turning a script's bytes into the lines the frame paints.
+//! Separate from `xai-grok-pager-render`'s `vte::Perform`, which discards OSC and quantizes colour.
+//! This row needs OSC 8 spans in absolute screen columns.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -12,17 +12,16 @@ use super::painted_width;
 
 pub const MAX_STATUS_LINE_LINES: u16 = 5;
 
-/// Sanitized on arrival rather than per frame: tabs expanded, escapes dropped,
-/// targets checked, lines cut. The frame still applies theme and width.
+/// Sanitized on arrival rather than per frame: tabs expanded, escapes dropped, targets checked, lines cut.
+/// The frame still applies theme and width.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SanitizedText {
     pub(super) lines: Vec<Line<'static>>,
     pub(super) links: Vec<CommandLink>,
 }
 
-/// Bounds the scan, not the paint: each link is measured from its line start,
-/// so many links cost quadratic time. Characters, escapes included, never
-/// columns.
+/// Bounds the scan, not the paint: each link is measured from its line start, so many links cost quadratic time.
+/// The cap counts characters, escapes included, never columns.
 const MAX_SANITIZED_CHARS: usize = 1024;
 
 impl SanitizedText {
@@ -44,9 +43,8 @@ impl SanitizedText {
     }
 }
 
-/// Drops lines beyond [`MAX_STATUS_LINE_LINES`] and cuts each survivor to
-/// [`MAX_SANITIZED_CHARS`] characters. The byte length gates the work, since a
-/// string under the cap in bytes is under it in characters too.
+/// Drops lines beyond [`MAX_STATUS_LINE_LINES`] and cuts each survivor to [`MAX_SANITIZED_CHARS`] characters.
+/// The byte length gates the work, since a string under the cap in bytes is under it in characters too.
 fn clamp_lines(text: &str) -> Cow<'_, str> {
     if text.len() <= MAX_SANITIZED_CHARS {
         return Cow::Borrowed(text);
@@ -76,8 +74,8 @@ pub(super) struct CommandLink {
     pub(super) url: Arc<str>,
 }
 
-/// An open OSC 8 link. The offset is into the visible text, so its columns come
-/// from painted glyphs.
+/// An open OSC 8 link.
+/// The offset is into the visible text, so its columns come from painted glyphs.
 struct OpenLink {
     line: u16,
     byte_start: usize,
@@ -87,8 +85,8 @@ struct OpenLink {
 fn extract_osc8_links(text: &str) -> (String, Vec<CommandLink>) {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
-    // `out` keeps the styling escapes for `ansi_to_tui`. A CSI is not glyphs,
-    // so only `visible` is measured.
+    // `out` keeps the styling escapes for `ansi_to_tui`
+    // A CSI is not glyphs, so only `visible` is measured
     let mut visible = String::with_capacity(text.len());
     let mut links: Vec<CommandLink> = Vec::new();
     let mut open: Option<OpenLink> = None;
@@ -103,8 +101,7 @@ fn extract_osc8_links(text: &str) -> (String, Vec<CommandLink>) {
                       line_start: usize,
                       line: u16| {
         let Some(link) = open.take() else { return };
-        // Both columns are measured from `line_start`, which locates the link only
-        // if it opened on this line.
+        // Both columns are measured from `line_start`, which locates the link only if it opened on this line
         debug_assert_eq!(link.line, line, "a link outlived the line it opened on");
         let columns = |text: &str| u16::try_from(painted_width(text)).unwrap_or(u16::MAX);
         let col_start = columns(&visible[line_start..link.byte_start]);
@@ -123,8 +120,8 @@ fn extract_osc8_links(text: &str) -> (String, Vec<CommandLink>) {
         let c = chars[i];
         if c == '\x1b' {
             match chars.get(i + 1).copied() {
-                // Every OSC but a link is dropped: `ansi_to_tui` ends one at BEL only, so an
-                // ST-terminated notification would eat the rest of the line.
+                // Every OSC but a link is dropped
+                // `ansi_to_tui` ends one at BEL only, so an ST-terminated notification would eat the rest of the line
                 Some(']') => {
                     let (body_end, next_i) = string_sequence(&chars, i + 2);
                     let body: String = chars[i + 2..body_end].iter().collect();
@@ -146,21 +143,20 @@ fn extract_osc8_links(text: &str) -> (String, Vec<CommandLink>) {
                     let mut final_byte = None;
                     while j < chars.len() {
                         let cc = chars[j];
-                        // An unterminated sequence ends at the line: swallowing
-                        // the newline counts a later link onto the wrong line.
+                        // An unterminated sequence ends at the line: swallowing the newline counts a later link onto the wrong line
                         if cc == '\n' {
                             break;
                         }
                         j += 1;
-                        // ECMA-48 final byte. Stopping at an alphabetic
-                        // swallows the text after `ESC [ 3 ~`.
+                        // ECMA-48 final byte
+                        // Stopping at an alphabetic swallows the text after `ESC [ 3 ~`
                         if matches!(cc, '\u{40}'..='\u{7e}') {
                             final_byte = Some(cc);
                             break;
                         }
                     }
-                    // Only SGR reaches the parser: `ansi_to_tui` eats any other CSI up to the
-                    // next ASCII letter and that letter too, dropping a counted glyph.
+                    // Only SGR reaches the parser
+                    // `ansi_to_tui` eats any other CSI up to the next ASCII letter and that letter too, dropping a counted glyph
                     if final_byte == Some('m') {
                         out.extend(&chars[i..j]);
                     }
@@ -169,8 +165,7 @@ fn extract_osc8_links(text: &str) -> (String, Vec<CommandLink>) {
                 // DCS, SOS, PM and APC address the terminal, not the screen.
                 // Passing one through paints its payload across the row.
                 Some('P' | 'X' | '^' | '_') => i = string_sequence(&chars, i + 2).1,
-                // Charset selection and two-character escapes: `tput sgr0`
-                // emits `ESC ( B ESC [ m`; an `ESC (` left here paints `(B`.
+                // Charset selection and two-character escapes: `tput sgr0` emits `ESC ( B ESC [ m`; an `ESC (` left here paints `(B`
                 _ => {
                     let mut j = i + 1;
                     while j < chars.len() && matches!(chars[j], '\u{20}'..='\u{2f}') {
@@ -214,8 +209,8 @@ fn safe_link_target(uri: &str) -> Option<Arc<str>> {
     ) {
         return None;
     }
-    // The shared gate stops at the scheme, enough for Grok's own text but not a
-    // script's: `http://` with no host passes it and opens a browser on nothing.
+    // The shared gate stops at the scheme, enough for Grok's own text but not a script's
+    // `http://` with no host passes it and opens a browser on nothing
     let web = uri.split_once("://").is_some_and(|(scheme, _)| {
         scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
     });
@@ -225,8 +220,8 @@ fn safe_link_target(uri: &str) -> Option<Arc<str>> {
     Some(Arc::from(uri))
 }
 
-/// Where a string sequence's body ends and scanning resumes. BEL and ST close
-/// one; a newline ends an unterminated one at the line.
+/// Where a string sequence's body ends and scanning resumes.
+/// BEL and ST close one; a newline ends an unterminated one at the line.
 fn string_sequence(chars: &[char], start: usize) -> (usize, usize) {
     let mut i = start;
     while i < chars.len() {

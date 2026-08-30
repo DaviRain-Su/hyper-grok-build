@@ -2,24 +2,15 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// The turn-status spinner names *what* the agent is waiting on. Right after a
-/// prompt is submitted, before the model streams its first token, the spinner
-/// reads "Waiting for response…" — the explicit `WaitingReason::Model` label
-/// that replaced the old opaque "Waiting…". This is the literal feedback that
-/// prompted the change ("what is 'Waiting…' waiting on?").
-///
-/// Drives the real binary end-to-end: prompt submit → `resolve_turn_activity`
-/// (no streamed activity, not bash, no subagent → `Waiting(Model)`) →
-/// `compute_activity` → rendered status line. A 3s per-event mock delay holds
-/// the pre-first-token window open long enough to observe.
+/// Right after a prompt is submitted, before the model streams its first token, the spinner reads "Waiting for response…".
+/// That label is `WaitingReason::Model`: `resolve_turn_activity` reports it when nothing has streamed and neither bash nor a subagent is running.
+/// A 3s delay on every mock SSE event holds the turn in that state long enough to observe.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn waiting_for_model_label_shows_before_first_token() {
     let content = ContentController::start().await.expect("start content");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} done."));
-    // Every SSE event (including the first) is emitted after this delay, so the
-    // turn sits in the "no activity yet" state — Waiting(Model) — for ~3s after
-    // submit, before the first response chunk arrives.
+    // Every SSE event, including the first, is emitted after this delay, so the turn sits in Waiting(Model) for ~3s after submit
     content.set_chunk_delay(Some(Duration::from_secs(3)));
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -35,8 +26,7 @@ async fn waiting_for_model_label_shows_before_first_token() {
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit prompt");
 
-    // The new explicit label, not the old generic "Waiting…". Match without the
-    // trailing ellipsis so terminal width / glyph handling can't flake it.
+    // Match without the trailing ellipsis so terminal width and glyph handling can't flake it
     harness
         .wait_for_text("Waiting for response", Duration::from_secs(10))
         .unwrap_or_else(|_| {

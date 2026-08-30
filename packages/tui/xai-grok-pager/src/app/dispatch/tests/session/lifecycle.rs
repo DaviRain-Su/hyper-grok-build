@@ -1,8 +1,8 @@
 //! Tests for session create, exit, trust, startup actions, worktree creation, and cloud lifecycle.
 use super::*;
 use crate::app::dispatch::session::lifecycle::dispatch_accept_consent;
-/// Simulate a release-stamped build so folder-trust is active (a local/dev
-/// build auto-trusts and persists nothing). Mirrors this module's raw env idiom.
+/// Simulate a release-stamped build so folder-trust is active (a local/dev build auto-trusts and persists nothing).
+/// Mirrors this module's raw env idiom.
 fn simulate_release_build() {
     unsafe { std::env::set_var(xai_grok_version::TEST_VERSION_ENV, "0.0.0-sim") };
 }
@@ -202,11 +202,8 @@ fn all_system_texts(app: &AppView, id: AgentId) -> Vec<String> {
         })
         .collect()
 }
-/// In minimal mode the `/new` session banner must advertise `/resume`, not
-/// `/dashboard` — the dashboard command is refused there, while the
-/// `/resume` session picker works. Deterministic regardless of the
-/// dashboard feature flag: the minimal branch of
-/// `session_switch_hint_command` never consults it.
+/// In minimal mode the `/new` session banner must advertise `/resume`, not `/dashboard`: the dashboard command is refused there.
+/// The result is deterministic regardless of the dashboard feature flag: the minimal branch of `session_switch_hint_command` never consults it.
 #[test]
 fn session_created_banner_advertises_resume_in_minimal_mode() {
     let mut app = test_app_with_agent();
@@ -1133,8 +1130,8 @@ fn deferred_model_switch_applied_on_worktree_session_created() {
             .. } if *a_id == id && *s_id == session_id && *m_id == model_id
     )));
 }
-/// The session-startup gate requires BOTH auth AND trust resolved. Trust is
-/// gated AFTER auth, so either one pending defers session creation.
+/// The session-startup gate requires BOTH auth AND trust resolved.
+/// Trust is gated AFTER auth, so either one pending defers session creation.
 #[test]
 fn session_startup_allowed_requires_auth_and_trust() {
     let mut app = test_app();
@@ -1191,8 +1188,7 @@ fn session_startup_and_typeahead_require_consent() {
         "keys typed before the notice must not be replayed into it",
     );
 }
-/// An acceptance must never cover text that did not reach the screen, so the renderer's verdict
-/// gates the dispatch, not just the key.
+/// An acceptance must never cover text that did not reach the screen, so the renderer's verdict gates the dispatch, not just the key.
 #[test]
 fn accept_is_refused_until_the_notice_paints() {
     use crate::app::consent::{ConsentLegibility, ConsentState};
@@ -1248,8 +1244,8 @@ fn accepting_records_the_answer_and_replays_deferred_startup() {
     );
     assert!(app.deferred_startup.session.is_none());
 }
-/// An api key carries no email, so an answer written under it would be filed against nobody and
-/// would overwrite the answer of whoever signed in on this machine. Both writes have to skip it.
+/// An api key carries no email, so an answer written under it would be filed against nobody.
+/// It would also overwrite the answer of whoever signed in on this machine, so both writes have to skip it.
 #[test]
 fn an_api_key_run_writes_no_answer_on_either_path() {
     let mut app = test_app();
@@ -1324,9 +1320,8 @@ fn a_consent_link_opens_the_url_its_label_stands_for() {
     unsafe { std::env::remove_var("GROK_TEST_OPEN_URL_FILE") };
     let _ = std::fs::remove_file(&url_file);
 }
-/// Accepting the trust question (its `finish_trust` tail) resolves trust and
-/// replays the deferred startup when auth is already done. (Declining quits
-/// instead -- see `welcome_trust_decline_keys_quit` in `app_view`.)
+/// Accepting the trust question (its `finish_trust` tail) resolves trust and replays the deferred startup when auth is already done.
+/// (Declining quits instead; see `welcome_trust_decline_keys_quit` in `app_view`.)
 #[test]
 fn finish_trust_resolves_and_replays_startup() {
     let mut app = test_app();
@@ -1352,8 +1347,8 @@ fn finish_trust_resolves_and_replays_startup() {
         "deferred load must replay once trust resolves",
     );
 }
-/// Accepting the trust question persists the grant to the store and resolves
-/// trust. GROK_HOME-isolated so the write hits a temp store, not the real one.
+/// Accepting the trust question persists the grant to the store and resolves trust.
+/// The test is GROK_HOME-isolated so the write hits a temp store, not the real one.
 #[serial_test::serial(GROK_HOME)]
 #[test]
 fn trust_folder_grants_and_resolves() {
@@ -1374,9 +1369,9 @@ fn trust_folder_grants_and_resolves() {
         "accepting must persist the trust grant for the workspace",
     );
 }
-/// When BOTH auth and trust are pending, `AuthComplete` must NOT replay the
-/// deferred startup -- the trust question renders next, and its answer drains
-/// it. Verifies the symmetric two-gate hand-off.
+/// When BOTH auth and trust are pending, `AuthComplete` must NOT replay the deferred startup.
+/// The trust question renders next, and its answer drains it.
+/// Verifies the symmetric two-gate ordering.
 #[test]
 fn auth_complete_defers_startup_until_trust_resolved() {
     let mut app = test_app();
@@ -1426,9 +1421,8 @@ fn auth_complete_defers_startup_until_trust_resolved() {
         "trust answer must replay the deferred startup",
     );
 }
-/// Symmetric to the above: trust answered FIRST while auth is still pending
-/// exercises `finish_trust`'s `else` (deferred) branch -- it must NOT drain;
-/// the later `AuthComplete` (the last gate) drains.
+/// Symmetric to the above: trust answered FIRST while auth is still pending exercises `finish_trust`'s `else` (deferred) branch.
+/// It must NOT drain; the later `AuthComplete` (the last gate) drains.
 #[test]
 fn trust_answered_first_defers_startup_until_auth_completes() {
     let mut app = test_app();
@@ -1475,10 +1469,8 @@ fn trust_answered_first_defers_startup_until_auth_completes() {
         "auth completion replays the deferred startup",
     );
 }
-/// Regression / negative-space: a session-creating dispatch (e.g. the
-/// global `Ctrl+N` `NewSession`, which bypasses the welcome interceptor) must
-/// NOT create a session while `TrustState::Pending` -- the dispatch
-/// chokepoint stashes it, and it replays exactly once when trust resolves.
+/// Regression: the global `Ctrl+N` `NewSession` bypasses the welcome interceptor but must NOT create a session while `TrustState::Pending`.
+/// The dispatch chokepoint stashes it, and it replays exactly once when trust resolves.
 #[test]
 fn new_session_is_gated_while_trust_pending() {
     let mut app = test_app();
@@ -1530,10 +1522,8 @@ fn chat_mode_new_session_creates_with_chat_kind() {
         "sticky --chat NewSession must stamp conversation_entry for rename kind"
     );
 }
-/// Atomicity: when several startup intents coexist (e.g. CLI
-/// `--resume` + an incidental `Ctrl+N` deferred during the trust question),
-/// `drain_startup_actions` replays the highest-priority one and leaves NO
-/// `startup_*` field set — no stale intent can fire on a later drain.
+/// `drain_startup_actions` replays the highest-priority intent and leaves NO `startup_*` field set, so no stale intent can fire on a later drain.
+/// Here several intents coexist: a CLI `--resume` plus an incidental `Ctrl+N` deferred during the trust question.
 #[test]
 fn drain_clears_all_startup_fields_even_when_intents_coexist() {
     let mut app = test_app();
@@ -1563,11 +1553,9 @@ fn drain_clears_all_startup_fields_even_when_intents_coexist() {
     assert!(app.deferred_startup.prompt.is_none());
     assert!(!app.deferred_startup.open_dashboard);
 }
-/// The `--worktree <ref>` feature must keep
-/// working through the startup gate. A `NewWorktreeSession` carrying a
-/// `git_ref` dispatched while the trust gate is closed is stashed into
-/// `deferred_startup.worktree_ref` by the chokepoint; once the gate opens the drain
-/// replays it as the worktree's git ref and clears the field.
+/// The `--worktree <ref>` feature must keep working through the startup gate.
+/// While the trust gate is closed, the chokepoint stashes a `NewWorktreeSession`'s `git_ref` into `deferred_startup.worktree_ref`.
+/// Once the gate opens, the drain replays it as the worktree's git ref and clears the field.
 #[test]
 fn deferred_worktree_ref_replays_through_gate() {
     let mut app = test_app();
@@ -1609,10 +1597,8 @@ fn deferred_worktree_ref_replays_through_gate() {
     );
     assert!(!app.deferred_startup.worktree);
 }
-/// Regression: a gated worktree-WITHOUT-load-id must
-/// not clobber a `--resume`/`LoadSession` id a previous gated action already
-/// stashed. Otherwise `drain_startup_actions` loses the resume intent and
-/// opens a blank worktree instead of a worktree-with-resume.
+/// Regression: a gated worktree-WITHOUT-load-id must not clobber a `--resume`/`LoadSession` id a previous gated action already stashed.
+/// Otherwise `drain_startup_actions` loses the resume intent and opens a blank worktree instead of a worktree-with-resume.
 #[test]
 fn gated_worktree_without_load_id_preserves_stashed_resume() {
     let mut app = test_app();
@@ -1669,11 +1655,9 @@ fn gated_worktree_without_load_id_preserves_stashed_resume() {
     assert!(app.deferred_startup.session.is_none());
     assert!(!app.deferred_startup.worktree);
 }
-/// Regression (derisk pass): the same clobber class as the resume-id fix,
-/// now for the worktree companion fields. A gated worktree dispatch carrying
-/// `None` label/ref must NOT erase a `--worktree <label>` / `--worktree-ref
-/// <ref>` a previous gated action already stashed -- otherwise the drain
-/// drops the label and builds off the default branch instead of the ref.
+/// Regression: the same clobber class as the resume-id fix, now for the worktree companion fields.
+/// A gated worktree carrying `None` label/ref must NOT erase a `--worktree <label>` / `--worktree-ref <ref>` a previous gated action stashed.
+/// Otherwise the drain drops the label and builds off the default branch instead of the ref.
 #[test]
 fn gated_worktree_with_none_companions_preserves_stashed_label_and_ref() {
     let mut app = test_app();
@@ -1748,10 +1732,9 @@ fn gated_worktree_with_none_companions_preserves_stashed_label_and_ref() {
     assert!(app.deferred_startup.session.is_none());
     assert!(!app.deferred_startup.worktree);
 }
-/// `/login` from inside a session must move to the welcome screen (the
-/// only view that renders the auth flow / external-provider URL) and
-/// stash the agent view for restoration. This is the core fix for the
-/// "external auth provider /login does nothing mid-session" bug.
+/// `/login` from inside a session must move to the welcome screen and stash the agent view for restoration.
+/// The welcome screen is the only view that renders the auth flow / external-provider URL.
+/// Regression: "external auth provider /login does nothing mid-session".
 #[test]
 fn login_mid_session_switches_to_welcome_and_stashes_view() {
     let mut app = test_app_with_agent();
@@ -1767,9 +1750,8 @@ fn login_mid_session_switches_to_welcome_and_stashes_view() {
         "must still kick off the auth flow",
     );
 }
-/// A mid-session `/login` switches to the welcome view to host the auth
-/// flow; that transition must collapse any expanded announcement so it
-/// can't reappear stale if auth completion lands back on a welcome screen.
+/// A mid-session `/login` switches to the welcome view to host the auth flow.
+/// That transition must collapse any expanded announcement so it can't reappear stale if auth completion lands back on a welcome screen.
 #[test]
 fn login_mid_session_resets_welcome_announcement_expanded() {
     let mut app = test_app_with_agent();
@@ -1781,9 +1763,8 @@ fn login_mid_session_resets_welcome_announcement_expanded() {
         "mid-session login must reset the expanded announcement"
     );
 }
-/// After a successful mid-session re-auth, the stale `ReAuthRequired`
-/// prompt (pushed when the 401 surfaced) is stripped so the user
-/// returns to a clean session.
+/// After a successful mid-session re-auth, the stale `ReAuthRequired` prompt (pushed when the 401 surfaced) is stripped.
+/// The user returns to a clean session.
 #[test]
 fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
     use crate::scrollback::block::RenderBlock;
@@ -1816,8 +1797,7 @@ fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
         "re-auth prompt must be stripped after successful re-auth"
     );
 }
-/// After a successful mid-session re-auth, the prompt that failed on the
-/// expired login is auto-resubmitted so the user doesn't have to retype it.
+/// After a successful mid-session re-auth, the prompt that failed on the expired login is auto-resubmitted so the user doesn't have to retype it.
 #[test]
 fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
     use crate::scrollback::block::RenderBlock;
@@ -2023,8 +2003,7 @@ fn dispatch_new_session_keeps_stale_attach_on_other_agent() {
         "attach on a different agent must not be re-pointed to the new session",
     );
 }
-/// Re-point must use top-level `active_view` id, not `get_active_agent`
-/// (subagent child views use placeholder `AgentId(0)`).
+/// Re-point must use top-level `active_view` id, not `get_active_agent` (subagent child views use placeholder `AgentId(0)`).
 #[test]
 fn dispatch_new_session_repoints_attach_while_subagent_view_open() {
     use crate::views::dashboard::DashboardRowId;
@@ -2267,7 +2246,7 @@ fn delete_current_session_confirm_emits_effect() {
         "got {effects:?}"
     );
 }
-/// Reverting session-delete kills to the wire default (`ClientUi`) would auto-wake.
+/// Session delete must kill background tasks as `Teardown`; the wire default (`ClientUi`) would auto-wake.
 #[test]
 fn delete_current_session_kills_bg_tasks_as_teardown() {
     use xai_grok_shell::extensions::task::TaskKillSource;
@@ -2355,7 +2334,7 @@ fn delete_current_session_confirm_from_dashboard_emits_dashboard_after() {
         "got {effects:?}"
     );
 }
-/// Dashboard state can exist without overlay attach; must still Welcome.
+/// Dashboard state can exist without overlay attach; the delete must still land on Welcome.
 #[test]
 fn delete_current_session_dashboard_state_without_attach_stays_welcome() {
     use crate::app::actions::AfterSessionDelete;
@@ -2535,8 +2514,7 @@ fn bg_task_killed_no_op_for_unknown_session() {
     assert!(effects.is_empty());
     assert!(app.agents[&AgentId(1)].session.bg_tasks["task-B-1"].pending_kill);
 }
-/// Mutual exclusion: enabling always-approve via the dispatch seam clears
-/// the per-session `auto_mode` display flag (yolo wins).
+/// Mutual exclusion: enabling always-approve via dispatch clears the per-session `auto_mode` display flag (yolo wins).
 #[test]
 fn set_yolo_on_clears_session_auto_mode() {
     use crate::app::actions::PermissionModeKind;
@@ -2556,9 +2534,8 @@ fn set_yolo_on_clears_session_auto_mode() {
         "enabling always-approve must clear the per-session auto flag (yolo wins)"
     );
 }
-/// Gate OFF + policy pin: Plan exit lands on Normal (ask) but MUST still
-/// push `SetSessionMode(Default)` so the agent leaves Plan — otherwise the
-/// session stays in Plan while the UI reads Normal.
+/// Gate OFF and policy pin: Plan exit lands on Normal (ask) but MUST still push `SetSessionMode(Default)` so the agent leaves Plan.
+/// Otherwise the session stays in Plan while the UI reads Normal.
 #[test]
 fn cycle_mode_plan_exit_under_gate_off_pin_emits_set_session_mode() {
     let mut app = test_app_with_agent();
@@ -2590,8 +2567,8 @@ fn cycle_mode_plan_exit_under_gate_off_pin_emits_set_session_mode() {
         "expected PersistPermissionMode(ask) under pin, got {effects:?}"
     );
 }
-/// Pre-session cycle (no session id yet) under the pin: Plan → Auto does
-/// not stage yolo (auto is the next mode; pin applies on Auto → Always-Approve).
+/// Pre-session cycle (no session id yet) under the pin: Plan to Auto does not stage yolo.
+/// Auto is the next mode; the pin applies on the Auto to Always-Approve step.
 #[test]
 fn cycle_mode_pre_session_blocked_by_policy_pin() {
     let mut app = test_app_with_agent();
@@ -2619,10 +2596,8 @@ fn cycle_mode_pre_session_blocked_by_policy_pin() {
     assert_eq!(agent.deferred_session_mode, None);
     assert_eq!(agent_toast(&app).as_deref(), Some(POLICY_WARNING));
 }
-/// Pre-session cycle from Plan with STALE `yolo_mode = true` (e.g. client
-/// state restored from before the pin landed): resets to Normal with yolo
-/// cleared (matching the with-session catch-all for the same Plan+yolo input)
-/// so always-approve is not left active behind another banner.
+/// Pre-session cycle from Plan with STALE `yolo_mode = true` (e.g. client state restored from before the pin landed) resets to Normal.
+/// Yolo is cleared too (matching the with-session catch-all for the same Plan+yolo input) so always-approve is not left active behind another banner.
 #[test]
 fn cycle_mode_pre_session_clears_stale_yolo_under_pin() {
     let mut app = test_app_with_agent();
@@ -2703,10 +2678,8 @@ fn dispatch_cycle_mode_pre_session_cycles_locally() {
     assert!(!agent.session.is_yolo());
     assert_eq!(agent.plan_mode_pending, Some(false));
 }
-/// No-session bail-out: when the active agent
-/// has no ACP session, the setter toasts "No active session" and
-/// returns empty effects. Pins the safety contract that we never
-/// dispatch a mode change to a non-existent session.
+/// No-session bail-out: when the active agent has no ACP session, the setter toasts "No active session" and returns empty effects.
+/// Pins the safety contract that we never dispatch a mode change to a non-existent session.
 #[test]
 fn set_plan_mode_no_session_toasts_and_bails() {
     let mut app = test_app_with_agent();
@@ -2728,8 +2701,7 @@ fn set_plan_mode_no_session_toasts_and_bails() {
     assert!(agent.plan_mode_pending.is_none());
     assert!(!agent.plan_mode_active);
 }
-/// Non-idempotent ON transition: emits
-/// `Effect::SetSessionMode(plan)` and sets `plan_mode_pending`.
+/// Non-idempotent ON transition: emits `Effect::SetSessionMode(plan)` and sets `plan_mode_pending`.
 /// Complement to the idempotent-ON test above.
 #[test]
 fn set_plan_mode_on_from_off_emits_set_session_mode() {
@@ -2750,12 +2722,9 @@ fn set_plan_mode_on_from_off_emits_set_session_mode() {
         "optimistic pending must be set to Some(true)"
     );
 }
-/// Real-world repro: the peek panel is OPEN for the selected row
-/// (it auto-opens on render), and the close is driven END-TO-END
-/// through `handle_input` (Ctrl+X twice) exactly as the event loop
-/// does. Verifies the selection moves to the next row AND the peek
-/// follows it — the path the direct-`dispatch_dashboard_stop` tests
-/// above don't exercise.
+/// Real-world repro: the peek panel is OPEN for the selected row (it auto-opens on render).
+/// The close is driven END-TO-END through `handle_input` (Ctrl+X twice) exactly as the event loop does.
+/// Verifies the selection moves to the next row AND the peek follows it, the path the direct-`dispatch_dashboard_stop` tests above don't exercise.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
@@ -2849,17 +2818,12 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
         "peek must follow the selection onto the next row",
     );
 }
-/// Regression — the same Ctrl+X double-press path driven
-/// END-TO-END through `DashboardState::handle_input` (which the
-/// existing `dashboard_stop_double_press_deletes_top_level` test
-/// bypasses by calling `dispatch_dashboard_stop` directly).
+/// Regression: the same Ctrl+X double-press path driven END-TO-END through `DashboardState::handle_input`.
+/// The existing `dashboard_stop_double_press_deletes_top_level` test bypasses it by calling `dispatch_dashboard_stop` directly.
 ///
-/// Without the fix, the second `handle_input` call
-/// runs the top-of-`handle_key` toast/confirm clear BEFORE the
-/// registry resolves the key to `DashboardStop`, wiping the
-/// just-armed `delete_confirm`. The dispatcher then sees a fresh
-/// state and re-arms instead of deleting. The session never deletes
-/// no matter how many times the user presses Ctrl+X.
+/// The bug: the second `handle_input` call runs the top-of-`handle_key` toast/confirm clear BEFORE the registry resolves the key to `DashboardStop`.
+/// That wipes the just-set `delete_confirm`, so the dispatcher sees a fresh state and sets it again instead of deleting.
+/// The session never deletes no matter how many times the user presses Ctrl+X.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_stop_double_press_via_handle_key_deletes_top_level() {

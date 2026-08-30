@@ -1,10 +1,11 @@
 //! Shell-owned control handle for one active child session.
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use xai_grok_tools::implementations::grok_build::task::coordinator::{
     ActiveMessageAdmission, ChildControl, LocalBoxFuture, SendBoxFuture, SubagentProgress,
 };
 use xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageDelivery;
+use xai_message_delivery_core::DeliveryEnvelope;
 
 use super::prompt_turn_receipt::{PromptTurnReceipt, cancel_shell_child_turn};
 use crate::session::{SessionCommand, SessionThread};
@@ -12,11 +13,15 @@ use crate::session::{SessionCommand, SessionThread};
 /// Shell runtime handle retained while a child is active.
 pub(crate) struct ShellChildRuntime {
     pub(crate) child_cmd_tx: mpsc::UnboundedSender<SessionCommand>,
+    pub(crate) message_delivery: crate::session::message_delivery::MessageDeliveryHandle,
+    pub(crate) active_message_target_session_id: String,
     pub(crate) child_signals: crate::session::signals::SessionSignalsHandle,
     /// Held by the worker until promotion succeeds; `None` while the caller
     /// still owns the join handle so cancel-at-promote can wait for exit.
     pub(crate) _child_thread: Option<SessionThread>,
     pub(crate) receipt_sink: mpsc::Sender<PromptTurnReceipt>,
+    #[cfg(test)]
+    pub(crate) force_queue_envelope: bool,
     pub(crate) active_message_parent_session_id: String,
     pub(crate) active_message_parent_prompt_index: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -47,8 +52,27 @@ impl ChildControl for ShellChildRuntime {
         &self,
         delivery: ActiveAgentMessageDelivery,
     ) -> SendBoxFuture<ActiveMessageAdmission> {
-        let cmd_tx = self.child_cmd_tx.clone();
+        let message_delivery = self.message_delivery.clone();
         let receipt_sink = self.receipt_sink.clone();
+        let message = delivery.message();
+        let envelope = DeliveryEnvelope::from_agent(
+            {
+                #[cfg(test)]
+                if self.force_queue_envelope {
+                    xai_message_delivery_core::Operation::Queue
+                } else {
+                    crate::session::message_delivery::delivery_operation(delivery.operation())
+                }
+                #[cfg(not(test))]
+                crate::session::message_delivery::delivery_operation(delivery.operation())
+            },
+            message.text.clone(),
+            crate::session::message_delivery::agent_delivery_identity(message.message_id.clone()),
+            crate::session::message_delivery::OwnedActiveDescendantGrant::new(
+                self.active_message_target_session_id.clone(),
+                delivery,
+            ),
+        );
         let parent_prompt_index = self
             .active_message_parent_prompt_index
             .load(std::sync::atomic::Ordering::Acquire);
@@ -57,21 +81,9 @@ impl ChildControl for ShellChildRuntime {
             std::sync::Arc::new(tokio::sync::Mutex::new(parent_prompt_index)),
         );
         Box::pin(async move {
-            let (respond_to, response_rx) = oneshot::channel();
-            if cmd_tx
-                .send(SessionCommand::ParentAgentMessage {
-                    delivery,
-                    receipt_sink,
-                    parent_telemetry_ctx,
-                    respond_to,
-                })
-                .is_err()
-            {
-                return ActiveMessageAdmission::ChannelClosed;
-            }
-            response_rx
+            message_delivery
+                .send(envelope, receipt_sink, parent_telemetry_ctx)
                 .await
-                .unwrap_or(ActiveMessageAdmission::ChannelClosed)
         })
     }
 

@@ -119,14 +119,12 @@ mod tests {
         assert!(m.is_match("read_file"));
         assert!(m.is_match("list_dir"));
         assert!(!m.is_match("grep"));
-        // Regression for the old `^a|b$` anchoring bug: terms must not substring-match.
         assert!(!m.is_match("my_read_file"));
         assert!(!m.is_match("list_dir_v2"));
     }
 
     #[test]
     fn pipe_skips_empty_terms() {
-        // Leading/trailing/double pipes contribute no spurious empty-string match.
         let m = HookMatcher::new("|read_file||grep|").unwrap();
         assert!(m.is_match("read_file"));
         assert!(m.is_match("grep"));
@@ -135,10 +133,9 @@ mod tests {
 
     #[test]
     fn regex_form_is_unanchored() {
-        // Contains regex metachars -> regex mode, unanchored.
         let m = HookMatcher::new("run_.*").unwrap();
         assert!(m.is_match("run_terminal_command"));
-        assert!(m.is_match("xrun_yyy")); // unanchored: substring match
+        assert!(m.is_match("xrun_yyy"));
         assert!(!m.is_match("read_file"));
     }
 
@@ -175,8 +172,6 @@ mod tests {
 
     #[test]
     fn whitespace_matcher_matches_nothing() {
-        // Whitespace is NOT trimmed; `"   "` is a regex that matches no
-        // real tool name (NOT match-all, which would turn a deny gate into deny-all).
         let m = HookMatcher::new("   ").unwrap();
         assert!(!m.is_match("read_file"));
         assert!(!m.is_match("run_terminal_command"));
@@ -185,10 +180,9 @@ mod tests {
     #[test]
     fn claude_bash_matches_grok_tool() {
         let m = HookMatcher::new("Bash").unwrap();
-        assert!(m.is_match("Bash")); // external alias name
-        assert!(m.is_match("run_terminal_command")); // Grok name
+        assert!(m.is_match("Bash"));
+        assert!(m.is_match("run_terminal_command"));
         assert!(!m.is_match("read_file"));
-        // Bug-fix regression: exact, not prefix.
         assert!(!m.is_match("run_terminal_command_v2"));
     }
 
@@ -197,18 +191,15 @@ mod tests {
         let m = HookMatcher::new("Edit|Write").unwrap();
         assert!(m.is_match("Edit"));
         assert!(m.is_match("Write"));
-        assert!(m.is_match("search_replace")); // Grok equivalent
-        assert!(m.is_match("hashline_edit")); // second Grok alias
+        assert!(m.is_match("search_replace"));
+        assert!(m.is_match("hashline_edit"));
         assert!(!m.is_match("read_file"));
-        // The old anchoring bug matched these; the exact-list mode must not.
         assert!(!m.is_match("Editorial"));
         assert!(!m.is_match("my_search_replace"));
     }
 
     #[test]
     fn regex_against_claude_alias_matches_grok_tool() {
-        // A regex written against an external alias still matches the Grok tool
-        // (legacy alias-name expansion).
         let m = HookMatcher::new("^Bash$").unwrap();
         assert!(m.is_match("run_terminal_command"));
         assert!(m.is_match("Bash"));

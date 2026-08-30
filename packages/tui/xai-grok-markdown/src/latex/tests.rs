@@ -29,17 +29,17 @@ fn subscripts_map_to_unicode() {
 
 #[test]
 fn script_fallback_uses_parens() {
-    // φ has no superscript form → fall back to ^(...)
+    // α has no superscript form, so the script falls back to ^(...)
     assert_eq!(inline("x^{\\alpha\\beta}"), "x^(αβ)");
     assert_eq!(inline("x^\\alpha"), "x^α");
-    // Single unmappable subscript char.
+    // q has no subscript form, so a single char stays ASCII with no parens
     assert_eq!(inline("a_q"), "a_q");
 }
 
 #[test]
 fn wordlike_scripts_fall_back_to_parens() {
-    // Text-family commands mark the atom as a word → no modifier-letter runs
-    // (`pₜₒᵣₛₒ` is unreadable and gappy in many terminal fonts).
+    // Text-family commands mark the atom as a word, so it is not rendered as a modifier-letter run
+    // `pₜₒᵣₛₒ` is unreadable and gappy in many terminal fonts
     assert_eq!(inline("p_{\\text{torso}}"), "p_(torso)");
     assert_eq!(inline("z_{\\mathrm{draft}}"), "z_(draft)");
     assert_eq!(inline("x^{\\text{opt}}"), "x^(opt)");
@@ -50,7 +50,7 @@ fn wordlike_scripts_fall_back_to_parens() {
 
 #[test]
 fn indexlike_scripts_keep_unicode_forms() {
-    // 1–2 letter runs are index juxtapositions, not words.
+    // Runs of one or two letters are index juxtapositions, not words
     assert_eq!(inline("x_{ij}"), "xᵢⱼ");
     assert_eq!(inline("T_{i+1}"), "Tᵢ₊₁");
     assert_eq!(inline("n^{th}"), "nᵗʰ");
@@ -62,16 +62,15 @@ fn boxed_renders_content_without_frame() {
     assert_eq!(inline("\\boxed{x = 1}"), "x = 1");
     assert_eq!(inline("\\boxed{\\mathcal{L}}"), "ℒ");
     assert_eq!(inline("\\fbox{done}"), "done");
-    // Math typography applies inside \boxed (math mode) …
+    // Math typography applies inside \boxed (math mode)
     assert_eq!(inline("\\boxed{a - b}"), "a − b");
-    // … but not inside \fbox (text mode).
+    // \fbox is text mode, so `-` stays a hyphen
     assert_eq!(inline("\\fbox{a-b}"), "a-b");
 }
 
 #[test]
 fn mtp_loss_equation_converts_fully() {
-    // A complex real-world equation: every command must
-    // convert — no literal command names in the output.
+    // A complex real-world equation: every command must convert, no literal command names in the output
     let src = "\\boxed{\n\\mathcal{L}_{\\text{MTP}}\n=\n\\sum_{i=0}^{2}\n\\gamma^{i}\\,\n\\mathbb{E}_{\\text{positions, mask}}\n\\Big[\n\\mathrm{KL}\\big(\n  \\mathrm{softmax}(z_{\\text{torso}}^{(s_i)})\n  \\;\\big\\|\\;\n  \\mathrm{softmax}(z_{\\text{draft}}^{(i)})\n\\big)\n\\Big]\n}";
     let joined = inline(src);
     assert!(joined.contains("ℒ_(MTP)"), "got: {joined}");
@@ -227,8 +226,7 @@ fn vmatrix_uses_bars() {
 
 #[test]
 fn matrix_with_prefix_aligns_as_box() {
-    // The prefix must stay on the anchor row with the matrix body
-    // aligned beneath — not glued to the first row only.
+    // The prefix must stay on the anchor row with the matrix body aligned beneath, not glued to the first row only
     let lines = display("A = \\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}");
     assert_eq!(lines, vec!["A = ⎛1  2⎞", "    ⎝3  4⎠"]);
 }

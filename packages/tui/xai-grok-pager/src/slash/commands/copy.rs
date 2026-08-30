@@ -1,42 +1,26 @@
-//! `/copy` -- copy the last (or Nth) assistant message to the clipboard.
+//! `/copy` copies the last (or Nth) assistant message to the clipboard.
 //!
-//! Optional file path writes instead of (or when) the clipboard is unreachable:
-//! - `/copy` — latest → clipboard (file fallback on failure)
-//! - `/copy 2` — 2nd-latest → clipboard
-//! - `/copy out.txt` — latest → file
-//! - `/copy 2 out.txt` — 2nd-latest → file
+//! An optional file path writes to a file instead, and is also the fallback when the clipboard is unreachable:
+//! - `/copy`: latest to the clipboard (file fallback on failure)
+//! - `/copy 2`: 2nd-latest to the clipboard
+//! - `/copy out.txt`: latest to the file
+//! - `/copy 2 out.txt`: 2nd-latest to the file
 
 use std::path::PathBuf;
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
-/// Copy an assistant message to the clipboard (or an optional file).
 pub struct CopyCommand;
 
 impl SlashCommand for CopyCommand {
-    fn name(&self) -> &str {
-        "copy"
-    }
-
-    fn description(&self) -> &str {
-        "Copy last response to clipboard or file (/copy [N] [file])"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    fn usage(&self) -> &str {
-        "/copy [N] [file]"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("[N] [file]")
+    slash_meta! {
+        name: "copy",
+        description: "Copy last response to clipboard or file (/copy [N] [file])",
+        usage: "/copy [N] [file]",
+        takes_args: true,
+        session_scoped: true,
+        arg_placeholder: "[N] [file]",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -51,10 +35,10 @@ impl SlashCommand for CopyCommand {
 
 /// Parse `/copy` args into `(n, optional_file_path)`.
 ///
-/// - empty → `(1, None)`
-/// - `2` → `(2, None)`
-/// - `out.txt` → `(1, Some(out.txt))`
-/// - `2 out.txt` → `(2, Some(out.txt))` (rest of line is the path, spaces ok)
+/// - empty parses to `(1, None)`
+/// - `2` parses to `(2, None)`
+/// - `out.txt` parses to `(1, Some(out.txt))`
+/// - `2 out.txt` parses to `(2, Some(out.txt))` (rest of line is the path, spaces ok)
 fn parse_copy_args(args: &str) -> Result<(usize, Option<PathBuf>), String> {
     let trimmed = args.trim();
     if trimmed.is_empty() {

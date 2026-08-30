@@ -12,6 +12,7 @@ use crate::version_overrides::{self, apply_version_overrides};
 /// Shared core of [`load_toml_file`] and the hook-layer read.
 fn read_toml_file(path: &Path) -> std::io::Result<toml::Value> {
     match std::fs::read_to_string(path) {
+        Ok(s) if s.trim().is_empty() => Ok(toml::Value::Table(toml::map::Map::new())),
         Ok(s) => match toml::from_str::<toml::Value>(&s) {
             Ok(v) => Ok(v),
             Err(e) => {
@@ -96,6 +97,19 @@ pub const MANAGED_CONFIG_FILENAME: &str = "managed_config.toml";
 
 /// Requirements (cloud-cache) filename — the sibling server-synced artifact.
 pub const REQUIREMENTS_FILENAME: &str = "requirements.toml";
+
+/// Unsigned folder-trust store (`$GROK_HOME/trusted_folders.toml`).
+pub const TRUSTED_FOLDERS_FILENAME: &str = "trusted_folders.toml";
+
+/// User-global sandbox profile definitions (`$GROK_HOME/sandbox.toml`).
+pub const SANDBOX_CONFIG_FILENAME: &str = "sandbox.toml";
+
+/// Legacy project-hook trust list (`$GROK_HOME/trusted-hook-projects`).
+/// Migrated into [`TRUSTED_FOLDERS_FILENAME`] on the next unsandboxed start.
+pub const TRUSTED_HOOK_PROJECTS_FILENAME: &str = "trusted-hook-projects";
+
+/// Plugin trust list (`$GROK_HOME/trusted-plugins`).
+pub const TRUSTED_PLUGINS_FILENAME: &str = "trusted-plugins";
 
 pub fn load_managed_config() -> std::io::Result<toml::Value> {
     load_user_config_layer(user_grok_home().as_deref(), MANAGED_CONFIG_FILENAME)
@@ -827,6 +841,16 @@ mod tests {
         // cwd-relative .grok read.
         let v = load_user_config_layer(None, "config.toml").unwrap();
         assert_eq!(v.as_table().map(|t| t.is_empty()), Some(true));
+    }
+
+    #[test]
+    fn load_user_config_layer_treats_empty_file_as_empty_table() {
+        let dir = std::env::temp_dir().join(format!("grok-load-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), b"").unwrap();
+        let v = load_user_config_layer(Some(&dir), "config.toml").unwrap();
+        assert_eq!(v.as_table().map(|t| t.is_empty()), Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

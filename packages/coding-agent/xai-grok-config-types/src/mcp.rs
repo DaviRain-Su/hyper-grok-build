@@ -8,8 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use xai_grok_mcp::oauth_config::McpOAuthConfig;
 
-/// serde default helper. Kept module-local rather than shared — the `pool`
-/// module keeps its own copy for `PoolConfig`.
+/// serde default helper.
 fn default_true() -> bool {
     true
 }

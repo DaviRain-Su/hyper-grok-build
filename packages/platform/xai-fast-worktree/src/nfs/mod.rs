@@ -4,6 +4,8 @@
 //! Dest probes and teardown (`dest_is_*`, `force_unmount`) are shared by NFS
 //! and FUSE. Create IPC wire types stay local (daemon owns attach).
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// Matches grove `WorktreeError::IdentityConflict` Display. Parsed once in the client.
+pub(crate) const IDENTITY_CONFLICT_MARK: &str = "identity conflict";
 mod client;
 mod confined;
 pub(crate) use confined::is_safe_worktree_id;
@@ -201,6 +203,9 @@ pub(crate) fn try_grove_worktree(plan: &WorktreePlan) -> Result<Option<CreateWor
         Err(NfsTryError::InFlight { phase }) => Err(anyhow::anyhow!(
             "nfs worktree create still in progress (phase={phase}); not falling back to copy"
         )),
+        Err(NfsTryError::IdentityConflict(msg)) => {
+            Err(anyhow::anyhow!("{msg}; not falling back to copy"))
+        }
         Err(NfsTryError::Other(e)) => Err(e).context("nfs worktree create failed"),
     }
 }
@@ -556,6 +561,16 @@ mod fallback_gate_tests {
         let err = try_grove_worktree(&plan).unwrap_err();
         assert_eq!(err.to_string(), OUT_OF_DISK_CONTEXT);
         assert!(nfs_error_blocks_fallback(&err));
+    }
+    #[test]
+    fn identity_conflict_blocks_fallback_via_not_falling_back() {
+        let err = anyhow::anyhow!(
+            "worktree w1 identity conflict: mismatched git_ref; not falling back to copy"
+        );
+        assert!(
+            nfs_error_blocks_fallback(&err),
+            "typed IdentityConflict maps through the existing not-falling-back needle"
+        );
     }
     #[test]
     fn head_read_failure_after_adopt_tears_down_and_falls_through() {

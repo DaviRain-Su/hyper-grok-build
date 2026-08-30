@@ -87,8 +87,7 @@
             other => panic!("expected Loaded plugins data, got {other:?}"),
         }
 
-        // The push counts as the one seeding: expand a group, deliver again,
-        // and the expansion must survive.
+        // The push counts as the one seeding: expand a group, deliver again, and the expansion must survive
         app.agents
             .get_mut(&AgentId(0))
             .unwrap()

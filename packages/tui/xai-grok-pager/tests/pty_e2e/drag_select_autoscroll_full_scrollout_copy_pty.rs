@@ -9,24 +9,21 @@ const ANCHOR_FIRST: &str = "SCROLLOUT_ALPHA";
 
 const ANCHOR_LAST: &str = "SCROLLOUT_OMEGA";
 
-/// Turn-2 filler rows: comfortably taller than the 50-row PTY so drag
-/// autoscroll can push the anchor block fully out of the viewport.
+/// Turn-2 filler rows: comfortably taller than the 50-row PTY so drag autoscroll can push the anchor block fully out of the viewport.
 const FILLER_ROWS: usize = 120;
 
-/// PTY: drag-hold at the bottom edge autoscrolls until the anchor block has
-/// scrolled FULLY out of the viewport, then release — the copy must still
-/// contain the anchor line and the block's late lines.
+/// PTY: drag-hold at the bottom edge autoscrolls until the anchor block has scrolled FULLY out of the viewport, then release.
+/// The copy must still contain the anchor line and the block's late lines.
 ///
-/// Exercises the drag-start `content_width` snapshot (mouse-up-time
-/// `visible_blocks` no longer has the anchor block) plus the per-frame head
-/// reclamp keeping the head on the range while it scrolls out.
+/// Exercises the drag-start `content_width` snapshot: at mouse-up time `visible_blocks` no longer has the anchor block.
+/// Also exercises the per-frame head reclamp keeping the head on the range while it scrolls out.
 /// `SSH_CONNECTION` forces the OSC 52 clipboard route for readback.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn drag_select_autoscroll_full_scrollout_copy_pty() {
     let content = ContentController::start().await.expect("start content");
-    // Turn 1: a three-row anchor message (markdown hard breaks keep one row
-    // per source line). Turn 2: filler tall enough to scroll it fully out.
+    // Turn 1: a three-row anchor message (markdown hard breaks keep one row per source line)
+    // Turn 2: filler tall enough to scroll it fully out
     let mut anchor_turn = content.expect_agent_turn(
         "selection anchor turn",
         format!("{ANCHOR_FIRST} anchor first line  \nmiddle filler line  \n{ANCHOR_LAST} anchor last line"),
@@ -65,9 +62,8 @@ async fn drag_select_autoscroll_full_scrollout_copy_pty() {
     harness
         .wait_for_text(ANCHOR_LAST, Duration::from_secs(45))
         .expect("anchor message rendered");
-    // Rendered text alone doesn't prove turn 1 is over: submitting turn 2
-    // while the pager still considers turn 1 live queues the prompt instead
-    // of sending it, and the filler wait below times out.
+    // Rendered text alone doesn't prove turn 1 is over
+    // Submitting turn 2 while the pager still considers turn 1 live queues the prompt instead of sending it, and the filler wait below times out
     tokio::time::timeout(Duration::from_secs(10), anchor_turn.wait_satisfied())
         .await
         .expect("turn 1 completes before turn 2 send");
@@ -88,8 +84,7 @@ async fn drag_select_autoscroll_full_scrollout_copy_pty() {
         .expect("scrollback focused (Space:prompt hint) after Tab");
     harness.update(Duration::from_millis(500));
 
-    // Wheel up until the anchor block's first line is back on screen, then a
-    // little further so the press row sits clear of the top autoscroll zone.
+    // Wheel up until the anchor block's first line is back on screen, then a little further so the press row sits clear of the top autoscroll zone
     let scroll_deadline = Instant::now() + Duration::from_secs(30);
     while !harness.contains_text(ANCHOR_FIRST) {
         assert!(
@@ -121,8 +116,7 @@ async fn drag_select_autoscroll_full_scrollout_copy_pty() {
     let (row, col) = locate_screen_text(&screen, ANCHOR_FIRST)
         .unwrap_or_else(|| panic!("could not locate {ANCHOR_FIRST:?}; screen:\n{screen}"));
 
-    // Press on the anchor line, drag to the bottom edge, and HOLD: the edge
-    // position arms autoscroll and the ticks do the rest.
+    // Press on the anchor line, drag to the bottom edge, and HOLD: the edge position starts autoscroll and the ticks do the rest
     let bottom_row = DEFAULT_ROWS - 3;
     let mut drag = String::new();
     drag.push_str(&sgr_mouse(0, row, col, 'M'));
@@ -132,11 +126,10 @@ async fn drag_select_autoscroll_full_scrollout_copy_pty() {
         .inject_keys(drag.as_bytes())
         .expect("press and drag to bottom edge");
 
-    // Hold until the anchor block is PROVABLY out of `visible_blocks`: the
-    // numbered filler sits below the anchor block, its padding, and the
-    // second prompt, so once the topmost visible filler marker is >= 4 every
-    // row above it — the whole anchor block included — is beyond the
-    // viewport top and the mouse-up-time width lookup cannot rescue the copy.
+    // Hold until the anchor block is PROVABLY out of `visible_blocks`
+    // The numbered filler sits below the anchor block, its padding, and the second prompt
+    // So once the topmost visible filler marker is 4 or higher, every row above it (the whole anchor block included) is beyond the viewport top
+    // The mouse-up-time width lookup then cannot rescue the copy
     let out_deadline = Instant::now() + Duration::from_secs(30);
     while topmost_visible_marker(&harness).is_none_or(|m| m < 4) {
         assert!(

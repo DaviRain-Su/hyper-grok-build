@@ -1,14 +1,11 @@
-//! Generic scrollable list pane widget.
-//!
-//! `ListPaneState` + `ListPane<T>` provide a reusable, scrollable, selectable
-//! list component. The state is non-generic and owns only scroll/selection/layout
-//! data; item data lives in an external model and is borrowed via
-//! [`ListPaneState::prepare_layout`].
+//! `ListPaneState` and `ListPane<T>` provide a reusable, scrollable, selectable list component.
+//! The state is non-generic and owns only scroll/selection/layout data.
+//! Item data lives in an external model and is borrowed via [`ListPaneState::prepare_layout`].
 //!
 //! Designed for three concrete use cases:
 //! - **Tracing pane** (100K+ entries, append-only, NoWrap, follow mode)
-//! - **Todo pane** (<10 items, random mutations, Wrap)
-//! - **Background task pane** (<10 items, random mutations, NoWrap)
+//! - **Todo pane** (under 10 items, random mutations, Wrap)
+//! - **Background task pane** (under 10 items, random mutations, NoWrap)
 
 mod layout;
 mod render;
@@ -27,24 +24,19 @@ use ratatui::style::Color;
 use ratatui::text::Line;
 
 // ---------------------------------------------------------------------------
-// ListPaneStyle — configurable colors for the framework's post-pass overlays
+// ListPaneStyle: configurable colors for the framework's post-pass overlays
 // ---------------------------------------------------------------------------
 
-/// Visual style configuration for a `ListPane`.
-///
-/// Controls colors for selection highlighting, input bar, and other
-/// framework-level overlays.  Match highlights use style inversion
-/// (REVERSED modifier) and don't need configurable colors.
-///
-/// Items do **not** need to know about these — the framework applies them
-/// as post-passes after each item renders.
+/// Controls colors for selection highlighting, the input bar, and other framework-level overlays.
+/// Match highlights use style inversion (REVERSED modifier) and don't need configurable colors.
+/// Items do not need to know about these; the framework applies them in a pass after each item renders.
 #[derive(Debug, Clone, Copy)]
 pub struct ListPaneStyle {
     /// Background color for the selected item row (cursor line).
     pub selection_bg: Color,
 
     /// Background color for the visual selection range (not the cursor line).
-    /// Slightly distinct from cursor bg, distinguishing range from cursor.
+    /// Kept slightly different from `selection_bg` so the range and the cursor read apart.
     pub visual_select_bg: Color,
 
     /// Background color for the input bar (search/filter).
@@ -72,17 +64,13 @@ pub struct ListPaneStyle {
     /// "Copied!" toast foreground color.
     pub toast_fg: Color,
 
-    /// When true, the cursor line uses `visual_select_bg` when inside a
-    /// visual selection (uniform range appearance). The cursor is then
-    /// distinguished only by the `prefix_cursor` style, not by background.
-    ///
-    /// When false (default), the cursor line always uses `selection_bg`,
-    /// even within a visual selection.
+    /// When true, the cursor line inside a visual selection uses `visual_select_bg`, so the whole range looks uniform.
+    /// The cursor is then distinguished only by the `prefix_cursor` style, not by background.
+    /// When false (default), the cursor line always uses `selection_bg`, even within a visual selection.
     pub uniform_visual_bg: bool,
 
-    /// When false, the right-corner scroll indicators (▲/▼) are suppressed.
-    /// Used by panes that draw their own scroll affordance (e.g. the tasks
-    /// pane draws the same ▲/▼ centered on dedicated rows). Defaults to `true`.
+    /// When false, the right-corner scroll indicators (▲/▼) are suppressed. Defaults to `true`.
+    /// Panes that draw their own scroll hint set this false (the tasks pane draws the same ▲/▼ centered on dedicated rows).
     pub show_corner_indicators: bool,
 }
 
@@ -90,7 +78,7 @@ impl Default for ListPaneStyle {
     fn default() -> Self {
         let theme = crate::theme::Theme::current();
         Self {
-            // Palette defaults — sourced from theme to ensure quantization.
+            // Defaults come from the theme, whose colors are already quantized
             selection_bg: theme.bg_highlight,
             visual_select_bg: theme.bg_visual,
             input_bar_bg: theme.bg_base,
@@ -111,37 +99,25 @@ impl Default for ListPaneStyle {
 // ListItem trait
 // ---------------------------------------------------------------------------
 
-/// Trait that items in a `ListPane` must implement.
-///
-/// Items are owned by the **model** (not the view). The view borrows them
-/// through `&[T]` in [`ListPaneState::prepare_layout`] and
-/// [`ListPane::new`].
+/// Items are owned by the model, not the view. The view borrows them through `&[T]` in [`ListPaneState::prepare_layout`] and [`ListPane::new`].
 ///
 /// ## Rendering: two modes
 ///
-/// **Content-based (preferred):** implement [`content()`] and optionally
-/// [`prefix()`].  The framework handles wrapping, truncation, highlighting,
-/// and selection overlays automatically.  This is the right choice for most
-/// items.
+/// **Content-based (preferred):** implement [`content()`] and optionally [`prefix()`].
+/// The framework handles wrapping, truncation, highlighting, and selection overlays automatically. This is the right choice for most items.
 ///
-/// **Custom rendering (escape hatch):** override [`render()`] to paint
-/// directly into a buffer.  Use this only when the content/prefix model
-/// doesn't fit (e.g. diff hunks with side-by-side layout).  You must also
-/// override [`desired_height()`] when using custom rendering.
+/// **Custom rendering (escape hatch):** override [`render()`] to paint directly into a buffer.
+/// Use this only when the content/prefix model doesn't fit (e.g. diff hunks with side-by-side layout). You must also override [`desired_height()`].
 ///
-/// Items that implement [`content()`] (non-empty Line) get framework
-/// rendering; the default [`render()`] and [`desired_height()`] are derived
-/// automatically.  Items that override [`render()`] bypass the framework.
+/// Items that implement [`content()`] (a non-empty Line) get framework rendering; [`render()`] and [`desired_height()`] then derive automatically.
+/// Items that override [`render()`] bypass the framework.
 pub trait ListItem {
     // =======================================================================
     // Content-based API (preferred)
     // =======================================================================
 
-    /// The styled content to display — one logical line of text.
-    ///
-    /// The framework handles wrapping (Wrap mode) and truncation (NoWrap mode)
-    /// based on this content.  Return a reference to a stored `Line`.
-    ///
+    /// The styled content to display: one logical line of text.
+    /// The framework handles wrapping (Wrap mode) and truncation (NoWrap mode) based on this content. Return a reference to a stored `Line`.
     /// Default returns an empty `Line` (signals "use custom `render()`").
     fn content(&self) -> &Line<'_> {
         static EMPTY: std::sync::LazyLock<Line<'static>> = std::sync::LazyLock::new(Line::default);
@@ -149,37 +125,26 @@ pub trait ListItem {
     }
 
     /// Optional prefix column (checkbox, spinner, timestamp, etc.).
-    ///
-    /// Rendered in a fixed-width column at the left edge of the item.
-    /// In Wrap mode, continuation lines are indented by the prefix width.
-    ///
-    /// Returned by value since prefixes are small and often constructed
-    /// dynamically (spinner frame, elapsed timer, checkbox toggle).
+    /// Rendered in a fixed-width column at the left edge; in Wrap mode, continuation lines are indented by the prefix width.
+    /// Returned by value since prefixes are small and often constructed dynamically (spinner frame, elapsed timer, checkbox toggle).
     fn prefix(&self) -> Option<Line<'_>> {
         None
     }
 
-    /// Optional prefix for items in the visual selection range (not the cursor line).
-    ///
-    /// Called instead of `prefix()` when the item is in the visual selection
-    /// range but NOT the cursor line. Default falls back to `prefix()`.
+    /// Prefix for items inside the visual selection range but not on the cursor line.
+    /// Default falls back to `prefix()`.
     fn prefix_in_selection(&self) -> Option<Line<'_>> {
         self.prefix()
     }
 
-    /// Optional prefix for the cursor line (the focused/active item).
-    ///
-    /// Called instead of `prefix()` when the item is the cursor line.
+    /// Prefix for the cursor line (the focused/active item).
     /// Default falls back to `prefix()`.
     fn prefix_cursor(&self) -> Option<Line<'_>> {
         self.prefix()
     }
 
     /// Optional full-width background color for this item.
-    ///
-    /// When `Some(color)`, the framework fills the entire item row(s) with
-    /// this background color before rendering content. Used for code blocks
-    /// in markdown viewers.
+    /// When `Some(color)`, the framework fills the entire item row(s) with it before rendering content. Used for code blocks in markdown viewers.
     fn background(&self) -> Option<Color> {
         None
     }
@@ -188,21 +153,13 @@ pub trait ListItem {
     // Custom rendering API (escape hatch)
     // =======================================================================
 
-    /// Render this item into the given area.
-    ///
-    /// Override this **only** when the content/prefix model doesn't fit.
-    /// When using the content-based API, leave this as the default (no-op).
-    ///
+    /// Override this only when the content/prefix model doesn't fit; with the content-based API, leave it as the default no-op.
     /// The framework calls this only when `content()` returns an empty Line.
     fn render(&self, _area: Rect, _buf: &mut Buffer, _selected: bool, _focused: bool) {}
 
-    /// Height in visual lines at the given `width` when soft-wrapping.
-    ///
-    /// In `NoWrap` mode the pane ignores this and uses height = 1.
-    /// Must be ≥ 1.
-    ///
-    /// Default implementation computes from [`content()`] and [`prefix()`].
-    /// Override only when using custom [`render()`].
+    /// Height in visual lines at the given `width` when soft-wrapping. Must be at least 1.
+    /// In `NoWrap` mode the pane ignores this and uses a height of 1.
+    /// The default computes from [`content()`] and [`prefix()`]; override only with a custom [`render()`].
     fn desired_height(&self, width: u16) -> u16 {
         if width == 0 {
             return 1;
@@ -216,14 +173,11 @@ pub trait ListItem {
         if text_area == 0 {
             return 1;
         }
-        // Use actual word-wrap line count via textwrap (not character-count
-        // division). The cheap ceil(chars/width) estimate underestimates
-        // because word-aware wrapping produces more lines when words can't
-        // fit at line boundaries.
+        // Use the actual word-wrap line count via textwrap, not character-count division
+        // The cheap ceil(chars/width) estimate underestimates because word-aware wrapping produces more lines when words can't fit at line boundaries
         //
-        // We use textwrap::wrap directly (cheap — just computes break
-        // positions) rather than word_wrap_line (expensive — builds styled
-        // Lines). Uses the same FirstFit options as the rendering pipeline.
+        // textwrap::wrap is cheap (it only computes break positions); word_wrap_line is expensive (it builds styled Lines)
+        // Uses the same FirstFit options as the rendering pipeline
         let flat: String = self
             .content()
             .spans
@@ -241,9 +195,7 @@ pub trait ListItem {
     // =======================================================================
 
     /// Stable identity that survives insertions, removals, and reordering.
-    ///
-    /// Must be unique within the list.  Used so that selection state persists
-    /// across mutations without index arithmetic.
+    /// Must be unique within the list. Used so that selection state persists across mutations without index arithmetic.
     fn stable_id(&self) -> u64;
 
     /// Whether this item can be selected. Return `false` for separator rows.
@@ -252,10 +204,8 @@ pub trait ListItem {
     }
 
     /// Source line number for goto-line (`:N`) navigation.
-    ///
-    /// When items have a meaningful source line number (e.g., file viewer
-    /// lines), return `Some(n)` so goto-line targets the correct item even
-    /// when the visual index differs (e.g., interleaved comment lines).
+    /// When items have a meaningful source line number (e.g. file viewer lines), return `Some(n)`.
+    /// Goto-line then targets the correct item even when the visual index differs (e.g. interleaved comment lines).
     /// Return `None` (default) to use the visual index.
     fn goto_line_number(&self) -> Option<usize> {
         None
@@ -271,23 +221,16 @@ pub trait ListItem {
     // =======================================================================
 
     /// Plain text for search/filter matching.
-    ///
-    /// The framework calls `regex.is_match(item.search_text())` during
-    /// filtering and `regex.find_iter(item.search_text())` for highlight
-    /// rendering.  Byte offsets in this string correspond to the text
-    /// content rendered starting at column [`search_text_col_offset`].
-    ///
+    /// The framework calls `regex.is_match(item.search_text())` during filtering and `regex.find_iter(item.search_text())` for highlight rendering.
+    /// Byte offsets in this string correspond to the text content rendered starting at column [`search_text_col_offset`].
     /// Default returns `""` (item not searchable/filterable).
     fn search_text(&self) -> &str {
         ""
     }
 
     /// Column offset where `search_text()` content begins in the rendered output.
-    ///
-    /// The framework uses this to position match highlights correctly.
-    ///
-    /// Default derives from [`prefix()`] display width.  Override only
-    /// when using custom [`render()`] with a non-standard layout.
+    /// The framework uses this to position match highlights.
+    /// Default derives from the [`prefix()`] display width; override only for a custom [`render()`] with a non-standard layout.
     fn search_text_col_offset(&self) -> u16 {
         self.prefix()
             .map(|p| line_display_width(&p) as u16)
@@ -295,9 +238,7 @@ pub trait ListItem {
     }
 
     /// Text to copy when `y` is pressed.
-    ///
-    /// Default extracts plain text from `content()`. Override for items
-    /// that use custom `render()` with empty `content()`.
+    /// Default extracts plain text from `content()`. Override for items that use custom `render()` with empty `content()`.
     fn copy_text(&self) -> String {
         self.content()
             .spans

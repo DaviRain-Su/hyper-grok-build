@@ -5,6 +5,7 @@
 //! tasks for the actual streaming work, so multiple requests can be
 //! in flight concurrently.
 
+pub(crate) mod request_metadata;
 pub(crate) mod request_task;
 pub(crate) mod state;
 

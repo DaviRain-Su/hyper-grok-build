@@ -2,8 +2,7 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// A queue-pane edit of a queued `!` row keeps bash semantics: the edited
-/// command executes at drain and never reaches the model.
+/// Editing a queued `!` row from the queue pane keeps it a bash command: the edited command runs when the queue drains and never reaches the model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 #[cfg(unix)]
@@ -70,7 +69,7 @@ async fn verify_bashq_claim3_edit_keeps_bash() {
         .expect("focus queue pane");
     harness.update(Duration::from_millis(300));
     harness.inject_keys(b"e").expect("edit queued row");
-    // A bash-row edit shows the bash info override, not "editing queued #N".
+    // Editing a bash row replaces the usual "editing queued #N" info line with the bash one
     harness
         .wait_for_text("Run shell command", Duration::from_secs(10))
         .expect("bash edit mode entered");

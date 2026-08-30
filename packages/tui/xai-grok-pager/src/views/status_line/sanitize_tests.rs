@@ -50,8 +50,7 @@ fn scanner_strips_escapes_and_records_link_columns() {
             &[(2, 4, "https://x.ai")],
         ),
         (
-            // `tput sgr0` emits `ESC ( B`, which paints a literal `(B` if kept
-            // and shifts the link right if counted.
+            // `tput sgr0` emits `ESC ( B`, which paints a literal `(B` if kept and shifts the link right if counted
             "a charset escape is swallowed and takes no columns",
             "\x1b(B\x1b]8;;https://x.ai\x07x.ai\x1b]8;;\x07",
             "x.ai",
@@ -64,8 +63,7 @@ fn scanner_strips_escapes_and_records_link_columns() {
             &[],
         ),
         (
-            // Ends on a non-alphabetic final byte: stopping at the next letter
-            // would swallow the text after it.
+            // The CSI ends on a non-alphabetic final byte: stopping at the next letter would swallow the text after it
             "a csi ending in ~ is dropped whole and paints no columns",
             "\x1b[3~\x1b]8;;https://x.ai\x07ok\x1b]8;;\x07",
             "ok",
@@ -112,8 +110,7 @@ fn link_is_dropped_with_the_line_the_cap_cuts() {
 
 #[test]
 fn a_web_link_with_no_host_is_not_a_link() {
-    // The shared gate allows these on the scheme alone; they open a browser on
-    // nothing.
+    // The shared gate allows these on the scheme alone; they open a browser on nothing
     for hostless in ["http://", "https://", "https:// "] {
         let input = format!("\x1b]8;;{hostless}\x07nowhere\x1b]8;;\x07");
         let (clean, links) = extract_osc8_links(&input);
@@ -136,8 +133,7 @@ fn script_cannot_smuggle_a_scheme_past_the_link_allowlist() {
         assert!(links.is_empty(), "{hostile}");
     }
 
-    // The allowlist's third scheme, and the control for the loop above: a gate
-    // that dropped every link would pass it without this.
+    // The allowlist's third scheme, and the control for the loop above: a gate that dropped every link would pass it without this
     let (clean, links) = extract_osc8_links("\x1b]8;;mailto:a@b.example\x07mail\x1b]8;;\x07");
     assert_eq!(clean, "mail");
     assert_eq!(
@@ -145,8 +141,7 @@ fn script_cannot_smuggle_a_scheme_past_the_link_allowlist() {
         ["mailto:a@b.example"]
     );
 
-    // The check trims, and falls back to a bare `://` test when `Url::parse`
-    // refuses, so the validated and stored strings must be the same one.
+    // The check trims, and falls back to a bare `://` test when `Url::parse` refuses, so the validated and stored strings must be the same one
     let (_, smuggled) =
         extract_osc8_links("\x1b]8;;https://x.ai\x1b]52;c;cHduZWQ=\x07ok\x1b]8;;\x07");
     assert!(smuggled.is_empty());

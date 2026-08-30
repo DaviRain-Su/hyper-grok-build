@@ -30,8 +30,7 @@ fn a_builtin_row_separates_its_segments_and_colours_the_warning() {
     let links = render_status_line(&mut buf, area, &display, 0, &theme);
     assert!(links.is_empty(), "segments carry no links");
 
-    // The separator is spelled out rather than read from the constant, which
-    // would make this assertion true whatever the constant became.
+    // The separator is spelled out rather than read from the constant, which would make this assertion true whatever the constant became
     assert_eq!(buffer_line(&buf, 0).trim_end(), "grok │ 90% ctx");
     let warn_at = buffer_line(&buf, 0)
         .find("90%")
@@ -117,8 +116,7 @@ fn row_holds_its_height_before_the_first_result() {
 
 #[test]
 fn elide_never_exceeds_the_width_it_was_given() {
-    // One case per way the two width models disagree, ASCII being the control:
-    // under `Line::width` two of these cases fit and would assert nothing.
+    // One case per way the two width models disagree, ASCII being the control: under `Line::width` two of these cases fit and would assert nothing
     for (name, cluster) in [
         ("ascii", "hello world "),
         ("variation selector", "\u{26a0}\u{fe0f}"),
@@ -142,8 +140,8 @@ fn elide_marks_the_cut_without_eating_the_scripts_own_marker() {
     assert_eq!(untouched.spans[0].content.as_ref(), "ab\u{2026}");
 }
 
-/// A link whose text the elision cut away must not survive on the marker: the
-/// `…` is the only thing left in those columns, and it is not the link's text.
+/// A link whose text the elision cut away must not survive on the marker.
+/// The `…` is the only thing left in those columns, and it is not the link's text.
 #[test]
 fn link_elided_away_does_not_make_the_marker_clickable() {
     let input = "0123456789\x1b]8;;https://example.com\x07AB\x1b]8;;\x07";

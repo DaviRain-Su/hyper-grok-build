@@ -1,13 +1,32 @@
-//! Tool-call execution concern for `SessionActor`: the model-output →
-//! tool-execution pipeline (`execute_tool_calls`, `prepare_tool_call`,
-//! tool-call start/success/error notifications, and sampling-event handling).
-//!
-//! `#[path]` child of `acp_session` (see the module comments there) so this
-//! `impl SessionActor` block retains access to the actor's private fields and
-//! the parent module's private helpers.
+//! Tool-call execution for `SessionActor`: a `#[path]` child of `acp_session`.
+use super::hooks::RewriteProblem;
 use super::*;
 use futures::StreamExt;
 use tracing::Instrument;
+use xai_grok_hooks::result::HookDecision;
+#[path = "wait_interrupt.rs"]
+mod wait_interrupt;
+use wait_interrupt::{
+    InterruptedWaitFilter, apply_interrupted_wait_filter, finished_wait_ids,
+    interrupted_wait_tool_result, record_interruptible_wait_outcome, wait_task_ids_from_args,
+};
+#[derive(Default)]
+struct PreToolUseGate {
+    hook_ask: Option<HookAsk>,
+    rewrite: Option<GateRewrite>,
+    additional_context: Vec<xai_grok_hooks::dispatcher::AdditionalContext>,
+}
+struct GateRewrite {
+    tool_input: ToolInput,
+    raw_arguments: String,
+    raw_input: serde_json::Value,
+    hook_name: String,
+}
+struct ValidatedRewrite {
+    rewritten: ToolInput,
+    updated_json: serde_json::Value,
+    hook_name: String,
+}
 /// Whether a tool name is an MCP `create_pull_request` (qualified
 /// `server__create_pull_request` or bare).
 fn is_mcp_create_pull_request(tool_name: &str) -> bool {
@@ -102,41 +121,6 @@ async fn wait_for_pending_interjection(buf: &InterjectionBuffer<acp::ImageConten
     }
 }
 use crate::tools::tool_context::BlockingWaitGuard;
-/// Model-facing result when a wait is aborted for a pending interjection.
-fn interrupted_wait_tool_result(args: &serde_json::Value) -> ToolRunResult {
-    interrupted_wait_tool_result_with_msg(args, "Wait interrupted: the user sent a message.")
-}
-/// [`interrupted_wait_tool_result`] with a caller-chosen model-facing message.
-fn interrupted_wait_tool_result_with_msg(args: &serde_json::Value, msg: &str) -> ToolRunResult {
-    use xai_tool_types::{TaskOutputOutput, TaskOutputResult};
-    let task_id = args
-        .get("task_ids")
-        .and_then(|v| v.as_array())
-        .and_then(|a| a.first())
-        .and_then(|v| v.as_str())
-        .or_else(|| args.get("task_id").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .to_string();
-    let result = TaskOutputResult {
-        task_id,
-        command: String::new(),
-        status: "cancelled".to_string(),
-        exit_code: None,
-        started: String::new(),
-        ended: None,
-        duration_secs: 0.0,
-        output: msg.to_string(),
-        output_file: String::new(),
-        truncated: false,
-        truncation_hint: String::new(),
-        raw_output_bytes: msg.len(),
-    };
-    ToolRunResult {
-        output: ToolsToolOutput::TaskOutput(TaskOutputOutput::Result(result)),
-        prompt_text: msg.to_string(),
-        effective_tool_name: None,
-    }
-}
 /// Clears `awaiting_plan_approval` (and re-persists) when the
 /// [`SessionActor::request_plan_approval`] await **resolves** (a decision came
 /// back) or is **dropped** (the model turn was cancelled) — so a cancelled
@@ -520,6 +504,13 @@ impl SessionActor {
             let conversation = self.chat_state_handle.get_conversation().await;
             super::refresh_classifier_transcript(&self.permissions, &conversation);
         }
+        let mcp_surface_requested = tool_calls.iter().any(|c| {
+            c.function.name == "search_tool"
+                || c.function.name == "use_tool"
+                || c.function
+                    .name
+                    .contains(crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER)
+        });
         let mut approved: Vec<PreparedToolCall> = Vec::new();
         for call in tool_calls.into_iter() {
             if final_result.is_some() {
@@ -547,7 +538,7 @@ impl SessionActor {
                     }
                 };
                 self.chat_state_handle
-                    .push_tool_result(ConversationItem::tool_error(call.id.clone(), message));
+                    .push_tool_result(ConversationItem::tool_result(call.id.clone(), message));
                 continue;
             }
             self.emit_event(crate::session::events::Event::ToolStarted {
@@ -610,6 +601,9 @@ impl SessionActor {
         }
         if approved.iter().any(|p| p.tool_name == "search_tool") {
             self.retry_auth_required_servers().await;
+        }
+        if mcp_surface_requested {
+            self.retry_unreachable_servers().await;
         }
         let dispatch_cwd = self.tool_context.cwd.to_path_buf();
         let lock_args: Vec<_> = {
@@ -712,7 +706,6 @@ impl SessionActor {
             .iter()
             .enumerate()
             .map(|(idx, prepared)| {
-                let prepared = Arc::new(prepared.clone());
                 let am = self.auth_manager.clone();
                 let shared_recovery = Arc::clone(&shared_recovery);
                 let workspace_ops = workspace_ops.clone();
@@ -729,6 +722,24 @@ impl SessionActor {
                 let blocking_wait_depth = self.tool_context.blocking_wait_depth.clone();
                 let interruptible =
                     is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args);
+                let prepared = {
+                    let mut dispatch_prepared = prepared.clone();
+                    if interruptible
+                        && let InterruptedWaitFilter::Rewritten { kept, requested } =
+                            apply_interrupted_wait_filter(
+                                &blocking_wait_depth,
+                                &mut dispatch_prepared.parsed_args,
+                            )
+                    {
+                        tracing::info!(
+                            tool = %dispatch_prepared.tool_name,
+                            kept = kept.len(),
+                            requested,
+                            "strip post-interrupt side-work from wait_all"
+                        );
+                    }
+                    Arc::new(dispatch_prepared)
+                };
                 let authored_tool_kind = self
                     .agent
                     .borrow()
@@ -824,8 +835,9 @@ impl SessionActor {
                             result
                         }
                     };
-                    let result = if interruptible {
-                        let _wait_guard = BlockingWaitGuard::enter(blocking_wait_depth.clone());
+                    let wait_guard = interruptible
+                        .then(|| BlockingWaitGuard::enter(blocking_wait_depth.clone()));
+                    let (result, wait_aborted) = if interruptible {
                         async {
                             tokio::select! {
                                 biased;
@@ -834,28 +846,49 @@ impl SessionActor {
                                     Some(&shared_recovery),
                                     &prepared.tool_name,
                                     run_tool,
-                                ) => result,
+                                ) => (result, false),
                                 _ = wait_for_pending_interjection(&pending_interjections) => {
                                     tracing::info!(
                                         tool = %prepared.tool_name,
                                         "abort wait tool: interjection pending"
                                     );
-                                    Ok(interrupted_wait_tool_result(&prepared.parsed_args))
+                                    (
+                                        Ok(interrupted_wait_tool_result(&prepared.parsed_args)),
+                                        true,
+                                    )
                                 }
                             }
                         }
                         .instrument(tool_span)
                         .await
                     } else {
-                        call_with_auth_retry(
-                            am.as_ref(),
-                            Some(&shared_recovery),
-                            &prepared.tool_name,
-                            run_tool,
+                        (
+                            call_with_auth_retry(
+                                am.as_ref(),
+                                Some(&shared_recovery),
+                                &prepared.tool_name,
+                                run_tool,
+                            )
+                            .instrument(tool_span)
+                            .await,
+                            false,
                         )
-                        .instrument(tool_span)
-                        .await
                     };
+                    if let Some(guard) = wait_guard.as_ref() {
+                        let waited = wait_task_ids_from_args(&prepared.parsed_args);
+                        let finished = if wait_aborted {
+                            Vec::new()
+                        } else {
+                            result.as_ref().map(finished_wait_ids).unwrap_or_default()
+                        };
+                        record_interruptible_wait_outcome(
+                            &blocking_wait_depth,
+                            guard.generation(),
+                            waited,
+                            wait_aborted,
+                            &finished,
+                        );
+                    }
                     let duration_ms = exec_start.elapsed().as_millis() as u64;
                     let outcome = tool_output_span_outcome(&result);
                     let success = record_tool_span_outcome(tool_span_for_record, &result);
@@ -918,9 +951,6 @@ impl SessionActor {
                 duration_ms,
             );
             let mut post_tool_use_result: Option<serde_json::Value> = None;
-            // Shared preview for WASM post_tool_use (success result JSON or error text).
-            // Assigned in both Ok/Err arms below before the wasm dispatch reads it.
-            let wasm_post_tool_preview;
             let tool_result_size_bytes: Option<u64> = match &result {
                 Ok(tool_result) => Some(tool_result.prompt_text.len() as u64),
                 Err(_) => None,
@@ -943,12 +973,12 @@ impl SessionActor {
                         .or_else(|| prepared.dispatch_target_name.clone())
                         .unwrap_or_else(|| prepared.tool_name.clone());
                     let drained = DrainedToolSuccess::new(tool_result);
-                    let result_value = serde_json::to_value(drained.output())
-                        .unwrap_or(serde_json::Value::Null);
-                    wasm_post_tool_preview = result_value.to_string();
                     post_tool_use_result = self
                         .may_have_hooks_for(xai_grok_hooks::event::HookEventName::PostToolUse)
-                        .then_some(result_value);
+                        .then(|| {
+                            serde_json::to_value(drained.output())
+                                .unwrap_or(serde_json::Value::Null)
+                        });
                     let followups = self
                         .handle_bridge_tool_success(
                             &prepared.tool_call_id,
@@ -971,8 +1001,6 @@ impl SessionActor {
                 }
                 Err(err) => {
                     let err: anyhow::Error = err.into();
-                    let err_text = format!("{err:#}");
-                    wasm_post_tool_preview = err_text.clone();
                     let err_followups = self
                         .handle_tool_error(
                             &prepared.tool_call_id,
@@ -1000,7 +1028,7 @@ impl SessionActor {
                                 tool_use_id: prepared.call_id.clone(),
                                 tool_input: tool_input_value,
                                 tool_input_truncated,
-                                error: err_text,
+                                error: format!("{err:#}"),
                                 subagent_type: self.subagent_type_label(),
                             },
                             None,
@@ -1021,6 +1049,9 @@ impl SessionActor {
                         self.send_available_commands_update().await;
                     }
                 }
+            }
+            for context in &prepared.additional_context {
+                deferred_followups.push(self.wrap_hook_context(context));
             }
             if let Some(tool_result_value) = post_tool_use_result {
                 let raw_input: serde_json::Value = serde_json::from_str(&prepared.raw_arguments)
@@ -1048,47 +1079,6 @@ impl SessionActor {
                 )
                 .await;
             }
-            // WASM post_tool_use observe: after shell/HTTP hooks, always fail-open.
-            // Runs for both success and failure (success flag on the envelope).
-            {
-                let ext_rt = self.extension_runtime.borrow().clone();
-                if !ext_rt.is_empty() {
-                    let post_in = xai_grok_extension_api::PostToolIn {
-                        tool_name: prepared.tool_name.clone(),
-                        success: !tool_failed,
-                        tool_input_json: prepared.raw_arguments.clone(),
-                        tool_result_preview: wasm_post_tool_preview.clone(),
-                    };
-                    let results = ext_rt.dispatch_post_tool_use(&post_in).await;
-                    for r in &results {
-                        if let xai_grok_extension_runtime::GuestCallResult::Failed {
-                            extension,
-                            error,
-                        } = r
-                        {
-                            tracing::debug!(
-                                target: "wasm_extension",
-                                extension = %extension,
-                                tool = %prepared.tool_name,
-                                error = %error,
-                                "wasm post_tool_use failed (observe, fail-open)"
-                            );
-                        }
-                    }
-                }
-                // Scheme extensions after wasm (observe, fail-open).
-                let scheme_rt = self.scheme_runtime.clone();
-                if !scheme_rt.is_empty() {
-                    let post_in = xai_grok_extension_api::PostToolIn {
-                        tool_name: prepared.tool_name.clone(),
-                        success: !tool_failed,
-                        tool_input_json: prepared.raw_arguments.clone(),
-                        tool_result_preview: wasm_post_tool_preview,
-                    };
-                    let results = scheme_rt.dispatch_post_tool_use(&post_in).await;
-                    crate::session::scheme_ext::log_observe_failures("post_tool_use", &results);
-                }
-            }
             self.events.tool_finished();
             let tool_outcome = match &tool_loop {
                 _ if tool_failed => crate::session::events::ToolOutcome::Error,
@@ -1103,6 +1093,8 @@ impl SessionActor {
                     crate::session::events::ToolOutcome::InvalidTool
                 }
             };
+            let rewriting_hook = prepared.rewriting_hook.clone();
+            let hook_rewrote = rewriting_hook.is_some();
             self.signals_handle().record_tool_duration(
                 &prepared.tool_name,
                 &tool_call_id,
@@ -1114,6 +1106,7 @@ impl SessionActor {
                 outcome: tool_outcome,
                 tool_call_id: tool_call_id.clone(),
                 source: crate::session::events::ToolCompletedSource::Shell,
+                rewriting_hook,
             });
             self.observability_bridge
                 .emit(
@@ -1142,6 +1135,7 @@ impl SessionActor {
                 xai_grok_telemetry::events::ToolCallCompleted {
                     tool_name: prepared.tool_name.clone(),
                     outcome: tool_outcome,
+                    hook_rewrote,
                     duration_ms,
                     tool_result_size_bytes,
                     file_path: ext_file_path,
@@ -1156,7 +1150,7 @@ impl SessionActor {
                     artifact = %artifact,
                     // i64: redact drops u64 (serializes as string). None ⇒ field omitted.
                     segment_index = artifact.segment_index().map(|i| i as i64),
-                    success = matches!(tool_outcome, crate::session::events::ToolOutcome::Success),
+                    success = tool_outcome.ran_successfully(),
                     duration_ms = duration_ms as i64,
                     tool_result_size_bytes = tool_result_size_bytes.map_or(0, |n| n as i64),
                 )
@@ -1175,7 +1169,139 @@ impl SessionActor {
         }
         Ok(())
     }
-    /// Phase 1: pre-flight (MCP, args, hooks, permission, ExitPlanMode).
+    async fn apply_pre_tool_use_gate(
+        &self,
+        call: &crate::sampling::types::ToolCallResponse,
+        tool_call_id: &acp::ToolCallId,
+        resolved_tool_name: &str,
+        dispatch_target_name: &Option<String>,
+        raw_input: &serde_json::Value,
+    ) -> Result<Result<PreToolUseGate, ToolLoop>, acp::Error> {
+        let mut envelope = self.make_pre_tool_use_envelope(resolved_tool_name, &call.id, raw_input);
+        let mut gate = PreToolUseGate::default();
+        let hook_registry_snapshot = self.hook_registry.borrow().clone();
+        if let Some(registry) = hook_registry_snapshot {
+            let ctx = self.hook_run_ctx();
+            let pre_result =
+                xai_grok_hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx).await;
+            self.send_hook_execution(
+                "pre_tool_use",
+                Some(resolved_tool_name),
+                None,
+                &pre_result.results,
+            )
+            .await;
+            self.emit_hook_executed_telemetry(
+                "pre_tool_use",
+                Some(resolved_tool_name),
+                &pre_result.results,
+            )
+            .await;
+            match pre_result.decision {
+                HookDecision::Deny { reason, hook_name } => {
+                    return Ok(Err(self
+                        .deny_tool(
+                            &call.id,
+                            tool_call_id,
+                            resolved_tool_name,
+                            hook_name,
+                            reason,
+                        )
+                        .await?));
+                }
+                HookDecision::Ask { reason, hook_name } => {
+                    gate.hook_ask = Some(HookAsk { hook_name, reason });
+                }
+                HookDecision::Defer { hook_name } => {
+                    tracing::warn!(
+                        %hook_name,
+                        tool = %resolved_tool_name,
+                        "PreToolUse hook returned 'defer'; continuing through the normal permission flow"
+                    );
+                }
+                HookDecision::Allow => {}
+            }
+            gate.additional_context = pre_result.additional_context;
+            if let Some(rewrite) = pre_result.updated_input {
+                let validated = match self
+                    .validate_hook_rewrite(
+                        call,
+                        tool_call_id,
+                        resolved_tool_name,
+                        dispatch_target_name,
+                        rewrite,
+                    )
+                    .await?
+                {
+                    Ok(validated) => validated,
+                    Err(blocked) => return Ok(Err(blocked)),
+                };
+                envelope = self.make_pre_tool_use_envelope(
+                    resolved_tool_name,
+                    &call.id,
+                    &validated.updated_json,
+                );
+                gate.rewrite = Some(GateRewrite {
+                    tool_input: validated.rewritten,
+                    raw_arguments: validated.updated_json.to_string(),
+                    raw_input: validated.updated_json,
+                    hook_name: validated.hook_name,
+                });
+            }
+        }
+        if let Some(denied) = self
+            .run_pre_tool_use_client_hook(call, tool_call_id, &envelope)
+            .await?
+        {
+            return Ok(Err(denied));
+        }
+        Ok(Ok(gate))
+    }
+    async fn validate_hook_rewrite(
+        &self,
+        call: &crate::sampling::types::ToolCallResponse,
+        tool_call_id: &acp::ToolCallId,
+        resolved_tool_name: &str,
+        dispatch_target_name: &Option<String>,
+        rewrite: xai_grok_hooks::dispatcher::InputRewrite,
+    ) -> Result<Result<ValidatedRewrite, ToolLoop>, acp::Error> {
+        let updated_json = serde_json::Value::Object(rewrite.input);
+        let rewritten = match self
+            .tool_bridge_handle()
+            .try_parse(&call.function.name, updated_json.clone())
+            .await
+        {
+            Ok(input) => input,
+            Err(err) => {
+                let schema_error = xai_grok_hooks::event::clip_reason(&err.to_string());
+                return Ok(Err(self
+                    .block_unusable_rewrite(
+                        &call.id,
+                        tool_call_id,
+                        resolved_tool_name,
+                        rewrite.hook_name,
+                        RewriteProblem::FailsSchema(schema_error),
+                    )
+                    .await?));
+            }
+        };
+        if rewritten.dispatch_target_name() != *dispatch_target_name {
+            return Ok(Err(self
+                .block_unusable_rewrite(
+                    &call.id,
+                    tool_call_id,
+                    resolved_tool_name,
+                    rewrite.hook_name,
+                    RewriteProblem::RetargetsCall,
+                )
+                .await?));
+        }
+        Ok(Ok(ValidatedRewrite {
+            rewritten,
+            updated_json,
+            hook_name: rewrite.hook_name,
+        }))
+    }
     pub(crate) async fn prepare_tool_call(
         &self,
         call: crate::sampling::types::ToolCallResponse,
@@ -1323,154 +1449,36 @@ impl SessionActor {
         } else {
             None
         };
-        let mut dispatch_target_name = tool_input.dispatch_target_name();
-        let mut resolved_tool_name = dispatch_target_name
+        let dispatch_target_name = tool_input.dispatch_target_name();
+        let resolved_tool_name = dispatch_target_name
             .clone()
             .unwrap_or_else(|| call.function.name.clone());
         let mut raw_arguments = call.function.arguments.clone();
+        let mut rewriting_hook: Option<String> = None;
+        let mut hook_ask: Option<HookAsk> = None;
+        let mut hook_additional_context = Vec::new();
         if self.may_have_hooks_for(xai_grok_hooks::event::HookEventName::PreToolUse) {
-            let mut envelope =
-                self.make_pre_tool_use_envelope(&resolved_tool_name, &call.id, &raw_input);
-            let hook_registry_snapshot = self.hook_registry.borrow().clone();
-            if let Some(registry) = hook_registry_snapshot {
-                let ctx = self.hook_run_ctx();
-                let pre_result =
-                    xai_grok_hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx)
-                        .await;
-                self.send_hook_execution(
-                    "pre_tool_use",
-                    Some(&resolved_tool_name),
-                    None,
-                    &pre_result.results,
+            let gate = match self
+                .apply_pre_tool_use_gate(
+                    &call,
+                    &tool_call_id,
+                    &resolved_tool_name,
+                    &dispatch_target_name,
+                    &raw_input,
                 )
-                .await;
-                self.emit_hook_executed_telemetry(
-                    "pre_tool_use",
-                    Some(&resolved_tool_name),
-                    &pre_result.results,
-                )
-                .await;
-                if let xai_grok_hooks::result::HookDecision::Deny { reason, hook_name } =
-                    pre_result.decision
-                {
-                    return Ok(Err(self
-                        .deny_tool(
-                            &call.id,
-                            &tool_call_id,
-                            resolved_tool_name.clone(),
-                            hook_name,
-                            reason,
-                        )
-                        .await?));
-                }
-                if let Some(rewrite) = pre_result.updated_input {
-                    let updated = rewrite.input;
-                    let updated_args = updated.to_string();
-                    let parsed = self
-                        .tool_bridge_handle()
-                        .try_parse(&call.function.name, updated.clone())
-                        .await;
-                    tool_input = match parsed {
-                        Ok(input) => input,
-                        Err(err) => {
-                            let msg = format!(
-                                "PreToolUse hook '{}' returned an invalid updatedInput: {err}",
-                                rewrite.hook_name
-                            );
-                            self.handle_tool_not_executed(&call.id, &tool_call_id, msg)
-                                .await?;
-                            return Ok(Err(ToolLoop::ToolParsingError));
-                        }
-                    };
-                    dispatch_target_name = tool_input.dispatch_target_name();
-                    resolved_tool_name = dispatch_target_name
-                        .clone()
-                        .unwrap_or_else(|| call.function.name.clone());
-                    raw_arguments = updated_args;
-                    raw_input = updated;
-                    concatenated_json_count = 0;
-                    envelope =
-                        self.make_pre_tool_use_envelope(&resolved_tool_name, &call.id, &raw_input);
-                }
-            }
-            if let Some(denied) = self
-                .run_pre_tool_use_client_hook(&call, &tool_call_id, &envelope)
                 .await?
             {
-                return Ok(Err(denied));
-            }
-        }
-        // WASM extensions always run after shell/HTTP hooks (even when no hooks
-        // are registered). Order: hooks → wasm → continue. Fail-open on trap.
-        // Clone the runtime so we never hold a RefCell guard across `.await`.
-        let ext_rt = self.extension_runtime.borrow().clone();
-        if !ext_rt.is_empty() {
-            let pre_in = xai_grok_extension_api::PreToolIn {
-                tool_name: resolved_tool_name.clone(),
-                tool_input_json: raw_input.to_string(),
+                Ok(gate) => gate,
+                Err(blocked) => return Ok(Err(blocked)),
             };
-            let wasm_result = ext_rt.dispatch_pre_tool_use(&pre_in).await;
-            if let xai_grok_extension_runtime::PreToolDecision::Deny { extension, reason } =
-                wasm_result.decision
-            {
-                let m = ext_rt.metrics();
-                tracing::warn!(
-                    target: "wasm_extension",
-                    extension = %extension,
-                    tool = %resolved_tool_name,
-                    pre_tool_denies = m.pre_tool_denies,
-                    calls_failed = m.calls_failed,
-                    calls_timeout = m.calls_timeout,
-                    reason = %reason,
-                    "wasm extension denied tool"
-                );
-                crate::session::wasm_tools::emit_wasm_extension_blocked(
-                    self.telemetry_enabled,
-                    &extension,
-                    &resolved_tool_name,
-                    crate::session::wasm_tools::deny_category_from_reason(&reason),
-                );
-                return Ok(Err(self
-                    .deny_tool(
-                        &call.id,
-                        &tool_call_id,
-                        resolved_tool_name.clone(),
-                        format!("wasm:{extension}"),
-                        reason,
-                    )
-                    .await?));
-            }
-        }
-        // Scheme extensions after wasm: same gate contract (first deny wins,
-        // GateFailMode on trap/timeout, fail-open when the image is missing).
-        {
-            let scheme_rt = self.scheme_runtime.clone();
-            if !scheme_rt.is_empty() {
-                let pre_in = xai_grok_extension_api::PreToolIn {
-                    tool_name: resolved_tool_name.clone(),
-                    tool_input_json: raw_input.to_string(),
-                };
-                let scheme_result = scheme_rt.dispatch_pre_tool_use(&pre_in).await;
-                if let xai_grok_extension_api::PreToolOut::Deny { reason } = scheme_result.decision
-                {
-                    let plugin = scheme_result.denied_by.unwrap_or_default();
-                    tracing::warn!(
-                        target: "scheme_extension",
-                        plugin = %plugin,
-                        tool = %resolved_tool_name,
-                        reason = %reason,
-                        "scheme extension denied tool"
-                    );
-                    return Ok(Err(self
-                        .deny_tool(
-                            &call.id,
-                            &tool_call_id,
-                            resolved_tool_name.clone(),
-                            format!("scheme:{plugin}"),
-                            reason,
-                        )
-                        .await?));
-                }
+            hook_ask = gate.hook_ask;
+            hook_additional_context = gate.additional_context;
+            if let Some(rewrite) = gate.rewrite {
+                tool_input = rewrite.tool_input;
+                raw_arguments = rewrite.raw_arguments;
+                raw_input = rewrite.raw_input;
+                concatenated_json_count = 0;
+                rewriting_hook = Some(rewrite.hook_name);
             }
         }
         let access_kind = AccessKind::from(&tool_input);
@@ -1493,12 +1501,12 @@ impl SessionActor {
         let tool_call_display = self
             .send_tool_call_start(&tool_call_id, &call.function.name, tool_input.clone())
             .await;
-        let plan_file_auto_approve = if let AccessKind::Edit(ref path) = access_kind {
-            self.plan_mode
+        let plan_file_auto_approve = match &access_kind {
+            AccessKind::Edit(path) if hook_ask.is_none() => self
+                .plan_mode
                 .lock()
-                .should_auto_approve_edit(std::path::Path::new(path))
-        } else {
-            false
+                .should_auto_approve_edit(std::path::Path::new(path)),
+            _ => false,
         };
         if plan_file_auto_approve {
             tracing::info_span!(
@@ -1599,14 +1607,12 @@ impl SessionActor {
                         crate::session::pending_interaction::PendingKind::Permission,
                     );
                 self.permissions
-                    .request_with_path_context_resolved(
-                        access_kind.clone(),
-                        tool_call_update,
+                    .request(PermissionRequest {
                         path_context,
-                        Some(self.session_info.id.0.to_string()),
-                        None,
-                        None,
-                    )
+                        session_id: Some(self.session_info.id.0.to_string()),
+                        hook_ask,
+                        ..PermissionRequest::new(access_kind.clone(), tool_call_update)
+                    })
                     .await
             };
             let manager_event = resolution.event;
@@ -1865,6 +1871,8 @@ impl SessionActor {
             concatenated_json_count,
             dispatch_target_name,
             is_read_only,
+            rewriting_hook,
+            additional_context: hook_additional_context,
         };
         Ok(Ok(prepared))
     }
@@ -1952,7 +1960,7 @@ impl SessionActor {
     /// back as a turn; abandon: leave plan mode and wait for the user.
     pub(super) async fn resume_plan_approval(
         self: Arc<Self>,
-        completion_tx: mpsc::UnboundedSender<super::tasks_cancel::TurnCompletionMsg>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
         if !self.plan_mode.lock().is_awaiting_plan_approval() {
             return;
@@ -2017,7 +2025,7 @@ impl SessionActor {
         self: Arc<Self>,
         text: String,
         mode: PromptMode,
-        completion_tx: mpsc::UnboundedSender<super::tasks_cancel::TurnCompletionMsg>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
         let prompt_id = format!("plan-resume-{}", chrono::Utc::now().timestamp_millis());
         let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
@@ -2506,7 +2514,7 @@ impl SessionActor {
             None,
         )
         .await;
-        let tool_chat = ConversationItem::tool_error(call_id.to_string(), message);
+        let tool_chat = ConversationItem::tool_result(call_id.to_string(), message);
         self.chat_state_handle.push_tool_result(tool_chat);
         Ok(())
     }
@@ -2946,378 +2954,9 @@ impl SessionActor {
             None,
         )
         .await;
-        let tool_chat = ConversationItem::tool_error(call_id.to_string(), message);
+        let tool_chat = ConversationItem::tool_result(call_id.to_string(), message);
         self.chat_state_handle.push_tool_result(tool_chat);
         vec![]
-    }
-    async fn send_thought_chunk(&self, text: String, chunk_index: u64) {
-        self.send_update(
-            acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
-                acp::TextContent::new(text),
-            ))),
-            Some(chunk_index),
-        )
-        .await;
-    }
-    /// Translate one [`xai_grok_sampler::SamplingEvent`] from the
-    /// per-session sampler actor into the corresponding ACP / shell
-    /// side-effects (notifications, signal recording, model-metadata
-    /// refresh, etc.).
-    ///
-    /// Called from the drainer task spawned in `spawn_session_actor`,
-    /// which loops `while let Some(event) = sampler_event_rx.recv().await`.
-    /// Pure event mapping. Semantic recovery (compaction, friendly
-    /// errors) lives in [`Self::handle_sampling_failure`] and runs in
-    /// the turn loop, not here, because it depends on per-turn state
-    /// and may need to call back into `sampler_handle.update_config`
-    /// or resubmit.
-    pub(crate) async fn handle_sampling_event(
-        self: &Arc<Self>,
-        event: xai_grok_sampler::SamplingEvent,
-    ) {
-        use xai_grok_sampler::{SamplingChannel, SamplingEvent};
-        match event {
-            SamplingEvent::StreamStarted { timestamp_ms, .. } => {
-                {
-                    let prompt_id = self
-                        .current_prompt_id
-                        .lock()
-                        .expect("current_prompt_id mutex poisoned")
-                        .clone();
-                    let mut cap = self.streaming_turn_capture.lock();
-                    if cap.prompt_id.as_deref() != prompt_id.as_deref() {
-                        cap.begin_turn(prompt_id, self.current_turn_number.get());
-                    }
-                    cap.start_stream(timestamp_ms);
-                }
-                if let Some(eng) = self.tool_context.ttsr.as_ref() {
-                    eng.reset_turn();
-                }
-                self.chat_state_handle.record_stream_start(timestamp_ms);
-            }
-            SamplingEvent::FirstToken { .. } => {
-                self.emit_event(crate::session::events::Event::FirstToken);
-            }
-            SamplingEvent::ChannelToken {
-                channel,
-                text,
-                chunk_index,
-                ..
-            } => match channel {
-                SamplingChannel::Text => {
-                    let mut ttsr_hit: Option<crate::session::ttsr::TtsrHit> = None;
-                    {
-                        let mut cap = self.streaming_turn_capture.lock();
-                        if cap.prompt_id.is_none() {
-                            let prompt_id = self
-                                .current_prompt_id
-                                .lock()
-                                .expect("current_prompt_id mutex poisoned")
-                                .clone();
-                            cap.begin_turn(prompt_id, self.current_turn_number.get());
-                            cap.attempt_count += 1;
-                        }
-                        cap.append(false, &text);
-                        if let Some(eng) = self.tool_context.ttsr.as_ref() {
-                            ttsr_hit = eng.check_stream_text(&cap.response_text);
-                        }
-                    }
-                    if let Some(hit) = ttsr_hit {
-                        tracing::info!(
-                            rule = %hit.rule_name,
-                            path = %hit.rule_path.display(),
-                            "ttsr-lite: stream rule matched; queueing injection"
-                        );
-                        if let Ok(mut slot) = self.tool_context.ttsr_pending_injection.lock() {
-                            *slot = Some(hit.injection);
-                        }
-                        // Soft interrupt: cancel the running turn (same path as
-                        // user cancel). Injection is drained at turn boundaries.
-                        let this = self.clone();
-                        tokio::task::spawn_local(async move {
-                            let _ = this.cancel_running_task(crate::session::CancelOptions {
-                                cancel_subagents: false,
-                                kill_background_tasks: false,
-                                history: Default::default(),
-                                trigger: None,
-                                user_initiated: false,
-                            })
-                            .await;
-                        });
-                    }
-                    self.emit_event(crate::session::events::Event::PhaseChanged {
-                        phase: crate::session::events::Phase::StreamingText,
-                    });
-                    self.send_update(
-                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                            acp::ContentBlock::Text(acp::TextContent::new(text)),
-                        )),
-                        Some(chunk_index),
-                    )
-                    .await;
-                }
-                SamplingChannel::Reasoning => {
-                    {
-                        let mut cap = self.streaming_turn_capture.lock();
-                        if cap.prompt_id.is_none() {
-                            let prompt_id = self
-                                .current_prompt_id
-                                .lock()
-                                .expect("current_prompt_id mutex poisoned")
-                                .clone();
-                            cap.begin_turn(prompt_id, self.current_turn_number.get());
-                            cap.attempt_count += 1;
-                        }
-                        cap.append(true, &text);
-                    }
-                    self.emit_event(crate::session::events::Event::PhaseChanged {
-                        phase: crate::session::events::Phase::StreamingReasoning,
-                    });
-                    self.send_thought_chunk(text, chunk_index).await;
-                }
-            },
-            SamplingEvent::ToolCallDelta {
-                tool_index,
-                id,
-                name,
-                arguments_delta,
-                ..
-            } => {
-                {
-                    let mut cap = self.streaming_turn_capture.lock();
-                    if cap.prompt_id.is_some() {
-                        cap.phase = CapturePhase::ToolCall;
-                    }
-                }
-                self.send_buffered_xai_update(XaiSessionUpdate::ToolCallDeltaChunk {
-                    tool_call_id: id,
-                    tool_index,
-                    name,
-                    arguments_delta,
-                })
-                .await;
-            }
-            SamplingEvent::ResponseStarted {
-                message_id,
-                model,
-                input_tokens,
-                cache_read_input_tokens,
-                cache_creation_input_tokens,
-                ..
-            } => {
-                self.send_buffered_xai_update(XaiSessionUpdate::ResponseStarted {
-                    message_id: Some(message_id),
-                    model: Some(model),
-                    input_tokens,
-                    cache_read_input_tokens,
-                    cache_creation_input_tokens,
-                })
-                .await;
-            }
-            SamplingEvent::ReasoningCompleted { signature, .. } => {
-                self.send_buffered_xai_update(XaiSessionUpdate::ReasoningCompleted {
-                    signature: Some(signature),
-                })
-                .await;
-            }
-            SamplingEvent::Completed {
-                request_id,
-                response,
-                metrics,
-            } => {
-                if let Some(tx) = self.turn_stream_drained.lock().take() {
-                    let _ = tx.send(());
-                }
-                let session = Arc::clone(self);
-                let rid = request_id.clone();
-                tokio::task::spawn_local(async move {
-                    session.apply_pending_image_strip(&rid).await;
-                });
-                if let Some(policy) = self.doom_loop_recovery {
-                    let triggers = policy.confident_triggers(&response.doom_loop_signals);
-                    if !triggers.is_empty() {
-                        let attempts = {
-                            let mut tally = self.doom_loop_turn_tally.lock();
-                            if tally.attempts == 0 {
-                                None
-                            } else {
-                                tally.accepted_after_budget = true;
-                                tally.merge_triggers(&triggers);
-                                Some(tally.attempts)
-                            }
-                        };
-                        if let Some(attempts) = attempts {
-                            self.streaming_turn_capture.lock().stamp_doom_loop(
-                                crate::session::streaming_capture::DoomLoopSegmentStamp {
-                                    doom_loop_triggers: triggers.clone(),
-                                    attempt: attempts + 1,
-                                    aborted_at_chunk: None,
-                                    action: "accepted_after_budget".to_string(),
-                                },
-                            );
-                            self.signals_handle()
-                                .record_doom_loop_accepted_after_budget(triggers);
-                        }
-                    }
-                }
-                self.streaming_turn_capture.lock().clear_current_segment();
-                self.record_api_request_time();
-                self.signals_handle().record_inference_metrics(metrics);
-            }
-            SamplingEvent::ModelMetadata { metadata, .. } => {
-                self.handle_model_metadata_update(metadata).await;
-            }
-            SamplingEvent::ImagesStripped {
-                request_id,
-                stripped_urls,
-                reason,
-            } => {
-                self.handle_images_stripped(request_id, stripped_urls, reason)
-                    .await;
-            }
-            SamplingEvent::Retrying {
-                request_id,
-                attempt,
-                max_retries,
-                kind,
-                reason,
-                doom_loop_triggers,
-                doom_loop_aborted_at_chunk,
-            } => {
-                if kind == xai_grok_sampler::SamplingErrorKind::DoomLoopDetected {
-                    let triggers = doom_loop_triggers.unwrap_or_default();
-                    let attempt_number = {
-                        let mut tally = self.doom_loop_turn_tally.lock();
-                        tally.attempts += 1;
-                        tally.merge_triggers(&triggers);
-                        tally.attempts
-                    };
-                    self.streaming_turn_capture.lock().stamp_doom_loop(
-                        crate::session::streaming_capture::DoomLoopSegmentStamp {
-                            doom_loop_triggers: triggers.clone(),
-                            attempt: attempt_number,
-                            aborted_at_chunk: doom_loop_aborted_at_chunk,
-                            action: "resampled".to_string(),
-                        },
-                    );
-                    self.signals_handle()
-                        .record_doom_loop_recovery_attempt(triggers, doom_loop_aborted_at_chunk);
-                }
-                xai_grok_telemetry::unified_log::warn(
-                    "shell.turn.inference_retry",
-                    Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!({
-                        "sampler_request_id": request_id.as_str(),
-                        "attempt": attempt,
-                        "max_retries": max_retries,
-                        "kind": kind.as_str(),
-                        "reason": crate::util::truncate(&reason, 300),
-                    })),
-                );
-                self.send_xai_notification(XaiSessionUpdate::RetryState(
-                    crate::extensions::notification::RetryState::Retrying {
-                        attempt,
-                        max_retries,
-                        reason,
-                    },
-                ))
-                .await;
-            }
-            SamplingEvent::Failed { request_id, error } => {
-                self.drop_pending_image_strip(&request_id);
-                xai_grok_telemetry::unified_log::error(
-                    "shell.turn.inference_failed",
-                    Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!({
-                        "sampler_request_id": request_id.as_str(),
-                        "kind": error.kind.as_str(),
-                        "status_code": error.status_code,
-                        "is_retryable": error.is_retryable,
-                        "message": crate::util::truncate(&error.message, 300),
-                    })),
-                );
-                self.signals_handle()
-                    .record_error_typed(error.kind.as_str());
-                if let Some(ref ctx) = error.empty_response_context {
-                    tracing::info!(
-                        empty_response = true,
-                        empty_reason = ctx.reason.as_str(),
-                        had_reasoning = ctx.had_reasoning,
-                        finish_reason = ctx.finish_reason_str(),
-                        model = %ctx.model,
-                        "sampler reported empty response (will retry if retryable)",
-                    );
-                }
-            }
-            SamplingEvent::BackendToolCallStarted { call_id, name, .. } => {
-                self.signals_handle().record_tool_call(&name);
-                let (title, kind, raw_input) = backend_tool_display(&name);
-                self.send_update(
-                    acp::SessionUpdate::ToolCall(
-                        acp::ToolCall::new(
-                            acp::ToolCallId::new(Arc::from(call_id.as_str())),
-                            title,
-                        )
-                        .kind(kind)
-                        .status(acp::ToolCallStatus::InProgress)
-                        .content(vec![])
-                        .locations(vec![])
-                        .raw_input(Some(raw_input))
-                        .meta(serde_json::json!({"backend": true}).as_object().cloned()),
-                    ),
-                    None,
-                )
-                .await;
-            }
-            SamplingEvent::BackendToolCallCompleted {
-                call_id,
-                name,
-                result,
-                ..
-            } => {
-                let status = backend_tool_call_status(result.as_ref());
-                if status == acp::ToolCallStatus::Failed {
-                    self.signals_handle().record_tool_failure(&name);
-                } else {
-                    self.signals_handle().record_tool_success(&name);
-                }
-                let (title, _kind, _raw_input) = backend_tool_display(&name);
-                self.send_update(
-                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
-                        acp::ToolCallId::new(Arc::from(call_id.as_str())),
-                        acp::ToolCallUpdateFields::new()
-                            .status(Some(status))
-                            .title(Some(title))
-                            .raw_output(result),
-                    )),
-                    None,
-                )
-                .await;
-            }
-            SamplingEvent::BackendToolCallFailed {
-                call_id,
-                name,
-                error,
-                ..
-            } => {
-                self.signals_handle().record_tool_failure(&name);
-                let (title, _kind, _raw_input) = backend_tool_display(&name);
-                self.send_update(
-                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
-                        acp::ToolCallId::new(Arc::from(call_id.as_str())),
-                        acp::ToolCallUpdateFields::new()
-                            .status(Some(acp::ToolCallStatus::Failed))
-                            .title(Some(title))
-                            .content(Some(vec![acp::ToolCallContent::from(
-                                acp::ContentBlock::Text(acp::TextContent::new(error.clone())),
-                            )]))
-                            .raw_output(Some(serde_json::json!({"error": error}))),
-                    )),
-                    None,
-                )
-                .await;
-            }
-        }
     }
     /// Model-facing rejection for a non-plan-file edit while plan mode is
     /// active. Rendered via the session's `TemplateRenderer` so
@@ -3354,7 +2993,7 @@ impl SessionActor {
         );
         self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
             .await;
-        let tool_chat = ConversationItem::tool_error(model_call_id.to_owned(), reason);
+        let tool_chat = ConversationItem::tool_result(model_call_id.to_owned(), reason);
         self.chat_state_handle.push_tool_result(tool_chat);
         Ok(())
     }
@@ -3746,12 +3385,7 @@ mod plan_approval_helper_tests {
 }
 #[cfg(test)]
 mod wait_interrupt_tests {
-    use super::{
-        BlockingWaitGuard, interrupted_wait_tool_result, is_interruptible_wait_tool,
-        wait_for_pending_interjection,
-    };
-    use xai_grok_tools::types::output::ToolOutput;
-    use xai_tool_types::TaskOutputOutput;
+    use super::{BlockingWaitGuard, is_interruptible_wait_tool, wait_for_pending_interjection};
     /// The interruptible-wait select arms: a pending interjection aborts an
     /// in-flight wait, and `biased` prefers an already-completed wait result
     /// over the abort. (Unit-level: the full dispatch loop has no test seam.)
@@ -3809,25 +3443,6 @@ mod wait_interrupt_tests {
             "read_file",
             &serde_json::json!({"target_file": "/tmp/x"})
         ));
-    }
-    #[test]
-    fn interrupted_wait_result_is_cancelled_not_error() {
-        let r = interrupted_wait_tool_result(&serde_json::json!({
-            "task_ids": ["bg-9"],
-            "timeout_ms": 60_000
-        }));
-        assert!(
-            r.prompt_text
-                .contains("Wait interrupted: the user sent a message.")
-        );
-        match &r.output {
-            ToolOutput::TaskOutput(TaskOutputOutput::Result(res)) => {
-                assert_eq!(res.task_id, "bg-9");
-                assert_eq!(res.status, "cancelled");
-            }
-            other => panic!("expected TaskOutput Result, got {other:?}"),
-        }
-        assert!(!r.output.is_error());
     }
     /// `BlockingWaitGuard` counts nested waits; drop always decrements.
     #[test]

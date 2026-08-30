@@ -241,8 +241,7 @@ fn refresh_failure_strikes_survive_an_invalidated_row() {
         let _ = state.finish_command_run(now, RunId(id), failed());
     }
 
-    // An agent switch clears the row, not the script's record: it is the
-    // same fixed script, and the switch does not absolve it.
+    // An agent switch clears the row, not the script's record: it is the same fixed script, and the switch does not absolve it
     state.invalidate();
 
     state.request_refresh();
@@ -294,7 +293,7 @@ fn superseded_refresh_failure_neither_paints_nor_counts_a_strike() {
     );
     assert!(state.display().is_none(), "its failure text never paints");
 
-    // No strike was counted, so the next real failure is the first. It
+    // No strike was counted, so the next real failure is the first
     state.request_refresh();
     let _ = begin(&mut state, now);
     assert_eq!(
@@ -381,8 +380,8 @@ fn every_field_on_the_wire_is_named_in_the_guide() {
                 } else {
                     format!("{path}.{name}")
                 };
-                // Only values are checked. A container is not something a
-                // script reads; the guide names it through its members.
+                // Only values are checked
+                // A container is not something a script reads; the guide names it through its members
                 if !child.is_object() && !documented.contains(&dotted) {
                     missing.push(dotted.clone());
                 }
@@ -414,8 +413,7 @@ fn every_builtin_item_is_named_in_the_guide() {
     );
 }
 
-/// The numbers the guide states literally, so none of them can move without
-/// editing 25-status-line.md in the same change.
+/// The numbers the guide states literally, so none of them can move without editing 25-status-line.md in the same change.
 #[test]
 fn the_numbers_the_guide_states_are_pinned() {
     assert_eq!(
@@ -442,15 +440,13 @@ fn the_numbers_the_guide_states_are_pinned() {
     );
 }
 
-/// Every key the section serializes must be a backticked cell in the guide's
-/// setup tables, so renaming one in the contract crate cannot strand the
-/// guide on the old spelling.
+/// Every key the section serializes must be a backticked cell in the guide's setup tables.
+/// Renaming a key in the contract crate therefore cannot strand the guide on the old spelling.
 #[test]
 fn every_config_key_the_section_serializes_is_named_in_the_guide() {
     let guide = include_str!("../../docs/user-guide/25-status-line.md");
     let cells: std::collections::HashSet<&str> = table_cells(section(guide, "## Set up")).collect();
-    // Every field set, so a key the fixture leaves unset cannot slip out of
-    // the serialized form and past this test.
+    // Every field is set: a key left unset would be absent from the serialized form and slip past this test
     let written = serde_json::to_value(
         xai_grok_status_line::test_support::StatusLineConfigFixture::from_kind(
             xai_grok_status_line::StatusLineType::Command,
@@ -474,16 +470,14 @@ fn every_config_key_the_section_serializes_is_named_in_the_guide() {
     );
 }
 
-/// Every field path the guide spells in backticks, with `parent.{a,b}` groups
-/// expanded and a leading-dot continuation resolved against the token before
-/// it. Only backticked text counts, so prose cannot document a field by
-/// accident.
+/// Every field path the guide spells in backticks.
+/// `parent.{a,b}` groups are expanded, and a leading-dot continuation is resolved against the token before it.
+/// Only backticked text counts, so prose cannot document a field by accident.
 fn documented_paths(guide: &str) -> std::collections::HashSet<String> {
     let mut paths = std::collections::HashSet::new();
     let mut parent = String::new();
     for token in table_cells(section(guide, "## Available data")) {
-        // A `head.{a,b}` group is expanded before the comma split, which would
-        // otherwise tear its members away from the head that names them.
+        // A `head.{a,b}` group is expanded before the comma split, which would otherwise tear its members away from the head that names them
         let expanded = match token.split_once(".{") {
             Some((head, rest)) => {
                 let (members, tail) = rest.split_once('}').unwrap_or((rest, ""));
@@ -497,8 +491,7 @@ fn documented_paths(guide: &str) -> std::collections::HashSet<String> {
             None => token.to_string(),
         };
         for part in expanded.split(',').map(str::trim) {
-            // A leading dot continues the row's previous path, which is how the
-            // table writes a second field of the same parent.
+            // A leading dot continues the row's previous path, which is how the table writes a second field of the same parent
             let path = match part.strip_prefix('.') {
                 Some(rest) => format!("{parent}.{rest}"),
                 None => part.to_string(),
@@ -512,9 +505,8 @@ fn documented_paths(guide: &str) -> std::collections::HashSet<String> {
     paths
 }
 
-/// The backticked cells of a section's table rows. Prose in the same section
-/// does not count: the porting notes name several fields, and a field named
-/// only there would vouch for the table row that documents it.
+/// The backticked cells of a section's table rows.
+/// Prose does not count: the porting notes name several fields, and a field named only there would count as documented without a table row.
 fn table_cells(section: &str) -> impl Iterator<Item = &str> {
     section
         .lines()
@@ -522,8 +514,8 @@ fn table_cells(section: &str) -> impl Iterator<Item = &str> {
         .flat_map(|row| row.split('`').skip(1).step_by(2))
 }
 
-/// One `##` section of the guide. Scoped, because a name in a neighbouring
-/// section would otherwise vouch for a row that was deleted.
+/// One `##` section of the guide.
+/// Scoped, because a name in a neighbouring section would otherwise vouch for a row that was deleted.
 fn section<'a>(guide: &'a str, heading: &str) -> &'a str {
     let start = guide.find(heading).expect("the guide has this section");
     let rest = &guide[start + heading.len()..];

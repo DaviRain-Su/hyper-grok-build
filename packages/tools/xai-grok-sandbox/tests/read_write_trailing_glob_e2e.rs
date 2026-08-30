@@ -53,7 +53,7 @@ fn trailing_glob_read_write_grants_parent_directory() {
 
     // Not under TMPDIR or the test workspace: base profiles already
     // write-allow those trees, which would hide allow-path isolation.
-    let root = dirs::home_dir()
+    let root = xai_dirs::home_dir()
         .expect("home dir required: the control probe relies on HOME-relative paths")
         .join(".cache")
         .join("grok-starstar-e2e")
@@ -78,7 +78,7 @@ fn trailing_glob_read_write_grants_parent_directory() {
 
     let cache_abs = dunce::canonicalize(&cache).expect("canonicalize cache");
     fs::write(
-        grok_home.join("sandbox.toml"),
+        grok_home.join(xai_grok_config::SANDBOX_CONFIG_FILENAME),
         format!(
             "[profiles.cargo]\nextends = \"workspace\"\nread_write = [{:?}]\n",
             format!("{}/**", cache_abs.display())

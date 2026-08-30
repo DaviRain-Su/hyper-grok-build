@@ -1,7 +1,5 @@
-//! PTY: Esc mirror of `auto_wake_cancel_preserves_queued_user_prompt` (see
-//! that file's header for the failure chain). Also gates on the wake stop
-//! affordance while the pane is idle, which exists only with wake-turn
-//! cancel support.
+//! PTY: Esc mirror of `auto_wake_cancel_preserves_queued_user_prompt` (see that file's header for the failure chain).
+//! It also waits for the [stop] control while the pane is idle; that control only renders with wake-turn cancel support.
 #[allow(unused_imports)]
 use super::common::*;
 

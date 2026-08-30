@@ -413,12 +413,19 @@ impl SessionActor {
     /// `"send_now"` marks a cancel-and-send end (marker suppressed).
     /// `cancellation_category` (when `Some`) rides as `cancellationCategory`
     /// (`meta_category_str`, e.g. `"HookDenied"`) so viewer rails pick
-    /// category-aware terminal copy.
+    /// category-aware terminal copy. A failed turn's typed error kind rides
+    /// the variant's own `error_kind` field (same derivation as the
+    /// `prompt_complete` payload's `errorKind`) so replay/wake rails pick
+    /// error-specific copy.
     ///
     /// `elapsed_ms` is `None` when no running task supplied a start time.
     ///
     /// Both callers queue the turn-end report before this, but the worker can dispatch first,
     /// so the terminal and the report race. The pager handles either order.
+    ///
+    /// Persisted via the durable append path: the terminal is emitted after
+    /// the turn's last flush barrier, so on the buffered rail a power loss
+    /// could keep the turn's content while dropping its terminal.
     pub(super) async fn emit_turn_completed(
         &self,
         prompt_id: String,
@@ -429,7 +436,8 @@ impl SessionActor {
         cancellation_context: Option<serde_json::Value>,
         elapsed_ms: Option<u64>,
     ) {
-        let (stop_reason, agent_result) = crate::sampling::error::prompt_complete_fields(mapped);
+        let (stop_reason, agent_result, error_kind) =
+            crate::sampling::error::prompt_complete_fields(mapped);
         let mut extra = serde_json::Map::new();
         if let Some(t) = cancel_trigger {
             extra.insert("cancelTrigger".to_string(), serde_json::json!(t));
@@ -446,10 +454,12 @@ impl SessionActor {
                 prompt_id,
                 stop_reason,
                 agent_result,
+                error_kind,
                 usage,
                 elapsed_ms,
             ),
             extra_meta,
+            crate::session::storage::jsonl::AppendDurability::Durable,
         )
         .await;
 

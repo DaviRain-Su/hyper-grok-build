@@ -1,9 +1,6 @@
-//! Shared test utilities for the pager crate.
-//!
 //! Compiled only in `#[cfg(test)]` builds. Import via `crate::test_util`.
 use std::path::{Path, PathBuf};
-/// Minimal `AgentView` for unit tests outside the dispatch/handler modules
-/// (which keep their own richer factories).
+/// Minimal `AgentView` for unit tests outside the dispatch/handler modules (which keep their own richer factories).
 pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent_view::AgentView {
     use crate::app::agent::{AgentId, AgentSession, AgentState};
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -73,8 +70,7 @@ pub fn make_worktree_record(
         metadata: Some(serde_json::json!({ "label": label })),
     }
 }
-/// Every row containing `row_marker` starts its PATH cell at the header's
-/// PATH column, measured in display width so CJK regressions fail.
+/// Every row containing `row_marker` starts its PATH cell at the header's PATH column, measured in display width so CJK regressions fail.
 pub fn assert_path_column_aligned(text: &str, row_marker: &str) {
     use unicode_width::UnicodeWidthStr;
     let lines: Vec<&str> = text.lines().collect();
@@ -97,18 +93,14 @@ pub fn assert_path_column_aligned(text: &str, row_marker: &str) {
     }
     assert!(rows > 0, "no table rows matched {row_marker:?} in: {text}");
 }
-/// RAII guard for temporarily overriding an environment variable.
-///
-/// Captures the original value on construction and restores it on drop.
-/// Used by theme and persist tests to redirect `HOME`/`USERPROFILE` to
-/// temp directories without affecting the real user config.
+/// RAII guard for temporarily overriding an environment variable: captures the original value on construction and restores it on drop.
+/// Used by theme and persist tests to redirect `HOME`/`USERPROFILE` to temp directories without affecting the real user config.
 pub struct EnvVarGuard {
     key: &'static str,
     original: Option<std::ffi::OsString>,
 }
 impl EnvVarGuard {
-    /// Override `key` to `value` (paths, URLs, flags — anything OsStr-able),
-    /// returning a guard that restores the original on drop.
+    /// Override `key` to `value` (paths, URLs, flags, anything that converts to `OsStr`), returning a guard that restores the original on drop.
     pub fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let original = std::env::var_os(key);
         unsafe {
@@ -128,53 +120,13 @@ impl Drop for EnvVarGuard {
         }
     }
 }
-
-/// RAII guard pinning the theme cache to GrokNight under the theme test
-/// lock, immune to the runner's `NO_COLOR` / `TERM=dumb` environment
-/// (unpinned theme resolution otherwise picks degraded palettes and breaks
-/// color/glyph assertions in minimal CI shells). Mirrors
-/// `app::dispatch::tests::with_theme_test_env` — theme-sensitive tests in
-/// every module must hold the same lock so they serialize with the dispatch
-/// theme tests that reset the cache on exit.
-///
-/// Usage: `let _theme = crate::test_util::pin_theme();` at the top of a test.
-// The guard's tuple field is intentionally only held for its Drop behavior.
-#[allow(dead_code)]
-pub struct PinnedThemeGuard(std::sync::MutexGuard<'static, ()>);
-
-/// Pin the theme cache to GrokNight until the returned guard drops.
-pub fn pin_theme() -> PinnedThemeGuard {
-    let guard = crate::theme::cache::test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    crate::theme::cache::reset_for_test();
-    crate::theme::cache::seed_auto_theme_defaults_for_test();
-    crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
-    crate::theme::system_appearance::clear_mock();
-    // `color_support::detect()` is OnceLock-cached env detection — force it
-    // per-call so `NO_COLOR`/`TERM=dumb` runners still render full color.
-    crate::theme::color_support::force_level_for_test(Some(
-        crate::theme::color_support::ColorLevel::TrueColor,
-    ));
-    PinnedThemeGuard(guard)
-}
-
-impl Drop for PinnedThemeGuard {
-    fn drop(&mut self) {
-        crate::theme::system_appearance::clear_mock();
-        crate::theme::cache::reset_for_test();
-        crate::theme::color_support::force_level_for_test(None);
-    }
-}
-
-/// Shared GROK_HOME boundary fixture for the resume-by-title startup and
-/// pre-sandbox tests.
+/// Shared GROK_HOME boundary fixture for the resume-by-title startup and pre-sandbox tests.
 ///
 /// `grok_home()` is OnceLock-cached process-wide, so summaries land under the
 /// *resolved* home (possibly the real `~/.grok` when another test pinned the
 /// cache first); cwd-encoded dirnames are tempdir-unique, and cleanup runs on
-/// drop so it survives assertion panics. Callers must hold
-/// `#[serial_test::serial(GROK_HOME)]`.
+/// drop so it survives assertion panics.
+/// Callers must hold `#[serial_test::serial(GROK_HOME)]`.
 pub struct GrokHomeFixture {
     _home: tempfile::TempDir,
     cwd: tempfile::TempDir,
@@ -203,18 +155,15 @@ impl GrokHomeFixture {
             cleanup: Vec::new(),
         }
     }
-    /// Canonicalized so the summary cwd encoding matches what production
-    /// path resolution sees (macOS tempdirs are symlinked). Tests pass this
-    /// through the explicit `*_for_cwd` seams; the process cwd is never
-    /// mutated.
+    /// Canonicalized so the summary cwd encoding matches what production path resolution sees (macOS tempdirs are symlinked).
+    /// Tests pass this through the explicit `*_for_cwd` parameters; the process cwd is never mutated.
     pub fn cwd_str(&self) -> String {
         dunce::canonicalize(self.cwd.path())
             .expect("canonicalize cwd")
             .to_string_lossy()
             .to_string()
     }
-    /// Write a minimal valid summary.json (every non-defaulted `Summary`
-    /// field) for `id` under `cwd`, merging `extra` fields on top.
+    /// Write a minimal valid summary.json (every non-defaulted `Summary` field) for `id` under `cwd`, merging `extra` fields on top.
     pub fn write_summary(&mut self, cwd: &str, id: &str, extra: serde_json::Value) {
         let sessions_cwd_dir = Self::sessions_cwd_dir(cwd);
         if !self.cleanup.contains(&sessions_cwd_dir) {
@@ -237,7 +186,7 @@ impl GrokHomeFixture {
         }
         std::fs::write(dir.join("summary.json"), serde_json::to_vec(&v).unwrap()).unwrap();
     }
-    /// Delete a previously written session dir (concurrent-delete simulation).
+    /// Delete a previously written session dir, so a test can simulate a concurrent delete.
     pub fn remove_session(&self, cwd: &str, id: &str) {
         let _ = std::fs::remove_dir_all(Self::sessions_cwd_dir(cwd).join(id));
     }

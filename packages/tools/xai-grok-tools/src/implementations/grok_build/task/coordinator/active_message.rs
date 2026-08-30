@@ -356,6 +356,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     sender_session_id: parent_session_id.clone(),
                     text: request.text().clone(),
                 },
+                request.operation(),
                 Arc::clone(&lease),
             ));
         self.active_messages.push(ActiveMessageFuture {

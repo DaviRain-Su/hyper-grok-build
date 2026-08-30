@@ -23,7 +23,7 @@ fn deny_list_covers_system_rootless_and_per_user_endpoints() {
             "missing rootless endpoint: {paths:?}"
         );
     }
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = xai_dirs::home_dir() {
         assert!(
             paths.contains(&home.join(".docker/desktop/docker.sock")),
             "missing Docker Desktop Linux endpoint: {paths:?}"

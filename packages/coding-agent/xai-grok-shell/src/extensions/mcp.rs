@@ -769,9 +769,8 @@ pub(crate) async fn init_agent_mcp_pool(
     }
 
     let noop = xai_grok_session_events::EventWriter::noop();
-    // session_less picks Interactive to preserve prior deferred-OAuth behavior. A session-less SDK
-    // agent can reach this non-interactively; threading real non-interactivity is a deliberate follow-up.
-    let ctx = crate::session::mcp_servers::McpSpawnCtx::session_less(&noop);
+    let ctx = crate::session::mcp_servers::McpSpawnCtx::standalone(&noop)
+        .with_oauth_discovery(crate::session::mcp_servers::McpOauthDiscovery::Network);
     let meta = Default::default();
     let oauth = Default::default();
     let results = start_mcp_servers(configs, Some(cwd), &meta, &oauth, &ctx).await;

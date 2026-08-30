@@ -32,7 +32,7 @@
         );
     }
 
-    /// Compact failure keeps the hold; PromptResponse reauth gate decides stash.
+    /// Compact failure keeps the hold; the reauth gate in the PromptResponse handler decides whether to stash it.
     #[test]
     fn apply_compaction_failed_keeps_held_prompt() {
         let mut session = make_session(Some("s1"));
@@ -92,8 +92,8 @@
         }
     }
 
-    /// A successful compression needs no user action: log-only — no toast,
-    /// no scrollback block, no redraw. Same live and on session replay.
+    /// A successful compression needs no user action: log-only, no toast, no scrollback block, no redraw.
+    /// The same holds live and on session replay.
     #[test]
     fn image_compressed_is_invisible_in_tui() {
         for replay in [false, true] {
@@ -109,8 +109,8 @@
         }
     }
 
-    /// The re-encode fallback (empty `images`) means the oversized original
-    /// was kept — a persistent warning line, not a transient toast.
+    /// The re-encode fallback (empty `images`) means the oversized original was kept.
+    /// That warrants a persistent warning line, not a transient toast.
     #[test]
     fn image_compressed_fallback_warning_stays_in_scrollback() {
         use crate::scrollback::block::RenderBlock;
@@ -189,8 +189,7 @@
         }
     }
 
-    /// Production `RetryState::Exhausted.reason` is `SamplingError::Api`'s
-    /// Display: `API error (status 429 Too Many Requests): …`.
+    /// Production `RetryState::Exhausted.reason` is `SamplingError::Api`'s Display: `API error (status 429 Too Many Requests): …`.
     #[test]
     fn retry_exhausted_rate_limited_surfaces_server_detail() {
         let body = "The model is currently at capacity due to high demand. Please try again.";
@@ -258,10 +257,8 @@
         );
     }
 
-    /// A rate-limit exhaustion whose flattened reason carries the
-    /// free-usage code sets both flags and pushes NO generic block (the
-    /// driver shows the paywall modal on PromptResponse; viewers keep no
-    /// marker).
+    /// A rate-limit exhaustion whose flattened reason carries the free-usage code sets both flags and pushes NO generic block.
+    /// The driver shows the paywall modal on PromptResponse; viewers keep no marker.
     #[test]
     fn retry_exhausted_free_usage_sets_paywall_flag_without_marker() {
         let mut session = make_session(Some("s1"));
@@ -447,14 +444,13 @@
             "Unauthorized (401) from https://proxy/v1/responses"
         ));
         assert!(is_reauthable_failure(None, "Unauthorized (401)"));
-        // legacy_auth carries its own migration guidance — excluded.
+        // legacy_auth carries its own migration guidance, so it is excluded
         assert!(!is_reauthable_failure(
             Some("legacy_auth"),
             "Unauthorized (401) ... deprecated authentication method"
         ));
-        // auth_transient = the shell says the failure self-heals (refreshable
-        // credential, no sticky verdict — e.g. post-wake network gap). Even
-        // with a 401 in the message, the `/login` banner must not fire.
+        // auth_transient means the shell says the failure self-heals (refreshable credential, no sticky verdict, e.g. a post-wake network gap).
+        // Even with a 401 in the message, the `/login` banner must not fire
         assert!(!is_reauthable_failure(
             Some("auth_transient"),
             "Unauthorized (401)\n\nAuthentication is temporarily unavailable"
@@ -467,8 +463,7 @@
         assert!(!is_reauthable_failure(Some("api"), "model not found"));
     }
 
-    /// A 401 with `error_type == "auth"` surfaces the actionable re-auth
-    /// prompt instead of the raw "Retry failed: Unauthorized (401) …" dump.
+    /// A 401 with `error_type == "auth"` shows the actionable re-auth prompt instead of the raw "Retry failed: Unauthorized (401) …" dump.
     #[test]
     fn apply_retry_state_auth_failure_pushes_reauth_prompt() {
         let mut session = make_session(Some("s1"));
@@ -492,8 +487,7 @@
         assert!(!session.credit_limit_blocked);
     }
 
-    /// A recoverable auth failure preserves `in_flight_prompt` so the
-    /// PromptResponse handler can stash it for auto-resubmit after re-auth.
+    /// A recoverable auth failure preserves `in_flight_prompt` so the PromptResponse handler can stash it for auto-resubmit after re-auth.
     #[test]
     fn apply_retry_state_auth_failure_preserves_in_flight_prompt() {
         let mut session = make_session(Some("s1"));
@@ -519,8 +513,7 @@
         assert_eq!(session.in_flight_prompt.unwrap().text, "retry after login");
     }
 
-    /// A 401 reported with a non-auth `error_type` but an "Unauthorized
-    /// (401)" message (the `SamplingErrorKind::Api` path) also prompts.
+    /// A 401 reported with a non-auth `error_type` but an "Unauthorized (401)" message (the `SamplingErrorKind::Api` path) also prompts.
     #[test]
     fn apply_retry_state_401_message_without_auth_type_prompts_reauth() {
         let mut session = make_session(Some("s1"));
@@ -539,8 +532,7 @@
         ));
     }
 
-    /// Legacy WebLogin auth keeps its verbose message (with `grok logout` /
-    /// `grok login` guidance), not the generic re-auth prompt.
+    /// Legacy WebLogin auth keeps its verbose message (with `grok logout` / `grok login` guidance), not the generic re-auth prompt.
     #[test]
     fn apply_retry_state_legacy_auth_keeps_detailed_message() {
         let mut session = make_session(Some("s1"));
@@ -560,8 +552,7 @@
         ));
     }
 
-    /// Non-auth terminal failures render the formatted RequestFailed banner
-    /// (same visual treatment as 401 re-auth), not a raw RetryFailed dump.
+    /// Non-auth terminal failures render the formatted RequestFailed banner (same visual treatment as 401 re-auth), not a raw RetryFailed dump.
     #[test]
     fn apply_retry_state_generic_failure_shows_request_failed_banner() {
         let mut session = make_session(Some("s1"));
@@ -618,8 +609,8 @@
         }
     }
 
-    /// A context overflow surfaces the actionable `ContextTooLarge` prompt (not the
-    /// raw `RetryFailed`); `PromptResponse` then suppresses the redundant `TurnFailed`.
+    /// A context overflow shows the actionable `ContextTooLarge` prompt (not the raw `RetryFailed`).
+    /// `PromptResponse` then suppresses the redundant `TurnFailed`.
     #[test]
     fn apply_retry_state_context_length_shows_context_too_large() {
         let mut session = make_session(Some("s1"));
@@ -642,8 +633,8 @@
         );
     }
 
-    /// Overflow-shaped copy without `error_type=context_length` must not take
-    /// the ContextTooLarge path — the shell is what tags overflow.
+    /// A message worded like an overflow but without `error_type=context_length` must not take the ContextTooLarge path.
+    /// The shell is what tags overflow.
     #[test]
     fn apply_retry_state_overflow_copy_without_type_is_not_context_too_large() {
         let mut session = make_session(Some("s1"));
@@ -668,8 +659,8 @@
         );
     }
 
-    /// When the compaction handler already showed its "too large to compact" message,
-    /// the overflow path does NOT stack a second `ContextTooLarge` prompt on top.
+    /// The compaction handler may already have shown its "too large to compact" message.
+    /// The overflow path then does NOT stack a second `ContextTooLarge` prompt on top.
     #[test]
     fn apply_retry_state_context_length_does_not_duplicate_compaction_failed() {
         let mut session = make_session(Some("s1"));
@@ -819,6 +810,33 @@
     }
 
     #[test]
+    fn compaction_lifecycle_refreshes_context_bar_from_trigger_counts() {
+        // Started refreshes with the count the trigger fired on; the banner percentage derives from it
+        // Completed refreshes with the post-compact count
+        // Failed/Cancelled carry no count; the next meta.totalTokens restamps
+        let started = XaiSessionUpdate::AutoCompactStarted {
+            tokens_used: 460_231,
+            context_window: 500_000,
+            percentage: 92,
+            reason: "threshold".into(),
+        };
+        assert_eq!(compaction_context_refresh(&started), Some(460_231));
+        let completed = XaiSessionUpdate::AutoCompactCompleted {
+            tokens_before: Some(460_231),
+            tokens_after: 21_502,
+            elapsed_ms: Some(500),
+            summary_preview: None,
+        };
+        assert_eq!(compaction_context_refresh(&completed), Some(21_502));
+        let failed = XaiSessionUpdate::AutoCompactFailed { error: "e".into() };
+        assert_eq!(compaction_context_refresh(&failed), None);
+        let cancelled = XaiSessionUpdate::AutoCompactCancelled {
+            reason: xai_grok_shell::extensions::notification::AutoCompactCancelReason::UserCancelled,
+        };
+        assert_eq!(compaction_context_refresh(&cancelled), None);
+    }
+
+    #[test]
     fn apply_unhandled_event_returns_false() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
@@ -851,11 +869,10 @@
 
         let info = agent.subagent_sessions.get(child_sid).unwrap();
         assert_eq!(info.tokens_used, Some(25000));
-        // 25000 / 131072 * 100 ~= 19
+        // 25000 tokens of the default 131072 window rounds to 19 percent
         assert_eq!(info.context_usage_pct, Some(19));
 
-        // The child view's context_state.used (context-bar numerator) must
-        // also be reset — see the comment in handle_child_session_notification.
+        // The child view's context_state.used (context-bar numerator) must also be reset; see handle_child_session_notification
         let child_view = agent.subagent_views.get(child_sid).unwrap();
         assert_eq!(
             child_view.context_state.as_ref().map(|c| c.used),
@@ -864,9 +881,8 @@
     }
 
     #[test]
-    fn child_compact_started_does_not_reset_context_used() {
-        // Sibling variants in the same outer arm must not touch the numerator;
-        // guards against accidental widening of the AutoCompactCompleted gate.
+    fn child_compact_started_refreshes_context_used() {
+        // Started carries the count the trigger fired on; the child view must refresh like the root path so the subagent bar matches the banner
         let mut agent = make_agent(Some("root-sess"));
         let child_sid = "child-sess-3";
         agent
@@ -891,14 +907,14 @@
         let child_view = agent.subagent_views.get(child_sid).unwrap();
         assert_eq!(
             child_view.context_state.as_ref().map(|c| c.used),
-            Some(90_000)
+            Some(95_000)
         );
     }
 
     #[test]
     fn child_notification_without_view_returns_false() {
         let mut agent = make_agent(Some("root-sess"));
-        // No child view registered.
+        // No child view is registered
         let update = XaiSessionUpdate::AutoCompactStarted {
             tokens_used: 90000,
             context_window: 131072,
@@ -925,9 +941,9 @@
             summary_preview: None,
         };
         let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
-        // No child_view means nothing visible changed — must not trigger redraw.
+        // No child_view means nothing visible changed, so it must not trigger a redraw
         assert!(!changed);
-        // SubagentInfo should still be updated (data correctness).
+        // SubagentInfo is still updated for data correctness even though nothing redraws
         let info = agent.subagent_sessions.get(child_sid).unwrap();
         assert_eq!(info.tokens_used, Some(25000));
         assert_eq!(info.context_usage_pct, Some(19));
@@ -966,7 +982,7 @@
         assert_eq!(writing.label(), "Writing subagent prompt…");
     }
 
-    /// A delta-first turn still counts as first activity: stash drops, TTFA stamps.
+    /// A delta-first turn still counts as first activity: the rewind stash drops and the TTFA timestamp is stamped.
     #[test]
     fn tool_call_delta_chunk_clears_in_flight_prompt() {
         let mut app = make_app_with_agent("sess-1");
@@ -1050,8 +1066,8 @@
         }
     }
 
-    /// Deltas carry no prompt id — while a wake turn is in flight the chunk is
-    /// dropped whole: no tracker write, no rewind-stash consumption, no TTFA.
+    /// Deltas carry no prompt id, so while a wake turn is in flight the chunk is dropped whole.
+    /// That means no tracker write, no rewind-stash consumption, no TTFA stamp.
     #[test]
     fn wake_gated_delta_chunk_is_fully_inert() {
         let mut app = make_app_with_agent("sess-1");

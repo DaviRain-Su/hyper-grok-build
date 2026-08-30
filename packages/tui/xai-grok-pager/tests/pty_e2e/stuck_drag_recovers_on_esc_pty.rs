@@ -1,11 +1,9 @@
-// Per-test-case module for the `pty_e2e` integration test crate.
 #[allow(unused_imports)]
 use super::common::*;
 use xai_grok_pager_pty_harness::StyledLine;
 
-/// Per-cell `(bg, inverse)` styling for one screen line (`StyledLine.line` is
-/// 1-based), expanded from its runs in column order. Selection highlight shows
-/// up as a changed `bg` and/or `inverse` on these cells.
+/// Per-cell `(bg, inverse)` styling for one screen line (`StyledLine.line` is 1-based), expanded from its runs in column order.
+/// Selection highlight shows up as a changed `bg` and/or `inverse` on these cells.
 fn row_cells(lines: &[StyledLine], target_line: usize) -> Vec<(Option<String>, bool)> {
     let mut cells = Vec::new();
     for line in lines {
@@ -28,15 +26,12 @@ fn differing_cells(base: &[(Option<String>, bool)], other: &[(Option<String>, bo
         .count()
 }
 
-/// PTY: a scrollback drag whose `Up(Left)` is lost latches the selection; Esc
-/// must clear it so later motion can't keep extending it. Drives the real
-/// binary: SGR press + drag bytes with no release `m`, then Esc + more motion.
-/// Without the recovery guard the post-Esc motion re-extends the latched
-/// selection and the final assert fails.
+/// PTY: a scrollback drag whose `Up(Left)` is lost latches the selection; Esc must clear it so later motion can't keep extending it.
+/// Drives the real binary: SGR press and drag bytes with no release `m`, then Esc and more motion.
+/// Without the recovery guard the post-Esc motion re-extends the latched selection and the final assert fails.
 ///
-/// Real-world lost-Up: xtermjs/xterm.js#4781 (xterm.js — VS Code's terminal —
-/// only delivers the mouseup when it lands on the terminal element) and the
-/// VS Code tracking issue microsoft/vscode#192518.
+/// Lost mouseups happen in the wild: xterm.js, VS Code's terminal, only delivers the mouseup when it lands on the terminal element.
+/// See xtermjs/xterm.js#4781 and the VS Code tracking issue microsoft/vscode#192518.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn stuck_drag_recovers_on_esc_pty() {
@@ -82,7 +77,7 @@ async fn stuck_drag_recovers_on_esc_pty() {
     let base = harness.screen_styled();
     let base_row = row_cells(&base, target_line);
 
-    // Press + drag with no release: the lost-Up the recovery guard must survive.
+    // Press and drag with no release: the lost Up the recovery guard must survive
     harness
         .inject_keys(mouse_drag_no_release(row, from_col, to_col).as_bytes())
         .expect("drag without release");
@@ -98,8 +93,8 @@ async fn stuck_drag_recovers_on_esc_pty() {
     harness.inject_keys(keys::ESC).expect("esc");
     harness.update(Duration::from_millis(300));
 
-    // The two post-Esc latched-extend paths: `<32` = left-drag motion (button 0 + motion bit),
-    // `<35` = bare move with no button held, reported under any-event tracking (DECSET 1003).
+    // Two motions could re-extend the latched selection after Esc. `<32` is left-drag motion (button 0 + motion bit).
+    // `<35` is a bare move with no button held, reported under any-event tracking (DECSET 1003)
     // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Any-event-tracking
     let far_motion = sgr_mouse(32, row, far_col, 'M') + sgr_mouse(35, row, far_col, 'M').as_str();
     harness

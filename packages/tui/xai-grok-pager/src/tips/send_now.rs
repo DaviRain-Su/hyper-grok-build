@@ -1,25 +1,22 @@
-//! Tip after queuing a follow-up while a turn is running: advertise that
-//! bare Enter on an empty prompt force-sends the top queued item ("send now").
+//! Tip after queuing a follow-up while a turn is running: advertise that bare Enter on an empty prompt force-sends the top queued item ("send now").
 
 use ratatui::style::{Modifier, Style};
 
 use super::EphemeralTip;
 use crate::theme::Theme;
 
-/// Ephemeral-tip dedup key for the queued-follow-up send-now hint.
+/// Dedup key for this tip.
 pub(crate) const SEND_NOW_TIP_KEY: &str = "send_now_tip";
 
-/// Key into the per-session in-memory seen-count map for this tip.
+/// Key for this tip in the in-memory map counting how many times each tip was shown this session.
 pub(crate) const SEND_NOW_TIP_SEEN_KEY: &str = "send_now_tip_shown_count";
 
 /// Stop showing after this many shows within a single session.
 const SEND_NOW_TIP_SEEN_CAP: u32 = 3;
 
-/// Build "Queued · Enter to send now", seen-gated to
-/// [`SEND_NOW_TIP_SEEN_CAP`] shows per session (in-memory).
+/// Build "Queued · Enter to send now", shown at most [`SEND_NOW_TIP_SEEN_CAP`] times per session (in-memory).
 ///
-/// After a mid-turn queue the composer is empty, so a second Enter force-sends
-/// the top queued follow-up without learning a special chord.
+/// After the user queues a prompt mid-turn the composer is empty, so a second Enter force-sends the top queued follow-up without a special chord.
 pub fn send_now_tip() -> EphemeralTip {
     let theme = Theme::current();
     let dim = Style::default().fg(theme.gray);

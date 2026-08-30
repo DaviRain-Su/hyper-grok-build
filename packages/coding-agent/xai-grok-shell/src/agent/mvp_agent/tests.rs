@@ -4304,6 +4304,88 @@ fn cancel_never_overtakes_in_flight_prompt_intake() {
         );
     });
 }
+#[test]
+fn prompt_routes_only_non_send_now_through_human_delivery_handle() {
+    use acp::Agent as _;
+    run_local_for_bridge_test(|| async {
+        for (send_now, expected_handle_sends) in [(false, 1), (true, 0)] {
+            let agent = build_minimal_agent_for_tests();
+            let sid = acp::SessionId::new(format!("human-route-{send_now}"));
+            let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
+            agent.insert_resident(&sid, handle);
+            tokio::task::spawn_local(async move {
+                while let Some(command) = cmd_rx.recv().await {
+                    match command {
+                        SessionCommand::GetCurrentPromptMode { responds_to } => {
+                            let _ = responds_to.send(Default::default());
+                        }
+                        SessionCommand::GetCurrentModel { responds_to } => {
+                            let _ = responds_to.send("test-model".to_owned());
+                        }
+                        SessionCommand::Prompt {
+                            prompt_blocks,
+                            client_identifier,
+                            screen_mode,
+                            verbatim,
+                            json_schema,
+                            send_now: actual,
+                            tool_overrides_update,
+                            respond_to,
+                            ..
+                        } => {
+                            assert_eq!(actual, send_now);
+                            assert_eq!(prompt_blocks.len(), 2);
+                            assert!(matches!(prompt_blocks[1], acp::ContentBlock::Image(_)));
+                            assert_eq!(client_identifier.as_deref(), Some("client"));
+                            assert_eq!(screen_mode.as_deref(), Some("minimal"));
+                            assert!(verbatim);
+                            assert_eq!(json_schema, Some(serde_json::json!({"type": "object"})));
+                            assert!(tool_overrides_update.is_some());
+                            let _ = respond_to
+                                .send(
+                                    Ok(crate::session::commands::PromptTurnOk {
+                                        stop_reason: acp::StopReason::Cancelled,
+                                        total_tokens: 0,
+                                        turn_snapshot: None,
+                                        completion_kind: crate::session::commands::PromptCompletionKind::RemovedFromQueue,
+                                        structured_output: None,
+                                        usage: None,
+                                        tool_overrides: None,
+                                    }),
+                                );
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            let _ = crate::session::message_delivery::take_human_send_count();
+            let request = acp::PromptRequest::new(
+                sid,
+                vec![
+                    acp::ContentBlock::Text(acp::TextContent::new("hello")),
+                    acp::ContentBlock::Image(acp::ImageContent::new("data", "image/png")),
+                ],
+            )
+            .meta(
+                serde_json::json!({
+                    "sendNow": send_now,
+                    "clientIdentifier": "client",
+                    "screenMode": "minimal",
+                    "verbatim": true,
+                    "outputSchema": {"type": "object"},
+                    "toolOverrides": {"webSearch": {}},
+                })
+                .as_object()
+                .cloned(),
+            );
+            assert!(agent.prompt(request).await.is_ok());
+            assert_eq!(
+                crate::session::message_delivery::take_human_send_count(),
+                expected_handle_sends
+            );
+        }
+    });
+}
 use crate::session::SessionCommand as TestSessionCommand;
 /// Build a session handle wired to a *live* command channel. Returns the
 /// handle (move into `sessions`) plus a probe `cmd_tx`/`cmd_rx` so a test
@@ -5938,7 +6020,7 @@ fn project_roles_personas_gated_via_resolve_and_record_chain() {
             !untrusted.subagent_personas.contains_key("probe"),
             "untrusted: project persona must stay out of spawn context"
         );
-        crate::agent::folder_trust::grant_folder_trust(repo.path());
+        xai_grok_workspace::folder_trust::grant_folder_trust(repo.path());
         let allowed = crate::agent::folder_trust::resolve_and_record(
             repo.path(),
             Some(&folder_trust_on()),

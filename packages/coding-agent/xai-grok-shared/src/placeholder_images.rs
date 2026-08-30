@@ -339,7 +339,7 @@ pub enum PlaceholderLoadError {
 /// etc. be exfil-able. Instead, only the typical user-paste image
 /// directories are added.
 pub fn default_allowed_prefixes(workspace_cwd: &Path) -> Vec<PathBuf> {
-    default_allowed_prefixes_with_home(workspace_cwd, dirs::home_dir())
+    default_allowed_prefixes_with_home(workspace_cwd, xai_dirs::home_dir())
 }
 
 /// Test-injectable variant of [`default_allowed_prefixes`]. Production
@@ -527,7 +527,7 @@ fn decode_image_mime(data: &[u8]) -> Option<&'static str> {
 /// [`default_allowed_prefixes`].
 ///
 /// **Note for integration tests.** This wrapper reads the ambient
-/// process `$HOME` via `dirs::home_dir()` to construct
+/// process `$HOME` via `xai_dirs::home_dir()` to construct
 /// [`HOME_IMAGE_SUBDIRS`] prefixes. An end-to-end test driving
 /// `handle_prompt` therefore inherits the test runner's `$HOME` and
 /// any subdirectories it materialises (`~/Downloads`, etc.) into the

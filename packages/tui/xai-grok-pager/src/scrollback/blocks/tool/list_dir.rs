@@ -1,5 +1,3 @@
-//! ListDirToolCallBlock - lists directory contents.
-
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
@@ -12,27 +10,20 @@ use crate::theme::Theme;
 use super::TOOL_HEADER_RANGE;
 use crate::appearance::AppearanceConfig;
 
-/// List directory tool call.
 #[derive(Debug, Clone)]
 pub struct ListDirToolCallBlock {
-    /// Path to the directory.
     pub path: String,
-    /// The formatted directory listing output.
     pub output: String,
-    /// Error message if the tool call failed (None = success).
     pub error: Option<String>,
-    /// When the tool started running (Phase 2: time tracking).
+    /// When the tool started running.
     pub started_at: Option<std::time::Instant>,
-    /// Elapsed time in ms after completion (Phase 2: time tracking).
+    /// Elapsed time in ms after completion.
     pub elapsed_ms: Option<i64>,
 }
 
 impl ListDirToolCallBlock {
-    /// Create a new list_dir block.
-    ///
-    /// Pre-completed blocks have no meaningful local timing — `started_at`
-    /// is `None`. Timing is only set for blocks that enter a running UI
-    /// state (via `set_last_running(true)` in `ScrollbackState`).
+    /// Pre-completed blocks have no meaningful local timing; `started_at` is `None`.
+    /// Timing is only set for blocks that enter a running UI state (via `set_last_running(true)` in `ScrollbackState`).
     pub fn new(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
@@ -43,24 +34,21 @@ impl ListDirToolCallBlock {
         }
     }
 
-    /// Set the output.
     pub fn with_output(mut self, output: impl Into<String>) -> Self {
         self.output = output.into();
         self
     }
 
-    /// Set error (marks as failed).
     pub fn with_error(mut self, error: impl Into<String>) -> Self {
         self.error = Some(error.into());
         self
     }
 
-    /// Check if successful (no error).
     pub fn is_success(&self) -> bool {
         self.error.is_none()
     }
 
-    /// Set error (mutable) — compute elapsed time if not already set (Phase 2).
+    /// Set error; compute elapsed time if not already set.
     pub fn set_error(&mut self, error: Option<String>) {
         if self.elapsed_ms.is_none()
             && let Some(start) = self.started_at
@@ -72,8 +60,7 @@ impl ListDirToolCallBlock {
 
     /// Finalize elapsed time from `started_at`.
     ///
-    /// Idempotent: no-op if `started_at` is `None` (pre-completed block)
-    /// or if `elapsed_ms` is already set (already finalized).
+    /// Idempotent: no-op if `started_at` is `None` (pre-completed block) or if `elapsed_ms` is already set (already finalized).
     pub fn finish(&mut self) {
         if self.elapsed_ms.is_some() {
             return;
@@ -83,7 +70,6 @@ impl ListDirToolCallBlock {
         }
     }
 
-    /// Get elapsed time in ms (Phase 2).
     pub fn elapsed_ms(&self) -> Option<i64> {
         match self.elapsed_ms {
             Some(ms) => Some(ms),
@@ -93,7 +79,6 @@ impl ListDirToolCallBlock {
         }
     }
 
-    /// Set output (mutable).
     pub fn set_output(&mut self, output: impl Into<String>) {
         self.output = output.into();
     }

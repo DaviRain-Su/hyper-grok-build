@@ -1,16 +1,14 @@
-//! Scenario tests driving [`PagerLeaderCluster`] (the harness lives in
-//! `mod.rs`). New multi-client scenarios land here so the harness and its
-//! consumers grow independently.
+//! Scenario tests driving [`PagerLeaderCluster`] (the harness lives in `mod.rs`).
+//! New multi-client scenarios land here so the harness and its consumers grow independently.
 
 use super::*;
 
 const T1: &str = "CLUSTER_SENTINEL_T1";
 const T2: &str = "CLUSTER_SENTINEL_T2";
 
-/// Two clients share one session: the driver's turn streams into the
-/// attached viewer live, replay renders exactly once, and the
-/// driver/viewer roles flip for the next turn. In-process port of the
-/// `leader_two_clients_shared_session` PTY case.
+/// Two clients share one session: the driver's turn streams into the attached viewer live, and replay renders exactly once.
+/// The driver and viewer roles flip for the next turn.
+/// This is an in-process port of the `leader_two_clients_shared_session` PTY case.
 #[test]
 #[ignore = "leader-cluster: needs single-process isolation (process-global env + grok_home OnceLock in the shared lib test binary); run: cargo test -p xai-grok-pager --lib -- app::leader_cluster --ignored --test-threads=1"]
 #[serial_test::serial(GROK_HOME)]
@@ -27,7 +25,7 @@ fn two_clients_share_session_and_stream_both_ways() {
         let sid = a.new_session().await;
         a.run_turn("go", T1).await;
 
-        // Viewer attaches and replays the transcript exactly once.
+        // The viewer attaches and replays the transcript exactly once
         let mut b = cluster.client("cluster-b", false).await;
         b.load_session(&sid).await;
         b.pump_until("replay reaches viewer", move |app| {
@@ -42,7 +40,7 @@ fn two_clients_share_session_and_stream_both_ways() {
             "replayed turn must render exactly once in the viewer"
         );
 
-        // Turn 2 driven from the driver streams into the viewer live.
+        // Turn 2, driven from the driver, streams into the viewer live
         cluster.server.set_response(format!("{T2} second turn."));
         a.act(Action::SendPrompt("again".to_string()));
         pump_clients_until(&mut [&mut a, &mut b], "turn 2 fans out", |clients| {
@@ -70,9 +68,9 @@ fn two_clients_share_session_and_stream_both_ways() {
     });
 }
 
-/// N-client fan-out: one driver, three viewers. Live turns broadcast to
-/// every subscriber exactly once; each viewer's attach replay is unicast
-/// (it never duplicates into the already-attached clients).
+/// N-client fan-out: one driver, three viewers.
+/// Live turns broadcast to every subscriber exactly once.
+/// Each viewer's attach replay is unicast; it never duplicates into the already-attached clients.
 #[test]
 #[ignore = "leader-cluster: needs single-process isolation (process-global env + grok_home OnceLock in the shared lib test binary); run: cargo test -p xai-grok-pager --lib -- app::leader_cluster --ignored --test-threads=1"]
 #[serial_test::serial(GROK_HOME)]
@@ -149,10 +147,9 @@ fn n_client_fan_out_without_replay_duplication() {
     });
 }
 
-/// Reattach after the driver disconnects: a completed turn round-trips
-/// through the durable log — the fresh client replays it exactly once,
-/// lands Idle, and no inference request is re-driven. In-process port of
-/// `leader_reattach_completion_roundtrips_durable_log`.
+/// Reattach after the driver disconnects: a completed turn round-trips through the durable log.
+/// The fresh client replays it exactly once, lands Idle, and no inference request is re-driven.
+/// This is an in-process port of `leader_reattach_completion_roundtrips_durable_log`.
 #[test]
 #[ignore = "leader-cluster: needs single-process isolation (process-global env + grok_home OnceLock in the shared lib test binary); run: cargo test -p xai-grok-pager --lib -- app::leader_cluster --ignored --test-threads=1"]
 #[serial_test::serial(GROK_HOME)]
@@ -169,14 +166,12 @@ fn reattach_completion_roundtrips_durable_log() {
         let sid = a.new_session().await;
         a.run_turn("go", T1).await;
 
-        // Keep-alive viewer so the session stays resident across A's exit
-        // (parity with the PTY case; the in-process server also survives).
+        // A keep-alive viewer keeps the session resident across A's exit (parity with the PTY case; the in-process server also survives)
         let mut keep = cluster.client("cluster-keepalive", false).await;
         keep.load_session(&sid).await;
 
-        // The completed turn is durable on disk before the reattach. The
-        // write is async relative to the PromptResponse, so poll briefly
-        // (the PTY port does the same via wait_for_turn_completed).
+        // The completed turn is durable on disk before the reattach
+        // The write is async relative to the PromptResponse, so poll briefly (the PTY port does the same via wait_for_turn_completed)
         let durable_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             let recorded = find_session_updates_file(&sid).is_some_and(|updates| {
@@ -227,12 +222,10 @@ fn reattach_completion_roundtrips_durable_log() {
     });
 }
 
-/// Leader kill → bridge reconnect (real `LeaderReconnector`, socket
-/// pinned) → manual reload dance (`begin_session_reload` → `session/load`
-/// → `finish_session_reload`) → history renders exactly once and new
-/// turns work. The reload-driver mirrors the event loop's reconnect arm
-/// (its `plan_reconnect_load` is event_loop-private; the cwd/meta
-/// derivation is replicated inline).
+/// Kill the leader and let the bridge reconnect (real `LeaderReconnector`, socket pinned).
+/// Then reload by hand (`begin_session_reload`, `session/load`, `finish_session_reload`): history renders exactly once and new turns work.
+/// The reload driver mirrors the event loop's reconnect arm.
+/// Its `plan_reconnect_load` is event_loop-private, so the cwd and meta derivation is replicated inline.
 #[test]
 #[ignore = "leader-cluster: needs single-process isolation (process-global env + grok_home OnceLock in the shared lib test binary); run: cargo test -p xai-grok-pager --lib -- app::leader_cluster --ignored --test-threads=1"]
 #[serial_test::serial(GROK_HOME)]
@@ -249,8 +242,7 @@ fn leader_kill_reconnect_reloads_without_duplicating_history() {
         let sid = a.new_session().await;
         a.run_turn("go", T1).await;
 
-        // Kill the leader generation, respawn at the same path; the
-        // bridge's reconnector adopts the new in-process server.
+        // Kill the leader generation, respawn at the same path; the bridge's reconnector adopts the new in-process server
         cluster.kill_leader().await;
         cluster.respawn_leader().await;
 
@@ -310,8 +302,7 @@ fn leader_kill_reconnect_reloads_without_duplicating_history() {
                         .is_some_and(|s| s.0.as_ref() == sid)
                 })
                 .expect("reconnecting tab exists");
-            // plan_reconnect_load equivalent: session id + session cwd +
-            // yolo/auto/cursor meta.
+            // The plan_reconnect_load equivalent: the session id, the session cwd, and the yolo/auto/cursor meta
             let cwd = if agent.session.cwd.as_os_str().is_empty() {
                 a.app.cwd.clone()
             } else {
@@ -340,8 +331,7 @@ fn leader_kill_reconnect_reloads_without_duplicating_history() {
         )
         .await;
         let ok = load.is_ok();
-        // Drain the replay the load unicast to this client BEFORE
-        // finalizing, mirroring the production replay-then-finalize order.
+        // Drain the replay the load unicast to this client BEFORE finalizing, mirroring the production replay-then-finalize order
         a.pump_until("reload replay lands", move |app| {
             app.agents
                 .values()
@@ -375,9 +365,8 @@ fn leader_kill_reconnect_reloads_without_duplicating_history() {
     });
 }
 
-/// Locate `<grok_home>/sessions/<enc-cwd>/<sid>/updates.jsonl` without the
-/// (internal) cwd encoder: scan one level of cwd dirs (same approach as
-/// session_load_perf's `locate_session_dir`).
+/// Locate `<grok_home>/sessions/<enc-cwd>/<sid>/updates.jsonl` without the (internal) cwd encoder.
+/// Scan one level of cwd dirs, the same approach as session_load_perf's `locate_session_dir`.
 fn find_session_updates_file(sid: &str) -> Option<PathBuf> {
     let sessions = effective_grok_home().join("sessions");
     for entry in std::fs::read_dir(&sessions).ok()?.flatten() {

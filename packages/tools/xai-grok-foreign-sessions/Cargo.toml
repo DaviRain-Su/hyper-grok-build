@@ -24,6 +24,8 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = { workspace = true }
 # Session ids are UUIDs; only parsing is used, no generation.
 uuid = { workspace = true }
+# Home-root resolution for the per-tool session stores (dirs::home_dir is banned).
+xai-dirs = { workspace = true }
 # Journal-mode probe: foreign stores are opened only under local WAL.
 xai-sqlite-journal = { workspace = true }
 # Codex rollout files may be zstd-compressed.

@@ -20,7 +20,7 @@ use crate::paths::grok_home;
 #[cfg(all(feature = "enforce", unix))]
 use crate::paths::{DEVICE_DIRS, DEVICE_FILES};
 use crate::paths::{essential_writable_paths, essential_writable_paths_minimal};
-use xai_grok_config::GlobalHookSource;
+use xai_grok_config::{GlobalHookSource, SANDBOX_CONFIG_FILENAME};
 
 /// A resolved sandbox profile ready to be converted to a `CapabilitySet`.
 #[derive(Debug, Clone)]
@@ -121,13 +121,13 @@ pub fn load_sandbox_config(workspace: &Path) -> SandboxConfig {
     let mut config = SandboxConfig::default();
 
     // Global config: ~/.grok/sandbox.toml
-    let global_path = grok_home().join("sandbox.toml");
+    let global_path = grok_home().join(SANDBOX_CONFIG_FILENAME);
     if let Some(global) = load_config_file(&global_path) {
         config = global;
     }
 
     // Project config: <workspace>/.grok/sandbox.toml (additive only)
-    let project_path = workspace.join(".grok").join("sandbox.toml");
+    let project_path = workspace.join(".grok").join(SANDBOX_CONFIG_FILENAME);
     if let Some(project) = load_config_file(&project_path) {
         merge_project_profiles(&mut config, project);
     }
@@ -136,9 +136,9 @@ pub fn load_sandbox_config(workspace: &Path) -> SandboxConfig {
 }
 
 pub fn sandbox_profile_conflicts(workspace: &Path) -> Vec<String> {
-    let global = load_config_file(&grok_home().join("sandbox.toml")).unwrap_or_default();
-    let project =
-        load_config_file(&workspace.join(".grok").join("sandbox.toml")).unwrap_or_default();
+    let global = load_config_file(&grok_home().join(SANDBOX_CONFIG_FILENAME)).unwrap_or_default();
+    let project = load_config_file(&workspace.join(".grok").join(SANDBOX_CONFIG_FILENAME))
+        .unwrap_or_default();
     mismatched_profile_names(&global, &project)
 }
 
@@ -169,6 +169,9 @@ fn merge_project_profiles(config: &mut SandboxConfig, project: SandboxConfig) {
 
 fn load_config_file(path: &Path) -> Option<SandboxConfig> {
     let content = std::fs::read_to_string(path).ok()?;
+    if content.trim().is_empty() {
+        return Some(SandboxConfig::default());
+    }
     match toml::from_str(&content) {
         Ok(config) => Some(config),
         Err(e) => {
@@ -427,7 +430,7 @@ impl ProfileName {
             }),
 
             Self::Strict => {
-                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+                let home = xai_dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
                 let system_read: Vec<PathBuf> = [
                     "/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/dev", "/proc", "/sys",
                     "/tmp",

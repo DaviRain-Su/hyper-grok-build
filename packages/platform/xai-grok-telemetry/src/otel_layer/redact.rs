@@ -594,7 +594,7 @@ mod tests {
     fn allowlisted_path_values_are_still_home_scrubbed() {
         // Path keys are allowlisted so the field exports, but home/username
         // segments must still collapse — allowlist is not a scrub bypass.
-        let home = dirs::home_dir().expect("home dir for path-scrub test");
+        let home = xai_dirs::home_dir().expect("home dir for path-scrub test");
         let home_str = home.to_string_lossy();
         // Skip if the home path is too short/generic for the scrubber to match.
         if home_str.len() < 4 {
@@ -622,7 +622,7 @@ mod tests {
     fn error_key_value_is_secret_and_path_scrubbed() {
         // Free-form `error` strings are allowlisted for classification labels;
         // any secret/path content that sneaks in must still be scrubbed.
-        let home = dirs::home_dir().expect("home dir");
+        let home = xai_dirs::home_dir().expect("home dir");
         let home_str = home.to_string_lossy();
         let msg =
             format!("failed reading {home_str}/.config/creds with sk-CANARYabcdefghij1234567890");

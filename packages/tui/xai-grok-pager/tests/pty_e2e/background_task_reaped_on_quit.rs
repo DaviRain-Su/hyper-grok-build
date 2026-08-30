@@ -1,20 +1,16 @@
-//! PTY: a background shell command spawned by a tool call must be reaped when
-//! the pager exits, so it can't outlive the TUI. This is the `/loop`
-//! orphaned-watcher quota-drain bug: background `run_terminal_command` / `monitor`
-//! commands are `setsid`-detached, so they escape the terminal's process group
-//! and survive a quit/kill unless the exit path reaps them.
+//! PTY: a background shell command spawned by a tool call must be reaped when the pager exits, so it can't outlive the TUI.
+//! This is the `/loop` bug where orphaned watchers kept draining quota.
+//! Background `run_terminal_command` / `monitor` commands are `setsid`-detached.
+//! They escape the terminal's process group and survive a quit/kill unless the exit path reaps them.
 //!
-//! Drives the real pager against the mock (spawn args are only `--yolo --trust`;
-//! the prompt is typed in via `inject_keys` after the welcome screen), scripts a
-//! background command that records its PID then sleeps, quits via a real SIGINT,
-//! and asserts the PID is gone. Without the fix the detached process reparents to
-//! init and keeps running, so the final poll times out.
+//! Drives the real pager against the mock (spawn args are only `--yolo --trust`; the prompt is typed in via `inject_keys` after the welcome screen).
+//! Scripts a background command that records its PID then sleeps, quits via a real SIGINT, and asserts the PID is gone.
+//! Without the fix the detached process reparents to init and keeps running, so the final poll times out.
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 10 min: comfortably outlasts the test's worst-case runtime yet self-exits, so
-/// a reap regression can't leak a ~68-year `/bin/sleep` on CI (tracked by PID
-/// file, so the exact bound only needs to outlast the test).
+/// 10 min: outlasts the test's worst-case runtime yet self-exits, so a reap regression can't leak a ~68-year `/bin/sleep` on CI.
+/// (Tracked by PID file, so the exact bound only needs to outlast the test.)
 #[cfg(unix)]
 const SLEEP_SECS: &str = "600";
 
@@ -27,9 +23,9 @@ async fn background_task_reaped_on_quit() {
     let donefile = content.home().join("orphan_bg.done");
     let errfile = content.home().join("orphan_bg.err");
 
-    // Turn 1: the model runs a background command via run_terminal_command. It writes
-    // its PID, then sleeps; the done/err files capture an unexpected early exit
-    // for diagnostics. Absolute /bin/sleep avoids PATH surprises in the spawn env.
+    // Turn 1: the model runs a background command via run_terminal_command
+    // It writes its PID, then sleeps; the done/err files capture an unexpected early exit for diagnostics
+    // Absolute /bin/sleep avoids PATH surprises in the spawn env
     let command = format!(
         "echo $$ > {pid}; /bin/sleep {SLEEP_SECS} 2> {err}; echo rc=$? > {done}",
         pid = pidfile.display(),
@@ -100,8 +96,8 @@ async fn background_task_reaped_on_quit() {
     }
 
     // A real SIGINT (not an injected Ctrl+C key byte) drives the OS-signal exit.
-    // Both the graceful-quit teardown and the hard-exit tail reap spawned
-    // children via the process-global ProcessScope, so the orphan dies either way.
+    // Both the graceful-quit teardown and the hard-exit tail reap spawned children via the process-global ProcessScope
+    // The orphan dies either way
     harness.send_signal(libc::SIGINT).expect("send SIGINT");
     let exit = harness
         .wait_exit_code(Duration::from_secs(15))
@@ -111,8 +107,8 @@ async fn background_task_reaped_on_quit() {
         "pager did not exit after SIGINT: {exit:?}"
     );
 
-    // The fix: no orphaned background process survives the quit. Without it the
-    // setsid-detached sleep reparents to init and keeps running -> this times out.
+    // No orphaned background process survives the quit
+    // Without the fix the setsid-detached sleep reparents to init and keeps running, so this times out
     assert!(
         wait_until(Duration::from_secs(15), || !pid_alive(pid)),
         "background sleep (pid {pid}) survived pager exit (orphaned)"
@@ -138,8 +134,7 @@ fn pid_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-/// Recursive listing of files under `home` (with sizes), to find where tool
-/// output / our marker files landed.
+/// Recursive listing of files under `home` (with sizes), to find where tool output / our marker files landed.
 #[cfg(unix)]
 fn dump_files(home: &Path) -> String {
     let mut out = String::new();

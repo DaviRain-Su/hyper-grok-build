@@ -1,5 +1,3 @@
-//! Settings modal rendering.
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -25,16 +23,16 @@ use crate::views::modal_window::{
 // Rendering
 // ---------------------------------------------------------------------------
 
-/// Overlay for the reset-confirm dialog. Overrides chrome breadcrumb,
-/// footer, and search bar with the confirmation prompt.
+/// Overlay for the reset-confirm dialog.
+/// Overrides chrome breadcrumb, footer, and search bar with the confirmation prompt.
 pub struct ResetConfirmOverlay<'a> {
     pub prompt: &'a str,
 
     pub breadcrumb_suffix: &'a str,
 }
 
-/// Render the settings modal. Returns `true` if the reset-confirm
-/// overlay was rendered (caller suppresses row-list mouse events).
+/// Render the settings modal.
+/// Returns `true` if the reset-confirm overlay was rendered (caller suppresses row-list mouse events).
 pub fn render_settings_modal(
     buf: &mut Buffer,
     full_area: Rect,
@@ -64,11 +62,8 @@ pub fn render_settings_modal(
         match &state.state.mode {
             SettingsMode::PickingEnum { key, .. } => {
                 if let Some(meta) = state.registry.find(key) {
-                    breadcrumb_owned = format!(
-                        "{MODAL_TITLE} {} {}",
-                        crate::glyphs::chevron(),
-                        meta.label_l10n()
-                    );
+                    breadcrumb_owned =
+                        format!("{MODAL_TITLE} {} {}", crate::glyphs::chevron(), meta.label);
                     &breadcrumb_owned
                 } else {
                     MODAL_TITLE
@@ -77,11 +72,8 @@ pub fn render_settings_modal(
 
             SettingsMode::EditingString { key, .. } | SettingsMode::EditingInt { key, .. } => {
                 if let Some(meta) = state.registry.find(key) {
-                    breadcrumb_owned = format!(
-                        "{MODAL_TITLE} {} {}",
-                        crate::glyphs::chevron(),
-                        meta.label_l10n()
-                    );
+                    breadcrumb_owned =
+                        format!("{MODAL_TITLE} {} {}", crate::glyphs::chevron(), meta.label);
                     &breadcrumb_owned
                 } else {
                     MODAL_TITLE
@@ -89,11 +81,8 @@ pub fn render_settings_modal(
             }
             SettingsMode::PickingGroup { key, .. } => {
                 if let Some(meta) = state.registry.find(key) {
-                    breadcrumb_owned = format!(
-                        "{MODAL_TITLE} {} {}",
-                        crate::glyphs::chevron(),
-                        meta.label_l10n()
-                    );
+                    breadcrumb_owned =
+                        format!("{MODAL_TITLE} {} {}", crate::glyphs::chevron(), meta.label);
                     &breadcrumb_owned
                 } else {
                     MODAL_TITLE
@@ -103,10 +92,9 @@ pub fn render_settings_modal(
         }
     };
 
-    // Footer sizing: predict shortcut wrap rows, add a gap row above
-    // when the docs footer is present. EditingValue suppresses the
-    // docs footer. Widen the modal when editing `max_thoughts_width`
-    // so the wrap preview is useful at widths above STANDARD_MAX_WIDTH.
+    // Footer sizing: predict shortcut wrap rows, add a gap row above when the docs footer is present
+    // EditingValue suppresses the docs footer
+    // Widen the modal when editing `max_thoughts_width` so the wrap preview is useful at widths above STANDARD_MAX_WIDTH
     let widen_for_max_thoughts_width = matches!(
         &state.state.mode,
         SettingsMode::EditingInt { key, .. }
@@ -131,8 +119,7 @@ pub fn render_settings_modal(
         footer_lines: 2,
     }
     .with_compact(compact);
-    // Must agree with the `docs_footer_area` split below — a mismatch
-    // would reserve a row nothing paints (or paint into the body).
+    // Must agree with the `docs_footer_area` split below; a mismatch would reserve a row nothing paints (or paint into the body)
     let has_tip_footer = !matches!(
         state.state.mode_kind(),
         SettingsModeKind::EditingString | SettingsModeKind::EditingInt
@@ -161,7 +148,7 @@ pub fn render_settings_modal(
     }) =
         modal_window::render_modal_window(buf, full_area, &mut state.window, &modal_config, &theme)
     else {
-        // Chrome refused — reset hit-rects for graceful degradation.
+        // Chrome refused: reset hit-rects for graceful degradation
         state.reset_hit_rects();
         return overlay.is_some();
     };
@@ -172,9 +159,8 @@ pub fn render_settings_modal(
     }
 
     if let Some(o) = overlay {
-        // Confirmation overlay replaces the search bar; row list
-        // renders dimmed underneath. Hit-rects reset so clicks
-        // only route to the y/n footer buttons.
+        // Confirmation overlay replaces the search bar; the row list renders dimmed underneath
+        // Hit-rects reset so clicks only route to the y/n footer buttons
         render_reset_confirm_overlay(buf, content_area, state, &theme, o);
         return true;
     }
@@ -220,7 +206,7 @@ pub fn render_settings_modal(
     }
 
     // Breadcrumb hit-rect for sub-pane back-navigation on click.
-    // Repaint with UNDERLINED (+ accent on hover) for affordance.
+    // Repaint with UNDERLINED (plus accent on hover) so it reads as clickable
     state.settings_breadcrumb_rect = if mode_is_sub_pane {
         state.window.popup_area.map(|popup| {
             let title_w = title.width() as u16;
@@ -260,9 +246,8 @@ pub fn render_settings_modal(
     false
 }
 
-/// Render the reset-confirm overlay: prompt replaces the search bar,
-/// row list renders below with the target row at full intensity and
-/// all other rows dimmed.
+/// Render the reset-confirm overlay: the prompt replaces the search bar.
+/// The row list renders below with the target row at full intensity and all other rows dimmed.
 fn render_reset_confirm_overlay(
     buf: &mut Buffer,
     content_area: Rect,
@@ -277,7 +262,7 @@ fn render_reset_confirm_overlay(
         return;
     }
 
-    // Row 0: prompt (full width, bold + accent).
+    // Row 0: prompt (full width, bold and accent)
     let prompt_area = Rect {
         x: content_area.x,
         y: content_area.y,
@@ -318,7 +303,7 @@ fn render_reset_confirm_overlay(
 
     let target_rect = state.row_rects.get(state.selected).copied();
 
-    // Dim every line outside the target row's y-range (DIM + blend).
+    // Dim every line outside the target row's y-range (DIM plus blend)
     let target_y_start = target_rect.map(|r| r.y);
     let target_y_end = target_rect.map(|r| r.y.saturating_add(r.height));
     let area_y_end = list_area.y.saturating_add(list_area.height);
@@ -327,7 +312,7 @@ fn render_reset_confirm_overlay(
             && y >= ys
             && y < ye
         {
-            continue; // inside the target row's y range — stays full intensity
+            continue; // inside the target row's y range; stays full intensity
         }
         let strip = Rect {
             x: list_area.x,
@@ -345,22 +330,22 @@ fn build_reset_confirm_shortcuts() -> Vec<Shortcut<'static>> {
     use crate::views::modal::{RESET_CONFIRM_NO_ID, RESET_CONFIRM_YES_ID};
     vec![
         Shortcut {
-            label: rust_i18n::t!("footer.y_reset"),
+            label: "y reset",
             clickable: true,
             id: RESET_CONFIRM_YES_ID,
         },
         Shortcut {
-            label: rust_i18n::t!("footer.n_cancel"),
+            label: "n cancel",
             clickable: true,
             id: RESET_CONFIRM_NO_ID,
         },
         Shortcut {
-            label: rust_i18n::t!("footer.esc_cancel"),
+            label: "Esc cancel",
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: rust_i18n::t!("footer.f2_cancel"),
+            label: "F2 cancel",
             clickable: false,
             id: 0,
         },
@@ -445,9 +430,10 @@ pub(super) fn render_row_list_with_search_bar(
 }
 
 pub(super) fn render_docs_footer(buf: &mut Buffer, area: Rect, theme: &Theme) {
-    let long = rust_i18n::t!("settings_modal.docs_tip_long").to_string();
-    let short = rust_i18n::t!("settings_modal.docs_tip_short").to_string();
-    let text = modal_window::fit_tip_line(&[long.as_str(), short.as_str()], area.width as usize);
+    const LONG: &str =
+        "Tip · Ask Grok: \"change theme to grokday\" or \"what does compact mode do?\"";
+    const SHORT: &str = "Tip · Ask Grok to change a setting";
+    let text = modal_window::fit_tip_line(&[LONG, SHORT], area.width as usize);
     modal_window::render_centered_tip_footer(buf, area, theme, text.as_ref());
 }
 
@@ -477,10 +463,10 @@ pub(super) fn render_rows(
 
     let total_visible = state.filtered_cache.len();
 
-    // Empty filter — show "No matches for <query>".
+    // Empty filter: show "No matches for <query>"
     if total_visible == 0 {
         if !state.query().is_empty() {
-            let prefix = rust_i18n::t!("settings_modal.no_matches").to_string();
+            let prefix = "No matches for ";
             let suffix_quote_w = 2u16; // surrounding "" chars
             let available_for_query = (area.width as usize)
                 .saturating_sub(prefix.width())
@@ -500,15 +486,14 @@ pub(super) fn render_rows(
         return;
     }
 
-    // Translate `state.selected` (rows-space) → filtered position.
+    // Translate `state.selected` (rows-space) into a filtered position
     let selected_fpos = state
         .filtered_cache
         .iter()
         .position(|&i| i == state.selected);
 
-    // Clamp scroll so selection stays in view, keeping the preceding
-    // section header visible when scrolling up. Row heights are
-    // variable (expanded descriptions, header gaps).
+    // Clamp scroll so selection stays in view, keeping the preceding section header visible when scrolling up
+    // Row heights are variable (expanded descriptions, header gaps)
     let row_heights = compute_filtered_row_heights(state, area.width);
     if let Some(fpos) = selected_fpos {
         if fpos < state.scroll_offset {
@@ -536,7 +521,7 @@ pub(super) fn render_rows(
             state.scroll_offset = min_offset_for_visibility;
         }
     }
-    // Final clamp — don't let scroll_offset past the end.
+    // Final clamp: don't let scroll_offset past the end
     if total_visible > 0 {
         let max_offset = compute_min_scroll_offset_for_visibility(
             &state.filtered_cache,
@@ -603,7 +588,7 @@ pub(super) fn render_rows(
 
         match row {
             RowEntry::Header { category } => {
-                let label = category.label_l10n();
+                let label = category.label();
                 let header_style = Style::default()
                     .fg(theme.gray)
                     .bg(theme.bg_base)
@@ -630,8 +615,7 @@ pub(super) fn render_rows(
                 let is_selected = row_idx == state.selected;
                 let is_expanded = expanded_snapshot.contains(key);
 
-                // Group rows carry no scalar value; render a chevron row that
-                // opens the sub-sheet (skips the value/edited machinery below).
+                // Group rows carry no scalar value; render a chevron row that opens the sub-sheet (skips the value/edited machinery below)
                 if matches!(meta.kind, SettingKind::Group { .. }) {
                     let is_hovered = hover_row_snapshot == Some(row_idx);
                     let value_rect = render_setting_group_row(
@@ -645,9 +629,8 @@ pub(super) fn render_rows(
                     );
                     state.value_hit_rects[row_idx] = value_rect;
                     y_cursor = y_cursor.saturating_add(1);
-                    // Mirror normal rows: render the description inline when the
-                    // group's key is expanded (Right/l). The group has no value,
-                    // so this is the only place its description can surface.
+                    // Mirror normal rows: render the description inline when the group's key is expanded (Right/l)
+                    // The group has no value, so this is the only place its description can appear
                     if is_expanded && y_cursor < area_end {
                         let desc_height = area_end - y_cursor;
                         let desc_rect = Rect {
@@ -687,7 +670,7 @@ pub(super) fn render_rows(
                 let show_restart_pill_for_layout = meta.restart_required && is_expanded;
                 let layout_decision = row_layout(
                     area.width,
-                    &meta.label_l10n(),
+                    meta.label,
                     &value_display,
                     show_restart_pill_for_layout,
                 );
@@ -734,8 +717,7 @@ pub(super) fn render_rows(
                     };
                     let lock_reason = lock.map(CodingDataSharingLock::reason);
                     render_expanded_description(buf, desc_rect, meta, lock_reason, theme);
-                    // Re-measure how many lines the wrapped description
-                    // actually consumed, so y_cursor advances precisely.
+                    // Re-measure how many lines the wrapped description actually consumed, so y_cursor advances precisely
                     let consumed =
                         wrapped_description_height(meta, lock_reason, area.width, desc_rect.height);
                     y_cursor = y_cursor.saturating_add(consumed);
@@ -745,9 +727,8 @@ pub(super) fn render_rows(
     }
 }
 
-/// Compute the minimum scroll_offset that keeps filtered position
-/// `fpos` visible within `visible_h` lines. Walks backward,
-/// accounting for variable row heights and header gaps.
+/// Compute the minimum scroll_offset that keeps filtered position `fpos` visible within `visible_h` lines.
+/// Walks backward, accounting for variable row heights and header gaps.
 fn compute_min_scroll_offset_for_visibility(
     filtered_cache: &[usize],
     rows: &[RowEntry],
@@ -758,24 +739,20 @@ fn compute_min_scroll_offset_for_visibility(
     if visible_h == 0 || fpos >= filtered_cache.len() {
         return fpos;
     }
-    // Visual lines consumed so far. `fpos` itself sits at the top of
-    // the viewport, so it doesn't earn a blank-above-header even if
-    // it IS a header.
+    // Visual lines consumed so far
+    // `fpos` itself sits at the top of the viewport, so it doesn't earn a blank-above-header even if it IS a header
     let fpos_height = row_heights.get(fpos).copied().unwrap_or(1) as usize;
     let mut lines_used: usize = fpos_height;
     if lines_used > visible_h {
-        // Even the focused row alone doesn't fit; clamp to fpos so
-        // the down-stream renderer at least shows its label.
+        // Even the focused row alone doesn't fit; clamp to fpos so the down-stream renderer at least shows its label
         return fpos;
     }
     let mut offset = fpos;
     while offset > 0 {
         let candidate = offset - 1;
         let candidate_height = row_heights.get(candidate).copied().unwrap_or(1) as usize;
-        // Cost of including `candidate` as the new top of the
-        // viewport: its own visual height, plus 1 line for the
-        // blank-above-header that the OLD top (`offset`) now
-        // earns (since it's no longer the first row rendered).
+        // Cost of including `candidate` as the new top of the viewport: its own visual height, plus 1 line for the
+        // blank above the OLD top (`offset`) when it is a header, since that row is no longer the first rendered
         let old_first_idx = filtered_cache[offset];
         let old_first_is_header = matches!(rows[old_first_idx], RowEntry::Header { .. });
         let cost: usize = candidate_height + usize::from(old_first_is_header);
@@ -788,21 +765,15 @@ fn compute_min_scroll_offset_for_visibility(
     offset
 }
 
-/// Precompute the visual height (in terminal rows) of each entry in
-/// `state.filtered_cache`, using the same `row_layout` /
-/// `wrapped_description_height` math the forward render loop uses.
+/// Precompute the visual height (in terminal rows) of each entry in `state.filtered_cache`.
+/// Uses the same `row_layout` / `wrapped_description_height` math the forward render loop uses.
 ///
-/// The cost passed to [`compute_min_scroll_offset_for_visibility`]
-/// is the row's intrinsic height EXCLUDING the blank-line-above-
-/// header gap — that gap is accounted for inside the scroll helper's
-/// backward walk because it depends on the runtime position relative
-/// to the viewport top.
+/// The cost passed to [`compute_min_scroll_offset_for_visibility`] is the row's intrinsic height EXCLUDING the blank-line-above-header gap.
+/// That gap is accounted for inside the scroll helper's backward walk because it depends on the runtime position relative to the viewport top.
 ///
-/// Cost: O(visible filtered rows) per render, bounded by the
-/// registry size (~15 entries today). Each row does at most one
-/// `word_wrap_line` call (for expanded descriptions). Allocations
-/// are confined to a single `Vec<u16>` per call; per-row layout
-/// math is on the stack.
+/// Cost: O(visible filtered rows) per render, bounded by the registry size (~15 entries today).
+/// Each row does at most one `word_wrap_line` call (for expanded descriptions).
+/// Allocations are confined to a single `Vec<u16>` per call; per-row layout math is on the stack.
 fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> Vec<u16> {
     let mut heights = Vec::with_capacity(state.filtered_cache.len());
     for &row_idx in &state.filtered_cache {
@@ -819,8 +790,7 @@ fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> 
                     heights.push(1);
                     continue;
                 };
-                // Group rows carry no value; height = chevron row + the expanded
-                // description (cap 8), agreeing with the forward render loop.
+                // Group rows carry no value; the height is the chevron row plus the expanded description (cap 8), agreeing with the forward render loop
                 if matches!(meta.kind, SettingKind::Group { .. }) {
                     let mut h: u16 = 1;
                     if state.expanded_keys.contains(key) {
@@ -837,19 +807,13 @@ fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> 
                 let lock = state.row_lock(key);
                 let value_display = value_display(meta, &value, lock);
                 let show_restart_pill = meta.restart_required && is_expanded;
-                let layout = row_layout(
-                    area_width,
-                    &meta.label_l10n(),
-                    &value_display,
-                    show_restart_pill,
-                );
+                let layout = row_layout(area_width, meta.label, &value_display, show_restart_pill);
                 let mut h: u16 = match layout {
                     RowLayout::OneLine => 1,
                     RowLayout::TwoLine | RowLayout::TwoLineWithLabelTruncation => 2,
                 };
                 if is_expanded {
-                    // Cap matches the forward render loop at line
-                    // 2040 (`desc_rect.height = ... .min(8)`).
+                    // Cap matches the forward render loop (`desc_rect.height = ... .min(8)`).
                     h = h.saturating_add(wrapped_description_height(
                         meta,
                         lock.map(CodingDataSharingLock::reason),
@@ -876,10 +840,7 @@ fn wrapped_description_height(
     if wrap_w == 0 {
         return 0;
     }
-    let text: std::borrow::Cow<'_, str> = match lock_reason {
-        Some(reason) => std::borrow::Cow::Borrowed(reason),
-        None => meta.description_l10n(),
-    };
+    let text = lock_reason.unwrap_or(meta.description);
     let line = Line::from(Span::raw(text));
     let wrapped = crate::render::wrapping::word_wrap_line(&line, wrap_w as usize);
     (wrapped.len() as u16).min(cap)
@@ -895,16 +856,15 @@ const PICKER_SEPARATOR_W: u16 = 3;
 
 const PICKER_MARKER_W: u16 = 1;
 
-/// Render the shared sub-pane header (bold title row + word-wrapped description)
-/// used by all four sub-pane renderers — the enum chooser, the group sub-sheet,
-/// and the string/int editors. Returns `header_rows`: the rows consumed (title +
-/// optional description + the 1-row gap), so the caller positions its body at
-/// `area.y + header_rows`. The bodies differ and stay in each caller.
+/// Render the shared sub-pane header (a bold title row and a word-wrapped description).
+/// All four sub-pane renderers use it: the enum chooser, the group sub-sheet, and the string/int editors.
+/// Returns `header_rows`, the rows consumed (title + optional description + the 1-row gap).
+/// The caller positions its body at `area.y + header_rows`.
+/// The bodies differ and stay in each caller.
 ///
-/// `min_non_desc_rows` is the vertical budget (excluding the description rows
-/// themselves) that must fit before the description renders at all: `2` for the
-/// choosers (title + gap), `3` for the editors (title + gap + the input/stepper
-/// row). Callers keep their own `if area.height <= header_rows { return; }`.
+/// `min_non_desc_rows` is the vertical budget (excluding the description rows themselves) that must fit before the description renders at all.
+/// It is `2` for the choosers (title + gap) and `3` for the editors (title + gap + the input/stepper row).
+/// Callers keep their own `if area.height <= header_rows { return; }`.
 fn render_sub_pane_header(
     buf: &mut Buffer,
     area: Rect,
@@ -951,8 +911,8 @@ fn render_sub_pane_header(
     if has_description { 2 + desc_rows } else { 2 }
 }
 
-/// Render the Enum chooser sub-pane. Title + description + radio-style
-/// choice list with scrolling and `… N more` overflow indicator.
+/// Render the Enum chooser sub-pane.
+/// Title, description, and a radio-style choice list with scrolling and an `… N more` overflow indicator.
 pub(super) fn render_picking_enum(
     buf: &mut Buffer,
     area: Rect,
@@ -999,8 +959,8 @@ pub(super) fn render_picking_enum(
                 .into_iter()
                 .map(|c| OwnedEnumChoice {
                     canonical: c.canonical.to_string(),
-                    display: c.display_l10n(setting_key).into_owned(),
-                    description: c.description_l10n(setting_key).into_owned(),
+                    display: c.display.to_string(),
+                    description: c.description.to_string(),
                 })
                 .collect()
         }
@@ -1014,15 +974,8 @@ pub(super) fn render_picking_enum(
         return;
     }
 
-    // Choosers need title + gap (2) before the description renders.
-    let header_rows = render_sub_pane_header(
-        buf,
-        area,
-        theme,
-        &meta.label_l10n(),
-        &meta.description_l10n(),
-        2,
-    );
+    // Choosers need title + gap (2 rows) before the description renders
+    let header_rows = render_sub_pane_header(buf, area, theme, meta.label, meta.description, 2);
     if area.height <= header_rows {
         return;
     }
@@ -1115,7 +1068,7 @@ pub(super) fn render_picking_enum(
         buf.set_style(block_rect, Style::default().bg(bg));
         picker_choice_rects[choice_i] = block_rect;
 
-        // ── Line 1: prefix + display + (· + first wrap line) ──────
+        // ── Line 1: prefix, display, then "·" and the first wrap line ──
         let y = y_cursor;
         if area.width > 0 {
             // Leading space (col 0 of the row).
@@ -1234,8 +1187,7 @@ pub(super) fn render_picking_enum(
         y_cursor = y_cursor.saturating_add(layout.height);
     }
 
-    // ── Overflow indicator: "… N more" on the row right below the
-    //    last rendered choice. ─────────────────────────────────────
+    // ── Overflow indicator: "… N more" on the row right below the last rendered choice ──
     if needs_overflow && visible_end < choices.len() {
         let more_count = choices.len() - visible_end;
         let overflow_y = y_cursor;
@@ -1270,25 +1222,21 @@ pub(super) fn render_picking_enum(
     let _ = total_h; // suppress unused-var warning on some builds
 }
 
-// Thread-local scratch to ferry hit-rects out of `render_picking_enum`
-// (which takes `&state`) into `state.picker_choice_rects`.
+// Thread-local scratch to carry hit-rects out of `render_picking_enum` (which takes `&state`) into `state.picker_choice_rects`
 thread_local! {
     static PICKER_RECTS_SCRATCH: std::cell::RefCell<Vec<Rect>>
         = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Read-and-clear the most recent per-choice hit-rects produced by
-/// `render_picking_enum`. Returns an empty Vec when called before
-/// the first picker render (or after a non-picker frame reset the
-/// scratch).
+/// Read-and-clear the most recent per-choice hit-rects produced by `render_picking_enum`.
+/// Returns an empty Vec when called before the first picker render (or after a non-picker frame reset the scratch).
 pub(super) fn take_picker_choice_rects() -> Vec<Rect> {
     PICKER_RECTS_SCRATCH.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
 }
 
-/// Render the group sub-sheet: title + description + one row per child Bool
-/// toggle (`<marker> <Label> … <on/off>`). Returns the per-child hit-rects
-/// (parallel to the group's children) for mouse routing. Mirrors the enum
-/// chooser's title/description/list shape but for independent toggles.
+/// Render the group sub-sheet: title, description, and one row per child Bool toggle (`<marker> <Label> … <on/off>`).
+/// Returns the per-child hit-rects (parallel to the group's children) for mouse routing.
+/// Mirrors the enum chooser's title/description/list shape but for independent toggles.
 fn render_picking_group(
     buf: &mut Buffer,
     area: Rect,
@@ -1307,13 +1255,13 @@ fn render_picking_group(
         return Vec::new();
     }
 
-    // Chooser shape: title + gap (2) before the description renders.
+    // Chooser shape: title + gap (2 rows) before the description renders
     let header_rows = render_sub_pane_header(
         buf,
         area,
         theme,
-        &group_meta.label_l10n(),
-        &group_meta.description_l10n(),
+        group_meta.label,
+        group_meta.description,
         2,
     );
     if area.height <= header_rows {
@@ -1364,11 +1312,7 @@ fn render_picking_group(
 
         // Value read live from the snapshot (refreshed after each toggle).
         let on = matches!(state.value_for(child_key), Some(SettingValue::Bool(true)));
-        let value_text = if on {
-            rust_i18n::t!("settings_modal.value_on")
-        } else {
-            rust_i18n::t!("settings_modal.value_off")
-        };
+        let value_text = if on { "on" } else { "off" };
         let value_style = if on {
             Style::default().fg(theme.accent_user).bg(bg)
         } else {
@@ -1397,11 +1341,10 @@ fn render_picking_group(
             .max(label_x);
         if value_x > label_x {
             let label_room = (value_x - label_x).saturating_sub(1) as usize;
-            let child_label = child_meta.label_l10n();
-            let label_text: std::borrow::Cow<'_, str> = if child_label.width() <= label_room {
-                child_label
+            let label_text: std::borrow::Cow<'_, str> = if child_meta.label.width() <= label_room {
+                std::borrow::Cow::Borrowed(child_meta.label)
             } else {
-                std::borrow::Cow::Owned(truncate_str(&child_label, label_room))
+                std::borrow::Cow::Owned(truncate_str(child_meta.label, label_room))
             };
             let label_w = (label_text.width() as u16).min((value_x - label_x).saturating_sub(1));
             buf.set_span(
@@ -1425,9 +1368,9 @@ struct PickerChoiceLayout {
     wrap_lines: Vec<String>,
 }
 
-/// Compute layout for one picker choice (height + wrapped desc lines).
+/// Compute layout for one picker choice: its height and wrapped description lines.
 fn compute_picker_choice_layout(choice: &OwnedEnumChoice, area_width: u16) -> PickerChoiceLayout {
-    // No description → 1 line, symbol + display only.
+    // No description means 1 line, symbol and display only
     if choice.description.trim().is_empty() {
         return PickerChoiceLayout {
             height: 1,
@@ -1435,7 +1378,7 @@ fn compute_picker_choice_layout(choice: &OwnedEnumChoice, area_width: u16) -> Pi
         };
     }
 
-    // Compute the desc column = PICKER_PREFIX_W + display_width + PICKER_SEPARATOR_W.
+    // The desc column is PICKER_PREFIX_W + display_width + PICKER_SEPARATOR_W
     // Display gets truncated if it'd overflow; mirror that for layout math.
     let display_room = (area_width as usize).saturating_sub(PICKER_PREFIX_W as usize);
     let display_w = choice.display.width().min(display_room) as u16;
@@ -1443,7 +1386,7 @@ fn compute_picker_choice_layout(choice: &OwnedEnumChoice, area_width: u16) -> Pi
     let after_sep = after_display.saturating_add(PICKER_SEPARATOR_W);
 
     if after_sep >= area_width {
-        // No room for description — single-line fallback.
+        // No room for description: single-line fallback
         return PickerChoiceLayout {
             height: 1,
             wrap_lines: Vec::new(),
@@ -1497,8 +1440,7 @@ fn picker_scroll_offset(
     let n = layouts.len();
     let mut offset = 0usize;
     loop {
-        // Sum heights starting at `offset` until adding the next
-        // choice would exceed `available_h`.
+        // Sum heights starting at `offset` until adding the next choice would exceed `available_h`
         let mut consumed: u16 = 0;
         let mut last_visible = offset;
         for (i, layout) in layouts.iter().enumerate().skip(offset) {
@@ -1509,14 +1451,13 @@ fn picker_scroll_offset(
             consumed = next;
             last_visible = i + 1;
         }
-        // `last_visible` is the exclusive upper bound. If
-        // `choices_idx` is in `[offset, last_visible)`, this offset
-        // works.
+        // `last_visible` is the exclusive upper bound
+        // If `choices_idx` is in `[offset, last_visible)`, this offset works
         if choices_idx < last_visible {
             return offset;
         }
-        // Otherwise advance. Stop when we've exhausted the list
-        // (defensive — shouldn't happen since `choices_idx < n`).
+        // Otherwise advance
+        // Stop when we've exhausted the list (defensive; can't happen since `choices_idx < n`)
         if offset + 1 >= n {
             return offset;
         }
@@ -1532,8 +1473,7 @@ const INT_STEPPER_WIDE_SMALL_STEP: i64 = 5;
 const INT_STEPPER_WIDE_LARGE_STEP: i64 = 10;
 
 /// Derive (small, large) step sizes from an Int setting's `[min, max]` span.
-/// Narrow dials use unit fine-steps so every in-range value is reachable;
-/// wide ranges keep the original ±5 / ±10 feel.
+/// Narrow dials use unit fine-steps so every in-range value is reachable; wide ranges keep the original ±5 / ±10 feel.
 pub(super) fn int_step_sizes(min: i64, max: i64) -> (i64, i64) {
     let span = max.saturating_sub(min).max(0);
     if span <= 20 {
@@ -1549,29 +1489,20 @@ pub(super) fn int_step_sizes(min: i64, max: i64) -> (i64, i64) {
 }
 
 /// Footer labels for the Int stepper (must be `'static` for `Shortcut`).
-fn int_step_footer_labels(
-    min: i64,
-    max: i64,
-) -> (
-    std::borrow::Cow<'static, str>,
-    std::borrow::Cow<'static, str>,
-) {
+fn int_step_footer_labels(min: i64, max: i64) -> (&'static str, &'static str) {
     let (small, large) = int_step_sizes(min, max);
-    let small_label = match small {
-        1 => crate::i18n::tr_or("footer.int_step_up_1", "\u{2191}/\u{2193} +/-1"),
-        5 => crate::i18n::tr_or("footer.int_step_up_5", "\u{2191}/\u{2193} +/-5"),
-        _ => crate::i18n::tr_or("footer.int_step_up", "\u{2191}/\u{2193} step"),
-    };
-    let large_label = match large {
-        1 => crate::i18n::tr_or("footer.int_step_side_1", "\u{2190}/\u{2192} +/-1"),
-        5 => crate::i18n::tr_or("footer.int_step_side_5", "\u{2190}/\u{2192} +/-5"),
-        10 => crate::i18n::tr_or("footer.int_step_side_10", "\u{2190}/\u{2192} +/-10"),
-        _ => crate::i18n::tr_or("footer.int_step_side", "\u{2190}/\u{2192} step"),
-    };
-    (small_label, large_label)
+    match (small, large) {
+        (1, 1) => ("\u{2191}/\u{2193} +/-1", "\u{2190}/\u{2192} +/-1"),
+        (1, 5) => ("\u{2191}/\u{2193} +/-1", "\u{2190}/\u{2192} +/-5"),
+        (5, 10) => ("\u{2191}/\u{2193} +/-5", "\u{2190}/\u{2192} +/-10"),
+        // Defensive fallback if thresholds change without new static pairs.
+        (1, _) => ("\u{2191}/\u{2193} +/-1", "\u{2190}/\u{2192} step"),
+        (5, _) => ("\u{2191}/\u{2193} +/-5", "\u{2190}/\u{2192} step"),
+        _ => ("\u{2191}/\u{2193} step", "\u{2190}/\u{2192} step"),
+    }
 }
 
-// ‹ / › (U+2039 / U+203A) — fall back to ASCII `<` / `>` on legacy ConHost.
+// ‹ / › (U+2039 / U+203A); falls back to ASCII `<` / `>` on legacy ConHost
 pub(super) fn int_stepper_left_glyph() -> &'static str {
     crate::glyphs::chevron_left()
 }
@@ -1591,8 +1522,8 @@ pub(super) const MAX_THOUGHTS_WIDTH_PREVIEW_MIN_WIDTH: u16 = 30;
 /// Min remaining height to render the wrap preview below the stepper.
 pub(super) const MAX_THOUGHTS_WIDTH_PREVIEW_MIN_HEIGHT: u16 = 5;
 
-/// Render the inline editor. Int settings use a stepper; String
-/// settings use a text input with cursor and validation feedback.
+/// Render the inline editor.
+/// Int settings use a stepper; String settings use a text input with cursor and validation feedback.
 pub(super) fn render_editing_value(
     buf: &mut Buffer,
     area: Rect,
@@ -1648,15 +1579,8 @@ pub(super) fn render_editing_value(
         return;
     };
 
-    // Editors reserve title + gap + the input row (3) before the description.
-    let header_rows = render_sub_pane_header(
-        buf,
-        area,
-        theme,
-        &meta.label_l10n(),
-        &meta.description_l10n(),
-        3,
-    );
+    // Editors reserve title + gap + the input row (3 rows) before the description
+    let header_rows = render_sub_pane_header(buf, area, theme, meta.label, meta.description, 3);
     if area.height <= header_rows {
         return;
     }
@@ -1703,22 +1627,18 @@ pub(super) fn render_editing_value(
     if buffer.is_empty() {
         let placeholder = match &meta.kind {
             SettingKind::String { validator, .. } => match validator {
-                StringValidator::KnownModel => {
-                    rust_i18n::t!("settings_modal.placeholder_shell_default")
-                }
-                StringValidator::NonEmptyToken => {
-                    rust_i18n::t!("settings_modal.placeholder_type_value")
-                }
-                StringValidator::Any => rust_i18n::t!("settings_modal.placeholder_type_value"),
+                StringValidator::KnownModel => "<empty: uses shell default>",
+                StringValidator::NonEmptyToken => "<type a value>",
+                StringValidator::Any => "<type a value>",
             },
-            _ => "".into(),
+            _ => "",
         };
         if !placeholder.is_empty() && visible_buffer_w > 0 {
             let placeholder_text: std::borrow::Cow<'_, str> =
                 if placeholder.width() <= visible_buffer_w {
-                    placeholder
+                    std::borrow::Cow::Borrowed(placeholder)
                 } else {
-                    std::borrow::Cow::Owned(truncate_str(&placeholder, visible_buffer_w))
+                    std::borrow::Cow::Owned(truncate_str(placeholder, visible_buffer_w))
                 };
             let placeholder_w = (placeholder_text.width() as u16).min(visible_buffer_w as u16);
             let placeholder_style = Style::default().fg(theme.gray_dim).bg(input_bg);
@@ -1779,7 +1699,7 @@ pub(super) fn render_editing_value(
     }
 }
 
-/// Render the Int stepper: title + description + centered `‹ N ›`.
+/// Render the Int stepper: title, description, and a centered `‹ N ›`.
 /// Populates `editor_adornment_rects` for mouse click targets.
 #[allow(clippy::too_many_arguments)]
 fn render_int_stepper(
@@ -1792,7 +1712,7 @@ fn render_int_stepper(
     buffer: &str,
     theme: &Theme,
 ) {
-    // Editors reserve title + gap + the stepper row (3) before the description.
+    // Editors reserve title + gap + the stepper row (3 rows) before the description
     let header_rows = render_sub_pane_header(buf, area, theme, label, description, 3);
     if area.height <= header_rows {
         return;
@@ -1801,10 +1721,8 @@ fn render_int_stepper(
 
     // ── Row 3: centered stepper "‹  N  ›". ────────────────────────
     let value_text = if buffer.is_empty() {
-        // Defensive — try_enter_editing_value seeds buffer from the
-        // current value, so this branch should be unreachable, but
-        // a blank cell would be confusing if a future refactor
-        // dropped the seed.
+        // Defensive: try_enter_editing_value seeds the buffer from the current value, so this branch is unreachable today
+        // A blank cell would be confusing if a future refactor dropped the seed
         "-".to_string()
     } else {
         buffer.to_string()
@@ -1818,8 +1736,8 @@ fn render_int_stepper(
     let left_w = int_stepper_left_glyph().width() as u16;
     let right_w = int_stepper_right_glyph().width() as u16;
     let value_w = value_text.width() as u16;
-    // Layout: "‹  N  ›" — 2 cells between each glyph for breathing
-    // room. Total width = left + 2 + value + 2 + right.
+    // Layout: "‹  N  ›" with 2 cells between each glyph for breathing room
+    // Total width = left + 2 + value + 2 + right
     let inter_pad: u16 = 2;
     let total_w = left_w + inter_pad + value_w + inter_pad + right_w;
     let render_arrows = area.width >= INT_STEPPER_ADORNMENT_MIN_WIDTH;
@@ -1865,7 +1783,7 @@ fn render_int_stepper(
             },
         );
     } else {
-        // Too narrow for arrows — render the value alone, centered.
+        // Too narrow for arrows: render the value alone, centered
         let v_w = value_w.min(area.width);
         let value_x = area.x + (area.width - v_w) / 2;
         buf.set_span(
@@ -1876,32 +1794,20 @@ fn render_int_stepper(
         );
     }
 
-    // **In-pane hint dropped.** Earlier revisions
-    // rendered a centered `↑/↓ +/-5   ←/→ +/-10   Enter commit · Esc
-    // cancel` strip here, but the chrome footer's
-    // `build_int_editor_shortcuts` already exposes the same content
-    // at the bottom of the modal. On tall viewports both rendered
-    // simultaneously — same keys, different separator (`·` vs `|`),
-    // duplicate visual noise. We rely on the chrome footer alone
-    // now; if the chrome ever fails to render its shortcut row (a
-    // future regression), the user can still discover the keys via
-    // the shortcuts cheatsheet (`?`).
+    // No in-pane key hint renders here
+    // Earlier revisions drew a centered hint strip, but the chrome footer's `build_int_editor_shortcuts` already exposes the same keys
+    // On tall viewports both rendered at once: same keys, different separator (`·` vs `|`), duplicate visual noise
+    // If the chrome ever fails to render its shortcut row, the user can still discover the keys via the shortcuts cheatsheet (`?`)
 
     // ── Live wrap preview for max_thoughts_width. ─────────────────
     //
-    // When the user is stepping `max_thoughts_width`, render a
-    // sample thinking-text preview directly below the stepper that
-    // wraps live at the current pending value. The preview sits in
-    // the rows immediately after the stepper (1 blank row + title +
-    // N content rows); any rows below the last content row of the
-    // preview stay blank — the chrome footer sits below
-    // `inner_area`, not inside `area`.
+    // When the user is stepping `max_thoughts_width`, a sample thinking-text preview renders directly below the stepper
+    // It wraps live at the current pending value
+    // The preview occupies the rows immediately after the stepper (1 blank row + title + N content rows)
+    // Any rows below the last content row stay blank; the chrome footer sits below `inner_area`, not inside `area`
     //
-    // Gated on `setting_key == MAX_THOUGHTS_WIDTH_KEY` so future
-    // Int settings don't inherit the preview behavior implicitly.
-    // The string equality is sufficient because key uniqueness is
-    // enforced at registry-load time (see
-    // `SettingsRegistry::defaults` / `::from_entries`).
+    // Gated on `setting_key == MAX_THOUGHTS_WIDTH_KEY` so future Int settings don't inherit the preview behavior implicitly
+    // The string equality is sufficient because key uniqueness is enforced at registry-load time (see `SettingsRegistry::defaults` / `::from_entries`)
     if setting_key == crate::settings::defs::MAX_THOUGHTS_WIDTH_KEY {
         let stepper_end_y = stepper_y.saturating_add(1);
         let area_end_y = area.y.saturating_add(area.height);
@@ -1919,16 +1825,12 @@ fn render_int_stepper(
     }
 }
 
-/// Parse the Int stepper's buffer back into a `u16` clamped to the
-/// `max_thoughts_width` registered bounds. Defensive — the stepper's
-/// step path keeps the buffer in range, but a synthetic test fixture
-/// or a future code path could seed an out-of-range buffer.
+/// Parse the Int stepper's buffer back into a `u16` clamped to the `max_thoughts_width` registered bounds.
+/// Defensive: the stepper's step path keeps the buffer in range, but a test fixture or a future code path could seed an out-of-range buffer.
 ///
-/// Both `MIN = 40` and `MAX = 500` fit inside `u16`, so the `clamp`
-/// result is always non-negative and ≤ `u16::MAX`. We use
-/// `u16::try_from(...).unwrap_or(u16::MAX)` instead of `as u16` so
-/// a future bump to `MAX > u16::MAX` saturates rather than silently
-/// truncating mod 65536 (security suggestion).
+/// Both `MIN = 40` and `MAX = 500` fit inside `u16`, so the `clamp` result is always non-negative and at most `u16::MAX`.
+/// We use `u16::try_from(...).unwrap_or(u16::MAX)` instead of `as u16`.
+/// A future bump to `MAX > u16::MAX` then saturates rather than silently truncating mod 65536.
 fn parse_max_thoughts_width_buffer(buffer: &str) -> u16 {
     let clamped = buffer
         .parse::<i64>()
@@ -1942,63 +1844,39 @@ fn parse_max_thoughts_width_buffer(buffer: &str) -> u16 {
 
 /// Render the `max_thoughts_width` live wrap preview block.
 ///
-/// **Vertical layout inside `area`.** Top-anchored. Row 0 of `area`
-/// is a 1-row blank gap separating the preview from whatever sits
-/// directly above (in the live caller, the stepper row); row 1 is
-/// the title; rows 2..(2+content_rows) hold the wrapped content.
-/// When `pending_value > area.width` (the preview is clamped) and
-/// there are at least two rows of vertical slack below the
-/// content, a 1-row blank gap and then a note row carry the text
-/// `note: clamped at N cols`. Any rows below the note
-/// stay blank — that empty space is intentional and stays
-/// unpainted (the chrome footer sits below `inner_area`).
+/// Vertical layout inside `area`, top-anchored: row 0 is a blank gap below the stepper, row 1 the title, rows 2 and on the wrapped content.
+/// When `pending_value > area.width` and at least two rows of slack sit below the content, a blank row and a `note: clamped at N cols` row follow.
+/// Rows below the note stay unpainted on purpose (the chrome footer sits below `inner_area`).
 ///
-/// **Edge cases (per spec).**
-/// - `area.width < MAX_THOUGHTS_WIDTH_PREVIEW_MIN_WIDTH` (30): omit
-///   the preview entirely — too narrow for readable wrapped text.
-/// - `area.height < MAX_THOUGHTS_WIDTH_PREVIEW_MIN_HEIGHT` (5):
-///   omit — insufficient vertical budget for the gap + title +
-///   2 content rows layout.
-/// - `pending_value > area.width`: clamp the preview width to
-///   `area.width`. The title stays plain `preview`; the clamp
-///   amount is surfaced via a `note: clamped at N cols` row
-///   rendered below the content when there's a row of slack
-///   below it. Content takes priority over the note — if there's
-///   no room for the note row, it's silently omitted.
-/// - Active setting key gating happens at the call site
-///   (`setting_key == "max_thoughts_width"`); this helper is pure
-///   on the `pending_value` it receives.
+/// Edge cases:
+/// - `area.width < MAX_THOUGHTS_WIDTH_PREVIEW_MIN_WIDTH` (30): omit the preview entirely; too narrow for readable wrapped text.
+/// - `area.height < MAX_THOUGHTS_WIDTH_PREVIEW_MIN_HEIGHT` (5): omit; not enough rows for the gap, the title, and 2 content rows.
+/// - `pending_value > area.width`: clamp the preview width to `area.width`; the title stays plain `preview` and only the note carries the clamp.
+///   Content takes priority over the note; without room for the note row, it's silently omitted.
+/// - Gating on the setting key happens at the call site; this helper is pure on the `pending_value` it receives.
 ///
-/// **Theme tokens.**
-/// - Title bg: `theme.bg_visual` — the heavier / more saturated of
-///   the two "block" bg tokens; matches selection-bg saturation.
-/// - Content bg: `theme.bg_highlight` — the lighter / less
-///   saturated of the two; still distinguishable from
-///   `theme.bg_base` so the preview reads as a contained block.
-/// - Title fg + content fg: `theme.text_primary` — same color the
-///   scrollback's thinking output renders in. Italic + bold +
-///   underlined for the title (the UNDERLINED gives consistent
-///   additional visual weight on themes where `bg_visual` vs
-///   `bg_highlight` is mostly a hue shift rather than a luma shift,
-///   e.g. TokyoNight); italic only for content.
+/// Theme tokens:
+/// - Title bg `theme.bg_visual`: the heavier, more saturated of the two "block" bg tokens; matches selection-bg saturation.
+/// - Content bg `theme.bg_highlight`: the lighter of the two, still distinguishable from `theme.bg_base` so the preview reads as a contained block.
+/// - Title and content fg `theme.text_primary`: the same color the scrollback's thinking output renders in.
+/// - The title is italic, bold, and underlined; content is italic only.
+///   UNDERLINED keeps the title distinct on themes where `bg_visual` vs `bg_highlight` is mostly a hue shift, not a luma shift (e.g. TokyoNight).
 fn render_max_thoughts_width_preview(
     buf: &mut Buffer,
     area: Rect,
     pending_value: u16,
     theme: &Theme,
 ) {
-    // Edge case 1: terminal area too narrow → omit.
+    // Edge case 1: the terminal area is too narrow; omit
     if area.width < MAX_THOUGHTS_WIDTH_PREVIEW_MIN_WIDTH {
         return;
     }
-    // Edge case 2: terminal area too short → omit.
+    // Edge case 2: the terminal area is too short; omit
     if area.height < MAX_THOUGHTS_WIDTH_PREVIEW_MIN_HEIGHT {
         return;
     }
-    // Defensive guard: catch future editors who add `\n` / `\t` (or
-    // any other control char that bypasses word_wrap_line's flow)
-    // to the sample. `wrap_description` has the same debug_assert
-    // for the same reason.
+    // Defensive guard: catch future editors who add `\n` / `\t` (or any other control char that bypasses word_wrap_line's flow) to the sample
+    // `wrap_description` has the same debug_assert for the same reason
     debug_assert!(
         !MAX_THOUGHTS_WIDTH_PREVIEW_SAMPLE.contains('\n')
             && !MAX_THOUGHTS_WIDTH_PREVIEW_SAMPLE.contains('\t'),
@@ -2015,19 +1893,15 @@ fn render_max_thoughts_width_preview(
     // Wrap the sample text at the effective width.
     let sample_line = Line::from(Span::raw(MAX_THOUGHTS_WIDTH_PREVIEW_SAMPLE));
     let wrapped = crate::render::wrapping::word_wrap_line(&sample_line, effective_width as usize);
-    // Defensive: a degenerate wrap (zero lines) means we have no
-    // meaningful preview to show. The MIN_WIDTH=30 gate above makes
-    // this practically unreachable.
+    // Defensive: a degenerate wrap (zero lines) means we have no meaningful preview to show
+    // The MIN_WIDTH=30 gate above makes this practically unreachable
     if wrapped.is_empty() {
         return;
     }
-    // Layout budget: 1 row blank gap (above title) + 1 row title +
-    // N content rows. Cap N at the available rows; the rest of
-    // `area` (below the last content row) stays blank. The
-    // MIN_HEIGHT=5 gate above guarantees `area.height >= 5`, so
-    // `available_content_rows >= 3` here — always enough room for
-    // the minimum 2 content rows. We cap at `wrapped.len()` so a
-    // short wrap doesn't leave us painting beyond the wrap shape.
+    // Layout budget: a 1-row blank gap above the title, 1 title row, and N content rows
+    // Cap N at the available rows; the rest of `area` below the last content row stays blank
+    // The MIN_HEIGHT=5 gate above guarantees `area.height >= 5`, so `available_content_rows >= 3`, always enough for the minimum 2 content rows
+    // We cap at `wrapped.len()` so a short wrap doesn't paint beyond the wrap shape
     let available_content_rows = area.height.saturating_sub(2) as usize;
     let visible_content = wrapped.len().min(available_content_rows);
     render_preview_block(
@@ -2040,27 +1914,18 @@ fn render_max_thoughts_width_preview(
     );
 }
 
-/// Inner painter for the preview block — split out so the
-/// caller's edge-case dispatch (omit / truncate / full-fit) stays
-/// readable and the rendering logic isn't duplicated.
+/// Inner painter for the preview block.
+/// Split out so the caller's edge-case dispatch (omit / truncate / full-fit) stays readable and the rendering logic isn't duplicated.
 ///
 /// Caller guarantees:
 /// - `effective_width <= area.width`.
-/// - `wrapped.len() >= 1` AND `wrapped.len() + 2 <= area.height`
-///   (1 row gap above + 1 row title + `wrapped.len()` content rows
-///   must all fit inside `area`).
+/// - `wrapped.len() >= 1` AND `wrapped.len() + 2 <= area.height` (the 1-row gap, the title row, and the content rows must all fit inside `area`).
 /// - `area.width >= MAX_THOUGHTS_WIDTH_PREVIEW_MIN_WIDTH`.
 ///
-/// Clamped-state surfacing: when `clamped` is true and there are
-/// at least 2 rows of vertical slack below the content (i.e.
-/// `area.height >= wrapped.len() + 4`), a 1-row blank gap and
-/// then a `note: clamped at N cols` row are rendered below the
-/// last content row
-/// in `theme.text_secondary` with no modifier and on
-/// `theme.bg_base` (no block-tinted bg — the note lives in the
-/// chrome strip below the preview, not inside the two-tone
-/// preview block). When the slack is unavailable, the note is
-/// silently omitted; content takes priority.
+/// When `clamped` is true and at least 2 rows of slack sit below the content (`area.height >= wrapped.len() + 4`), the clamp note renders.
+/// It is a blank row, then `note: clamped at N cols` in `theme.text_secondary`, no modifier, on `theme.bg_base`.
+/// The plain bg keeps the note reading as chrome below the preview, outside the two-tone preview block.
+/// When the slack is unavailable, the note is silently omitted; content takes priority.
 fn render_preview_block(
     buf: &mut Buffer,
     area: Rect,
@@ -2076,11 +1941,8 @@ fn render_preview_block(
         area.height,
         wrapped.len() + 2,
     );
-    // Top-anchor: row 0 of `area` is a blank gap, row 1 holds the
-    // title, rows 2..(2+content_rows) hold the wrapped content.
-    // Any rows below the last content row stay blank, except for
-    // the optional clamped-note row described at the bottom of
-    // this function.
+    // Top-anchor: row 0 of `area` is a blank gap, row 1 holds the title, rows 2..(2+content_rows) hold the wrapped content
+    // Any rows below the last content row stay blank, except for the optional clamped-note row described at the bottom of this function
     let title_y = area.y.saturating_add(1);
 
     // ── Title row. ────────────────────────────────────────────────
@@ -2089,9 +1951,8 @@ fn render_preview_block(
     let title_fg = theme.text_primary;
     let content_fg = theme.text_primary;
 
-    // Paint title bg first so partial-trailing-whitespace stays
-    // tinted (the bg extends to the FULL effective_width on every
-    // row, including any title columns past the text).
+    // Paint title bg first so trailing whitespace stays tinted
+    // The bg extends to the FULL effective_width on every row, including any title columns past the text
     let title_rect = Rect {
         x: area.x,
         y: title_y,
@@ -2100,12 +1961,9 @@ fn render_preview_block(
     };
     buf.set_style(title_rect, Style::default().bg(title_bg));
 
-    // Title is always plain lowercase `preview`. The previous
-    // implementation appended ` · clamped to N cols` to the title
-    // when the preview clamped to a narrower terminal width; the
-    // clamp signal has been moved to a note row below the content
-    // (see the bottom of this function) so the title carries the
-    // same shape regardless of clamp state.
+    // Title is always plain lowercase `preview`
+    // The previous implementation appended ` · clamped to N cols` to the title when the preview clamped to a narrower terminal width
+    // The clamp signal now lives in a note row below the content, so the title carries the same shape regardless of clamp state
     let title_text: &str = "preview";
     let title_text_truncated: std::borrow::Cow<'_, str> =
         if title_text.width() <= effective_width as usize {
@@ -2114,11 +1972,9 @@ fn render_preview_block(
             std::borrow::Cow::Owned(truncate_str(title_text, effective_width as usize))
         };
     let title_w = (title_text_truncated.width() as u16).min(effective_width);
-    // BOLD + ITALIC + UNDERLINED on the title. UNDERLINED gives
-    // additional visual weight independent of the bg luma — on
-    // TokyoNight `bg_visual` vs `bg_highlight` is
-    // mostly a hue shift, not a luma shift, so the underline
-    // carries the "this is the title" cue on its own.
+    // BOLD, ITALIC, and UNDERLINED on the title
+    // UNDERLINED gives visual weight independent of the bg luma
+    // On TokyoNight `bg_visual` vs `bg_highlight` is mostly a hue shift, not a luma shift, so the underline carries the "this is the title" cue alone
     let title_style = Style::default()
         .fg(title_fg)
         .bg(title_bg)
@@ -2162,18 +2018,12 @@ fn render_preview_block(
 
     // ── Clamped note (optional, height-permitting). ───────────────
     //
-    // When `clamped`, surface the clamp in a low-key note row
-    // immediately below the last content row. The note is
-    // height-aware: content takes priority, so if there's no row
-    // of slack below the content we omit the note entirely. The
-    // note sits OUTSIDE the two-tone preview bg block — it uses
-    // `theme.bg_base` so it visually reads as chrome/tip text,
-    // not as part of the wrap preview. Left-aligned at the same
-    // x-offset as content (`area.x`).
+    // When `clamped`, a low-key note row states the clamp immediately below the last content row
+    // The note is height-aware: content takes priority, so with no row of slack below the content we omit the note entirely
+    // The note sits OUTSIDE the two-tone preview bg block: it uses `theme.bg_base` so it reads as chrome/tip text, not as part of the wrap preview
+    // Left-aligned at the same x-offset as content (`area.x`)
     if clamped {
-        // One blank row sits between the last content row and the
-        // note so the note reads as a separate annotation, not a
-        // continuation of the wrap preview.
+        // One blank row sits between the last content row and the note so the note reads as a separate annotation, not a continuation of the preview
         let note_y = title_y
             .saturating_add(1)
             .saturating_add(wrapped.len() as u16)
@@ -2188,8 +2038,7 @@ fn render_preview_block(
                     std::borrow::Cow::Owned(truncate_str(&note_text, area.width as usize))
                 };
             let note_w = (note_text_truncated.width() as u16).min(area.width);
-            // No modifier, no bg tint — the note reads as chrome
-            // text aligned with the preview's left edge.
+            // No modifier, no bg tint: the note reads as chrome text aligned with the preview's left edge
             let note_style = Style::default().fg(theme.text_secondary).bg(theme.bg_base);
             buf.set_span(
                 area.x,
@@ -2201,10 +2050,8 @@ fn render_preview_block(
     }
 }
 
-/// `compute_max_label_w` equivalent for settings rows. Caps the column
-/// at 24 cols (so a single outlier label can't push the value column
-/// off-screen) and never exceeds half the content area width.
-/// Mirrors `question_view::compute_max_label_w` semantics.
+/// `compute_max_label_w` equivalent for settings rows, matching `question_view::compute_max_label_w`.
+/// Caps the column at 24 cols (so a single outlier label can't push the value column off-screen) and never exceeds half the content area width.
 fn compute_settings_max_label_w(metas: &[SettingMeta], content_w: u16) -> u16 {
     const MAX_LABEL_W: u16 = 24;
     let half = content_w / 2;
@@ -2217,33 +2064,24 @@ fn compute_settings_max_label_w(metas: &[SettingMeta], content_w: u16) -> u16 {
         .min(cap)
 }
 
-/// Look up the user-friendly display string for an Enum canonical
-/// against the setting's own `EnumChoice` catalog. Falls back to the
-/// canonical verbatim if the lookup misses (defense-in-depth: a
-/// hand-edited corrupted config with an unknown canonical still
-/// renders without an empty string, mirroring
-/// `display_name_for_canonical`'s pattern).
-///
-/// Look up the display name for an Enum canonical via the registry.
-/// Looks up the choice's translated display name
-/// (`settings.{key}.choice.{canonical}.display`), falling back to the English
-/// source when the locale bundle has no entry. The plain-English variant was
-/// removed once every render site switched to this one.
-fn display_for_enum_canonical_l10n(
-    meta: &SettingMeta,
-    canonical: &str,
-) -> std::borrow::Cow<'static, str> {
-    if let SettingKind::Enum { choices, .. } = &meta.kind {
+/// Look up the user-friendly display string for an Enum canonical against the setting's own `EnumChoice` catalog.
+/// Falls back to the canonical verbatim if the lookup misses, mirroring `display_name_for_canonical`.
+/// A hand-edited corrupted config with an unknown canonical then still renders without an empty string.
+fn display_for_enum_canonical<'a>(kind: &'a SettingKind, canonical: &'a str) -> &'a str {
+    if let SettingKind::Enum { choices, .. } = kind {
         for c in *choices {
             if c.canonical == canonical {
-                return c.display_l10n(meta.key);
+                return c.display;
             }
         }
     }
-    canonical.to_string().into()
+    // Fallback: render the canonical verbatim
+    // Defensive: catches a schema-vs-renderer drift without crashing the modal
+    canonical
 }
 
-/// Word-wrap a description string. Returns owned lines for re-styling.
+/// Word-wrap a description string.
+/// Returns owned lines for re-styling.
 /// Asserts descriptions are single-line (no `\n`/`\t`).
 pub(super) fn wrap_description(description: &str, width: u16) -> Vec<String> {
     if description.is_empty() || width == 0 {
@@ -2268,20 +2106,20 @@ pub(super) fn wrap_description(description: &str, width: u16) -> Vec<String> {
         .collect()
 }
 
-// Row layout: triangle on left, value right-aligned. Two-line
-// layout used when label + value exceed area width.
+// Row layout: triangle on left, value right-aligned
+// The two-line layout kicks in when label + value exceed the area width
 
 // Row chrome dimensions.
 const ROW_TRIANGLE_PREFIX_W: u16 = 2;
 const ROW_GAP_MIN_W: u16 = 1;
 pub(super) const ROW_RIGHT_PAD_W: u16 = 1;
 const ROW_CHEVRON_W: u16 = 2;
-/// Chevron column width — reserved for all rows for alignment.
+/// Chevron column width, reserved for all rows for alignment.
 pub(super) const ROW_CHEVRON_COL_W: u16 = ROW_CHEVRON_W;
-const ROW_RESTART_PILL_W: u16 = 10; // " · restart" — used for layout budgeting only.
+const ROW_RESTART_PILL_W: u16 = 10; // " · restart", used for layout budgeting only.
 /// Appended to the value column of a locked row (see `SettingsModalState::row_lock`).
 pub(super) const ROW_ADMIN_MANAGED_SUFFIX: &str = " \u{00B7} Admin Managed";
-/// Value column for ZDR-locked rows — replaces the opt-in/out value entirely.
+/// Value column for ZDR-locked rows; replaces the opt-in/out value entirely.
 pub(super) const ROW_ZDR_VALUE: &str = "ZDR";
 
 /// Value-column text, shared by layout, scroll math, and paint.
@@ -2294,21 +2132,15 @@ pub(super) fn value_display(
         return ROW_ZDR_VALUE.to_string();
     }
     let mut display = match value {
-        SettingValue::Bool(b) => {
-            if *b {
-                rust_i18n::t!("settings_modal.value_on").to_string()
-            } else {
-                rust_i18n::t!("settings_modal.value_off").to_string()
-            }
-        }
+        SettingValue::Bool(b) => if *b { "on" } else { "off" }.to_string(),
         SettingValue::String(s) => {
             if s.is_empty() && matches!(meta.kind, SettingKind::DynamicEnum { .. }) {
-                rust_i18n::t!("settings_modal.no_override").to_string()
+                "(no override)".to_string()
             } else {
                 s.clone()
             }
         }
-        SettingValue::Enum(e) => display_for_enum_canonical_l10n(meta, e).into_owned(),
+        SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e).to_string(),
         SettingValue::Int(i) => i.to_string(),
     };
     if lock == Some(CodingDataSharingLock::TeamManaged) {
@@ -2323,7 +2155,7 @@ pub(super) enum RowLayout {
     OneLine,
     /// Value drops to line 2 (label too wide for single line).
     TwoLine,
-    /// Even label alone exceeds width — truncate label, value on line 2.
+    /// Even the label alone exceeds the width: truncate the label, value on line 2.
     TwoLineWithLabelTruncation,
 }
 
@@ -2351,9 +2183,8 @@ pub(super) fn row_layout(
     if one_line_total <= area_width {
         return RowLayout::OneLine;
     }
-    // Two-line: line 1 hosts the label + (optional) restart pill +
-    // right pad. If even that doesn't fit, fall back to label
-    // truncation on line 1.
+    // Two-line: line 1 hosts the label + (optional) restart pill + right pad
+    // If even that doesn't fit, fall back to label truncation on line 1
     let line1_full = ROW_TRIANGLE_PREFIX_W
         .saturating_add(label_w)
         .saturating_add(restart_w)
@@ -2365,8 +2196,7 @@ pub(super) fn row_layout(
     }
 }
 
-/// Terminal-native themes collapse selection tokens to `Reset`; use ANSI
-/// `DarkGray` (not silver `Gray`, which washes out default fg on dark profiles).
+/// Terminal-native themes collapse selection tokens to `Reset`; use ANSI `DarkGray` (not silver `Gray`, which washes out default fg on dark profiles).
 pub(super) fn settings_list_row_bg(theme: &Theme, is_selected: bool, is_hovered: bool) -> Color {
     if crate::theme::cache::terminal_native_locked() || matches!(theme.bg_visual, Color::Reset) {
         return if is_selected || is_hovered {
@@ -2414,8 +2244,6 @@ pub(super) fn render_setting_row(
         .add_modifier(Modifier::ITALIC);
     let desc_style = Style::default().fg(theme.gray).bg(bg);
 
-    // Enum rows display the localized user-friendly name while managed
-    // settings retain the lock-specific value treatment.
     let value_text = value_display(meta, value, lock);
     let value_text = value_text.as_str();
 
@@ -2426,7 +2254,7 @@ pub(super) fn render_setting_row(
     };
 
     // Chevron for Enum/String/DynamicEnum (opens picker/editor).
-    // Locked rows can't be entered, so they drop the affordance.
+    // Locked rows can't be entered, so they drop the glyph
     let show_chevron = lock.is_none()
         && matches!(
             (&meta.kind, value),
@@ -2434,7 +2262,7 @@ pub(super) fn render_setting_row(
                 | (SettingKind::String { .. }, _)
                 | (SettingKind::DynamicEnum { .. }, _)
         );
-    let chevron_str = format!(" {}", crate::glyphs::chevron()); // › → > on legacy ConHost
+    let chevron_str = format!(" {}", crate::glyphs::chevron()); // › falls back to > on legacy ConHost
     let chevron_w = if show_chevron {
         chevron_str.width() as u16
     } else {
@@ -2442,8 +2270,7 @@ pub(super) fn render_setting_row(
     };
     let value_w = value_text.width() as u16;
 
-    // Pill only while expanded — change-time feedback is the toast's job, and
-    // a collapsed non-default row would misread as "restart pending" forever.
+    // Pill only while expanded: change-time feedback is the toast's job, and a collapsed non-default row would misread as "restart pending" forever
     let show_restart_pill = meta.restart_required && is_expanded;
     let restart_pill_text = " \u{00B7} restart";
     let restart_w = if show_restart_pill {
@@ -2465,15 +2292,9 @@ pub(super) fn render_setting_row(
     );
 
     // Fall back to one-line if only 1 line was allocated.
-    let layout_decision = row_layout(
-        area.width,
-        &meta.label_l10n(),
-        value_text,
-        show_restart_pill,
-    );
+    let layout_decision = row_layout(area.width, meta.label, value_text, show_restart_pill);
     let layout = if area.height < 2 {
-        // Only 1 line available — collapse to a one-line render and
-        // accept that the label might collide with the value column.
+        // Only 1 line is available: collapse to a one-line render and accept that the label might collide with the value column
         RowLayout::OneLine
     } else {
         layout_decision
@@ -2535,11 +2356,8 @@ pub(super) fn render_setting_row(
             let _ = desc_style;
             let _ = is_selected;
 
-            // Hit-rect for the value column: spans the value text
-            // plus the (always-reserved) chevron column. Clicking
-            // the chevron column on a Bool row is a no-op (no
-            // glyph there) but still routes to the row, matching
-            // chevron rows.
+            // Hit-rect for the value column: spans the value text plus the (always-reserved) chevron column
+            // Clicking the chevron column on a Bool row is a no-op (no glyph there) but still routes to the row, matching chevron rows
             Rect {
                 x: value_x,
                 y: area.y,
@@ -2549,8 +2367,7 @@ pub(super) fn render_setting_row(
         }
         RowLayout::TwoLine | RowLayout::TwoLineWithLabelTruncation => {
             // ── Line 1: triangle + label + (restart pill) ──
-            // Compute how much horizontal space is available to the
-            // label before colliding with the restart pill.
+            // Compute how much horizontal space is available to the label before colliding with the restart pill
             let label_avail = area
                 .width
                 .saturating_sub(restart_w + 1) // restart pill + right pad
@@ -2559,8 +2376,7 @@ pub(super) fn render_setting_row(
             let label_text_owned: String;
             let label_text: &str = match layout {
                 RowLayout::TwoLineWithLabelTruncation => {
-                    // Truncate the label so triangle + truncated label
-                    // + restart_pill + right_pad fits on line 1.
+                    // Truncate the label so triangle + truncated label + restart_pill + right_pad fits on line 1
                     if label_avail == 0 {
                         ""
                     } else {
@@ -2594,37 +2410,24 @@ pub(super) fn render_setting_row(
 
             // ── Line 2: right-aligned value + chevron column ──
             //
-            // The chevron column is reserved
-            // for ALL rows so the `›` glyph is at a constant
-            // offset; Bool rows leave it empty but the value
-            // still right-aligns to the column's left edge.
-            // An earlier version anchored Bool rows on line 2 to
-            // `area.right - value_w - 1` (no chevron column
-            // reserved), shifting their `on`/`off` text 2 cells
-            // to the right of chevron rows' values — a
-            // visual misalignment.
+            // The chevron column is reserved for ALL rows so the `›` glyph is at a constant offset
+            // Bool rows leave it empty but the value still right-aligns to the column's left edge
+            // An earlier version anchored Bool rows on line 2 to `area.right - value_w - 1` (no chevron column reserved)
+            // That shifted their `on`/`off` text 2 cells to the right of chevron rows' values, a visual misalignment
             //
-            // Anchor line-2's
-            // chevron-column LEFT EDGE at the same column the
-            // one-line layout uses: `area.right - ROW_RIGHT_PAD_W
-            // - ROW_CHEVRON_COL_W` (i.e. `restart_x_line1 -
-            // ROW_CHEVRON_COL_W` when no restart pill is on
-            // line 2). The earlier version anchored at
-            // `area.right - ROW_CHEVRON_COL_W`, so on a row
-            // that flipped from one-line to two-line layout the
-            // `›` glyph would jump 1 cell rightward — producing
-            // a staircase between mixed-layout rows. Subtracting
-            // `ROW_RIGHT_PAD_W` here brings line 2 into pixel
-            // parity with line 1.
+            // Anchor line-2's chevron-column LEFT EDGE at the same column the one-line layout uses:
+            // `area.right - ROW_RIGHT_PAD_W - ROW_CHEVRON_COL_W` (i.e. `restart_x_line1 - ROW_CHEVRON_COL_W` when no restart pill is on line 2).
+            // The earlier version anchored at `area.right - ROW_CHEVRON_COL_W`
+            // On a row that flipped from one-line to two-line layout the `›` glyph then jumped 1 cell rightward, a staircase between mixed-layout rows
+            // Subtracting `ROW_RIGHT_PAD_W` here brings line 2 into pixel parity with line 1
             let y2 = area.y + 1;
             let chevron_x_line2 = (area.x + area.width)
                 .saturating_sub(ROW_RIGHT_PAD_W + ROW_CHEVRON_COL_W)
                 .max(area.x);
             let value_x_line2 = chevron_x_line2.saturating_sub(value_w + 1).max(area.x);
 
-            // Render value, then chevron, on line 2. Clip if either
-            // would land off the left edge in a pathologically
-            // narrow row.
+            // Render value, then chevron, on line 2
+            // Clip if either would land off the left edge in a pathologically narrow row
             if value_w > 0 && value_x_line2 + value_w <= area.x + area.width {
                 buf.set_span(
                     value_x_line2,
@@ -2648,11 +2451,8 @@ pub(super) fn render_setting_row(
             let _ = desc_style;
             let _ = is_selected;
 
-            // Hit-rect for the value column: covers the value text
-            // + the always-reserved chevron column on LINE 2 only.
-            // Width is `value_w + ROW_CHEVRON_COL_W`
-            // (not `value_w + chevron_w`) so the hit-rect spans the
-            // empty chevron column on Bool rows too.
+            // Hit-rect for the value column: covers the value text and the always-reserved chevron column on LINE 2 only
+            // Width is `value_w + ROW_CHEVRON_COL_W` (not `value_w + chevron_w`) so the hit-rect spans the empty chevron column on Bool rows too
             Rect {
                 x: value_x_line2,
                 y: y2,
@@ -2678,10 +2478,7 @@ fn render_expanded_description(
         .fg(theme.gray)
         .bg(theme.bg_base)
         .add_modifier(Modifier::ITALIC);
-    let desc_text: std::borrow::Cow<'_, str> = match lock_reason {
-        Some(reason) => std::borrow::Cow::Borrowed(reason),
-        None => meta.description_l10n(),
-    };
+    let desc_text = lock_reason.unwrap_or(meta.description);
     // Indent 4 cols to nest under the label.
     let indent = 4u16.min(area.width);
     let wrap_w = area.width.saturating_sub(indent);
@@ -2705,10 +2502,9 @@ fn render_expanded_description(
     }
 }
 
-/// Fallback render path for a row whose `current_value_for` returned
-/// `None` (registry / dispatch skew). Shows the label without a value
-/// column so the misconfiguration is visible at runtime; the
-/// `every_setting_has_dispatch_arm` test catches the case at CI time.
+/// Fallback render path for a row whose `current_value_for` returned `None` (registry / dispatch skew).
+/// Shows the label without a value column so the misconfiguration is visible at runtime.
+/// The `every_setting_has_dispatch_arm` test catches the case at CI time.
 fn render_setting_row_no_value(
     buf: &mut Buffer,
     area: Rect,
@@ -2725,11 +2521,10 @@ fn render_setting_row_no_value(
         .add_modifier(Modifier::BOLD);
 
     let label_max_w = max_label_w;
-    let label_l10n = meta.label_l10n();
-    let label_truncated: std::borrow::Cow<'_, str> = if label_l10n.width() <= label_max_w as usize {
-        label_l10n
+    let label_truncated: std::borrow::Cow<'_, str> = if meta.label.width() <= label_max_w as usize {
+        std::borrow::Cow::Borrowed(meta.label)
     } else {
-        std::borrow::Cow::Owned(truncate_str(&label_l10n, label_max_w as usize))
+        std::borrow::Cow::Owned(truncate_str(meta.label, label_max_w as usize))
     };
     let text = format!(" !   {label_truncated} (no read mapping)");
     let w = text.width() as u16;
@@ -2741,9 +2536,9 @@ fn render_setting_row_no_value(
     );
 }
 
-/// Render a `Group` row in the Browse list: a triangle-prefixed label with a
-/// trailing chevron (opens the sub-sheet). Carries no value column. Returns the
-/// chevron hit-rect so a click on it opens the sub-sheet like an Enum row.
+/// Render a `Group` row in the Browse list: a triangle-prefixed label with a trailing chevron (opens the sub-sheet).
+/// Carries no value column.
+/// Returns the chevron hit-rect so a click on it opens the sub-sheet like an Enum row.
 fn render_setting_group_row(
     buf: &mut Buffer,
     area: Rect,
@@ -2767,8 +2562,7 @@ fn render_setting_group_row(
         .saturating_sub(ROW_RIGHT_PAD_W)
         .saturating_sub(ROW_CHEVRON_COL_W);
 
-    // Triangle prefix mirrors normal rows: "▾" expanded, "▸" collapsed
-    // (the group's description expands inline via Right/l like other rows).
+    // Triangle prefix mirrors normal rows: "▾" expanded, "▸" collapsed (the group's description expands inline via Right/l like other rows)
     let triangle = if is_expanded { "\u{25BE}" } else { "\u{25B8}" };
     let label_text = format!("{triangle} {}", meta.label);
     let label_cap = chevron_x.saturating_sub(area.x).saturating_sub(1);
@@ -2798,37 +2592,35 @@ fn render_setting_group_row(
     }
 }
 
-/// Build the footer shortcut row. Enter label varies by focused row kind.
+/// Build the footer shortcut row.
+/// The Enter label varies by focused row kind.
 pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'static>> {
     match &state.state.mode {
         SettingsMode::Browse => {
-            // A locked row (ZDR / team-managed) accepts neither the edit keys
-            // nor `d`, so it advertises neither. `→ expand` stays — that is
-            // how the user reads the lock reason.
+            // A locked row (ZDR / team-managed) accepts neither the edit keys nor `d`, so it advertises neither
+            // `→ expand` stays: that is how the user reads the lock reason
             let locked = state
                 .focused_setting()
                 .is_some_and(|(key, _)| state.row_lock(key).is_some());
             let enter_label = match state.focused_setting() {
-                Some((_, meta)) if matches!(meta.kind, SettingKind::Bool { .. }) => {
-                    rust_i18n::t!("footer.enter_toggle")
-                }
-                _ => rust_i18n::t!("footer.enter_edit"),
+                Some((_, meta)) if matches!(meta.kind, SettingKind::Bool { .. }) => "Enter toggle",
+                _ => "Enter edit",
             };
             let mut shortcuts = vec![
                 Shortcut {
-                    label: rust_i18n::t!("footer.nav_arrows_jk"),
+                    label: "\u{2191}/\u{2193}/j/k nav",
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: rust_i18n::t!("footer.top_btm"),
+                    label: "g/G top/btm",
                     clickable: false,
                     id: 0,
                 },
             ];
             if !locked {
                 shortcuts.push(Shortcut {
-                    label: rust_i18n::t!("footer.space_toggle"),
+                    label: "Space toggle",
                     clickable: false,
                     id: 0,
                 });
@@ -2840,56 +2632,55 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
             }
             shortcuts.extend([
                 Shortcut {
-                    label: rust_i18n::t!("footer.arrow_expand"),
+                    label: "\u{2192} expand",
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: rust_i18n::t!("footer.search"),
+                    label: "/ search",
                     clickable: false,
                     id: 0,
                 },
             ]);
             if !locked {
                 shortcuts.push(Shortcut {
-                    label: rust_i18n::t!("footer.d_reset"),
+                    label: "d reset",
                     clickable: false,
                     id: 0,
                 });
             }
             shortcuts.push(Shortcut {
-                label: rust_i18n::t!("footer.f2_esc_close"),
+                label: "F2/Esc close",
                 clickable: false,
                 id: 0,
             });
-            // Browse is nav mode (filter inactive), so append `i search` last
-            // (matching the shared pickers).
+            // Browse is nav mode (filter inactive), so append `i search` last (matching the shared pickers)
             modal_window::push_vim_nav_search_hint(&mut shortcuts, false);
             shortcuts
         }
         SettingsMode::FilterFocused => vec![
             Shortcut {
-                label: rust_i18n::t!("footer.type_filter"),
+                label: "type to filter",
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: rust_i18n::t!("footer.nav"),
+                label: "\u{2191}/\u{2193} nav",
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: rust_i18n::t!("footer.backspace_edit"),
+                label: "Backspace edit",
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: rust_i18n::t!("footer.enter_commit"),
+                label: "Enter commit",
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: rust_i18n::t!("footer.esc_clear"),
+                label: "Esc clear",
                 clickable: false,
                 id: 0,
             },
@@ -2901,15 +2692,11 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
         } => {
             // Labels depend on whether the Enum supports live preview.
             let nav_label = if *sp {
-                rust_i18n::t!("footer.try")
+                "\u{2191}/\u{2193} try"
             } else {
-                rust_i18n::t!("footer.nav")
+                "\u{2191}/\u{2193} nav"
             };
-            let esc_label = if *sp {
-                rust_i18n::t!("footer.esc_revert")
-            } else {
-                rust_i18n::t!("footer.esc_cancel")
-            };
+            let esc_label = if *sp { "Esc revert" } else { "Esc cancel" };
             let consent = crate::settings::is_consent_chooser(key);
             let mut shortcuts = vec![
                 Shortcut {
@@ -2917,11 +2704,10 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     clickable: false,
                     id: 0,
                 },
-                // A chooser picks one of the offered answers, so Enter
-                // "selects". The filter bar and the value editors, where
-                // Enter really does commit typed input, keep that wording.
+                // A chooser picks one of the offered answers, so Enter "selects"
+                // The filter bar and the value editors, where Enter really does commit typed input, keep that wording
                 Shortcut {
-                    label: rust_i18n::t!("footer.enter_select"),
+                    label: "Enter select",
                     clickable: false,
                     id: 0,
                 },
@@ -2931,11 +2717,10 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     id: 0,
                 },
             ];
-            // Consent choosers hide reset; the key is disabled there too, so
-            // this stays a description of what actually works on the pane.
+            // Consent choosers hide reset; the key is disabled there too, so this stays a description of what actually works on the pane
             if !consent {
                 shortcuts.push(Shortcut {
-                    label: rust_i18n::t!("footer.d_reset"),
+                    label: "d reset",
                     clickable: false,
                     id: 0,
                 });
@@ -2957,17 +2742,17 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     id: 0,
                 },
                 Shortcut {
-                    label: rust_i18n::t!("footer.enter_commit"),
+                    label: "Enter commit",
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: rust_i18n::t!("footer.esc_cancel"),
+                    label: "Esc cancel",
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: rust_i18n::t!("footer.d_reset"),
+                    label: "d reset",
                     clickable: false,
                     id: 0,
                 },
@@ -2975,39 +2760,39 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
         }
         SettingsMode::EditingString { .. } => vec![
             Shortcut {
-                label: rust_i18n::t!("footer.type_edit"),
+                label: "type to edit",
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: rust_i18n::t!("footer.cursor"),
+                label: "\u{2190}/\u{2192} cursor",
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: rust_i18n::t!("footer.enter_commit"),
+                label: "Enter commit",
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: rust_i18n::t!("footer.esc_cancel"),
+                label: "Esc cancel",
                 clickable: false,
                 id: 0,
             },
         ],
         SettingsMode::PickingGroup { .. } => vec![
             Shortcut {
-                label: rust_i18n::t!("footer.nav_arrows_jk"),
+                label: "\u{2191}/\u{2193}/j/k nav",
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: rust_i18n::t!("footer.space_enter_toggle"),
+                label: "Space/Enter toggle",
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: rust_i18n::t!("footer.esc_back"),
+                label: "Esc back",
                 clickable: false,
                 id: 0,
             },

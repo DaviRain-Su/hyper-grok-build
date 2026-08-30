@@ -2,17 +2,16 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Ctrl+\ (OpenDashboard). crossterm maps the raw 0x1c byte to Ctrl+4, so the
-/// universal dashboard chord must be sent as the kitty CSI-u form: code 92
-/// (`\`), modifier 5 (Ctrl). Mirrors `CTRL_ENTER` / `CTRL_SEMICOLON` in common.
+/// Ctrl+\ (OpenDashboard).
+/// crossterm maps the raw 0x1c byte to Ctrl+4, so the universal dashboard chord must be sent as kitty CSI-u: code 92 (`\`), modifier 5 (Ctrl).
+/// Mirrors `CTRL_ENTER` / `CTRL_SEMICOLON` in common.
 const CTRL_BACKSLASH: &[u8] = b"\x1b[92;5u";
 
 /// Attach the (only) agent row as a session overlay from the dashboard list.
-/// Down clamps at the last focusable, so three Downs land on the row regardless
-/// of the current cursor (fresh open = New Agent button; after a back-out =
-/// previously-selected row); Enter then attaches the peeked row. Waits until the
-/// overlay is up: the dashboard list ("+ New Agent") is gone and the agent's
-/// transcript (MOCKRESPONSE) is shown.
+/// Down clamps at the last focusable, so three Downs land on the row regardless of the current cursor.
+/// (A fresh open starts on the New Agent button; after a back-out, on the previously-selected row.)
+/// Enter then attaches the peeked row.
+/// Waits until the overlay is up: the dashboard list ("+ New Agent") is gone and the agent's transcript (MOCKRESPONSE) is shown.
 fn attach_overlay(h: &mut PtyHarness) {
     for _ in 0..3 {
         h.inject_keys(keys::DOWN).expect("down to row");
@@ -29,13 +28,12 @@ fn attach_overlay(h: &mut PtyHarness) {
     );
 }
 
-/// Dashboard-overlay back-out. Attaching a
-/// session lands on the default Prompt focus, so every keyboard back-out path
-/// must work and the user must never be trapped:
+/// Dashboard-overlay back-out.
+/// Attaching a session lands on the default Prompt focus, so every keyboard back-out path must work and the user must never be trapped:
 ///   - **Ctrl+\** opens the dashboard from a session (and from inside the overlay);
 ///   - **empty-prompt Esc** backs out;
 ///   - **Left on an empty prompt** backs out;
-///   - **a drafted-prompt Esc** does NOT back out — it arms "press again to clear";
+///   - **a drafted-prompt Esc** does NOT back out; it arms "press again to clear";
 ///   - **Tab then a neutral scrollback Esc** backs out.
 /// Each back-out is re-verified against a freshly re-attached overlay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -67,8 +65,7 @@ async fn dashboard_overlay_tab_esc_backout_and_ctrl_backslash() {
         .wait_for_text("+ New Agent", Duration::from_secs(10))
         .expect("Ctrl+\\ opens the dashboard");
 
-    // ── (c) Drafted-prompt Esc must NOT back out (arms "press again to clear")
-    //    and (d) empty-prompt Esc backs out. Overlay lands on Prompt.
+    // ── (c) Drafted-prompt Esc must NOT back out (arms "press again to clear") and (d) empty-prompt Esc backs out. Overlay lands on Prompt.
     attach_overlay(&mut harness);
     let draft = "OVLDRAFT";
     harness.inject_keys(draft.as_bytes()).expect("type draft");
@@ -96,7 +93,7 @@ async fn dashboard_overlay_tab_esc_backout_and_ctrl_backslash() {
         .wait_for_text("+ New Agent", Duration::from_secs(10))
         .expect("empty-prompt overlay Esc must back out to the dashboard");
 
-    // ── (a) Left on an empty prompt backs out. (Left arrow = CSI D.)
+    // ── (a) Left on an empty prompt backs out. (Left arrow is CSI D.)
     attach_overlay(&mut harness);
     harness
         .inject_keys(b"\x1b[D")

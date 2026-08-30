@@ -1,7 +1,6 @@
 //! Dedicated presentation for `send_subagent_message` tool calls.
 //!
-//! Destination and message arguments are inert literal text: they never enter
-//! generic media discovery, command interpretation, or Q&A parsing.
+//! Destination and message arguments are inert literal text: they never enter generic media discovery, command interpretation, or Q&A parsing.
 
 use std::sync::Arc;
 

@@ -1,9 +1,7 @@
 //! PTY e2e: permission Auto mode is distinct on the real pager screen.
 //!
-//! Uses `xai-grok-pager-pty-harness` (`PtyHarness`) + Shift+Tab (CSI Z,
-//! compatible with `ptyctl` key injection) to cycle Normal → Plan → Auto
-//! and assert the mode banner / status shows Auto without conflating
-//! Always-Approve.
+//! Uses `xai-grok-pager-pty-harness` (`PtyHarness`) and Shift+Tab (CSI Z, compatible with `ptyctl` key injection) to cycle Normal to Plan to Auto.
+//! The mode banner or status line must show Auto as its own mode, distinct from Always-Approve.
 //!
 //! Auth: seeds `HOME/.grok/auth.json` from `GROK_AUTH_JSON` (path) or the
 //! developer's `~/.grok/auth.json` so the pager skips device-login when
@@ -24,7 +22,7 @@ const COLS: u16 = 120;
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(25);
 const WELCOME_SCREEN_SENTINEL: &str = "Quit";
 
-/// Back-tab / Shift+Tab (CSI Z) — pager binds this to CycleMode.
+/// Back-tab (Shift+Tab, CSI Z); the pager binds it to CycleMode.
 const SHIFT_TAB: &[u8] = b"\x1b[Z";
 
 /// Prefer explicit path, else the user's real `~/.grok/auth.json`.
@@ -46,9 +44,8 @@ fn dirs_next_home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Sandbox HOME + optional auth.json seed (no secrets logged), with the
-/// auto-permission-mode feature gate pinned explicitly via `gate_on` so each
-/// test is self-contained and deterministic regardless of the runner's shell.
+/// Build the sandbox env: HOME plus an optional auth.json seed (no secrets logged).
+/// `gate_on` pins the auto-permission-mode feature gate so each test is deterministic regardless of the runner's shell.
 fn prepare_sandbox(sandbox: &mut TestSandbox, gate_on: bool) -> Vec<(String, String)> {
     // Remove rather than empty the fake API key so seeded OIDC remains authoritative.
     sandbox.remove_env("XAI_API_KEY");
@@ -82,12 +79,10 @@ fn prepare_sandbox(sandbox: &mut TestSandbox, gate_on: bool) -> Vec<(String, Str
         ("TERM_PROGRAM".into(), "".into()),
         ("TMUX".into(), "".into()),
     ];
-    // Pin the feature gate explicitly so the cycle is deterministic regardless
-    // of the developer's shell. `GROK_AUTO_PERMISSION_MODE` is the highest gate
-    // layer below requirements; "1"/"0" parse to on/off (xai_grok_config::
-    // env_bool), and portable-pty merges this over the inherited environment —
-    // so an exported value can't flip the result (Auto is present in the ring
-    // with the gate on, skipped with it off).
+    // Pin the feature gate explicitly so the cycle is deterministic regardless of the developer's shell
+    // `GROK_AUTO_PERMISSION_MODE` is the highest gate layer below requirements; "1" and "0" parse to on and off (`xai_grok_config::env_bool`)
+    // portable-pty merges this over the inherited environment, so a value exported in the shell can't flip the result
+    // Auto is in the ring with the gate on and skipped with it off
     env.push((
         "GROK_AUTO_PERMISSION_MODE".into(),
         if gate_on { "1" } else { "0" }.into(),
@@ -101,15 +96,13 @@ fn is_login_screen(screen: &str) -> bool {
         || screen.contains("finish signing in")
 }
 
-/// Whether the caller expects seeded auth (CI / a deliberate e2e run). When set,
-/// hitting the login screen is a real failure (broken auth seeding), not an
-/// environmental skip — so the test hard-fails instead of passing vacuously.
+/// Whether the caller expects seeded auth (CI, or a deliberate e2e run).
+/// When set, hitting the login screen means auth seeding broke, so the test fails instead of passing vacuously.
 fn require_auth() -> bool {
     std::env::var("GROK_PTY_REQUIRE_AUTH").is_ok_and(|v| v == "1" || v == "true")
 }
 
-/// Cycle into Auto on the welcome / pre-session path and assert screen text
-/// shows Auto (mode banner) while not stuck on Always-Approve alone.
+/// Cycle into Auto on the welcome (pre-session) screen and assert the screen shows Auto (mode banner), not Always-Approve alone.
 #[test]
 #[ignore = "spawns real pager PTY; run with cargo test -- --ignored"]
 fn pty_shift_tab_cycles_to_auto_mode_banner() {
@@ -128,7 +121,7 @@ fn pty_shift_tab_cycles_to_auto_mode_banner() {
         PtyHarness::new_in_sandbox(&binary, ROWS, COLS, &[], &sandbox, &env_refs, None)
             .expect("spawn pager in PTY (xai-grok-pager-pty-harness)");
 
-    // Drain startup; welcome or agent chrome.
+    // Drain startup output; either the welcome or the agent chrome may be on screen
     let _ = harness.wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT);
     let early = harness.screen_contents();
     if is_login_screen(&early) {
@@ -136,9 +129,8 @@ fn pty_shift_tab_cycles_to_auto_mode_banner() {
             !require_auth(),
             "GROK_PTY_REQUIRE_AUTH set but pager hit the login screen — auth seeding broke"
         );
-        // Auth still blocking (expired token / no network). Honest env failure:
-        // the UI-ring guarantee is covered by the dispatch-level unit tests; save
-        // the screen for debugging.
+        // Auth is still blocking (expired token or no network), an environmental failure
+        // The UI-ring guarantee is covered by the dispatch-level unit tests; save the screen for debugging
         if let Ok(dump) = std::env::var("PTY_AUTO_MODE_SCREEN_DUMP") {
             let _ = std::fs::write(&dump, &early);
         }
@@ -157,13 +149,13 @@ fn pty_shift_tab_cycles_to_auto_mode_banner() {
         return;
     }
 
-    // Normal → Plan
+    // Normal to Plan
     harness
         .inject_keys(SHIFT_TAB)
         .expect("inject Shift+Tab (Plan)");
     let _ = harness.wait_for_text("Plan", Duration::from_secs(8));
 
-    // Plan → Auto
+    // Plan to Auto
     harness
         .inject_keys(SHIFT_TAB)
         .expect("inject Shift+Tab (Auto)");
@@ -192,10 +184,9 @@ fn pty_shift_tab_cycles_to_auto_mode_banner() {
     let _ = harness.inject_keys(b"q");
 }
 
-/// Gate OFF (the shipped default): the Shift+Tab ring must SKIP Auto entirely
-/// (Normal → Plan → Always-Approve → Normal), so the feature is inert and the
-/// classifier never launches. Negative companion to the gate-ON cycle test;
-/// proves the gate governs the UI ring, not just the engine.
+/// Gate off (the shipped default): the Shift+Tab ring must skip Auto entirely, so the feature is inert and the classifier never launches.
+/// The ring cycles Normal, Plan, Always-Approve, back to Normal.
+/// The negative companion to the gate-on cycle test; it proves the gate governs the UI ring, not just the engine.
 #[test]
 #[ignore = "spawns real pager PTY; run with cargo test -- --ignored"]
 fn pty_shift_tab_skips_auto_when_gate_off() {
@@ -233,19 +224,17 @@ fn pty_shift_tab_skips_auto_when_gate_off() {
         return;
     }
 
-    // Cycle the full ring (4 presses returns to Normal). With the gate off the
-    // ring is Normal → Plan → Always-Approve → Normal: Auto must never appear,
-    // while Plan and Always-Approve still must (the ring otherwise works).
+    // Cycle the full ring (4 presses returns to Normal)
+    // With the gate off the ring is Normal, Plan, Always-Approve, Normal: Auto must never appear
+    // Plan and Always-Approve still must appear, proving the ring otherwise works
     let mut saw_plan = false;
     let mut saw_always = false;
     let mut saw_auto = false;
     for _ in 0..4 {
         harness.inject_keys(SHIFT_TAB).expect("inject Shift+Tab");
-        // Drain output so the NEW mode banner renders before we read. A
-        // `wait_for_text("Switched to mode:")` would hit its fast-path and
-        // return instantly on the prior press's banner still on screen, so we
-        // explicitly pump for a fixed window instead (the screen tracker keeps
-        // only the latest frame, so each read reflects the current mode).
+        // Drain output so the new mode banner renders before we read
+        // `wait_for_text("Switched to mode:")` would hit its fast path and return instantly on the prior press's banner still on screen
+        // Pump for a fixed window instead; the screen tracker keeps only the latest frame, so each read reflects the current mode
         harness.update(Duration::from_secs(2));
         let s = harness.screen_contents();
         if is_login_screen(&s) {
@@ -280,7 +269,7 @@ fn pty_shift_tab_skips_auto_when_gate_off() {
     let _ = harness.inject_keys(b"q");
 }
 
-/// Structural: harness crate exports used by this e2e (fails compile if removed).
+/// Structural: the harness crate exports this e2e uses (fails to compile if they are removed).
 #[test]
 fn pty_harness_api_surface_for_auto_mode_e2e() {
     let _ = std::any::type_name::<PtyHarness>();

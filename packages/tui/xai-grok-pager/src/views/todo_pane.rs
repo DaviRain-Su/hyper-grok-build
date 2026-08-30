@@ -1,7 +1,6 @@
-//! Todo pane — renders `TodoItem`s from `xai-grok-tools` in a `ListPane`.
+//! Renders `TodoItem`s from `xai-grok-tools` in a `ListPane`.
 //!
-//! Wraps the canonical `TodoItem` type with a `ListItem` implementation
-//! that provides status-icon prefixes and styled content.
+//! Wraps the canonical `TodoItem` type with a `ListItem` implementation that provides status-icon prefixes and styled content.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -10,19 +9,15 @@ use xai_grok_shell::tools::{TodoItem, TodoStatus};
 use super::list_pane::ListItem;
 
 // ---------------------------------------------------------------------------
-// TodoPaneStyle — per-status colors
+// TodoPaneStyle: per-status colors
 // ---------------------------------------------------------------------------
 
-/// Visual style for each todo status.
 #[derive(Debug, Clone, Copy)]
 pub struct TodoStatusStyle {
-    /// Color for the status icon.
     pub icon_fg: Color,
-    /// Style for the content text.
     pub text_style: Style,
 }
 
-/// Full style configuration for the todo pane.
 #[derive(Debug, Clone, Copy)]
 pub struct TodoPaneStyle {
     pub pending: TodoStatusStyle,
@@ -33,7 +28,7 @@ pub struct TodoPaneStyle {
 
 impl Default for TodoPaneStyle {
     fn default() -> Self {
-        // Sourced from theme to ensure colors are quantized for terminal compat.
+        // The theme quantizes colors for terminal compatibility
         let theme = crate::theme::Theme::current();
 
         Self {
@@ -62,27 +57,22 @@ impl Default for TodoPaneStyle {
 }
 
 // ---------------------------------------------------------------------------
-// TodoListEntry — ListItem wrapper around TodoItem
+// TodoListEntry: ListItem wrapper around TodoItem
 // ---------------------------------------------------------------------------
 
 /// A `TodoItem` wrapped for display in a `ListPane`.
 ///
-/// Caches the styled `Line` for `content()` and generates a status-icon
-/// `prefix()` per frame.
+/// Caches the styled `Line` for `content()` and generates a status-icon `prefix()` per frame.
 #[derive(Debug, Clone)]
 pub struct TodoListEntry {
     /// Unique ID (index in the todo list, or a stable ID from the model).
     pub id: u64,
-    /// The canonical todo item.
     pub item: TodoItem,
-    /// Cached styled content line.
     styled: Line<'static>,
-    /// The style to use for this entry's status.
     status_style: TodoStatusStyle,
 }
 
 impl TodoListEntry {
-    /// Create a new entry from a `TodoItem`.
     pub fn new(id: u64, item: TodoItem, style: &TodoPaneStyle) -> Self {
         let status_style = match item.status {
             TodoStatus::Pending => style.pending,
@@ -99,7 +89,6 @@ impl TodoListEntry {
         }
     }
 
-    /// Status icon for the current status.
     fn icon(&self) -> &'static str {
         match self.item.status {
             TodoStatus::Pending => "□",
@@ -133,7 +122,7 @@ impl ListItem for TodoListEntry {
 }
 
 // ---------------------------------------------------------------------------
-// TodoPane — self-contained pane owning items, state, and rendering
+// TodoPane: self-contained pane owning items, state, and rendering
 // ---------------------------------------------------------------------------
 
 use crossterm::event::{KeyCode, KeyEvent, MouseEventKind};
@@ -148,13 +137,11 @@ use super::list_pane::{ListPane, ListPaneConfig, ListPaneState, ListPaneStyle, W
 use super::overlay::OverlayState;
 
 // ---------------------------------------------------------------------------
-// TodoCounts — aggregate status counts
+// TodoCounts: aggregate status counts
 // ---------------------------------------------------------------------------
 
-/// Counts of todo items by status.
-///
-/// Feeds the empty-pane placeholder message.
-/// Counts ALL items regardless of `show_done` filter.
+/// Feeds the placeholder message shown when the pane is empty.
+/// Counts ALL items regardless of the `show_done` filter.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TodoCounts {
     pub in_progress: usize,
@@ -164,7 +151,6 @@ pub struct TodoCounts {
 }
 
 impl TodoCounts {
-    /// Total number of items across all statuses.
     pub fn total(&self) -> usize {
         self.in_progress + self.pending + self.completed + self.cancelled
     }
@@ -187,28 +173,25 @@ const MAX_TODO_HEIGHT: u16 = 10;
 /// Maximum fraction of total view height the todo pane may occupy.
 const MAX_TODO_FRACTION: f32 = 0.15;
 
-/// Self-contained todo pane component.
-///
-/// Owns the raw `TodoItem` data, the filtered `TodoListEntry` cache,
-/// `ListPaneState`, and style config. `AgentView` holds a single
-/// `TodoPane` and delegates input/render to it.
+/// Owns the raw `TodoItem` data, the filtered `TodoListEntry` cache, `ListPaneState`, and style config.
+/// `AgentView` holds a single `TodoPane` and delegates input and render to it.
 pub struct TodoPane {
     /// Raw todo items from ACP Plan updates.
     todos: Vec<TodoItem>,
-    /// Filtered + styled entries for `ListPane` rendering.
+    /// Filtered and styled entries for `ListPane` rendering.
     /// Rebuilt from `todos` at the start of each `render()` call.
     entries: Vec<TodoListEntry>,
     /// List pane state (scroll, selection, search, layout cache).
     pub list_state: ListPaneState,
     /// Per-status visual style for icons and text.
     style: TodoPaneStyle,
-    /// Visual style for the list pane framework (selection bg, etc.).
+    /// Visual style for the `ListPane` widget (selection bg, etc.).
     list_style: ListPaneStyle,
-    /// Whether to show completed/cancelled items.
+    /// Whether to show completed and cancelled items.
     show_done: bool,
-    /// Shared visibility/focus state.
+    /// Shared visibility and focus state.
     pub overlay: OverlayState,
-    /// Last theme kind seen — used to detect theme switches and restyle.
+    /// Last theme kind seen; used to detect theme switches and restyle.
     last_theme: ThemeKind,
 }
 
@@ -219,7 +202,6 @@ impl Default for TodoPane {
 }
 
 impl TodoPane {
-    /// Create a new empty todo pane.
     pub fn new() -> Self {
         let config = ListPaneConfig {
             follow_enabled: false,
@@ -247,7 +229,6 @@ impl TodoPane {
 
     // -- Data management -----------------------------------------------------
 
-    /// Read-only access to the current todo items.
     pub fn todos(&self) -> &[TodoItem] {
         &self.todos
     }
@@ -259,7 +240,6 @@ impl TodoPane {
         self.todos = items;
     }
 
-    /// Compute status counts from a list of items.
     fn compute_counts(items: &[TodoItem]) -> TodoCounts {
         let mut c = TodoCounts::default();
         for item in items {
@@ -278,31 +258,26 @@ impl TodoPane {
         Self::compute_counts(&self.todos)
     }
 
-    /// Whether the pane should be visible in the layout.
-    ///
-    /// Visible when overlay is shown. When empty, shows a placeholder
-    /// message instead of the list pane.
+    /// Visible when the overlay is shown.
+    /// When empty, the pane shows a placeholder message instead of the list.
     pub fn is_visible(&self) -> bool {
         self.overlay.visible
     }
 
-    /// Called after overlay state changes that hide the pane.
-    ///
-    /// Closes the input bar if it's actively open (mid-typing), but
-    /// preserves any accepted search/filter so it persists across
-    /// show/hide cycles.
+    /// Called after an overlay state change hides the pane.
+    /// Closes the input bar if it's open mid-typing, but keeps any accepted search or filter across hide and show.
     pub fn on_state_change(&mut self) {
         if !self.overlay.visible {
             self.list_state.close_input_bar();
         }
     }
 
-    /// Whether completed/cancelled items are shown.
+    /// Whether completed and cancelled items are shown.
     pub fn show_done(&self) -> bool {
         self.show_done
     }
 
-    /// Toggle visibility of completed/cancelled items.
+    /// Toggle visibility of completed and cancelled items.
     pub fn toggle_show_done(&mut self) {
         self.show_done = !self.show_done;
     }
@@ -339,9 +314,8 @@ impl TodoPane {
 
     /// Rebuild `entries` from `todos`, filtered by `show_done`.
     ///
-    /// Items preserve their original order from the agent (no status-based
-    /// reordering). IDs are based on the original index in `todos` so that
-    /// `ListPaneState` can maintain selection across rebuilds.
+    /// Items preserve their original order from the agent (no reordering by status).
+    /// IDs are based on the original index in `todos` so that `ListPaneState` can maintain selection across rebuilds.
     fn rebuild_entries(&mut self) {
         self.entries.clear();
         for (idx, item) in self.todos.iter().enumerate() {
@@ -361,7 +335,7 @@ impl TodoPane {
     ///
     /// Returns `true` if the event was consumed.
     pub fn handle_key(&mut self, key: &KeyEvent) -> bool {
-        // 'h' toggles show_done (only when not typing in search/filter bar).
+        // 'h' toggles show_done (only when not typing in the search or filter bar)
         if key.code == KeyCode::Char('h') && self.list_state.input_mode().is_none() {
             self.toggle_show_done();
             self.rebuild_entries();
@@ -380,9 +354,8 @@ impl TodoPane {
 
     /// Handle a mouse scroll event over the todo pane area.
     ///
-    /// Caps scroll speed for small viewports — the app-level scroll
-    /// accumulator can produce large deltas (3-5 lines) which would
-    /// jump past most items in a 4-row pane.
+    /// Caps scroll speed for small viewports.
+    /// The app-level scroll accumulator can produce deltas of 3-5 lines, which would jump past most items in a 4-row pane.
     pub fn handle_scroll(&mut self, lines: i32, col: u16, row: u16) {
         let max = match self.list_state.viewport_height() {
             0..=5 => 1,
@@ -394,7 +367,7 @@ impl TodoPane {
             .handle_scroll_event(capped, col, row, &self.entries);
     }
 
-    /// Handle a mouse click/drag event over the todo pane area.
+    /// Handle a mouse click or drag event over the todo pane area.
     ///
     /// Returns `true` if the event was consumed.
     pub fn handle_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16, area: Rect) -> bool {
@@ -404,9 +377,8 @@ impl TodoPane {
 
     // -- Rendering -----------------------------------------------------------
 
-    /// Compute the inner content area with horizontal padding matching
-    /// the scrollback's `HorizontalLayout` (accent + block_pad_left on
-    /// the left, block_pad_right on the right).
+    /// Compute the inner content area with horizontal padding matching the scrollback's `HorizontalLayout`.
+    /// The left pad is accent + block_pad_left; the right pad is block_pad_right.
     fn content_area(area: Rect, layout_cfg: &LayoutConfig) -> Rect {
         use crate::scrollback::layout::HorizontalLayout;
         let pad_left = HorizontalLayout::ACCENT + layout_cfg.block_pad_left;
@@ -421,9 +393,8 @@ impl TodoPane {
 
     /// Render the todo pane into the given area.
     ///
-    /// Rebuilds entries from `todos` each call (cheap — typically <20 items),
-    /// runs layout, and renders the `ListPane` widget in a padded inner area
-    /// matching the scrollback's horizontal layout.
+    /// Rebuilds entries from `todos` each call, which is cheap at the typical count of under 20 items.
+    /// Runs layout, then renders the `ListPane` widget in a padded inner area matching the scrollback's horizontal layout.
     pub fn render(
         &mut self,
         area: Rect,
@@ -431,7 +402,7 @@ impl TodoPane {
         focused: bool,
         layout_cfg: &LayoutConfig,
     ) {
-        // Detect theme switch and refresh styles before rebuilding entries.
+        // Detect a theme switch and refresh styles before rebuilding entries
         let current_theme = crate::theme::Theme::current_kind();
         if current_theme != self.last_theme {
             self.last_theme = current_theme;
@@ -442,7 +413,7 @@ impl TodoPane {
         self.rebuild_entries();
         let inner = Self::content_area(area, layout_cfg);
         if self.entries.is_empty() {
-            // Empty state: placeholder message in muted style.
+            // Empty state: draw the placeholder message in a muted style
             if inner.height > 0 && inner.width > 0 {
                 let msg = empty_placeholder_message(self.todos.is_empty(), self.counts());
                 let theme = crate::theme::Theme::current();

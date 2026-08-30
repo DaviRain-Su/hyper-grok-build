@@ -2,19 +2,16 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// macOS-only, REAL host clipboard: Ctrl+V (raw 0x16) with an IMAGE on the
-/// pasteboard must not block the UI thread. The clipboard read, image decode,
-/// and session persist all run off the event loop, so keys typed immediately
-/// after the chord echo right away while the `[Image #N]` chip attaches via a
-/// follow-up completion.
+/// macOS-only, REAL host clipboard: Ctrl+V (raw 0x16) with an IMAGE on the pasteboard must not block the UI thread.
+/// The clipboard read, image decode, and session persist all run off the event loop, so keys typed right after the chord echo immediately.
+/// The `[Image #N]` chip attaches later via a follow-up completion.
 ///
-/// This FAILS on a pre-offthread pager: the probe ran inline on the event
-/// loop, so the chip attached BEFORE the typed burst was even processed (and
-/// the burst echo stalled behind the ~0.5-1s osascript read + persist).
+/// This FAILS on a pager that still runs the probe inline on the event loop.
+/// There the chip attached BEFORE the typed burst was even processed, and the burst echo stalled behind the ~0.5-1s osascript read and persist.
 ///
 /// WARNING: this test OVERWRITES the machine-global clipboard with an image.
-/// The prior TEXT contents are restored best-effort on exit (drop guard); a
-/// prior IMAGE clipboard cannot be restored — `pbpaste` only reads text.
+/// The prior TEXT contents are restored best-effort on exit (drop guard).
+/// A prior IMAGE clipboard cannot be restored because `pbpaste` only reads text.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
@@ -38,9 +35,8 @@ async fn paste_ctrl_v_image_keeps_ui_responsive_macos() {
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
 
-    // Ctrl+V then a typed burst in ONE injected buffer: the burst chases the
-    // chord with no settle, so it can only echo promptly if the paste's
-    // clipboard read/decode/persist is off the event loop.
+    // Ctrl+V then a typed burst in ONE injected buffer: the burst chases the chord with no settle
+    // It can only echo promptly if the paste's clipboard read, decode, and persist run off the event loop
     let start = Instant::now();
     let mut keys = vec![0x16];
     keys.extend_from_slice(ECHO.as_bytes());
@@ -53,8 +49,7 @@ async fn paste_ctrl_v_image_keeps_ui_responsive_macos() {
         .expect("typed burst echoes within 2s while the paste probe runs off-thread");
     let echo_elapsed = start.elapsed();
 
-    // Ordering guard: the chip must NOT already be on screen when the burst
-    // first echoes — an inline (blocking) probe attaches it before the burst.
+    // Ordering guard: the chip must NOT already be on screen when the burst first echoes; an inline (blocking) probe attaches it before the burst
     assert!(
         !harness.contains_text("Image #"),
         "image chip attached before the typed burst echoed — the clipboard \
@@ -67,8 +62,7 @@ async fn paste_ctrl_v_image_keeps_ui_responsive_macos() {
         .expect("deferred clipboard probe attaches the [Image #1] chip");
     let chip_elapsed = start.elapsed();
 
-    // Ordering is proven by the chip-absence check above (screen state at echo
-    // time); comparing the two sequenced elapsed() readings would be vacuous.
+    // The assert above that the chip was absent at echo time proves ordering; comparing the two sequenced elapsed() readings would be vacuous
     eprintln!(
         "paste_ctrl_v_image_keeps_ui_responsive_macos: typed-burst echo {} ms, image chip {} ms",
         echo_elapsed.as_millis(),

@@ -1,13 +1,12 @@
-//! The bearer fragment every 401-attribution site compares. One definition,
-//! because the comparison only works if both sides reduce the token alike.
+//! The bearer fragment every 401-attribution site compares.
+//! One definition, because the comparison only works if both sides reduce the token alike.
 
 /// Trailing characters of a bearer that may cross an attribution boundary.
 /// The tail, not the head: JWTs share a base64 header and xAI keys a prefix.
 pub const BEARER_SUFFIX_LEN: usize = 12;
 
 /// Last [`BEARER_SUFFIX_LEN`] characters, or the whole string if shorter.
-/// Counts chars, not bytes: slicing at `len - N` panics mid-character, and
-/// tokens from `auth.json` or an auth-provider command are not ASCII-safe.
+/// Counts chars, not bytes: slicing at `len - N` panics mid-character, and tokens from `auth.json` or an auth-provider command can be non-ASCII.
 pub fn bearer_suffix(s: &str) -> &str {
     match s.char_indices().rev().nth(BEARER_SUFFIX_LEN - 1) {
         Some((i, _)) => &s[i..],
@@ -29,8 +28,8 @@ mod tests {
             ("abc", "abc"),
             ("", ""),
             ("123456789012", "123456789012"),
-            // Characters, not bytes. A byte cut at `len - 12` lands
-            // mid-character on the first two and would panic.
+            // Characters, not bytes
+            // A byte cut at `len - 12` lands mid-character on the first two and would panic
             ("éabcdefghijk", "éabcdefghijk"),
             ("ééééééééééééé", "éééééééééééé"),
             ("🔑🔑🔑🔑🔑🔑🔑", "🔑🔑🔑🔑🔑🔑🔑"),

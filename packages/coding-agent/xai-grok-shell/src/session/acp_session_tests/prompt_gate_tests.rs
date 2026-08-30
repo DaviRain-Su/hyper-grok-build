@@ -116,7 +116,7 @@ async fn blocked_user_prompt_cancels_turn_without_sampling() {
             let seen = annotations.borrow().clone();
             assert!(
                 seen.iter()
-                    .any(|m| m.contains("prompt blocked by hook `test/promptgate`")
+                    .any(|m| m.contains("Prompt blocked by test/promptgate")
                         && m.contains("no prod deploys")),
                 "the block reason must reach the user as an annotation: {seen:?}"
             );
@@ -126,6 +126,52 @@ async fn blocked_user_prompt_cancels_turn_without_sampling() {
             assert!(
                 actor.state.lock().await.hook_block_held(),
                 "the queue hold must be armed by the turn itself"
+            );
+        })
+        .await;
+}
+
+/// A hook's top-level `systemMessage` reaches the user verbatim on the
+/// rendered `HookAnnotation` channel, alongside the hook's decision.
+#[tokio::test(flavor = "current_thread")]
+async fn hook_system_message_reaches_user_as_annotation() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let annotations = spawn_persistence_drain(persistence_rx);
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.hook_resolved_workspace_root = "/tmp".to_string();
+            let actor = Arc::new(actor);
+            *actor.hook_registry.borrow_mut() = Some(std::sync::Arc::new(prompt_gate_registry(
+                r#"echo '{"systemMessage":"heads up","decision":"block","reason":"nope"}'"#,
+            )));
+
+            let result = Box::pin(actor.handle_prompt(
+                "p-msg",
+                text_prompt("deploy to prod"),
+                PromptMode::Agent,
+                /* trace_gcs_config */ None,
+                /* artifact_tracker */ None,
+                /* client_identifier */ None,
+                /* screen_mode */ None,
+                /* verbatim */ false,
+                /* send_now */ false,
+                /* json_schema */ None,
+                /* persist_ack */ None,
+                /* parsed_prompt_tx */ None,
+            ))
+            .await;
+            let ok = result.expect("a hook block must resolve Ok(Cancelled)");
+            assert_eq!(ok.stop_reason, acp::StopReason::Cancelled);
+
+            tokio::task::yield_now().await;
+            let seen = annotations.borrow().clone();
+            assert!(
+                seen.iter().any(|m| m == "heads up"),
+                "the hook systemMessage must reach the user verbatim: {seen:?}"
             );
         })
         .await;

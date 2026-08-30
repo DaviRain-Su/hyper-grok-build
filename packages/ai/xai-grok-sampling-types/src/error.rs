@@ -143,6 +143,11 @@ impl SentCredential {
 /// can never drift from what Display actually emits.
 const SERIALIZATION_DISPLAY_PREFIX: &str = "serialization error: ";
 
+/// Display text of [`SamplingError::MaxTokensTruncation`]. Public: the pager
+/// sniffs it to recover the kind from rails predating the typed `errorKind`
+/// field; sharing the const with the `#[error(...)]` template prevents drift.
+pub const MAX_TOKENS_TRUNCATION_MESSAGE: &str = "response truncated by max_tokens";
+
 #[derive(Debug, Error)]
 pub enum SamplingError {
     #[error("{message}")]
@@ -193,7 +198,7 @@ pub enum SamplingError {
     IdleTimeout { elapsed_secs: u64 },
     #[error("empty response from model ({})", context.reason)]
     EmptyResponse { context: EmptyResponseContext },
-    #[error("response truncated by max_tokens")]
+    #[error("{text}", text = MAX_TOKENS_TRUNCATION_MESSAGE)]
     MaxTokensTruncation,
     /// A confident server-reported doom loop on the attempt (mid-stream or
     /// on the completed response). Retryable on the recovery loop's own
@@ -211,6 +216,13 @@ pub enum SamplingError {
 /// Semantic `error.code` the server stamps on invalid-image rejections, on
 /// both non-stream error bodies and mid-stream SSE error events.
 pub const INVALID_IMAGE_ERROR_CODE: &str = "invalid_image";
+
+/// Content path some upstream providers key codeless image rejections on
+/// (`.image.source.base64.data`/`.url`; `invalid_request_error`, no
+/// `error.code`, so [`INVALID_IMAGE_ERROR_CODE`] misses them). The fragment
+/// appears only when the request carried an image, so stripping is safe
+/// recovery. Fragile to the provider renaming the wire path.
+const IMAGE_CONTENT_PATH_MARKER: &str = ".image.source.";
 
 /// A wire `error.code`, parsed once at the boundary so classification
 /// compares variants instead of strings. `#[non_exhaustive]`: the next
@@ -383,10 +395,12 @@ impl SamplingError {
     /// processed. [`INVALID_IMAGE_ERROR_CODE`] is the signal; the legacy
     /// phrase match covers pre-code servers and relayed provider messages
     /// that carry the same wording (they arrive as `Api` errors, so the
-    /// phrase arm applies to them too). Providers emitting neither the code
-    /// nor the phrase get no recovery. The `400 | 500` gate is deliberate
-    /// insurance against a mis-stamping server: recovery destroys request
-    /// images, so unexpected statuses (422, 415, ...) fail closed.
+    /// phrase arm applies to them too). Some provider passthroughs stamp
+    /// neither, keying image rejections on the
+    /// [`IMAGE_CONTENT_PATH_MARKER`] content path instead. The `400 | 500`
+    /// gate is deliberate insurance against a mis-stamping server: recovery
+    /// destroys request images, so unexpected statuses (422, 415, ...) fail
+    /// closed.
     pub fn is_image_processing_error(&self) -> bool {
         match self {
             SamplingError::Api {
@@ -397,6 +411,7 @@ impl SamplingError {
             } if matches!(status.as_u16(), 400 | 500) => {
                 *error_code == Some(ApiErrorCode::InvalidImage)
                     || message.contains("Could not process image")
+                    || message.contains(IMAGE_CONTENT_PATH_MARKER)
             }
             SamplingError::StreamError { code, .. } => *code == Some(ApiErrorCode::InvalidImage),
             // Explicit like `is_retryable`: a new variant must state its
@@ -1595,6 +1610,22 @@ mod tests {
         // Deliberate: server prose without the code does not strip — any
         // server new enough to emit these rejections stamps the code.
         assert!(!api_400("Invalid base64-encoded image.").is_image_processing_error());
+    }
+
+    #[test]
+    fn image_processing_error_image_content_path_detected() {
+        let err = api_400(
+            "invalid_request_error: messages.0.content.4.image.source.base64.data: \
+             At least one of the image dimensions exceed max allowed size for \
+             many-image requests: 2000 pixels",
+        );
+        assert!(err.is_image_processing_error());
+    }
+
+    #[test]
+    fn image_processing_error_non_image_invalid_request_not_detected() {
+        let err = api_400("invalid_request_error: messages.1.content.0.text: field required");
+        assert!(!err.is_image_processing_error());
     }
 
     /// Mid-stream rejections strip only on the code — the server stamps

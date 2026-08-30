@@ -12,20 +12,16 @@ use crate::schema::{self, SchemaInit, USER_VERSION, read_user_version};
 use crate::types::SchemaState;
 
 impl WorkspaceStore {
-    /// Create-or-open the store at `db_path`. Creates the parent directory
-    /// 0700 and the database file 0600 before SQLite ever opens it (Unix;
-    /// Windows keeps the default profile ACLs), opens through
-    /// [`JournalMode`] (WAL locally; TRUNCATE plus a per-host file on
-    /// network mounts, where each host then has its own workspace),
-    /// re-tightens file and journal-sibling modes, and initializes or
-    /// version-gates the schema.
+    /// Create-or-open the store at `db_path`.
+    /// Creates the parent directory 0700 and the database file 0600 before SQLite ever opens it; Windows keeps the default profile ACLs.
+    /// Opens through [`JournalMode`]: WAL locally, TRUNCATE plus a per-host file on network mounts, where each host then has its own workspace.
+    /// Re-tightens file and journal-sibling modes, and initializes or version-gates the schema.
     ///
     /// # Errors
     ///
-    /// [`crate::StoreError::Unusable`] when the file is not a SQLite database
-    /// (never deleted or recreated), [`crate::StoreError::Busy`] when the busy
-    /// budget elapses, [`crate::StoreError::Io`] on directory/mode failures or
-    /// when the path is not a regular file (e.g. a planted symlink),
+    /// [`crate::StoreError::Unusable`] when the file is not a SQLite database (never deleted or recreated),
+    /// [`crate::StoreError::Busy`] when the busy budget elapses,
+    /// [`crate::StoreError::Io`] on directory/mode failures or when the path is not a regular file (e.g. a planted symlink),
     /// [`crate::StoreError::Sqlite`] otherwise.
     pub fn open(db_path: &Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
@@ -33,10 +29,10 @@ impl WorkspaceStore {
         }
         let mode = JournalMode::for_db_path(db_path);
         let effective = mode.effective_db_path(db_path);
-        // O_CREAT|O_EXCL + mode(0o600) before SQLite's first open: the file
-        // is never visible at umask defaults, and SQLite accepts a zero-length
-        // file as a fresh database. Existing paths are validated without
-        // following symlinks. Journal siblings inherit the database mode.
+        // O_CREAT|O_EXCL with mode 0o600 runs before SQLite's first open, so the file is never visible at umask defaults
+        // SQLite accepts a zero-length file as a fresh database
+        // Existing paths are validated without following symlinks
+        // Journal siblings inherit the database mode
         create_owner_only(&effective)?;
         let opened_at = Instant::now();
         let mut conn = mode
@@ -44,14 +40,12 @@ impl WorkspaceStore {
             .map_err(|error| classify_open_error(error.into(), opened_at, &effective))?;
         tighten_owner_only(&effective)?;
         for suffix in ["-wal", "-shm", "-journal"] {
-            // Newly created siblings inherit 0600 from the file; this covers
-            // ones an earlier binary created while the database was loose.
+            // Newly created siblings inherit 0600 from the file; this covers ones an earlier binary created while the database was loose
             tighten_owner_only(&sibling_path(&effective, suffix))?;
         }
 
-        // Autocommit fast-path read: a file already known to be newer is
-        // gated without ever taking the write lock. The authoritative
-        // re-read happens inside init_schema's transaction.
+        // Autocommit fast-path read: a file already known to be newer is gated without ever taking the write lock
+        // The authoritative re-read happens inside init_schema's transaction
         let found = read_user_version(&conn)
             .map_err(|error| classify_open_error(error, opened_at, &effective))?;
         if found > USER_VERSION {
@@ -92,9 +86,8 @@ impl WorkspaceStore {
         }
     }
 
-    /// Finish an open of a file written by a newer grok: gate at the
-    /// connection so even a bug in this crate cannot write. Reads remain
-    /// available while the newer schema is read-compatible.
+    /// Finish an open of a file written by a newer grok: gate at the connection so even a bug in this crate cannot write.
+    /// Reads remain available while the newer schema is read-compatible.
     fn open_newer_schema(
         conn: rusqlite::Connection,
         effective: PathBuf,

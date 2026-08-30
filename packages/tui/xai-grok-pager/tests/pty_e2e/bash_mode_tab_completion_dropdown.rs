@@ -4,26 +4,22 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Two seeded files sharing the typed prefix (equal length, so ranking ties
-/// break on name and `AAA` is deterministically the top row) — both reach
-/// the screen only through the Tab-opened dropdown.
+/// Two seeded files sharing the typed prefix (equal length, so ranking ties break on name and `AAA` is deterministically the top row).
+/// Both reach the screen only through the Tab-opened dropdown.
 const FILE_AAA: &str = "SUGGESTAAA.txt";
 const FILE_BBB: &str = "SUGGESTBBB.txt";
-/// A seeded shell-history line sharing the same typed prefix. Tab fetches
-/// are token-only: this row must NEVER surface on a Tab (it would make the
-/// set mixed and kill terminal-Tab semantics for the file rows).
+/// A seeded shell-history line sharing the same typed prefix.
+/// Tab fetches are token-only: this row must NEVER appear on a Tab (a mixed set would break the terminal-style Tab completion of the file rows).
 const HISTORY_LINE: &str = "cat SUGGESTHISTROW-42";
 const HISTORY_SENTINEL: &str = "SUGGESTHISTROW";
-/// What the mocked user types: `!` flips into bash mode (consumed by the
-/// prompt), then the shared prefix of both files — exactly their LCP, so
-/// the first Tab opens the dropdown instead of prefix-filling.
+/// What the mocked user types: `!` flips into bash mode (consumed by the prompt), then the shared prefix of both files.
+/// That prefix is exactly their LCP, so the first Tab opens the dropdown instead of prefix-filling.
 const TYPED_PREFIX: &str = "!cat SUGGEST";
 
-/// Env: NO suggestion flag — Tab completion in bash mode is always on, and
-/// this test is the acceptance proof. `GROK_SUGGESTIONS=0` pins the
-/// as-you-type pipeline OFF hermetically (the PTY child inherits the parent
-/// env, so a dev shell exporting the flag must not turn it on here); the
-/// shell-history tier is pinned to the seeded file.
+/// Env: NO suggestion flag; Tab completion in bash mode is always on, and this test is the acceptance proof.
+/// `GROK_SUGGESTIONS=0` pins the as-you-type pipeline OFF.
+/// The PTY child inherits the parent env, so a dev shell exporting the flag must not turn it on here.
+/// The shell-history tier is pinned to the seeded file.
 fn suggestions_env(histfile: &Path) -> Vec<(String, String)> {
     vec![
         ("SHELL".into(), "/bin/bash".into()),
@@ -38,19 +34,14 @@ fn seed_history(content: &ContentController) -> std::path::PathBuf {
     histfile
 }
 
-/// **Bash-mode completion acceptance with NO env flag: Tab fetches
-/// token-only candidates and opens the dropdown, Tab accepts the selected
-/// item in place.** In a real session with a seeded cwd and history, typing
-/// `!cat SUGGEST`:
-/// - nothing completes before Tab (no as-you-type pipeline without the
-///   env flag);
-/// - Tab fires the deterministic fetch; when its candidates land, the
-///   dropdown opens with BOTH file rows (their LCP equals the typed token,
-///   so no fill) — and the prefix-matching history line stays out (Tab
-///   fetches run only the token providers);
-/// - Down + Tab accepts the second item into the prompt without clobbering
-///   it: a trailing typed char composes with the spliced token, and the
-///   other candidate vanishes with the closed dropdown.
+/// **Bash-mode completion acceptance with NO env flag: Tab fetches token-only candidates, opens the dropdown, and accepts the selection in place.**
+/// In a real session with a seeded cwd and history, typing `!cat SUGGEST`:
+/// - nothing completes before Tab (no as-you-type pipeline without the env flag);
+/// - Tab fires the deterministic fetch.
+///   When its candidates land, the dropdown opens with BOTH file rows (their LCP equals the typed token, so no fill).
+///   The prefix-matching history line stays out (Tab fetches run only the token providers);
+/// - Down + Tab accepts the second item into the prompt without clobbering it.
+///   A trailing typed char composes with the spliced token, and the other candidate vanishes with the closed dropdown.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 #[cfg(unix)]
@@ -86,8 +77,7 @@ async fn bash_mode_tab_accepts_dropdown_item_in_place() {
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
 
-    // Establish a session: bash mode lives on the agent-view prompt (the
-    // welcome prompt never completes).
+    // Establish a session: bash mode lives on the agent-view prompt (the welcome prompt never completes)
     harness
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("start session");
@@ -106,7 +96,7 @@ async fn bash_mode_tab_accepts_dropdown_item_in_place() {
     );
 
     harness.inject_keys(b"\t").expect("press Tab");
-    // The Tab-armed fetch lands and opens the dropdown with both files.
+    // The fetch Tab started lands and opens the dropdown with both files
     harness
         .wait_for_text(FILE_AAA, Duration::from_secs(15))
         .expect("dropdown lists the top file candidate");
@@ -121,8 +111,7 @@ async fn bash_mode_tab_accepts_dropdown_item_in_place() {
 
     harness.inject_keys(b"\x1b[B").expect("press Down");
     harness.inject_keys(b"\t").expect("press Tab to accept");
-    // A trailing char proves the accepted token is real prompt text (the
-    // dropdown never contained this composition).
+    // A trailing char proves the accepted token is real prompt text (the dropdown never showed this combined string)
     harness.inject_keys(b"Y").expect("type trailing char");
     harness
         .wait_for_text(&format!("cat {FILE_BBB}Y"), Duration::from_secs(10))

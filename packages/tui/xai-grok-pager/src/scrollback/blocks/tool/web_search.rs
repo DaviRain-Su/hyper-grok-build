@@ -1,5 +1,3 @@
-//! WebSearchToolCallBlock — web search with citations preview.
-
 use std::collections::HashSet;
 
 use ratatui::style::Modifier;
@@ -20,25 +18,22 @@ const TRUNCATED_INLINE_LINES: usize = 3;
 /// Max number of domain names shown in the sources summary line.
 const MAX_INLINE_SOURCES: usize = 3;
 
-/// Web search tool call — searching the web and returning markdown results.
+/// Web search tool call: searches the web and returns markdown results.
 #[derive(Debug, Clone)]
 pub struct WebSearchToolCallBlock {
-    /// The search query.
     pub query: String,
     /// Markdown-formatted search results.
     pub content: Option<String>,
     /// Source URLs from the search.
     pub citations: Vec<String>,
-    /// Error message if the tool call failed (None = success).
+    /// Error message if the tool call failed (None means success).
     pub error: Option<String>,
-    /// When the tool started running.
     pub started_at: Option<std::time::Instant>,
     /// Elapsed time in ms after completion.
     pub elapsed_ms: Option<i64>,
     /// Header label override (default: "Web Search ").
     pub label: Option<String>,
-    /// True for X search (backend); suppresses the content body since
-    /// structured post results are not exposed to the TUI client.
+    /// True for X search (backend); suppresses the content body since structured post results are not exposed to the TUI client.
     pub is_x_search: bool,
 }
 
@@ -96,9 +91,9 @@ impl WebSearchToolCallBlock {
 
     /// Render the header line: **Web Search** `query` `(N sources)`
     ///
-    /// In collapsed mode (`max_width` is `Some`), reserves space for the source
-    /// count suffix and truncates the query to fit — so the suffix is always
-    /// visible. In expanded mode (`None`), renders the full query with no suffix.
+    /// In collapsed mode (`max_width` is `Some`), it reserves space for the source-count suffix and truncates the query to fit.
+    /// The suffix is therefore always visible.
+    /// In expanded mode (`None`), it renders the full query with no suffix.
     fn header_line(&self, theme: &Theme, muted: bool, max_width: Option<usize>) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
@@ -157,7 +152,7 @@ impl WebSearchToolCallBlock {
 
     /// Header line with only the query span selectable (exclude label prefix/suffix).
     fn header_block_line(&self, line: Line<'static>) -> BlockLine {
-        // Spans: [prefix, query, optional_suffix] — only the query (index 1).
+        // Spans are [prefix, query, optional_suffix]; only the query (index 1) is selectable
         let query_end = 2.min(line.spans.len()).max(1);
         BlockLine {
             selectable: Selectable::Spans(1..query_end),

@@ -1,5 +1,4 @@
-//! Unit tests for the turn-finalize rails in [`super`] (`turn_completion`),
-//! split out via `#[path]` to keep the module itself small.
+//! Unit tests for the turn-finalize rails in [`super`] (`turn_completion`), split out via `#[path]` to keep the module itself small.
 
 use super::*;
 use crate::app::agent::AgentState;
@@ -28,8 +27,7 @@ fn running_viewer(prompt_id: &str) -> AgentView {
     agent
 }
 
-/// A driver in TurnRunning with a local prompt id (default
-/// `attached_as_viewer == false`).
+/// A driver in TurnRunning with a local prompt id (default `attached_as_viewer == false`).
 fn running_driver(prompt_id: &str) -> AgentView {
     let mut agent = super::super::agent_view::test_agent_view(Some("s1"), PathBuf::from("/tmp"));
     agent.session.start_turn(&mut agent.scrollback);
@@ -123,8 +121,7 @@ fn marker_push_consumes_matching_stop_hook_stash() {
 
 #[test]
 fn marker_push_flushes_stale_stash_standalone() {
-    // A stash stamped with another turn's prompt id must not attach to
-    // this marker — it flushes as the legacy standalone block.
+    // A stash stamped with another turn's prompt id must not attach to this marker; it flushes as the legacy standalone block
     let mut agent = running_driver("p2");
     agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
         prompt_id: Some("p1".into()),
@@ -150,9 +147,8 @@ fn marker_push_flushes_stale_stash_standalone() {
 
 #[test]
 fn marker_without_ending_pid_flushes_stamped_stash_standalone() {
-    // A stamped stash can't be confirmed against a marker whose ending
-    // turn id is missing — it flushes standalone instead of folding into
-    // a marker it may not belong to.
+    // A stamped stash can't be confirmed against a marker whose ending turn id is missing
+    // It flushes standalone instead of folding into a marker it may not belong to
     let mut agent = running_driver("p1");
     agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
         prompt_id: Some("p1".into()),
@@ -178,8 +174,7 @@ fn marker_without_ending_pid_flushes_stamped_stash_standalone() {
 
 #[test]
 fn no_marker_flushes_stash_as_standalone_block() {
-    // Turn ends without a marker (bash turn / rate-limit UX): the held
-    // hooks still surface, in the legacy standalone form.
+    // The turn ends without a marker (a bash turn, or a rate limit): the held hooks still render, in the legacy standalone form
     let mut agent = running_driver("p1");
     agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
         prompt_id: Some("p1".into()),
@@ -194,8 +189,7 @@ fn no_marker_flushes_stash_as_standalone_block() {
 
 #[test]
 fn viewer_finalize_consumes_stop_hook_stash() {
-    // A viewer that stashed hooks mid-turn folds them into the marker the
-    // finalize pushes.
+    // A viewer that stashed hooks mid-turn folds them into the marker the finalize pushes
     let mut agent = running_viewer("p1");
     agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
         prompt_id: Some("p1".into()),
@@ -249,10 +243,9 @@ fn viewer_finalize_duplicate_terminal_is_noop() {
     );
 }
 
-/// A cancelled terminal stamped `cancellationCategory: "HookDenied"` renders
-/// the blocked-by-hook marker, never "cancelled by user" — a policy block is
-/// not a user action (wrong story for an audit trail). Unknown categories and
-/// absent meta (older shells) keep the user-cancel copy.
+/// A cancelled terminal stamped `cancellationCategory: "HookDenied"` renders the blocked-by-hook marker, never "cancelled by user".
+/// A policy block is not a user action, and the audit trail should not say it was.
+/// Unknown categories and absent meta (older shells) keep the user-cancel copy.
 #[test]
 fn viewer_finalize_hook_denied_renders_blocked_marker() {
     let mut agent = running_viewer("p1");
@@ -271,7 +264,7 @@ fn viewer_finalize_hook_denied_renders_blocked_marker() {
         other => panic!("expected TurnBlockedByHook, got {other:?}"),
     }
 
-    // Unknown category → user-cancel copy (no false hook attribution).
+    // An unknown category keeps the user-cancel copy (no false hook attribution)
     let mut agent = running_viewer("p1");
     let _ = finalize_turn_from_terminal(
         &mut agent,
@@ -360,8 +353,7 @@ fn hook_denied_signal<'a>(context: Option<&'a serde_json::Value>) -> TerminalSig
 fn hook_denied_finalize_requeues_blocked_prompt_and_opens_card() {
     use crate::views::question_view::LocalQuestionKind;
 
-    // Built through the shared wire type, so the test breaks if the shell's
-    // serialization and the pager's parse ever drift apart.
+    // The context is built through the shared wire type, so the test breaks if the shell's serialization and the pager's parse ever drift apart
     let context = serde_json::to_value(xai_grok_shell::session::commands::CancellationContext {
         hook_name: Some("global/block-hihi:user_prompt_submit[0].hooks[0]".into()),
         reason: Some("it contains 'hihi'".into()),
@@ -371,7 +363,7 @@ fn hook_denied_finalize_requeues_blocked_prompt_and_opens_card() {
     let mut agent = running_viewer("p1");
     agent.session.enqueue_prompt("queued follower".into());
     stash_in_flight(&mut agent);
-    // Armed at send, as dispatch_send_prompt does.
+    // dispatch_send_prompt sets this at send; the test mirrors that
     agent.session.tracker.expect_user_echo();
     let bubbles_before = agent.scrollback.len();
     let _ = finalize_turn_from_terminal(&mut agent, "s1", hook_denied_signal(Some(&context)));
@@ -448,8 +440,7 @@ fn hook_denied_finalize_requeues_blocked_prompt_and_opens_card() {
         "the prompt bubble stays (plus the terminal marker); requeue is not a rewind"
     );
 
-    // A composer draft does not stop the hard modal: the card still opens
-    // (the decision is mandatory) and the draft survives in the card's stash.
+    // A composer draft does not stop the hard modal: the card still opens (the decision is mandatory) and the draft survives in the card's stash
     let mut agent = running_viewer("p1");
     stash_in_flight(&mut agent);
     agent.prompt.set_text("a newer draft");
@@ -477,8 +468,7 @@ fn hook_denied_finalize_requeues_blocked_prompt_and_opens_card() {
 #[test]
 fn hook_denied_finalize_ignores_foreign_stash() {
     let mut agent = running_viewer("p1");
-    // Adopted turn: the rewind stash exists but "p1" was never noted
-    // self-originated.
+    // Adopted turn: the rewind stash exists but "p1" was never noted self-originated
     let entry = agent
         .scrollback
         .push_block(crate::scrollback::RenderBlock::user_prompt(
@@ -597,8 +587,8 @@ fn blocked_prompt_card_refuses_skip() {
         "Esc must not dismiss the blocked-prompt card"
     );
 
-    // `y` (option copy) is disabled on this card: copying "Edit / Fix your
-    // prompt" is noise. A real copy always toasts, so no toast = no copy.
+    // `y` (option copy) is disabled on this card: copying "Edit / Fix your prompt" is noise
+    // A real copy always toasts, so no toast means no copy happened
     agent.toast = None;
     let yank = crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Char('y'),
@@ -612,8 +602,7 @@ fn blocked_prompt_card_refuses_skip() {
     assert!(agent.question_view.is_some(), "and the card stays up");
 }
 
-/// Card → Edit → Esc must NOT resend the unfixed row: the hold stays and the
-/// card reopens.
+/// Choosing Edit on the card and then pressing Esc must not resend the unfixed row: the hold stays and the card reopens.
 #[test]
 fn esc_from_blocked_row_edit_reopens_card() {
     use crate::views::question_view::LocalQuestionKind;
@@ -665,8 +654,7 @@ fn esc_from_blocked_row_edit_reopens_card() {
     );
 }
 
-/// Saving the blocked row is the card's Edit resolution: the hold releases
-/// and the fixed row drains in place.
+/// Saving the blocked row is the card's Edit resolution: the hold releases and the fixed row drains in place.
 #[test]
 fn saving_blocked_row_releases_hold() {
     let mut agent = running_viewer("p1");
@@ -701,9 +689,8 @@ fn saving_blocked_row_releases_hold() {
     );
 }
 
-/// A block landing mid-edit of an UNRELATED row must not lose the blocked
-/// prompt when that edit resolves: saving the other row keeps the hold and
-/// brings the card up.
+/// A block landing mid-edit of an unrelated row must not lose the blocked prompt when that edit resolves.
+/// Saving the other row keeps the hold and brings the card up.
 #[test]
 fn saving_unrelated_row_keeps_hold_and_reopens_card() {
     use crate::views::question_view::LocalQuestionKind;
@@ -743,8 +730,7 @@ fn saving_unrelated_row_keeps_hold_and_reopens_card() {
     );
 }
 
-/// A blocked-prompt card deferred behind an already-open question reopens
-/// when that question closes; the hold and context survive the collision.
+/// A blocked-prompt card deferred behind an already-open question reopens when that question closes; the hold and context survive the collision.
 #[test]
 fn deferred_card_reopens_when_other_question_closes() {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
@@ -807,9 +793,8 @@ fn deferred_card_reopens_when_other_question_closes() {
     );
 }
 
-/// The `/feedback` report stage tears down through its own pane path
-/// (`submit_feedback_pane`), not the generic card teardown — skipping it
-/// must also bring the deferred blocked-prompt card back.
+/// The `/feedback` report stage tears down through its own pane path (`submit_feedback_pane`), not the generic card teardown.
+/// Skipping it must also bring the deferred blocked-prompt card back.
 #[test]
 fn deferred_card_reopens_when_feedback_report_closes() {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
@@ -863,8 +848,7 @@ fn deferred_card_reopens_when_feedback_report_closes() {
     );
 }
 
-/// An out-of-range option index must never reach the destructive Discard
-/// arm: the answer is ignored and the queue row survives.
+/// An out-of-range option index must never reach the destructive Discard arm: the answer is ignored and the queue row survives.
 #[test]
 fn unknown_card_index_never_discards() {
     use crate::views::question_view::QuestionSelection;
@@ -914,7 +898,7 @@ fn cancelled_turn_event_picks_marker_by_category() {
 
 #[test]
 fn viewer_finalize_stop_reason_to_marker_mapping() {
-    // cancelled → Turn cancelled.
+    // A "cancelled" stop renders the Turn cancelled marker
     let mut agent = running_viewer("p1");
     let _ = finalize_turn_from_terminal(
         &mut agent,
@@ -930,7 +914,7 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
         Some(SessionEvent::TurnCancelled { .. })
     ));
 
-    // error (+agentResult) → TurnFailed with formatted text.
+    // An "error" stop with agentResult renders TurnFailed with formatted text
     let mut agent = running_viewer("p1");
     let _ = finalize_turn_from_terminal(
         &mut agent,
@@ -952,8 +936,7 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
         other => panic!("expected TurnFailed, got {other:?}"),
     }
 
-    // error with a dedicated banner already in the trailing run → the
-    // banner explains the failure; no redundant TurnFailed marker.
+    // An "error" stop with a dedicated banner already in the trailing run: the banner explains the failure, so no redundant TurnFailed marker
     let mut agent = running_viewer("p1");
     agent
         .scrollback
@@ -979,8 +962,7 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
         "a trailing RequestFailed banner must suppress the viewer's TurnFailed"
     );
 
-    // …but a banner buried behind a substantive block is a previous turn's:
-    // the trailing-run scan stops and the marker is pushed.
+    // But a banner buried behind a substantive block is a previous turn's: the trailing-run scan stops and the marker is pushed
     let mut agent = running_viewer("p1");
     agent
         .scrollback
@@ -1007,7 +989,7 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
         "a banner behind a substantive block must not suppress the marker"
     );
 
-    // rate_limit → finished, but no marker (not actionable from a viewer).
+    // A "rate_limit" stop finishes the turn but pushes no marker (not actionable from a viewer)
     let mut agent = running_viewer("p1");
     let _ = finalize_turn_from_terminal(
         &mut agent,
@@ -1024,7 +1006,7 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
         "rate_limit must not push a marker on a viewer"
     );
 
-    // unknown/other reason → Turn completed (the catch-all).
+    // An unknown or other reason renders Turn completed (the catch-all)
     let mut agent = running_viewer("p1");
     let _ = finalize_turn_from_terminal(
         &mut agent,
@@ -1115,8 +1097,7 @@ fn stream_agent_text(agent: &mut AgentView, text: &str) {
     );
 }
 
-/// Missing wire pid still arms lost-PR reconcile (full teardown
-/// lives in `reconcile_overdue_turn_ends` / PromptResponse).
+/// A missing wire pid still arms the lost-PR reconcile (full teardown lives in `reconcile_overdue_turn_ends` / PromptResponse).
 #[test]
 fn repro_terminal_without_prompt_id_arms_reconcile_for_lost_pr() {
     let mut agent = running_driver("p1");
@@ -1141,7 +1122,7 @@ fn repro_terminal_without_prompt_id_arms_reconcile_for_lost_pr() {
     );
 }
 
-/// Armed, the overdue reconcile would force-finish the live turn mid-write.
+/// If it armed here, the overdue reconcile would force-finish the live turn mid-write.
 #[test]
 fn driver_missing_prompt_id_ignored_during_tool_call_write() {
     let mut agent = running_driver("p1");
@@ -1199,7 +1180,7 @@ fn driver_missing_prompt_id_arms_when_tool_call_write_is_stale() {
     );
 }
 
-/// Exact pid still arms (control).
+/// An exact pid still arms the reconcile (the control case).
 #[test]
 fn recovery_mode_matching_turn_completed_arms_reconcile_for_lost_pr() {
     let mut agent = running_driver("p1");
@@ -1219,7 +1200,7 @@ fn recovery_mode_matching_turn_completed_arms_reconcile_for_lost_pr() {
     assert!(agent.pending_turn_end_reconcile.is_some());
 }
 
-/// Re-arm same pid keeps earliest received_at (does not extend grace forever).
+/// Re-arming the same pid keeps the earliest received_at (the grace does not extend forever).
 #[test]
 fn driver_rearm_same_pid_preserves_received_at() {
     let mut agent = running_driver("p1");
@@ -1357,7 +1338,7 @@ fn viewer_finalize_suppresses_send_now_cancel_marker() {
         "a send-now cancel pushes no marker on a viewer"
     );
 
-    // A non-send-now trigger keeps the marker even with a local expectation armed (wire is authoritative).
+    // A non-send-now trigger keeps the marker even with a local expectation set (wire is authoritative)
     let mut agent = running_viewer("p1");
     agent.expect_send_now_cancel = Some("p-mine".into());
     let _ = finalize_turn_from_terminal(
@@ -1375,7 +1356,7 @@ fn viewer_finalize_suppresses_send_now_cancel_marker() {
         Some(SessionEvent::TurnCancelled { .. })
     ));
 
-    // Older shell (no meta): the armed expectation is the fallback.
+    // Older shell (no meta): the local expectation is the fallback
     let mut agent = running_viewer("p1");
     agent.expect_send_now_cancel = Some("p-mine".into());
     let _ = finalize_turn_from_terminal(
@@ -1425,7 +1406,7 @@ fn driver_arm_records_cancel_trigger_for_reconcile() {
     );
 }
 
-/// The turn-end marker takes no fold path — a park has no row to fold into.
+/// The turn-end marker takes no fold path: a park has no row to fold into.
 #[test]
 fn turn_end_after_park_pushes_single_marker() {
     use crate::app::agent_view::test_fixtures::count_turn_markers;
@@ -1458,6 +1439,7 @@ fn base_input<'a>(stop: TurnStopReason) -> TerminalMarkerInput<'a> {
         agent_result: None,
         send_now_cancel: false,
         cancellation_category: None,
+        error_kind: None,
         error_banner_present: false,
     }
 }
@@ -1590,5 +1572,45 @@ fn classifier_error_banner_and_failed_elapsed() {
     }) {
         Some(SessionEvent::TurnFailed { elapsed: None, .. }) => {}
         other => panic!("expected failed with None elapsed, got {other:?}"),
+    }
+}
+
+#[test]
+fn classifier_error_typed_truncation_kind_picks_truncation_copy() {
+    // The typed kind alone must pick the truncation copy; the flattened message contains nothing text-matching could find
+    match terminal_marker(TerminalMarkerInput {
+        agent_result: Some("turn ended early"),
+        error_kind: Some(WireErrorType::MaxTokensTruncation),
+        ..base_input(TurnStopReason::Error)
+    }) {
+        Some(SessionEvent::TurnFailed { error, .. }) => {
+            assert_eq!(error, "Response truncated: turn ended early");
+        }
+        other => panic!("expected TurnFailed, got {other:?}"),
+    }
+}
+
+/// The real wire pair (the canonical truncation text as `agent_result` plus the typed kind) renders the exact user-visible copy.
+/// This pins the headline-echo dedupe: a regression there would ship "Response truncated: response truncated by max_tokens".
+/// Every placeholder-text test would stay green through that regression.
+#[test]
+fn viewer_finalize_truncation_wire_pair_renders_exact_user_copy() {
+    let mut agent = running_viewer("p1");
+    let _ = finalize_turn_from_terminal(
+        &mut agent,
+        "s1",
+        TerminalSignal {
+            prompt_id: Some("p1"),
+            stop_reason: Some("error"),
+            agent_result: Some(xai_grok_shell::sampling::error::MAX_TOKENS_TRUNCATION_MESSAGE),
+            error_kind: Some(WireErrorType::MaxTokensTruncation),
+            ..Default::default()
+        },
+    );
+    match last_session_event(&agent.scrollback) {
+        Some(SessionEvent::TurnFailed { error, .. }) => {
+            assert_eq!(error, "Response truncated: The model hit its output limit.");
+        }
+        other => panic!("expected TurnFailed, got {other:?}"),
     }
 }

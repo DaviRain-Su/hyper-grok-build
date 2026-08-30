@@ -6,10 +6,10 @@
 
 use tokio::sync::oneshot;
 
-use xai_grok_sampling_types::{ConversationRequest, ConversationResponse, SamplingError};
+use xai_grok_sampling_types::ConversationRequest;
 
 use crate::config::SamplerConfig;
-use crate::metrics::InferenceLatencyStats;
+use crate::handle::CollectedSamplingResult;
 use crate::types::RequestId;
 
 /// Commands sent from a [`SamplerHandle`](crate::handle::SamplerHandle)
@@ -25,9 +25,7 @@ pub(crate) enum SamplerCommand {
         request_id: RequestId,
         request: Box<ConversationRequest>,
         config: Option<Box<SamplerConfig>>,
-        completion_tx: Option<
-            oneshot::Sender<Result<(ConversationResponse, InferenceLatencyStats), SamplingError>>,
-        >,
+        completion_tx: Option<oneshot::Sender<CollectedSamplingResult>>,
     },
 
     /// Cancel an in-flight request.

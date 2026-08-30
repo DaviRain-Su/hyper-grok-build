@@ -1,7 +1,4 @@
 //! Syntax highlighting support using syntect.
-//!
-//! This module provides the `Syntect` struct which holds the syntax definitions
-//! and theme for code block highlighting.
 
 use std::io::Cursor;
 use std::path::Path;
@@ -14,7 +11,6 @@ use syntect::{
 
 /// Syntax highlighting configuration.
 ///
-/// Holds the theme and syntax definitions for code highlighting.
 /// Create one instance and pass it to the markdown renderer.
 pub struct Syntect {
     /// The color theme for syntax highlighting.
@@ -27,7 +23,6 @@ impl Syntect {
     /// Create a new Syntect instance from theme bytes.
     ///
     /// The theme bytes should be a TextMate `.tmTheme` file.
-    /// Uses two-face's extended syntax set with 250+ languages.
     ///
     /// # Example
     ///
@@ -69,16 +64,9 @@ impl Syntect {
         ))
     }
 
-    /// Highlighter for a fenced code block *info* string: a normal language token
-    /// (e.g. `rust`, `python`), or a **line-range citation** of the form
-    /// `lineStart:lineEnd:path/to/file.ext` where the syntax is resolved the same
-    /// way as [`Syntect::highlight_lines_by_file_path`] (see
-    /// [`Syntect::find_syntax_by_file_path`]).
-    ///
-    /// If the string matches the citation form but no syntax is found for the
-    /// path, this falls back to [`Syntect::find_syntax_by_token`] with the full
-    /// `fence_info` string, so plain ` ```lang` blocks keep working and odd
-    /// citations degrade like the pre-citation code path.
+    /// Highlighter for a fenced code block *info* string: a language token (`rust`, `python`) or a `lineStart:lineEnd:path` line-range citation.
+    /// A citation's path resolves via [`Syntect::find_syntax_by_file_path`].
+    /// When the path has no known syntax, the whole string falls back to [`Syntect::find_syntax_by_token`], so plain ` ```lang` blocks keep working.
     pub fn highlight_lines_for_fence_info(&self, fence_info: &str) -> Option<HighlightLines<'_>> {
         Some(HighlightLines::new(
             self.find_syntax_for_fence_info(fence_info)?,
@@ -86,15 +74,9 @@ impl Syntect {
         ))
     }
 
-    /// Resolve the [`SyntaxReference`] for a fenced code block *info* string,
-    /// using the SAME rules as [`Syntect::highlight_lines_for_fence_info`]:
-    /// a `lineStart:lineEnd:path` citation resolves by file path, otherwise
-    /// (or if the path has no known syntax) it falls back to a language token.
-    ///
-    /// Exposed so the incremental open-code highlighter can build its own
-    /// resumable `ParseState`/`HighlightState` against exactly the syntax the
-    /// batch `HighlightLines` path would have used — keeping the two
-    /// byte-identical.
+    /// Resolve the [`SyntaxReference`] for a fenced code block *info* string, with the same rules as [`Syntect::highlight_lines_for_fence_info`].
+    /// This is exposed so the incremental open-code highlighter can build its resumable `ParseState`/`HighlightState` from the same syntax.
+    /// That keeps its output byte-identical to the batch `HighlightLines` path.
     pub(crate) fn find_syntax_for_fence_info(&self, fence_info: &str) -> Option<&SyntaxReference> {
         if let Some((_, _, path)) = parse_line_citation_fence_info(fence_info)
             && let Some(s) = self.find_syntax_by_file_path(Path::new(path))
@@ -109,10 +91,8 @@ impl Syntect {
 /// lineStart:lineEnd:path/to/file.ext
 /// ```
 ///
-/// The path is the segment after the **second** colon; it is then parsed with
-/// [`Path::new`]. Paths with extra colons in the first two segments (e.g. some
-/// Windows `C:...` forms) are not supported; use a repo-relative or
-/// forward-slash form.
+/// The path is the segment after the **second** colon; it is then parsed with [`Path::new`].
+/// Paths with extra colons in the first two segments (e.g. some Windows `C:...` forms) are not supported; use a repo-relative or forward-slash form.
 fn parse_line_citation_fence_info(info: &str) -> Option<(&str, &str, &str)> {
     let mut it = info.splitn(3, ':');
     let start = it.next()?;
@@ -132,11 +112,8 @@ fn parse_line_citation_fence_info(info: &str) -> Option<(&str, &str, &str)> {
 
 /// Syntax highlight code, returning raw styled segments per line.
 ///
-/// `fence_info` is the fenced code block *info* string (language tag or
-/// `lineStart:lineEnd:path` citation form); see
-/// [`Syntect::highlight_lines_for_fence_info`]. Lives here (not in `parse`)
-/// so both the parser and the streaming highlighter caches depend one-way on
-/// `syntax`.
+/// `fence_info` is the fenced code block *info* string (language tag or citation); see [`Syntect::highlight_lines_for_fence_info`].
+/// This function lives here (not in `parse`) so both the parser and the streaming highlighter caches depend one-way on `syntax`.
 pub(crate) fn syntax_highlight_raw(
     syntect: Option<&Syntect>,
     fence_info: &str,
@@ -162,7 +139,6 @@ pub(crate) fn syntax_highlight_raw(
 /// Get a shared Syntect instance for tests.
 ///
 /// This loads the tokyo-night theme bundled with the crate.
-/// Uses a static OnceLock for efficiency in test runs.
 #[cfg(any(test, fuzzing))]
 #[allow(dead_code)]
 pub fn test_syntect() -> &'static Syntect {

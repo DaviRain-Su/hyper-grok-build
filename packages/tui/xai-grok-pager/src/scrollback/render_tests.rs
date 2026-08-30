@@ -18,8 +18,8 @@ fn make_markdown_entry(text: &str) -> ScrollbackEntry {
     ScrollbackEntry::new(RenderBlock::agent_message(text))
 }
 
-/// Compute EntryLayoutInfo for a set of entries (heights + gap_after).
-/// Uses default appearance. Gap rule: all stubs are groupable+expanded → gap=1.
+/// Compute EntryLayoutInfo for a set of entries (heights and gap_after).
+/// Uses default appearance. Gap rule: all stubs are groupable and expanded, so every gap is 1.
 fn compute_layouts(
     entries: &[ScrollbackEntry],
     viewport_width: u16,
@@ -44,7 +44,7 @@ fn compute_layouts(
                 group_header_count: 0,
                 group_collapse_header: false,
                 verb_group_header: false,
-            } // placeholder
+            } // gap_after is recomputed below
         })
         .collect();
 
@@ -60,7 +60,7 @@ fn compute_layouts(
             1
         };
     }
-    // Last entry: trailing gap = 1
+    // Last entry: trailing gap of 1
     if n > 0 {
         layouts[n - 1].gap_after = 1;
     }
@@ -192,8 +192,7 @@ fn count_reversed(buf: &Buffer) -> usize {
         .sum()
 }
 
-/// The plain text of buffer row `y` (viewport x starts at 0, so a byte
-/// index into this string equals the buffer column for ASCII content).
+/// The plain text of buffer row `y` (viewport x starts at 0, so a byte index into this string equals the buffer column for ASCII content).
 fn buffer_row_text(buf: &Buffer, y: u16) -> String {
     (buf.area.left()..buf.area.right())
         .map(|x| buf[(x, y)].symbol())
@@ -248,13 +247,11 @@ fn search_highlight_inverts_exactly_the_match_columns() {
 
 #[test]
 fn search_highlight_maps_to_wrapped_continuation_row() {
-    // A narrow viewport forces the message to wrap; the match lands on a
-    // continuation row, exercising the per-row screen_y mapping.
+    // A narrow viewport forces the message to wrap; the match lands on a continuation row, exercising the per-row screen_y mapping
     let entries = vec![make_markdown_entry(
         "alpha bravo charlie delta echo foxtrot golf hotel needle",
     )];
-    // Width 40 wraps the sentence (message blocks also reserve 10 cols for
-    // the timestamp) while keeping "needle" whole on a continuation row.
+    // Width 40 wraps the sentence (message blocks also reserve 10 cols for the timestamp) while keeping "needle" whole on a continuation row
     let viewport = Rect::new(0, 0, 40, 12);
     let re = regex::Regex::new("needle").unwrap();
 
@@ -297,7 +294,7 @@ fn test_total_height_calculation() {
     let viewport = Rect::new(0, 0, 80, 20);
     let result = render_with_scratch(&entries, viewport, 0, None);
 
-    // Each stub entry: 3 lines (1 content + 2 vpad). All are groupable+expanded → gap=1.
+    // Each stub entry is 3 lines (1 content + 2 vpad). All are groupable and expanded, so every gap is 1.
     // Total: 3*3 + 2 gaps + 1 trailing = 12
     assert_eq!(result.total_height, 12);
 }
@@ -312,8 +309,8 @@ fn test_scroll_offset_skips_content() {
     assert_eq!(result.total_height, 5 * 3 + 5);
 }
 
-/// Large scrollback mid-offset: shipped render + viewport paint window must
-/// match a full-list pass (geometry / selection / total_height of full list).
+/// Large scrollback at a mid offset: the shipped render and viewport paint window must match a full-list pass.
+/// Geometry, selection, and the full list's total_height are all compared.
 #[test]
 fn large_scrollback_mid_offset_viewport_window_matches_full_pass() {
     const N: usize = 3000;
@@ -427,14 +424,12 @@ fn large_scrollback_mid_offset_viewport_window_matches_full_pass() {
         assert_eq!(a.bottom_clipped, b.bottom_clipped);
     }
 
-    // Cell content must match — proves paint of the window equals full walk.
+    // Cell content must match, proving the window paint equals the full walk
     assert_eq!(full_buf, win_buf);
 }
 
-/// A verb-group header on the viewport's last row must paint the label of
-/// the FULL run (count + failure suffix), not just the on-screen members:
-/// `paint_window` extends the slice past the window bottom so the label
-/// walk sees every member.
+/// A verb-group header on the viewport's last row must paint the label of the FULL run (count and failure suffix), not just the on-screen members.
+/// `paint_window` extends the slice past the window bottom so the label walk sees every member.
 #[test]
 fn windowed_paint_renders_full_verb_group_label_for_offscreen_members() {
     use crate::scrollback::ScrollbackState;
@@ -499,10 +494,9 @@ fn windowed_paint_renders_full_verb_group_label_for_offscreen_members() {
     );
 }
 
-/// A collapsed truncation header on the viewport's last row must label
-/// its FULL hidden prefix: the height-0 hidden rows share the tail's
-/// virtual_y past the window bottom, so `paint_window`'s gate must
-/// extend the slice for truncation headers too — not just verb headers.
+/// A collapsed truncation header on the viewport's last row must label its FULL hidden prefix.
+/// The height-0 hidden rows share the tail's virtual_y past the window bottom.
+/// `paint_window`'s gate must therefore extend the slice for truncation headers too, not just verb headers.
 #[test]
 fn windowed_paint_labels_truncation_header_on_last_viewport_row() {
     use crate::scrollback::ScrollbackState;
@@ -527,8 +521,7 @@ fn windowed_paint_labels_truncation_header_on_last_viewport_row() {
     let layouts = state.get_cached_entry_layouts().expect("layout cache");
     assert!(!layouts[header].verb_group_header, "truncation, not verb");
     assert_eq!(layouts[header].group_header_count, 2);
-    // Header row on the viewport's last row: the hidden prefix and tail
-    // sit past the window bottom.
+    // Header row on the viewport's last row: the hidden prefix and tail sit past the window bottom
     let scroll = virtual_y[header] + 1 - viewport.height as usize;
     let (paint_range, content_y0) =
         state.paint_window(0..state.len(), scroll, viewport.height as usize);
@@ -682,10 +675,9 @@ fn rendered_verb_group_header_aggregates_hook_outcomes_and_keeps_compact_members
     );
 }
 
-/// A hidden thinking entry inside a folded run stays transparent through
-/// the whole production path: the layout fold spans it AND the rendered
-/// header label counts the members on both sides — pinning the
-/// `show_thinking` handoff from the render loop into the label walk.
+/// A hidden thinking entry inside a folded run stays transparent through the whole production path.
+/// The layout fold spans it AND the rendered header label counts the members on both sides.
+/// This pins the `show_thinking` value the render loop passes into the label walk.
 #[test]
 fn rendered_verb_group_label_spans_hidden_thinking_inside_folded_run() {
     use crate::scrollback::ScrollbackState;
@@ -734,9 +726,8 @@ fn rendered_verb_group_label_spans_hidden_thinking_inside_folded_run() {
     );
 }
 
-/// A finished collapsed thought inside a folded run stays out of the
-/// collapsed header entirely: the fold claims it (no standalone
-/// "Thought" row anywhere) while the rendered label counts tools only.
+/// A finished collapsed thought inside a folded run stays out of the collapsed header entirely.
+/// The fold claims it (no standalone "Thought" row anywhere) while the rendered label counts tools only.
 #[test]
 fn rendered_verb_group_label_stays_tools_only_across_folded_thought() {
     use crate::scrollback::ScrollbackState;
@@ -794,9 +785,8 @@ fn rendered_verb_group_label_stays_tools_only_across_folded_thought() {
     }
 }
 
-/// A single groupable tool call folds on its own: the run renders the
-/// aggregated header label — not the tool's own row — and finished
-/// thoughts fold behind it just like in a multi-member run.
+/// A single groupable tool call folds on its own: the run renders the aggregated header label, not the tool's own row.
+/// Finished thoughts fold behind it just like in a multi-member run.
 #[test]
 fn rendered_verb_group_singleton_folds_tool_and_trailing_thoughts() {
     use crate::scrollback::ScrollbackState;
@@ -856,9 +846,8 @@ fn rendered_verb_group_singleton_folds_tool_and_trailing_thoughts() {
     }
 }
 
-/// A subagent lifecycle row folds into the verb group: the collapsed
-/// header renders the aggregated label, and expanding the group reveals
-/// the subagent's own row with its live ` · activity` suffix intact.
+/// A subagent lifecycle row folds into the verb group: the collapsed header renders the aggregated label.
+/// Expanding the group reveals the subagent's own row with its live ` · activity` suffix intact.
 #[test]
 fn rendered_verb_group_folds_subagent_row_and_expansion_keeps_activity() {
     use crate::scrollback::ScrollbackState;
@@ -907,7 +896,7 @@ fn rendered_verb_group_folds_subagent_row_and_expansion_keeps_activity() {
         "header must aggregate tool and subagent members: {header_row:?}"
     );
 
-    // Expanded: the subagent member surfaces with its live suffix.
+    // Expanded: the subagent member row appears with its live suffix
     state.set_selected(Some(0));
     assert!(state.toggle_group_expansion());
     state.prepare_layout(viewport.width, viewport.height);
@@ -944,10 +933,9 @@ fn rendered_verb_group_folds_subagent_row_and_expansion_keeps_activity() {
     );
 }
 
-/// Render a prepared state — feeding the fold's spans when `with_spans` —
-/// and return the frame buffer plus the full render result (selection
-/// model included). The span-less path is what harnesses exercise and
-/// must keep the legacy plain-count header text.
+/// Render a prepared state, feeding the fold's spans when `with_spans`.
+/// Returns the frame buffer plus the full render result (selection model included).
+/// The span-less path is what harnesses exercise and must keep the legacy plain-count header text.
 fn render_state(
     state: &crate::scrollback::ScrollbackState,
     viewport: Rect,
@@ -978,8 +966,7 @@ fn render_state(
     (buf, result)
 }
 
-/// Render the header row (row 0) of a truncation-grouped state, with or
-/// without the fold's spans.
+/// Render the header row (row 0) of a truncation-grouped state, with or without the fold's spans.
 fn truncation_header_row(
     state: &crate::scrollback::ScrollbackState,
     viewport: Rect,
@@ -988,10 +975,9 @@ fn truncation_header_row(
     buffer_row_text(&render_state(state, viewport, with_spans).0, 0)
 }
 
-/// A collapsed truncation ("N more") header fed with the fold's spans
-/// renders the aggregated bucket label for exactly its hidden prefix —
-/// the header row plus the rows folded behind it — while the span-less
-/// path keeps the plain count.
+/// A collapsed truncation ("N more") header fed with the fold's spans renders the aggregated bucket label.
+/// The label covers exactly the hidden prefix: the header row plus the rows folded behind it.
+/// The span-less path keeps the plain count.
 #[test]
 fn truncation_header_renders_bucket_label_with_spans_and_plain_count_without() {
     use crate::scrollback::ScrollbackState;
@@ -1010,8 +996,7 @@ fn truncation_header_renders_bucket_label_with_spans_and_plain_count_without() {
 
     let layouts = state.get_cached_entry_layouts().expect("layout cache");
     assert!(!layouts[0].verb_group_header, "commands never verb-fold");
-    // 6 participants, max_visible=3 → hidden=3; the plain count shows
-    // hidden-1 while the label describes all 3 hidden participants.
+    // 6 participants with max_visible 3 leave 3 hidden; the plain count shows one less while the label describes all 3 hidden participants
     assert_eq!(layouts[0].group_header_count, 2);
 
     let labeled = truncation_header_row(&state, viewport, true);
@@ -1026,10 +1011,8 @@ fn truncation_header_renders_bucket_label_with_spans_and_plain_count_without() {
     );
 }
 
-/// The aggregated vocabulary is owned by the "Group tool calls" setting:
-/// toggled off, a span-fed truncation header keeps the plain "N more"
-/// count (with the toggle off, previously verb-groupable tools feed
-/// truncation runs — they must not come back verb-labeled anyway).
+/// The aggregated vocabulary is owned by the "Group tool calls" setting: toggled off, a span-fed truncation header keeps the plain "N more" count.
+/// With the toggle off, previously verb-groupable tools feed truncation runs; they must not come back verb-labeled anyway.
 #[test]
 fn truncation_header_keeps_plain_count_when_group_tool_verbs_off() {
     use crate::scrollback::ScrollbackState;
@@ -1056,9 +1039,8 @@ fn truncation_header_keeps_plain_count_when_group_tool_verbs_off() {
     );
 }
 
-/// The expanded truncation collapse header describes the WHOLE run —
-/// every participant, visible tail included — when spans are present,
-/// and keeps the legacy "N tool calls & thoughts" count without them.
+/// The expanded truncation collapse header describes the WHOLE run (every participant, visible tail included) when spans are present.
+/// Without them it keeps the legacy "N tool calls & thoughts" count.
 #[test]
 fn expanded_truncation_collapse_header_renders_whole_run_label() {
     use crate::scrollback::ScrollbackState;
@@ -1094,8 +1076,7 @@ fn expanded_truncation_collapse_header_renders_whole_run_label() {
     );
 }
 
-/// A same-row drag spanning a line's full selectable width, for copy
-/// reconstruction assertions.
+/// A same-row drag spanning a line's full selectable width, for copy reconstruction assertions.
 fn full_row_drag(
     line: &ResolvedSelectableLine,
 ) -> crate::scrollback::text_selection::ActiveTextDrag {
@@ -1117,9 +1098,8 @@ fn full_row_drag(
     }
 }
 
-/// A labeled truncation header gets copy parity with verb headers: its
-/// synthetic selectable row carries the aggregated label as the copy
-/// text, hitbox shifted past the diamond chrome, in both fold states.
+/// A labeled truncation header copies like a verb header.
+/// Its synthetic selectable row carries the aggregated label as the copy text, with the hitbox shifted past the diamond chrome, in both fold states.
 #[test]
 fn labeled_truncation_header_synthetic_line_copies_label_text() {
     use crate::scrollback::ScrollbackState;
@@ -1144,9 +1124,8 @@ fn labeled_truncation_header_synthetic_line_copies_label_text() {
     assert_eq!(header.lines.len(), 1);
     assert_eq!(header.lines[0].text, "Ran 3 commands");
     assert_eq!(header.lines[0].screen_y, 0);
-    // Pin the hitbox to the DRAWN glyphs, not just to the chrome helper:
-    // the frame's own cells must spell the label starting at screen_x, so
-    // a chrome edit that misaligned highlight from paint would fail here.
+    // Pin the hitbox to the DRAWN glyphs, not just to the chrome helper
+    // The frame's own cells must spell the label starting at screen_x, so a chrome edit that misaligned highlight from paint would fail here
     let screen_x = header.lines[0].screen_x;
     let drawn: String = (screen_x..screen_x + header.lines[0].selectable_cols.end)
         .map(|x| buf[(x, 0)].symbol())
@@ -1181,10 +1160,8 @@ fn labeled_truncation_header_synthetic_line_copies_label_text() {
     assert_eq!(copy, "Ran 6 commands");
 }
 
-/// With the vocabulary gate off, a span-fed truncation header keeps the
-/// plain count AND stays non-copyable: no synthetic selectable line may
-/// land on the header row (the span-less path is pinned by
-/// `group_header_entry_contributes_no_selectable_lines`).
+/// With the vocabulary gate off, a span-fed truncation header keeps the plain count AND stays non-copyable.
+/// No synthetic selectable line may land on the header row (the span-less path is pinned by `group_header_entry_contributes_no_selectable_lines`).
 #[test]
 fn plain_count_truncation_header_contributes_no_selectable_line() {
     use crate::scrollback::ScrollbackState;
@@ -1226,9 +1203,8 @@ fn plain_count_truncation_header_contributes_no_selectable_line() {
     );
 }
 
-/// Both fold families feed the single label channel in one frame: the
-/// verb header and the labeled truncation header each render their
-/// aggregated label and expose it through the shared reserved range.
+/// Both fold families feed the single label channel in one frame.
+/// The verb header and the labeled truncation header each render their aggregated label and expose it through the shared reserved range.
 #[test]
 fn verb_and_truncation_headers_share_one_label_channel() {
     use crate::scrollback::ScrollbackState;
@@ -1368,20 +1344,16 @@ fn test_selected_entry_output_divergence_uses_selected_branch() {
     assert_eq!(result.selection_model.visible_blocks[0].entry_idx, 0);
 }
 
-/// Message-style blocks (`AgentMessage`, `UserPrompt`, `Btw`)
-/// reserve 10 columns on the right for the timestamp overlay, so their cached
-/// output is wrapped at `content_area.width - 10`, not `content_area.width`.
+/// Message-style blocks (`AgentMessage`, `UserPrompt`, `Btw`) reserve 10 columns on the right for the timestamp overlay.
+/// Their cached output is therefore wrapped at `content_area.width - 10`, not `content_area.width`.
 ///
-/// `VisibleBlockGeometry.content_width` must report the same reduced width
-/// that was used to populate the cache; otherwise any code that re-derives
-/// the wrapped lines from the model (notably `finish_text_drag`) would call
-/// `effective_output` at the wrong width, get a different wrapping, and
-/// slice the wrong content for the clipboard.
+/// `VisibleBlockGeometry.content_width` must report the same reduced width that was used to populate the cache.
+/// Otherwise code that re-derives the wrapped lines from the model (notably `finish_text_drag`) would call `effective_output` at the wrong width.
+/// A different wrapping there slices the wrong content for the clipboard.
 #[test]
 fn message_block_content_width_subtracts_timestamp_reservation() {
-    // Picked so the message wraps to a different line count at
-    // `content_width - 10` than at `content_width`. With viewport=30
-    // and chrome=4, pane_content_width=26 and per-block content_width=16.
+    // Picked so the message wraps to a different line count at `content_width - 10` than at `content_width`
+    // With a 30-wide viewport and 4 columns of chrome, pane_content_width is 26 and per-block content_width is 16
     let entries = vec![make_markdown_entry(
         "hello world foo bar baz qux quux corge grault garply waldo",
     )];
@@ -1396,11 +1368,9 @@ fn message_block_content_width_subtracts_timestamp_reservation() {
         "AgentMessage should reserve 10 cols for the timestamp"
     );
 
-    // The lines registered in the resolved model came from the cached
-    // output computed at `block.content_width`. Re-deriving them at the
-    // same width must produce the same line count so block_line_idx values
-    // remain valid; deriving at the wider `pane_content_width` produces a
-    // different wrapping (the bug `finish_text_drag` previously triggered).
+    // The lines registered in the resolved model came from the cached output computed at `block.content_width`
+    // Re-deriving them at the same width must produce the same line count so block_line_idx values remain valid
+    // Deriving at the wider `pane_content_width` produces a different wrapping (the bug `finish_text_drag` previously triggered)
     let appearance = AppearanceConfig::default();
     let model_lines = result.selection_model.ranges[0].lines.len();
     let entry_lines_narrow = entries[0]
@@ -1479,8 +1449,7 @@ fn overlay_single_line_link() {
 
 #[test]
 fn overlay_relative_link_resolves_against_cwd() {
-    // A relative markdown destination that is not generated media resolves
-    // to an existing file under the session cwd, and becomes clickable.
+    // A relative markdown destination that is not generated media resolves to an existing file under the session cwd, and becomes clickable
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("src")).unwrap();
     std::fs::write(dir.path().join("src/main.rs"), b"fn main() {}").unwrap();
@@ -1529,9 +1498,7 @@ fn overlay_relative_link_resolves_against_cwd() {
 
 #[test]
 fn overlay_markdown_relative_link_opens_as_file_url() {
-    // End-to-end through the real render path: a markdown link to a short
-    // media path that matches this transcript's generated media becomes a
-    // `file://` overlay.
+    // End-to-end through the real render path: a markdown link to a short media path that matches this transcript's generated media becomes a `file://` overlay
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("images")).unwrap();
     std::fs::write(dir.path().join("images/1.png"), b"x").unwrap();
@@ -1646,7 +1613,7 @@ fn overlay_max_screen_y_clips_links() {
         make_hyperlink(2, 0..5, "https://clipped.com", 2),
     ];
     let mut overlay = LinkOverlay::new();
-    // max_screen_y=2 → only rows 0..2 are visible (screen_y 0 and 1)
+    // max_screen_y=2 means only rows 0..2 are visible (screen_y 0 and 1)
     map_hyperlinks_to_overlay(&links, &output, 0, 0, 2, 0, 0, &[], None, &mut overlay);
 
     assert_eq!(overlay.links().len(), 1);
@@ -1660,7 +1627,7 @@ fn overlay_max_screen_y_clips_links() {
 
 #[test]
 fn overlay_content_line_offset_skips_header_lines() {
-    // Simulates BtwBlock: header + separator + markdown body
+    // Simulates BtwBlock: header, separator, then markdown body
     let output = make_block_output(&[
         ("/btw question", None), // header (offset 0)
         ("", None),              // separator (offset 1)
@@ -1730,7 +1697,6 @@ fn execute_block_urls_get_overlay_links() {
     let viewport = Rect::new(0, 0, 80, 20);
     let result = render_with_scratch(&entries, viewport, 0, None);
 
-    // Should find URL(s) in the output text.
     assert!(
         !result.link_overlay.is_empty(),
         "execute block output should have linkified URLs"
@@ -1755,10 +1721,9 @@ fn execute_block_urls_get_overlay_links() {
 
 #[test]
 fn markdown_wrapped_project_media_path_fully_linkified() {
-    // Regression: imagine-tool prose whose long, percent-encoded media
-    // path soft-wraps across rows. The whole path must be clickable (one
-    // overlay region per row, all pointing at the full file:// URL) — not
-    // just the leading path fragment on the first row.
+    // Regression: imagine-tool prose whose long, percent-encoded media path soft-wraps across rows
+    // The whole path must be clickable, not just the leading fragment on the first row
+    // Each visual row gets one overlay region, all pointing at the full file:// URL
     let path = "/Users/alice/.grok/projects/%2FUsers%2Falice%2Fcode%2Fxai/\
                 019e0000-0000-7000-8000-000000000001/images/1.jpg";
     let entries = vec![make_markdown_entry(&format!(
@@ -1809,9 +1774,8 @@ fn markdown_wrapped_project_media_path_fully_linkified() {
 
 #[test]
 fn two_autolink_documents_with_restarted_ids_stay_separate_hits() {
-    // Each agent message is its own markdown document, so both autolinks
-    // get id=0. Consecutive same-id overlay entries must not merge when
-    // the URLs differ (Apple Terminal Cmd+hover/click).
+    // Each agent message is its own markdown document, so both autolinks get id=0
+    // Consecutive same-id overlay entries must not merge when the URLs differ (Apple Terminal Cmd+hover/click)
     let entries = vec![
         make_markdown_entry("<https://example.com/aaa>\n"),
         make_markdown_entry("<https://example.com/bbb>\n"),
@@ -1850,8 +1814,7 @@ fn two_autolink_documents_with_restarted_ids_stay_separate_hits() {
 
 #[test]
 fn markdown_block_does_not_double_scan() {
-    // Agent message with a URL — should get exactly one hyperlink per URL
-    // from the markdown renderer, not doubled by the plain-text scan.
+    // An agent message with a URL gets exactly one hyperlink per URL from the markdown renderer, not doubled by the plain-text scan
     let entries = vec![make_markdown_entry("Visit https://example.com for info.\n")];
     let viewport = Rect::new(0, 0, 80, 10);
     let result = render_with_scratch(&entries, viewport, 0, None);
@@ -1874,8 +1837,7 @@ fn markdown_block_does_not_double_scan() {
 
 #[test]
 fn collapsed_block_body_urls_not_visible() {
-    // URLs in the output body are not rendered when collapsed (only the
-    // header line is shown), so no link overlay entries should appear.
+    // URLs in the output body are not rendered when collapsed (only the header line is shown), so no link overlay entries should appear
     let entries = vec![ScrollbackEntry::new(RenderBlock::execute_with_output(
         "echo test",
         "See https://example.com",
@@ -1895,8 +1857,7 @@ fn collapsed_block_body_urls_not_visible() {
 
 #[test]
 fn collapsed_block_header_file_path_is_scanned() {
-    // File paths in the command header line should be linkified even
-    // when the block is collapsed.
+    // File paths in the command header line should be linkified even when the block is collapsed
     let mut entries = vec![ScrollbackEntry::new(RenderBlock::execute_with_output(
         "cd /Users/foo/project && ls",
         "file1\nfile2",
@@ -2025,8 +1986,7 @@ fn group_header_entry_does_not_leak_hidden_line_links() {
 
 #[test]
 fn collapse_header_entry_does_not_leak_links_but_visible_group_entries_do() {
-    // Smallest shape the truncation fold can produce for an expanded
-    // group: 3 entries, header count = group_len - 1 = 2.
+    // Smallest shape the truncation fold can produce for an expanded group: 3 entries, header count = group_len - 1 = 2
     let mut entries = vec![
         ScrollbackEntry::new(RenderBlock::execute_with_output(
             "cd /Users/foo/hidden && ls",
@@ -2220,10 +2180,8 @@ fn group_header_entry_contributes_no_selectable_lines() {
     );
 }
 
-/// The verb-group header's synthetic selectable line tracks the rendered
-/// label geometry: both fold states shift the hitbox past the diamond
-/// chrome onto the label glyphs, so highlight always matches the copied
-/// text.
+/// The verb-group header's synthetic selectable line tracks the rendered label geometry.
+/// Both fold states shift the hitbox past the diamond chrome onto the label glyphs, so highlight always matches the copied text.
 #[test]
 fn verb_group_header_selection_geometry_tracks_chrome() {
     crate::appearance::cache::set_show_thinking_blocks(false);
@@ -2243,7 +2201,7 @@ fn verb_group_header_selection_geometry_tracks_chrome() {
     let layouts_for = |expanded: bool| {
         vec![
             EntryLayoutInfo {
-                // Expanded slot = header line + entry 0's own row.
+                // The expanded slot is the header line plus entry 0's own row
                 height: if expanded { 2 } else { 1 },
                 gap_after: 0,
                 // Verb headers carry the run's tool-member count.
@@ -2299,8 +2257,7 @@ fn verb_group_header_selection_geometry_tracks_chrome() {
         collapsed.selectable_cols, expanded.selectable_cols,
         "hitbox always spans exactly the label glyphs"
     );
-    // The expanded slot also exposes member 0's own content line at the
-    // row below the header, selectable like any other member row.
+    // The expanded slot also exposes member 0's own content line at the row below the header, selectable like any other member row
     let member_line_at = |expanded: bool| {
         let mut buf = Buffer::empty(viewport);
         let result = render_scrolled_entries_with_scratch(
@@ -2340,10 +2297,9 @@ fn verb_group_header_selection_geometry_tracks_chrome() {
         member_line_at(false).is_none(),
         "collapsed slot must not map hidden member content"
     );
-    // Collapsed Read headers show basename only (`a1.rs`), so the plain-
-    // text path scanner no longer sees the absolute `/tmp/verbgeo/…`
-    // string and will not emit a file link for it. Folded members still
-    // expose no links; expanded members remain selectable (asserted above).
+    // Collapsed Read headers show basename only (`a1.rs`)
+    // The plain-text path scanner therefore never sees the absolute `/tmp/verbgeo/…` string and emits no file link for it
+    // Folded members still expose no links; expanded members remain selectable (asserted above)
     let member_link_rows = |expanded: bool| {
         let mut buf = Buffer::empty(viewport);
         let result = render_scrolled_entries_with_scratch(
@@ -2377,8 +2333,7 @@ fn verb_group_header_selection_geometry_tracks_chrome() {
             .map(|l| l.screen_row)
             .collect::<Vec<_>>()
     };
-    // If a link is still produced (e.g. relative basename scanners), it
-    // must sit on the member content row under the verb header.
+    // If a link is still produced (e.g. relative basename scanners), it must sit on the member content row under the verb header.
     for row in member_link_rows(true) {
         assert_eq!(
             row, 1,
@@ -2389,10 +2344,8 @@ fn verb_group_header_selection_geometry_tracks_chrome() {
         member_link_rows(false).is_empty(),
         "folded member must expose no links"
     );
-    // Both states wear the diamond chrome: the hitbox starts past it at
-    // the same x either way. The label begins at the content column
-    // (accent + left pad — NOT `chrome_width`, which also counts the
-    // right pad) plus the diamond prefix.
+    // Both states wear the diamond chrome: the hitbox starts past it at the same x either way
+    // The label begins at the content column (accent plus left pad, NOT `chrome_width`, which also counts the right pad) plus the diamond prefix
     let expected_x = HorizontalLayout::ACCENT
         + appearance.scrollback.layout.block_pad_left
         + group_header_chrome_prefix_width();
@@ -2406,11 +2359,9 @@ fn verb_group_header_selection_geometry_tracks_chrome() {
     );
 }
 
-/// The expanded slot's two rows are independent drag targets: the
-/// synthetic header line keys its own reserved range, so a drag anchored
-/// on either row paints and copies that row alone. Before the reserved
-/// id, both rows shared (entry 0, range 0, block line 0) — `push_line`
-/// merged them into one range and a drag on either selected both.
+/// The expanded slot's two rows are independent drag targets.
+/// The synthetic header line keys its own reserved range, so a drag anchored on either row paints and copies that row alone.
+/// Before the reserved id, both rows shared (entry 0, range 0, block line 0), so `push_line` merged them and a drag on either selected both.
 #[test]
 fn verb_group_expanded_slot_header_and_member_select_independently() {
     use crate::scrollback::text_selection::reconstruct_selection_text;
@@ -2427,7 +2378,7 @@ fn verb_group_expanded_slot_header_and_member_select_independently() {
     let theme = Theme::current();
     let appearance = AppearanceConfig::default();
     let viewport = Rect::new(0, 0, 80, 10);
-    // Expanded slot: header line + member 0's own row.
+    // Expanded slot: the header line plus member 0's own row
     let layouts = vec![
         EntryLayoutInfo {
             height: 2,
@@ -2466,8 +2417,7 @@ fn verb_group_expanded_slot_header_and_member_select_independently() {
     );
     let model = &result.selection_model;
 
-    // The two rows resolve to two distinct ranges, one line each on
-    // their own screen rows.
+    // The two rows resolve to two distinct ranges, one line each on their own screen rows
     let header = model.range(0, GROUP_HEADER_RANGE_ID).expect("header range");
     assert_eq!(header.lines.len(), 1);
     assert_eq!(header.lines[0].text, "Read 2 files");
@@ -2714,8 +2664,7 @@ fn truncated_execute_block_detects_urls_in_head_and_tail() {
     );
 }
 
-/// Collapsed Edit header: after bullet prepend the path is span 2, and the
-/// OSC8 overlay must cover path cols only (not the verb or bullet).
+/// Collapsed Edit header: after the bullet is prepended the path is span 2, and the OSC8 overlay must cover path cols only (not the verb or bullet).
 #[test]
 fn tool_header_link_target_overlay_covers_path_after_bullet() {
     use crate::appearance::ToolBullet;
@@ -3119,25 +3068,18 @@ fn read_header_link_is_dropped_when_path_has_no_visible_columns() {
     );
 }
 
-/// Collect all `OverlayLink`s for `url` grouped by `OverlayLink::id`,
-/// returning the largest id-group (the wrapped URL's fragment set).
+/// Collect all `OverlayLink`s for `url` grouped by `OverlayLink::id`, returning the largest id-group (the wrapped URL's fragment set).
 ///
-/// In pretty mode `[text](url)` produces two HyperlinkTargets that BOTH
-/// reference `url` but have distinct ids: one for the link text
-/// (lower id, parser-produced) and one for the `(url)` suffix
-/// (higher id, url_scan-produced).  The wrapped URL fragments share
-/// an id; for URL-wrap tests the url_scan group is the one that
-/// spans multiple rows.  Panics with a verbose diagnostic if no
-/// group has at least one entry.
+/// In pretty mode `[text](url)` produces two HyperlinkTargets that BOTH reference `url` but have distinct ids.
+/// One covers the link text (lower id, parser-produced) and one the `(url)` suffix (higher id, url_scan-produced).
+/// The wrapped URL fragments share an id; for URL-wrap tests the url_scan group is the one that spans multiple rows.
+/// Panics with a verbose diagnostic if no group has at least one entry.
 ///
-/// Tie behaviour: `Iterator::max_by_key` returns the LAST equally-
-/// maximum element, and `BTreeMap::into_iter()` yields entries in
-/// ascending key order, so if both groups have the same number of
-/// fragments the higher-id group wins — which is the
-/// url_scan-produced URL-suffix group, the right pick for these
-/// tests.  The helper is unambiguous for all current callers; a
-/// future caller with a different `[parser, url_scan]` shape may
-/// want to filter `result.link_overlay.links()` directly.
+/// Ties: `Iterator::max_by_key` returns the LAST equally-maximum element, and `BTreeMap::into_iter()` yields entries in ascending key order.
+/// If both groups have the same number of fragments, the higher-id group wins.
+/// That is the url_scan-produced URL-suffix group, the right pick for these tests.
+/// The helper is unambiguous for all current callers.
+/// A future caller with a different `[parser, url_scan]` shape may want to filter `result.link_overlay.links()` directly.
 fn url_overlay_group<'a>(result: &'a ScrollRenderResult, url: &str) -> Vec<&'a OverlayLink> {
     let mut by_id: std::collections::BTreeMap<u32, Vec<&OverlayLink>> =
         std::collections::BTreeMap::new();
@@ -3176,9 +3118,8 @@ fn url_overlay_group<'a>(result: &'a ScrollRenderResult, url: &str) -> Vec<&'a O
     group
 }
 
-/// Assert that `fragments` are on strictly-increasing CONSECUTIVE
-/// screen rows (rows must differ by exactly 1).  Catches partial
-/// regressions where the middle of a wrapped URL is silently skipped.
+/// Assert that `fragments` are on strictly-increasing CONSECUTIVE screen rows (rows must differ by exactly 1).
+/// Catches partial regressions where the middle of a wrapped URL is silently skipped.
 fn assert_consecutive_rows(fragments: &[&OverlayLink]) {
     for w in fragments.windows(2) {
         assert_eq!(
@@ -3193,15 +3134,11 @@ fn assert_consecutive_rows(fragments: &[&OverlayLink]) {
     }
 }
 
-/// Regression test for the bug where a markdown link `[text](url)`
-/// rendered in pretty mode loses the OSC 8 wrapper (and the terminal's
-/// auto-styling) on every wrapped row of the URL portion EXCEPT the
-/// first.  Every wrapped row covering URL bytes must receive its own
-/// `OverlayLink` so the entire URL is clickable and styled.
+/// Regression: a `[text](url)` link in pretty mode lost the OSC 8 wrapper and the terminal's auto-styling on every wrapped URL row except the first.
+/// Every wrapped row covering URL bytes must receive its own `OverlayLink` so the entire URL is clickable and styled.
 #[test]
 fn overlay_pretty_link_url_wraps_across_rows() {
-    // Long URL with hyphens that force HyphenSplitter to wrap mid-URL.
-    // Synthetic long hyphenated URL (length/shape match wrap regression needs).
+    // A synthetic long hyphenated URL forces HyphenSplitter to wrap mid-URL; its length and shape match what the wrap regression needs
     let url = "https://example.com/d/seg-00-wrap-seg-01-wrap-seg-02-wrap-seg-03-wrap-seg-04-wrap-seg-05-wrap-seg-06-wrap-seg-07-wrap-seg-08-wrap-seg-09-wrap-seg-10";
     let markdown = format!("[Example Dashboard -- Long Title For Wrap]({url})\n");
     let entries = vec![make_markdown_entry(&markdown)];
@@ -3210,14 +3147,10 @@ fn overlay_pretty_link_url_wraps_across_rows() {
     let viewport = Rect::new(0, 0, 50, 20);
     let result = render_with_scratch(&entries, viewport, 0, None);
 
-    // The pre-wrap line is ~185 cells wide and per-block content area
-    // is ~35 cells (viewport - timestamp reservation - layout chrome).
-    // The link text takes row 0 (33 cells), then the URL portion
-    // wraps onto exactly 5 continuation rows.  This is a plain
-    // paragraph (no `subsequent_indent`), so the combined fragment
-    // widths must equal the URL's display width — a strong
-    // invariant that would fail under any row drop or off-by-N
-    // column-tracking regression.
+    // The pre-wrap line is ~185 cells wide and the per-block content area is ~35 cells (viewport - timestamp reservation - layout chrome)
+    // The link text takes row 0 (33 cells), then the URL portion wraps onto exactly 5 continuation rows
+    // This is a plain paragraph (no `subsequent_indent`), so the combined fragment widths must equal the URL's display width
+    // That invariant would fail under any row drop or off-by-N column-tracking regression
     let group = url_overlay_group(&result, url);
     assert_eq!(
         group.len(),
@@ -3242,11 +3175,9 @@ fn overlay_pretty_link_url_wraps_across_rows() {
     );
 }
 
-/// Short-ish URL inside prose, wrapping onto multiple rows (no
-/// blockquote/list indent involvement).  For paragraph wrapping
-/// `map_hyperlinks_to_overlay` produces OverlayLinks whose combined
-/// width exactly equals the URL's display width — the strongest
-/// invariant we can pin for the non-indented case.
+/// Short-ish URL inside prose, wrapping onto multiple rows (no blockquote/list indent involvement).
+/// For paragraph wrapping `map_hyperlinks_to_overlay` produces OverlayLinks whose combined width exactly equals the URL's display width.
+/// That is the strongest invariant we can pin for the non-indented case.
 #[test]
 fn overlay_pretty_link_url_wraps_multi_row_paragraph() {
     let url = "https://example.com/some/long/path/that/will/wrap/once-and-twice";
@@ -3266,8 +3197,7 @@ fn overlay_pretty_link_url_wraps_multi_row_paragraph() {
             .collect::<Vec<_>>(),
     );
     assert_consecutive_rows(&group);
-    // The combined width of all fragments must equal the URL's
-    // display width (URLs are pure ASCII → display width == byte len).
+    // The combined width of all fragments must equal the URL's display width (these URLs are pure ASCII, so display width equals byte length)
     // Any silently-dropped middle row would make this sum unequal.
     let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
     assert_eq!(
@@ -3281,13 +3211,11 @@ fn overlay_pretty_link_url_wraps_multi_row_paragraph() {
     );
 }
 
-/// CJK link text: column tracking must be display-width aware.  If
-/// the bug had used byte length for `日` (3 bytes, but 2 display
-/// cells), the column accounting would be off by N cells per CJK
-/// character and the URL fragments wouldn't sum to the URL's
-/// display width.  We assert that combined fragment widths equal
-/// the URL's display width — the strongest cell-width invariant we
-/// can pin without re-deriving the entire wrap layout.
+/// CJK link text: column tracking must be display-width aware.
+/// If the bug had used byte length for `日` (3 bytes, but 2 display cells), the column accounting would be off by N cells per CJK character.
+/// The URL fragments then wouldn't sum to the URL's display width.
+/// We assert that combined fragment widths equal the URL's display width.
+/// That is the strongest cell-width invariant we can pin without re-deriving the entire wrap layout.
 #[test]
 fn overlay_pretty_link_url_with_cjk_text() {
     use unicode_width::UnicodeWidthStr;
@@ -3305,12 +3233,9 @@ fn overlay_pretty_link_url_with_cjk_text() {
     );
     assert_consecutive_rows(&group);
 
-    // Combined fragment widths must equal the URL's display width.
-    // For pure-ASCII URLs that's `url.len()`.  A byte-vs-cell
-    // regression in CJK column tracking would propagate as a wrong
-    // pre-wrap column for the URL HyperlinkTarget, which in turn
-    // would clip or shift one of the fragments — making the sum
-    // unequal.
+    // Combined fragment widths must equal the URL's display width. For pure-ASCII URLs that's `url.len()`.
+    // A byte-vs-cell regression in CJK column tracking would propagate as a wrong pre-wrap column for the URL HyperlinkTarget
+    // That in turn would clip or shift one of the fragments, making the sum unequal
     let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
     assert_eq!(
         combined_width as usize,
@@ -3319,30 +3244,19 @@ fn overlay_pretty_link_url_with_cjk_text() {
     );
 }
 
-/// Long URL inside a blockquote.  The OverlayLink for the URL must
-/// cover continuation rows so OSC 8 is present on every wrapped row.
+/// Long URL inside a blockquote. The OverlayLink for the URL must cover continuation rows so OSC 8 is present on every wrapped row.
 ///
-/// KNOWN-BUG: the current
-/// `map_hyperlinks_to_overlay` accumulates `cumulative_col` using
-/// `line.content.width()`, which INCLUDES the `│ ` indent injected
-/// by `word_wrap_line_with_joiners` on continuation rows.  Two
-/// consequences for blockquote/list URL wraps:
-///   (a) Cosmetic: the OverlayLink on continuation rows starts at
-///       `content_x` (covering the `│ ` indent), so the indent
-///       characters are OSC 8 wrapped and inherit the terminal's
-///       auto-styling (underline/colour).
-///   (b) Functional: because `cumulative_col` over-counts by
-///       `indent_width` cells per continuation row, the last
-///       `indent_width` cells of the URL on each continuation row
-///       are NOT covered by an OverlayLink — those trailing chars
-///       are not clickable.  With N continuation rows the
-///       unclickable tail accumulates to `N * indent_width` cells.
-/// The original PR's invariant (OSC 8 present on every wrapped row
-/// of the URL) IS satisfied.  This test pins that invariant; once
-/// the bug is fixed (needs `BlockLine` to carry `subsequent_indent`
-/// width), tighten the assertions to `col_start == content_x +
-/// indent_width` on continuation rows and pin
-/// `sum(fragment_widths) == url.display_width()`.
+/// KNOWN-BUG: `map_hyperlinks_to_overlay` accumulates `cumulative_col` using `line.content.width()`.
+/// That width INCLUDES the `│ ` indent injected by `word_wrap_line_with_joiners` on continuation rows.
+/// Two consequences for blockquote/list URL wraps:
+///   (a) Cosmetic: the OverlayLink on continuation rows starts at `content_x`, covering the `│ ` indent.
+///       The indent characters are OSC 8 wrapped and inherit the terminal's auto-styling (underline/colour).
+///   (b) Functional: `cumulative_col` over-counts by `indent_width` cells per continuation row.
+///       The last `indent_width` cells of the URL on each continuation row are therefore not covered by an OverlayLink and are not clickable.
+///       With N continuation rows the unclickable tail accumulates to `N * indent_width` cells.
+/// The invariant that OSC 8 is present on every wrapped row of the URL IS satisfied, and this test pins it.
+/// Once the bug is fixed (needs `BlockLine` to carry the `subsequent_indent` width), tighten the assertions:
+/// `col_start == content_x + indent_width` on continuation rows, and `sum(fragment_widths) == url.display_width()`.
 #[test]
 fn overlay_pretty_link_url_in_blockquote_wraps_correctly() {
     let url = "https://example.com/blockquote/path/with/many/hyphens-and-segments-here";
@@ -3377,12 +3291,10 @@ fn overlay_pretty_link_url_in_blockquote_wraps_correctly() {
     }
 }
 
-/// Long URL inside a list item.  Same OSC-coverage invariant as the
-/// blockquote test above; see that test for the rationale and the
-/// description of the related indent-inclusion
-/// bug (both the cosmetic indent-over-styling AND the functional
-/// "last `indent_width` cells of URL not clickable on continuation
-/// rows" symptoms apply here too).
+/// Long URL inside a list item. Same OSC-coverage invariant as the blockquote test above.
+/// See that test for the rationale and the related indent-inclusion bug.
+/// Both its symptoms apply here too.
+/// The indent inherits the URL styling, and the last `indent_width` URL cells of each continuation row are not clickable.
 #[test]
 fn overlay_pretty_link_url_in_list_wraps_correctly() {
     let url = "https://example.com/list/item/path/with/many/hyphens-and-segments-here";
@@ -3416,10 +3328,8 @@ fn overlay_pretty_link_url_in_list_wraps_correctly() {
     }
 }
 
-/// Width changes trigger `set_max_table_width` resets inside
-/// `MarkdownContent::ensure_wrapped`.  URL hyperlinks must survive
-/// every step of a narrow→narrower→wider→narrow sequence (production
-/// terminal pane drags fire many such transitions).
+/// Width changes trigger `set_max_table_width` resets inside `MarkdownContent::ensure_wrapped`.
+/// URL hyperlinks must survive every step of a narrow, narrower, wider, narrow sequence (production terminal pane drags fire many such transitions).
 #[test]
 fn overlay_url_hyperlinks_survive_width_change() {
     let url = "https://example.com/long/url/path/with/many/segments-and-hyphens";
@@ -3428,15 +3338,12 @@ fn overlay_url_hyperlinks_survive_width_change() {
     if let RenderBlock::AgentMessage(b) = &mut entries[0].block {
         b.finish();
     }
-    // Exercise multiple width transitions: a wide viewport where
-    // the URL fits on one row, a narrow viewport where it must
-    // wrap onto multiple rows, and back-and-forth between them.
+    // Exercise multiple width transitions and back-and-forth: a wide viewport where the URL fits on one row, a narrow one where it wraps
     // The URL must remain present at every step.
     //
-    // The "wide" threshold (120) is chosen so the per-block content
-    // area exceeds the URL's display width + leading "link (" prefix
-    // even after the 10-cell timestamp reservation and ~4 cells of
-    // layout chrome.  The "narrow" widths (30, 50) force wrapping.
+    // The "wide" threshold (120) makes the per-block content area exceed the URL's display width plus the leading "link (" prefix
+    // That holds even after the 10-cell timestamp reservation and ~4 cells of layout chrome
+    // The "narrow" widths (30, 50) force wrapping
     for width in [120u16, 50, 30, 50, 120, 30] {
         let result = render_with_scratch(&entries, Rect::new(0, 0, width, 10), 0, None);
         let group = url_overlay_group(&result, url);
@@ -3457,8 +3364,7 @@ fn overlay_url_hyperlinks_survive_width_change() {
                 "single-row URL fragment width must equal URL display width",
             );
         } else {
-            // Narrow: URL must wrap onto consecutive rows, with
-            // combined fragment widths summing to the URL width.
+            // Narrow: URL must wrap onto consecutive rows, with combined fragment widths summing to the URL width
             assert!(
                 group.len() >= 2,
                 "URL at width={width} should wrap onto multiple rows; got: {:?}",
@@ -3483,8 +3389,7 @@ fn overlay_url_hyperlinks_survive_width_change() {
     }
 }
 
-/// Short URL that fits on a single row produces exactly one
-/// `OverlayLink`, sized to the URL's display width.
+/// Short URL that fits on a single row produces exactly one `OverlayLink`, sized to the URL's display width.
 #[test]
 fn overlay_pretty_link_url_no_wrap_single_row() {
     let url = "https://a.example/x";
@@ -3507,9 +3412,8 @@ fn overlay_pretty_link_url_no_wrap_single_row() {
     );
 }
 
-/// Two markdown links on the same pre-wrap line, both with URLs long
-/// enough to wrap their `(url)` suffixes; each URL must produce its
-/// own id-group and the id-groups must be distinct (no merging).
+/// Two markdown links on the same pre-wrap line, both with URLs long enough to wrap their `(url)` suffixes.
+/// Each URL must produce its own id-group and the id-groups must be distinct (no merging).
 #[test]
 fn overlay_pretty_two_wrapping_links_distinct_ids() {
     let url_a = "https://aaa.example/with-many-segments/and-more-hyphens/foo/bar/baz";
@@ -3531,17 +3435,14 @@ fn overlay_pretty_two_wrapping_links_distinct_ids() {
     );
     assert!(group_a.len() >= 2, "URL A should wrap onto multiple rows");
     assert!(group_b.len() >= 2, "URL B should wrap onto multiple rows");
-    // Wrapped fragments must land on strictly consecutive rows
-    // (no silently-dropped middle row).
+    // Wrapped fragments must land on strictly consecutive rows (no silently-dropped middle row)
     assert_consecutive_rows(&group_a);
     assert_consecutive_rows(&group_b);
 
-    // The full set of OverlayLink ids referencing either URL must
-    // have at least 4 distinct entries: parser link-text id for "link-a",
-    // url_scan id for `(url_a)`, parser link-text id for "link-b", and
-    // url_scan id for `(url_b)`.  A regression where any two of these
-    // collide (e.g. parser hyperlink IDs not advanced past url_scan IDs
-    // across paragraphs) would silently merge OSC 8 hyperlinks.
+    // The set of OverlayLink ids referencing either URL must have at least 4 distinct entries
+    // Those are the parser link-text ids for "link-a" and "link-b" and the url_scan ids for `(url_a)` and `(url_b)`
+    // If any two collide, OSC 8 hyperlinks silently merge
+    // The known shape is parser hyperlink IDs not advanced past url_scan IDs across paragraphs
     let ids: std::collections::HashSet<u32> = result
         .link_overlay
         .links()
@@ -3562,10 +3463,8 @@ fn overlay_pretty_two_wrapping_links_distinct_ids() {
     );
 }
 
-/// A detected diagram exposes one affordance-row placement, anchored on a
-/// real screen row at the content-area x, carrying the diagram source — and
-/// never an inline image (no `inline_media` placement). Rendering is lazy, so
-/// the placement holds no path/state.
+/// A detected diagram exposes one affordance-row placement, anchored on a real screen row at the content-area x and carrying the diagram source.
+/// It never registers an inline image (no `inline_media` placement). Rendering is lazy, so the placement holds no path/state.
 #[test]
 fn diagram_emits_affordance_placement_not_inline_image() {
     crate::appearance::cache::set_render_mermaid(crate::appearance::RenderMermaid::On);
@@ -3610,8 +3509,7 @@ fn diagram_emits_affordance_placement_not_inline_image() {
     let aff = &result.diagram_affordances[0];
     assert_eq!(aff.source, "A-->B\n");
 
-    // Exact placement geometry: one row tall, anchored at the content-area x,
-    // a non-empty width that stays within the content column band.
+    // Exact placement geometry: one row tall, anchored at the content-area x, a non-empty width that stays within the content column band
     let hlayout = HorizontalLayout::new(viewport, &appearance.scrollback.layout);
     assert_eq!(aff.screen_rect.height, 1, "the affordance row is one row");
     assert_eq!(
@@ -3628,8 +3526,7 @@ fn diagram_emits_affordance_placement_not_inline_image() {
         "row is on-screen",
     );
 
-    // The reserved affordance row renders blank here (the draw loop paints the
-    // buttons), and the diagram source sits on a row above it.
+    // The reserved affordance row renders blank here (the draw loop paints the buttons), and the diagram source sits on a row above it
     assert!(
         buffer_row_text(&buf, aff.screen_rect.y).trim().is_empty(),
         "the placement points at the reserved blank row",
@@ -3650,18 +3547,16 @@ fn make_test_png(width: u32, height: u32) -> Vec<u8> {
     buf
 }
 
-/// A tool-media overlay/image placement exposes the click-to-copy filepath as
-/// its `filepath_screen_rect`, anchored on the block's second output row (the
-/// filepath line) and sharing the image's content-column origin. This is the
-/// assertion that the removed `has_filepath_line` flag previously carried.
+/// A tool-media overlay/image placement exposes the click-to-copy filepath as its `filepath_screen_rect`.
+/// The rect anchors on the block's second output row (the filepath line) and shares the image's content-column origin.
+/// This is the assertion that the removed `has_filepath_line` flag previously carried.
 #[test]
 fn tool_media_overlay_exposes_filepath_click_rect() {
     use crate::scrollback::blocks::tool::{OtherToolCallBlock, ToolCallBlock};
     use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
 
-    // Kitty overlay active → the block hosts its image overlay (no text
-    // `[Open]` line), so the sole placement is the overlay one whose second
-    // output line is the click-to-copy filepath.
+    // With the Kitty overlay active the block hosts its image overlay (no text `[Open]` line)
+    // The sole placement is the overlay one whose second output line is the click-to-copy filepath
     let _guard = set_protocol_for_test(GraphicsProtocol::Kitty);
 
     let dir = tempfile::tempdir().unwrap();
@@ -3674,14 +3569,12 @@ fn tool_media_overlay_exposes_filepath_click_rect() {
     let viewport = Rect::new(0, 0, 80, 30);
     let result = render_with_scratch(std::slice::from_ref(&entry), viewport, 0, None);
 
-    // Exactly the overlay/image placement (button row reserved); no separate
-    // text-`[Open]` placement when the overlay hosts the buttons.
+    // Exactly the overlay/image placement (button row reserved); no separate text-`[Open]` placement when the overlay hosts the buttons
     assert_eq!(result.inline_media.len(), 1, "one overlay placement");
     let media = &result.inline_media[0];
     assert!(media.has_button_row, "overlay/image tool-media placement");
 
-    // The tool block has no vpad, so its second output line (the filepath) is
-    // screen row 1: a one-row click-to-copy target at the image's x.
+    // The tool block has no vpad, so its second output line (the filepath) is screen row 1: a one-row click-to-copy target at the image's x
     let rect = media
         .filepath_screen_rect
         .expect("tool media exposes the click-to-copy filepath rect");

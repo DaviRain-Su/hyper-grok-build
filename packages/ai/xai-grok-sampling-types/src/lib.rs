@@ -17,8 +17,9 @@ pub mod types;
 
 pub use self::conversation::*;
 pub use self::doom_loop::{
-    DOOM_LOOP_CHECK_EVENT_TYPE, DOOM_LOOP_CHECK_HEADER, DoomLoopPeek, DoomLoopRecoveryPolicy,
-    DoomLoopSignal, DoomLoopSignalKind, is_check_event, peek_doom_loop,
+    DEFAULT_EXACT_REPETITION_MIN_TOKENS, DOOM_LOOP_CHECK_EVENT_TYPE, DOOM_LOOP_CHECK_HEADER,
+    DoomLoopPeek, DoomLoopRecoveryPolicy, DoomLoopSignal, DoomLoopSignalKind,
+    EXACT_REPETITION_CHECK_HEADER, is_check_event, peek_doom_loop,
 };
 pub use self::error::{
     ApiErrorCode, EmptyReason, EmptyResponseContext, INVALID_IMAGE_ERROR_CODE,

@@ -61,10 +61,8 @@ fn hint_with_action(
     }
 }
 
-/// `DashboardCycleMode` carries Shift+Tab three times (the terminal
-/// encoding variants `BackTab` / `BackTab`+SHIFT / `Tab`+SHIFT).
-/// The cheatsheet must collapse identically-rendered keys instead
-/// of showing "Shift+Tab / Shift+Tab / Shift+Tab".
+/// `DashboardCycleMode` carries Shift+Tab three times (the terminal encoding variants `BackTab` / `BackTab`+SHIFT / `Tab`+SHIFT).
+/// The cheatsheet must collapse identically-rendered keys instead of showing "Shift+Tab / Shift+Tab / Shift+Tab".
 #[test]
 fn build_entries_dedupes_identically_rendered_alt_keys() {
     let registry = crate::actions::ActionRegistry::defaults();
@@ -729,11 +727,10 @@ fn build_entries_dims_both_pane_contexts_from_side_pane() {
     );
 }
 
-/// The dashboard LIST and the session OVERLAY dim each other's shortcuts:
-/// on the list the overlay-scoped shortcuts (`When::DashboardOverlay`,
-/// e.g. "prev session") are dimmed while the list shortcuts
-/// (`When::DashboardFocused`, e.g. "pin") are lit; inside the overlay it's
-/// the inverse. (Dashboard actions are registered under `cfg(test)`.)
+/// The dashboard LIST and the session OVERLAY dim each other's shortcuts.
+/// On the list, overlay-scoped shortcuts (`When::DashboardOverlay`, e.g. "prev session") are dimmed.
+/// List shortcuts (`When::DashboardFocused`, e.g. "pin") are lit; inside the overlay it's the inverse.
+/// (Dashboard actions are registered under `cfg(test)`.)
 #[test]
 fn build_entries_dims_dashboard_list_vs_overlay() {
     let registry = ActionRegistry::defaults();
@@ -775,18 +772,15 @@ fn build_entries_dims_dashboard_list_vs_overlay() {
     );
 }
 
-/// `DashboardStop` (list) and `DashboardOverlayStop` (overlay) share
-/// Ctrl+X and the Dashboard category. The per-category dedup must keep
-/// whichever matches the active surface — lit — instead of always
-/// keeping the first-registered (list) def. And inside the overlay the
-/// `ShortcutsHelp` row must drop its shadowed Ctrl+X alt (the overlay
-/// stop owns the key there) while keeping its other binding.
+/// `DashboardStop` (list) and `DashboardOverlayStop` (overlay) share Ctrl+X and the Dashboard category.
+/// The per-category dedup must keep whichever matches the active surface (lit) instead of always keeping the first-registered (list) def.
+/// Inside the overlay, the `ShortcutsHelp` row must drop its shadowed Ctrl+X alt while keeping its other binding.
+/// The overlay stop owns the key there.
 #[test]
 fn build_entries_overlay_stop_wins_dedup_and_shadows_cheatsheet_ctrl_x() {
     let registry = ActionRegistry::defaults();
     let ctrl_x = crate::key!('x', CONTROL);
-    // Match the two Ctrl+X rows by ActionId: the list and overlay
-    // stops carry different labels ("delete" vs "stop").
+    // Match the two Ctrl+X rows by ActionId: the list and overlay stops carry different labels ("delete" vs "stop")
     let is_stop = |action_id: &Option<ActionId>| {
         matches!(
             action_id,
@@ -833,8 +827,7 @@ fn build_entries_overlay_stop_wins_dedup_and_shadows_cheatsheet_ctrl_x() {
             .expect("the ShortcutsHelp row must be present")
     };
 
-    // Dashboard LIST: the list stop survives, lit; the cheatsheet
-    // row keeps Ctrl+X (no overlay up).
+    // Dashboard LIST: the list stop survives, lit; the cheatsheet row keeps Ctrl+X (no overlay up)
     let list = build_entries(&[When::DashboardFocused, When::Always], &registry, true);
     assert_eq!(
         stop_rows(&list),
@@ -850,8 +843,7 @@ fn build_entries_overlay_stop_wins_dedup_and_shadows_cheatsheet_ctrl_x() {
         "without an overlay the cheatsheet row keeps its Ctrl+X binding",
     );
 
-    // Session OVERLAY: the overlay stop survives, lit; the
-    // cheatsheet row drops the shadowed Ctrl+X but keeps Ctrl+.
+    // Session OVERLAY: the overlay stop survives, lit; the cheatsheet row drops the shadowed Ctrl+X but keeps Ctrl+
     let overlay = build_entries(
         &[When::AgentScreen, When::Always, When::DashboardOverlay],
         &registry,
@@ -898,7 +890,7 @@ fn make_key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
     crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
 }
 
-/// Helper: set up entries + state with selected on a section header.
+/// Helper: set up entries and state with the selection on a section header.
 fn setup_on_header() -> (Vec<ShortcutsHelpEntry>, PickerState) {
     let entries = vec![
         header("Nav", 0, 2),
@@ -944,7 +936,7 @@ fn enter_on_section_header_toggles() {
 
 #[test]
 fn enter_on_hint_without_action_id_is_unchanged() {
-    // Pseudo/legacy hints have no action_id — Enter does not close or open detail.
+    // Pseudo/legacy hints have no action_id: Enter does not close or open detail
     let entries = vec![header("Nav", 0, 1), hint("send", key!(Enter))];
     let mut state = build_initial_picker_state(&entries);
     state.selected = 1; // select the hint
@@ -988,8 +980,7 @@ fn enter_on_registry_hint_opens_detail() {
     );
 }
 
-/// Opening detail from an active search clears the query so a later Esc closes
-/// the modal directly (back -> close), not back -> clear-query -> close.
+/// Opening detail from an active search clears the query, so a later Esc closes the modal directly rather than clearing the query first.
 #[test]
 fn enter_from_search_opens_detail_and_clears_query() {
     use crate::actions::ActionId;
@@ -1021,8 +1012,8 @@ fn enter_from_search_opens_detail_and_clears_query() {
     assert!(!state.search_active, "opening detail clears search_active");
 }
 
-/// Mouse parity with the keyboard path: clicking a hint while searching opens
-/// detail AND drops the committed query (so Esc from detail closes next press).
+/// Mouse parity with the keyboard path: clicking a hint while searching opens detail AND drops the committed query.
+/// So Esc from detail closes on the next press.
 #[test]
 fn click_from_search_opens_detail_and_clears_query() {
     use crate::actions::ActionId;
@@ -1078,7 +1069,7 @@ fn click_from_search_opens_detail_and_clears_query() {
     );
 }
 
-/// The browse footer advertises the detail action so pattern B is discoverable.
+/// The browse footer advertises the detail action so it is discoverable.
 #[test]
 fn modal_footer_advertises_detail() {
     let footer = modal_footer(false);
@@ -1088,9 +1079,8 @@ fn modal_footer_advertises_detail() {
     );
 }
 
-/// Wiring check: the cheatsheet footer carries the shared `i search` hint
-/// under vim and keeps `/ search` regardless. The gate is covered centrally
-/// by `modal_window::tests::vim_nav_search_hint_only_in_vim_nav_mode`.
+/// Wiring check: the cheatsheet footer carries the shared `i search` hint under vim and keeps `/ search` regardless.
+/// The gate is covered centrally by `modal_window::tests::vim_nav_search_hint_only_in_vim_nav_mode`.
 #[test]
 fn modal_footer_advertises_i_search_under_vim() {
     let _vim_mode = VimModeGuard::set(true);
@@ -1105,8 +1095,7 @@ fn modal_footer_advertises_i_search_under_vim() {
     );
 }
 
-/// Host path: Enter on a registry hint enters Detail (not Close) via the
-/// chrome + picker pipeline both hosts share.
+/// Host path: Enter on a registry hint enters Detail (not Close) via the chrome and picker pipeline both hosts share.
 #[test]
 fn handle_modal_key_enter_on_hint_enters_detail() {
     use crate::actions::ActionId;
@@ -1138,8 +1127,7 @@ fn handle_modal_key_enter_on_hint_enters_detail() {
     assert!(mode.is_detail(), "Enter enters the detail page");
 }
 
-/// Over-scrolling a detail body clamps to the last lines instead of paging
-/// into an all-blank page.
+/// Over-scrolling a detail body clamps to the last lines instead of paging into an all-blank page.
 #[test]
 fn render_detail_body_clamps_overscroll() {
     use ratatui::buffer::Buffer;
@@ -1173,8 +1161,8 @@ fn render_detail_body_clamps_overscroll() {
     );
 }
 
-/// When the body merely repeats the title (no long_help yet) it must render
-/// once; a distinct body (populated long_help) must still render below the title.
+/// When the body merely repeats the title (no long_help yet) it must render once.
+/// A distinct body (populated long_help) must still render below the title.
 #[test]
 fn render_detail_body_omits_body_equal_to_title() {
     use ratatui::buffer::Buffer;
@@ -1207,9 +1195,8 @@ fn render_detail_body_omits_body_equal_to_title() {
     );
 }
 
-/// Every action that ships `long_help` carries man-style copy that is present
-/// and genuinely distinct from its one-line description. Iterating the whole
-/// registry catches a future description-echo on ANY populated action.
+/// Every action that ships `long_help` carries man-style copy that is present and genuinely distinct from its one-line description.
+/// Iterating the whole registry catches a future description-echo on ANY populated action.
 #[test]
 fn populated_long_help_is_distinct_and_man_style() {
     let registry = ActionRegistry::defaults();
@@ -1239,8 +1226,7 @@ fn populated_long_help_is_distinct_and_man_style() {
     }
 }
 
-/// `detail_from_entry` surfaces the action's `long_help` as the detail body
-/// (not the description), proving the populated copy reaches the screen.
+/// `detail_from_entry` uses the action's `long_help` as the detail body (not the description), proving the populated copy reaches the screen.
 #[test]
 fn detail_from_entry_uses_long_help_for_body() {
     let registry = ActionRegistry::defaults();
@@ -1268,14 +1254,14 @@ fn detail_from_entry_uses_long_help_for_body() {
     );
 }
 
-/// Scroll clamp counts WRAPPED rows: a body that wraps well past the viewport
-/// can scroll to its last wrapped row (a logical-line clamp could not reach it).
+/// Scroll clamp counts WRAPPED rows: a body that wraps well past the viewport can scroll to its last wrapped row.
+/// A logical-line clamp could not reach it.
 #[test]
 fn render_detail_body_scroll_is_wrap_aware() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let theme = crate::theme::Theme::current();
-    // Narrow + short: one logical body line that wraps into many rows.
+    // Narrow and short: one logical body line that wraps into many rows
     let area = Rect::new(0, 0, 20, 4);
     let mut buf = Buffer::empty(area);
     let body = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo ZZEND";
@@ -1303,9 +1289,8 @@ fn render_detail_body_scroll_is_wrap_aware() {
     );
 }
 
-/// The detail page (Enter) paints a blank line between paragraphs so wrapped
-/// text reads as spaced blocks. The inline expand (arrows) is a separate path
-/// and stays tight.
+/// The detail page (Enter) paints a blank line between paragraphs so wrapped text reads as spaced blocks.
+/// The inline expand (arrows) is a separate path and stays tight.
 #[test]
 fn render_detail_body_spaces_paragraphs_with_blank_line() {
     use ratatui::buffer::Buffer;
@@ -1352,7 +1337,7 @@ fn render_detail_body_spaces_paragraphs_with_blank_line() {
     );
 }
 
-/// Search has no long_help — Enter stays in browse.
+/// Search has no long_help: Enter stays in browse.
 #[test]
 fn enter_on_search_pseudo_row_opens_detail() {
     let registry = ActionRegistry::defaults();
@@ -1474,8 +1459,8 @@ fn esc_in_detail_returns_to_browse() {
     assert!(mode.is_browse(), "Esc in detail must return to browse");
 }
 
-/// Vim keys (h/j/k/g) are intentionally NOT bound in detail mode — vim modal
-/// bindings are owned separately. Arrows/Home scroll; Esc/Left/Backspace go back.
+/// Vim keys (h/j/k/g) are intentionally NOT bound in detail mode: vim modal bindings are owned separately.
+/// Arrows/Home scroll; Esc/Left/Backspace go back.
 #[test]
 fn detail_mode_ignores_vim_keys() {
     use crossterm::event::KeyCode;
@@ -1545,8 +1530,7 @@ fn detail_mode_ignores_vim_keys() {
     assert!(mode.is_browse(), "Left returns to browse");
 }
 
-/// Host path: chrome must not intercept Esc while in detail (would close the
-/// modal); it returns to browse and keeps the modal open.
+/// Host path: chrome must not intercept Esc while in detail (would close the modal); it returns to browse and keeps the modal open.
 #[test]
 fn handle_modal_key_esc_in_detail_is_back_not_close() {
     let entries = vec![header("Nav", 0, 1), hint("send", key!(Enter))];
@@ -1750,8 +1734,8 @@ fn non_vim_hjkl_start_search() {
     }
 }
 
-/// In non-vim mode, `j/k` row should drop the `j` key and show only
-/// the `Down` alt — `Down` still works and the row should not be dimmed.
+/// In non-vim mode, `j/k` row should drop the `j` key and show only the `Down` alt.
+/// `Down` still works and the row should not be dimmed.
 #[test]
 fn build_entries_vim_off_keeps_arrow_alt_without_vim_key() {
     let registry = ActionRegistry::defaults();
@@ -1779,9 +1763,7 @@ fn build_entries_vim_off_keeps_arrow_alt_without_vim_key() {
     );
 }
 
-/// In non-vim mode, scrollback bindings that have NO non-vim alt
-/// (e.g. `g` GotoTop, `y` CopyBlockContent) should be hidden from the
-/// cheatsheet entirely.
+/// In non-vim mode, scrollback bindings that have NO non-vim alt (e.g. `g` GotoTop, `y` CopyBlockContent) should be hidden from the cheatsheet.
 #[test]
 fn build_entries_vim_off_hides_vim_only_rows() {
     let registry = ActionRegistry::defaults();
@@ -1801,8 +1783,7 @@ fn build_entries_vim_off_hides_vim_only_rows() {
     }
 }
 
-/// Vim mode ON: both vim key and arrow alt should be visible on the
-/// same row.
+/// Vim mode ON: both vim key and arrow alt should be visible on the same row.
 #[test]
 fn build_entries_vim_on_shows_both_vim_and_arrow_keys() {
     let registry = ActionRegistry::defaults();
@@ -1828,8 +1809,8 @@ fn build_entries_vim_on_shows_both_vim_and_arrow_keys() {
     );
 }
 
-/// Asserts that the cheatsheet row for `label` advertises `expected_key`
-/// (primary or alt). Used by the Windows-fallback regressions below.
+/// Asserts that the cheatsheet row for `label` advertises `expected_key` (primary or alt).
+/// Used by the Windows-fallback regressions below.
 fn assert_cheatsheet_row_has_key(entries: &[ShortcutsHelpEntry], label: &str, expected_key: &str) {
     let keys: Vec<String> = entries
         .iter()
@@ -1861,8 +1842,7 @@ fn build_entries_surfaces_queue_ctrl_apostrophe_fallback() {
     assert_cheatsheet_row_has_key(&entries, "queue", "Ctrl+'");
 }
 
-/// A section whose entries are all filtered out should have its
-/// header dropped, not rendered as a dead row.
+/// A section whose entries are all filtered out should have its header dropped, not rendered as a dead row.
 #[test]
 fn build_entries_vim_off_drops_empty_section_headers() {
     let registry = ActionRegistry::defaults();
@@ -1904,8 +1884,7 @@ fn build_entries_sets_action_id_on_registry_hints() {
     let paste_key = key!('v', CONTROL);
     let undo_key = key!('z', CONTROL);
     let redo_key = key!('z', CONTROL | SHIFT);
-    // Prompt history (Up / /history) is an inline key handler + slash
-    // command, not an ActionRegistry entry, so it stays display-only too.
+    // Prompt history (Up / /history) is an inline key handler and slash command, not an ActionRegistry entry, so it stays display-only too
     let history_key = key!(Up);
     for entry in &entries {
         let ShortcutsHelpEntry::Hint {
@@ -2137,8 +2116,7 @@ fn vim_l_expands_and_h_collapses_paste() {
     assert!(state.query().is_empty(), "vim h must not enter search text");
 }
 
-/// `handle_modal_key` (chrome + picker pipeline) maps the hint-row expand to
-/// `ModalKeyOutcome::ToggleExpand` so dashboards get identical semantics.
+/// `handle_modal_key` (chrome and picker pipeline) maps the hint-row expand to `ModalKeyOutcome::ToggleExpand` so dashboards behave identically.
 #[test]
 fn handle_modal_key_maps_toggle_expand() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -2166,10 +2144,9 @@ fn handle_modal_key_maps_toggle_expand() {
     );
 }
 
-/// `handle_modal_key` forwards `expanded_ids` through the chrome pipeline so
-/// the dashboard host's Left-collapse works. A *populated* expanded set is
-/// required to exercise the wiring — the `→` test above passes regardless of
-/// the set, so it can't catch a dropped `expanded_ids` forward.
+/// `handle_modal_key` forwards `expanded_ids` through the chrome pipeline so the dashboard host's Left-collapse works.
+/// A *populated* expanded set is required.
+/// The Right-arrow test above passes regardless of the set, so it can't catch a dropped `expanded_ids` forward.
 #[test]
 fn handle_modal_key_left_collapses_expanded_hint() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -2200,8 +2177,7 @@ fn handle_modal_key_left_collapses_expanded_hint() {
     );
 }
 
-/// A row's `long_help` renders as an inline line only while its id is
-/// expanded, and is absent otherwise.
+/// A row's `long_help` renders as an inline line only while its id is expanded, and is absent otherwise.
 #[test]
 fn render_modal_shows_long_help_only_when_expanded() {
     use crate::actions::ActionId;
@@ -2265,9 +2241,8 @@ fn render_modal_shows_long_help_only_when_expanded() {
     );
 }
 
-/// The collapsible (inline expand) view collapses newlines to spaces so the
-/// help renders as one wrap-flowed block with no hard breaks — unlike the
-/// detail page (Enter), which spaces paragraphs out with blank lines.
+/// The collapsible (inline expand) view collapses newlines to spaces so the help renders as one wrap-flowed block with no hard breaks.
+/// The detail page (Enter) instead spaces paragraphs out with blank lines.
 #[test]
 fn cheatsheet_rows_inline_help_joins_newlines_with_spaces() {
     use crate::actions::ActionId;
@@ -2299,8 +2274,8 @@ fn cheatsheet_rows_inline_help_joins_newlines_with_spaces() {
     );
 }
 
-/// A hint with neither long_help nor description has empty inline help, so an
-/// expanded row must render no description line (no stray blank inline row).
+/// A hint with neither long_help nor description has empty inline help.
+/// An expanded row must render no description line (no stray blank inline row).
 #[test]
 fn inline_expand_with_no_help_renders_no_description_line() {
     use crate::actions::ActionId;

@@ -111,7 +111,7 @@ pub fn parse_install_source(input: &str, cwd: &Path) -> InstallSource {
     } else {
         // Local path
         let path = if let Some(stripped) = main.strip_prefix("~/") {
-            dirs::home_dir()
+            xai_dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(stripped)
         } else {

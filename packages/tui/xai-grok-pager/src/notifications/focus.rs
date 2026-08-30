@@ -1,24 +1,22 @@
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
-/// Minimum gap between automatic recap *attempts* while still away. The shell
-/// may no-op early requests (<3 min since last turn, etc.); we must retry later
-/// without hammering every 20s poll.
+/// Minimum gap between automatic recap *attempts* while still away.
+/// The shell may no-op early requests (under 3 min since last turn, etc.), so we must retry later, but not on every 20s poll.
 const AUTO_RECAP_RETRY_INTERVAL: Duration = Duration::from_secs(90);
 
 pub struct FocusTracker {
     focused: Cell<bool>,
     lost_at: Cell<Option<Instant>>,
     idle_threshold: Duration,
-    /// Minimum unfocused time before an automatic session recap is offered on
-    /// return. See [`FocusTracker::recap_due`].
+    /// Minimum unfocused time before an automatic session recap is offered on return.
+    /// See [`FocusTracker::recap_due`].
     recap_threshold: Duration,
-    /// Whether an automatic recap has already been *shown* for the current away
-    /// period (set when a `SessionRecap` notification arrives). Cleared on focus
-    /// loss. Stops further requests for this away period once the user has a recap.
+    /// Whether an automatic recap has already been *shown* for the current away period (set when a `SessionRecap` notification arrives).
+    /// Stops further requests until focus is lost again, which clears it.
     recap_shown_this_away: Cell<bool>,
-    /// Last time we dispatched an automatic recap request (pre-gen or focus-gained).
-    /// Used for retry backoff while waiting for shell gates (e.g. 3 min since last turn).
+    /// Last time we dispatched an automatic recap request (pre-generated while away, or sent on focus gain).
+    /// Used for retry backoff while waiting for the shell's own conditions (e.g. 3 min since last turn).
     last_auto_recap_attempt_at: Cell<Option<Instant>>,
 }
 
@@ -42,7 +40,7 @@ impl FocusTracker {
     pub fn on_focus_lost(&self) {
         self.focused.set(false);
         self.lost_at.set(Some(Instant::now()));
-        // A fresh away period begins — re-arm auto recap.
+        // A fresh away period begins, so auto recap is allowed again
         self.recap_shown_this_away.set(false);
         self.last_auto_recap_attempt_at.set(None);
     }
@@ -61,13 +59,11 @@ impl FocusTracker {
         self.focused.get()
     }
 
-    /// `true` if an automatic session recap request should be sent: unfocused
-    /// past the recap threshold, no successful recap shown this away period,
-    /// and not within the retry backoff after a recent attempt.
+    /// `true` if an automatic session recap request should be sent.
+    /// That means unfocused past the recap threshold, no recap shown this away period, and no attempt within the retry backoff.
     ///
-    /// Shell gates (≥3 turns, ≥3 min since last main turn, never twice in a
-    /// row) are authoritative; early attempts may no-op, so we retry on a
-    /// 90s interval until shown or focus returns.
+    /// The shell's own conditions (at least 3 turns, at least 3 min since the last main turn, never twice in a row) are authoritative.
+    /// Early attempts may no-op, so we retry every 90s until a recap is shown or focus returns.
     pub fn recap_due(&self) -> bool {
         if self.focused.get() || self.recap_shown_this_away.get() {
             return false;
@@ -83,16 +79,15 @@ impl FocusTracker {
         }
     }
 
-    /// Record that an automatic recap was dispatched (pre-gen or focus-gained).
-    /// Does **not** consume the away period — only starts retry backoff so we
-    /// do not spam every poll while the shell still rejects (e.g. <3 min idle).
+    /// Record that an automatic recap request was dispatched (pre-generated while away, or sent on focus gain).
+    /// Does **not** consume the away period; it only starts the retry backoff.
+    /// The backoff stops a retry on every poll while the shell still rejects (e.g. under 3 min idle).
     pub fn note_auto_recap_attempt(&self) {
         self.last_auto_recap_attempt_at.set(Some(Instant::now()));
     }
 
-    /// Record that a recap was shown (auto or manual `/recap`) for the current
-    /// away period. Stops further **auto** requests until focus is lost again.
-    /// Manual `/recap` may still be invoked repeatedly.
+    /// Record that a recap was shown (auto or manual `/recap`) for the current away period.
+    /// Stops further **auto** requests until focus is lost again; manual `/recap` may still be invoked repeatedly.
     pub fn mark_recap_shown(&self) {
         self.recap_shown_this_away.set(true);
     }
@@ -217,8 +212,7 @@ mod tests {
 
     #[test]
     fn recap_due_respects_independent_threshold() {
-        // idle (notification) threshold is 0, but recap threshold is large:
-        // a brief away period must not be recap-eligible.
+        // The idle (notification) threshold is 0, but the recap threshold is large: a brief away period must not be eligible for a recap
         let tracker = FocusTracker::new(0, 180);
         tracker.on_focus_lost();
         assert!(tracker.should_notify(), "notification fires immediately");
@@ -243,14 +237,14 @@ mod tests {
         tracker.on_focus_lost();
         tracker.mark_recap_shown();
         assert!(!tracker.recap_due());
-        // Return, then leave again — a new away period re-arms the recap.
+        // Return, then leave again; the new away period allows auto recap again
         tracker.on_focus_gained();
         tracker.on_focus_lost();
         assert!(tracker.recap_due());
     }
 
-    /// Early dispatch must not consume the away period (shell may no-op until
-    /// ≥3 min since last turn). Only backoff applies; after the interval we retry.
+    /// Early dispatch must not consume the away period (the shell may no-op until at least 3 min since the last turn).
+    /// Only backoff applies; after the interval we retry.
     #[test]
     fn recap_due_backoff_after_attempt_allows_retry() {
         let tracker = FocusTracker::new(3, 0);

@@ -21,7 +21,7 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 /// Name of the trust-store file under `~/.grok/`.
-const TRUST_FILE_NAME: &str = "trusted-plugins";
+const TRUST_FILE_NAME: &str = xai_grok_config::TRUSTED_PLUGINS_FILENAME;
 
 /// Manages the set of trusted plugin root directories.
 #[derive(Debug, Clone)]
@@ -167,7 +167,7 @@ impl TrustStore {
     /// is under the user's home directory.  Otherwise it requires explicit
     /// trust via `~/.grok/trusted-plugins`.
     pub fn is_config_path_auto_trusted(plugin_root: &Path) -> bool {
-        let Some(home) = dirs::home_dir() else {
+        let Some(home) = xai_dirs::home_dir() else {
             return false;
         };
         match dunce::canonicalize(plugin_root) {

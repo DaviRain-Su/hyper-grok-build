@@ -1,7 +1,7 @@
-//! AcpUpdateTracker — converts ACP SessionUpdate events into scrollback mutations.
+//! AcpUpdateTracker: converts ACP SessionUpdate events into scrollback mutations.
 //!
-//! This is a stateful streaming machine: it tracks which entries are currently
-//! being streamed to (agent message, thinking) and which tool calls are pending.
+//! This is a stateful streaming machine.
+//! It tracks which entries are currently being streamed to (agent message, thinking) and which tool calls are pending.
 //! Each `handle_update()` call processes one event and mutates the scrollback.
 use crate::acp::meta::{NotificationMeta, user_message_chunk_meta, user_prompt_meta};
 use crate::scrollback::block::RenderBlock;
@@ -46,47 +46,37 @@ fn utc_ms_to_local(ms: i64) -> DateTime<Local> {
 /// (turn started, but no chunks received yet).
 /// Why a turn is open but nothing is streaming right now.
 ///
-/// Replaces the old single, opaque "Waiting…" placeholder: instead of treating
-/// the absence of activity as one undifferentiated state, the turn-status line
-/// names *what* the agent is blocked on. Resolved partly by the tracker (the
-/// blocking tool waits it suppresses — see [`AcpUpdateTracker::activity`]) and
-/// partly at the view boundary (`Model`/`Subagent`, which need turn-state and
-/// the subagent registry the tracker doesn't own).
+/// The turn-status line uses this to name what the agent is blocked on instead of one generic "Waiting…".
+/// The tracker resolves part of it (the blocking tool waits it suppresses, see [`AcpUpdateTracker::activity`]).
+/// The view resolves the rest (`Model`/`Subagent`, which need turn-state and the subagent registry the tracker doesn't own).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitingReason {
-    /// Waiting for the model to (re)start streaming — the first token after the
-    /// prompt is sent, or the gap after a tool completes before the next
-    /// inference step begins.
+    /// Waiting for the model to (re)start streaming.
+    /// This covers the gap before the first token after the prompt is sent, and the gap after a tool completes before the next inference step begins.
     Model,
     /// Blocked on a running foreground subagent (`task` / `spawn_subagent`).
-    /// `display` is the fully composed, pre-budgeted spinner phrase
-    /// (`Subagent (<desc>): <activity>` / `<N> subagents: …`) — unlike
-    /// `TaskOutput.subject`, which holds a bare subject that `label()`
-    /// decorates. View-resolved; the tracker always leaves it `None`.
+    /// `display` is the fully composed spinner phrase (`Subagent (<desc>): <activity>` / `<N> subagents: …`), already cut to the length budget.
+    /// Unlike `TaskOutput.subject`, it is not a bare subject for `label()` to decorate.
+    /// The view fills it in; the tracker always leaves it `None`.
     Subagent { display: Option<String> },
-    /// Blocked polling/awaiting a background task's output
-    /// (`get_command_or_subagent_output` / `get_task_output`).
+    /// Blocked polling/awaiting a background task's output (`get_command_or_subagent_output` / `get_task_output`).
     ///
     /// `task_ids` come from the tool's `raw_input` (empty until it arrives).
-    /// `subject` is an optional display name (description preferred, else
-    /// command) filled in by the view from live task state — the tracker
-    /// itself always leaves it `None`.
+    /// `subject` is an optional display name (description preferred, else command) filled in by the view from live task state.
+    /// The tracker itself always leaves it `None`.
     TaskOutput {
         task_ids: Vec<String>,
         subject: Option<String>,
-        /// True when the call blocks (`timeout_ms > 0` in raw_input); an
-        /// instant poll (0/missing) can't be shortened by interjecting.
+        /// True when the call blocks (`timeout_ms > 0` in raw_input); an instant poll (0/missing) can't be shortened by interjecting.
         /// Defaults to false until raw_input arrives.
         waits: bool,
     },
-    /// Blocked until one or more background tasks finish
-    /// (`wait_commands_or_subagents` / `wait_tasks`).
+    /// Blocked until one or more background tasks finish (`wait_commands_or_subagents` / `wait_tasks`).
     TasksComplete,
     /// Explicit sleep / await (`Await` / `Sleep …`).
     Sleep,
 }
-/// Max chars for wait/tool *description* subjects in status UI (matches
-/// tool-title truncation in `format_activity_label`).
+/// Max chars for wait/tool *description* subjects in status UI (matches tool-title truncation in `format_activity_label`).
 pub const MAX_ACTIVITY_SUBJECT_CHARS: usize = 40;
 /// First non-empty trimmed line, clamped to [`MAX_ACTIVITY_SUBJECT_CHARS`].
 pub fn clamp_activity_subject(s: &str) -> String {
@@ -101,11 +91,9 @@ pub fn clamp_activity_subject(s: &str) -> String {
         line.chars().take(MAX_ACTIVITY_SUBJECT_CHARS).collect()
     }
 }
-/// Shared in-progress subject label (clamped description/command) used by
-/// turn-status, title bar, and dashboard/subagent activity columns.
+/// Shared in-progress subject label (clamped description/command) used by turn-status, title bar, and dashboard/subagent activity columns.
 ///
-/// Renders as `{subject}…` — no "Waiting for" prefix or quotes — so a
-/// description like `Wait 5 seconds` reads cleanly next to the spinner.
+/// Renders as `{subject}…` (no "Waiting for" prefix or quotes) so a description like `Wait 5 seconds` reads cleanly next to the spinner.
 pub fn format_waiting_for_subject(subject: &str) -> String {
     let clamped = clamp_activity_subject(subject);
     if clamped.is_empty() {
@@ -155,18 +143,16 @@ impl WaitingReason {
         }
     }
 }
-/// A suppressed blocking tool's wait, tagged with the stream it was registered
-/// under (drives `drop_stale_blocking_waits`).
+/// A suppressed blocking tool's wait, tagged with the stream it was registered under (drives `drop_stale_blocking_waits`).
 #[derive(Debug, Clone)]
 struct BlockingWait {
     reason: WaitingReason,
     stream_start_ms: Option<i64>,
 }
-/// Deltas stream continuously during a live write — silence this long means the stream is dead.
+/// Deltas stream continuously during a live write; silence this long means the stream is dead.
 pub(crate) const WRITING_DELTA_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(10);
-/// The model is streaming tool-call arguments (xAI `tool_call_delta_chunk`),
-/// which reach no scrollback until the canonical `ToolCall` lands.
+/// The model is streaming tool-call arguments (xAI `tool_call_delta_chunk`), which reach no scrollback until the canonical `ToolCall` lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WritingToolCall {
     /// `None` until a chunk carries the name (only the first per-tool one does).
@@ -224,7 +210,7 @@ impl WritingToolCall {
 }
 /// Cap on remembered per-index tool names per sample (model-driven input).
 const MAX_WRITING_TOOL_NAMES: usize = 64;
-/// `strings`-greppable marker proving a binary carries this fix (kept by `#[used]`).
+/// `strings`-greppable marker proving a binary carries the mid-turn wait-status handling (kept by `#[used]`).
 #[used]
 static PAGER_IMPL_WAIT_STATUS_MIDTURN: &str = "PAGER_IMPL_wait_status_midturn";
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,12 +221,10 @@ pub enum TurnActivity {
     Responding,
     /// A tool is executing.
     ToolRunning {
-        /// Tool title (e.g., command name, file path). Used for `Run …`
-        /// when no human description is available.
+        /// Tool title (e.g., command name, file path). Used for `Run …` when no human description is available.
         title: String,
-        /// Optional human description from tool input (e.g. bash
-        /// `description`). Prefer this over `Run <command>` when set
-        /// (renders as `{desc}…`).
+        /// Optional human description from tool input (e.g. bash `description`).
+        /// Prefer this over `Run <command>` when set (renders as `{desc}…`).
         description: Option<String>,
     },
     /// Auto-compaction in progress (mid-turn, agent-initiated).
@@ -256,16 +240,14 @@ pub enum TurnActivity {
     },
     /// The model is streaming tool-call arguments; see [`WritingToolCall`].
     WritingToolCall(WritingToolCall),
-    /// Turn is open but nothing is streaming; `reason` says what we're waiting
-    /// on. Replaces the implicit "no activity == generic Waiting…" placeholder.
+    /// Turn is open but nothing is streaming; `reason` says what we're waiting on.
+    /// Replaces the old fallback where no activity meant a generic "Waiting…".
     Waiting(WaitingReason),
 }
-/// A spinner phase's identity: the activity discriminant plus only the payload
-/// that names a different unit of work. Payload the view or late-arriving
-/// input fills in mid-phase (wait subjects/ids, writing name/ordinal) is
-/// display churn, not a new phase — a long wait or write stays one timed
-/// phase. Exhaustive on both enums so a new variant must decide its identity
-/// here instead of silently regaining the per-frame timer reset.
+/// A spinner phase's identity: the activity discriminant plus only the payload that names a different unit of work.
+/// Payload filled in mid-phase by the view or late-arriving input (wait subjects/ids, writing name/ordinal) is display churn, not a new phase.
+/// A long wait or write stays one timed phase.
+/// Exhaustive on both enums so a new variant must decide its identity here instead of silently regaining the per-frame timer reset.
 #[derive(PartialEq)]
 enum PhaseKey<'a> {
     Thinking,
@@ -297,16 +279,15 @@ fn phase_key(activity: &TurnActivity) -> PhaseKey<'_> {
         TurnActivity::Waiting(reason) => PhaseKey::Waiting(reason.as_telemetry_label()),
     }
 }
-/// Whether `prev` → `next` starts a new spinner phase — see [`PhaseKey`].
+/// Whether going from `prev` to `next` starts a new spinner phase; see [`PhaseKey`].
 pub(crate) fn is_phase_transition(
     prev: Option<&TurnActivity>,
     next: Option<&TurnActivity>,
 ) -> bool {
     prev.map(phase_key) != next.map(phase_key)
 }
-/// Agent-visible output kinds. Shared by the live tracker (output epoch) and
-/// replay-marker synthesis so a new visible update cannot change one rail
-/// without the other.
+/// Agent-visible output kinds.
+/// Shared by the live tracker (output epoch) and replay-marker synthesis so a new visible update cannot change one without the other.
 pub(crate) fn is_agent_output_update(update: &acp::SessionUpdate) -> bool {
     matches!(
         update,
@@ -340,7 +321,7 @@ pub struct PendingCompaction {
 /// Tracks in-flight streaming state for one agent's turn.
 ///
 /// Converts ACP `SessionUpdate` variants into scrollback entry mutations.
-/// Does nothing else — no UI, no networking, just data transformation.
+/// Does nothing else: no UI, no networking, just data transformation.
 #[derive(Debug, Default)]
 pub struct AcpUpdateTracker {
     /// Entry currently receiving AgentMessageChunk deltas.
@@ -353,49 +334,39 @@ pub struct AcpUpdateTracker {
     /// Stores the base ToolCall for field merging with ToolCallUpdate.
     pending_tools: HashMap<String, PendingTool>,
     /// ToolCallUpdates that arrived before their ToolCall (race condition).
-    /// When the ToolCall arrives, we merge and create the entry immediately
-    /// as completed.
+    /// When the ToolCall arrives, we merge and create the entry immediately as completed.
     orphan_updates: HashMap<String, acp::ToolCallUpdate>,
     /// Last computed thinking elapsed (ms) from server timestamps.
     /// Updated on every thought chunk as `agentTimestampMs - streamStartMs`.
     /// Frozen when thinking ends (passed to `finish_running_with_time`).
     last_thinking_elapsed_ms: Option<i64>,
-    /// When true, the next UserMessageChunk will be silently ignored
-    /// because we already pushed the user prompt entry directly from
-    /// `dispatch_send_prompt`. Reset after one skip.
+    /// When true, the next UserMessageChunk is silently ignored because we already pushed the user prompt entry from `dispatch_send_prompt`.
+    /// Reset after one skip.
     skip_next_user_echo: bool,
-    /// When true, the next UserMessageChunk is a skill body that follows
-    /// a skill metadata chunk. It should be silently absorbed so the
-    /// raw skill instructions don't appear in scrollback.
+    /// When true, the next UserMessageChunk is a skill body that follows a skill metadata chunk.
+    /// It should be silently absorbed so the raw skill instructions don't appear in scrollback.
     skip_next_skill_body: bool,
     /// Tool call IDs suppressed from scrollback (e.g. TodoWrite).
     /// Their ToolCallUpdate counterparts are silently dropped too.
     suppressed_tools: std::collections::HashSet<String>,
-    /// Suppressed-but-blocking tool calls, keyed by tool-call ID → the reason
-    /// the turn is waiting. These tools (`get_command_or_subagent_output`,
-    /// `wait_tasks`, `Sleep`, …) are kept out of `pending_tools` (so they never
-    /// hit scrollback) but the turn *is* blocked on them — without this the
-    /// spinner falls back to a generic "Waiting…". Populated in
-    /// `handle_tool_call`, cleared on the suppressed tool's completion update
-    /// and in `finish_turn`.
+    /// Suppressed-but-blocking tool calls, keyed by tool-call ID, holding the reason the turn is waiting.
+    /// These tools (`get_command_or_subagent_output`, `wait_tasks`, `Sleep`, …) are kept out of `pending_tools` so they never hit scrollback.
+    /// The turn *is* blocked on them, though; without this map the spinner falls back to a generic "Waiting…".
+    /// Populated in `handle_tool_call`, cleared on the suppressed tool's completion update and in `finish_turn`.
     blocking_waits: std::collections::HashMap<String, BlockingWait>,
     /// Task tool `run_in_background` flags, keyed by `task_id` (subagent_id).
-    /// Populated when a task tool call is detected (variant == "Task"),
-    /// consumed by the acp_handler when `SubagentSpawned` arrives.
+    /// Populated when a task tool call is detected (variant == "Task"), consumed by the acp_handler when `SubagentSpawned` arrives.
     pub(crate) task_tool_background: std::collections::HashMap<String, bool>,
     /// Tool call IDs marked as background (`is_background=true`).
     ///
-    /// First-detection (no scrollback entry yet): defers entry creation until
-    /// `x.ai/task_backgrounded` creates a `BgTask` block.
-    /// Late-detection (Execute block already exists): suppresses further output
-    /// streaming; the existing block is demoted by `handle_task_backgrounded`.
+    /// First-detection (no scrollback entry yet): defers entry creation until `x.ai/task_backgrounded` creates a `BgTask` block.
+    /// Late-detection (Execute block already exists): suppresses further output streaming; `handle_task_backgrounded` demotes the existing block.
     ///
     /// Value is the optional description from `raw_input.description`.
     pub(crate) bg_deferred_tools: std::collections::HashMap<String, Option<String>>,
     /// Last seen `stream_start_ms` from notification meta.
-    /// When this changes, a new LLM streaming response has started — we
-    /// finish any in-flight thinking/agent-message entries so the next
-    /// chunks create fresh ones instead of appending to stale entries.
+    /// When this changes, a new LLM streaming response has started.
+    /// We finish any in-flight thinking/agent-message entries so the next chunks create fresh ones instead of appending to stale entries.
     last_stream_start_ms: Option<i64>,
     /// Monotonic count of live parent-agent updates that changed scrollback.
     agent_output_epoch: u64,
@@ -404,42 +375,34 @@ pub struct AcpUpdateTracker {
     /// Set from [`AgentSession::cwd`]; not used for execution.
     session_cwd: Option<PathBuf>,
     /// Compaction-related activity override.
-    /// Set by `set_compaction_activity()` from ExtNotification events,
-    /// cleared by `finish_turn()`.
+    /// Set by `set_compaction_activity()` from ExtNotification events, cleared by `finish_turn()`.
     compaction_activity: Option<TurnActivity>,
     pending_compaction: Option<PendingCompaction>,
     /// Retry-related activity override.
-    /// Set by `set_retry_activity()` from ExtNotification `RetryState::Retrying`,
-    /// auto-cleared when normal streaming data resumes (in `handle_update` and
-    /// `note_tool_call_arguments_delta`) and on `finish_turn()`.
+    /// Set by `set_retry_activity()` from ExtNotification `RetryState::Retrying`.
+    /// Auto-cleared when normal streaming data resumes (in `handle_update` and `note_tool_call_arguments_delta`) and on `finish_turn()`.
     retry_activity: Option<TurnActivity>,
-    /// Set per `ToolCallDeltaChunk` (streaming-only, never persisted — cannot
-    /// replay); cleared by the canonical `ToolCall` / text / thought chunks
-    /// (not `ToolCallUpdate` — see `handle_update`) and by `finish_turn()`.
-    /// The instant is the last delta's arrival; expiry lives in the accessors
-    /// ([`Self::fresh_writing_tool_call`] / [`Self::has_stale_tool_call_write`]).
+    /// Set per `ToolCallDeltaChunk` (streaming-only, never persisted, cannot replay).
+    /// Cleared by the canonical `ToolCall` / text / thought chunks (not `ToolCallUpdate`, see `handle_update`) and by `finish_turn()`.
+    /// The instant is the last delta's arrival.
+    /// Expiry lives in the accessors ([`Self::fresh_writing_tool_call`] / [`Self::has_stale_tool_call_write`]).
     writing_tool_call: Option<(WritingToolCall, std::time::Instant)>,
-    /// Per-`tool_index` names so interleaved deltas restore a call's name on
-    /// switch-back; `None` marks an index observed before its name arrived
-    /// (it still ranks for ordinals). Cleared together with `writing_tool_call`.
+    /// Per-`tool_index` names so interleaved deltas can restore a call's name when the stream switches back to it.
+    /// `None` marks an index observed before its name arrived (it still ranks for ordinals).
+    /// Cleared together with `writing_tool_call`.
     writing_tool_names: HashMap<u32, Option<String>>,
     /// Pending ACP commands from the most recent `AvailableCommandsUpdate`.
-    /// Consumed by the caller via `take_pending_acp_commands()`. The caller
-    /// is responsible for copying to `AgentSession.available_commands` and
-    /// bumping `available_commands_generation`.
+    /// Consumed by the caller via `take_pending_acp_commands()`.
+    /// The caller is responsible for copying to `AgentSession.available_commands` and bumping `available_commands_generation`.
     pending_acp_commands: Option<Vec<acp::AvailableCommand>>,
     /// Pending agent toolset from the most recent `AvailableCommandsUpdate.meta`.
     /// Format on the wire: `{"tools": ["read_file", ...]}`.
     /// `Some(_)` only if the shell included a tools list this round.
     /// Consumed by the caller via `take_pending_acp_tools()`.
     ///
-    /// Invariant: drained synchronously by
-    /// `acp_handler::handle_session_notification` immediately after each
-    /// `handle_update` call -- so this field never accumulates across
-    /// notifications. A meta-less follow-up update intentionally
-    /// preserves the previous `Some` (see the assignment in
-    /// `handle_update`) so a partial replay can't silently regress the
-    /// registry to the unknown-toolset state.
+    /// Invariant: `acp_handler::handle_session_notification` drains this synchronously after each `handle_update` call, so it never accumulates.
+    /// A meta-less follow-up update intentionally preserves the previous `Some` (see the assignment in `handle_update`).
+    /// Without that, a partial replay could silently regress the registry to the unknown-toolset state.
     pending_acp_tools: Option<Vec<String>>,
     /// Live Edit completions awaiting full-file HL (drained via [`Self::take_pending_edit_hl`]).
     pending_edit_hl: Vec<EntryId>,
@@ -448,47 +411,38 @@ pub struct AcpUpdateTracker {
 #[derive(Debug)]
 struct PendingTool {
     /// Scrollback entry ID, or None if the entry hasn't been created yet.
-    /// The entry is deferred until we receive the real tool kind from the
-    /// first in-progress update. The initial ToolCall message often has
-    /// kind=Other with no useful metadata — creating an entry from it
-    /// would show a wrong block type briefly before the real kind arrives.
+    /// The entry is deferred until we receive the real tool kind from the first in-progress update.
+    /// The initial ToolCall message often has kind=Other with no useful metadata.
+    /// Creating an entry from it would show a wrong block type briefly before the real kind arrives.
     entry_id: Option<EntryId>,
     base: acp::ToolCall,
     /// Streaming UTF-8 decoder for incremental bash output deltas.
     utf8_decoder: Utf8Decoder,
-    /// Stashed `started_at` from eager creation. The eagerly-created block
-    /// is `ToolCallBlock::Other`; when the refinement arrives with the real
-    /// kind, `transfer_timing_from` can't cross variant boundaries
-    /// (Other → Search, etc.) and would silently drop the timing. This
-    /// field preserves the instant so `set_started_at` can apply it to
-    /// whatever variant the refined block becomes.
+    /// Stashed `started_at` from eager creation. The eagerly-created block is `ToolCallBlock::Other`.
+    /// `transfer_timing_from` can't cross variant boundaries (Other to Search, etc.), so refining to the real kind would silently drop the timing.
+    /// This field preserves the instant so `set_started_at` can apply it to whatever variant the refined block becomes.
     started_at: Option<std::time::Instant>,
 }
 /// Streaming UTF-8 decoder for incremental byte deltas.
 ///
-/// When output is split at arbitrary byte offsets, a multi-byte UTF-8
-/// character can land across two deltas. Without buffering, both halves
-/// would be replaced with U+FFFD by `from_utf8_lossy`, permanently
-/// corrupting the character.
+/// When output is split at arbitrary byte offsets, a multi-byte UTF-8 character can land across two deltas.
+/// Without buffering, both halves would be replaced with U+FFFD by `from_utf8_lossy`, permanently corrupting the character.
 ///
-/// This decoder buffers trailing incomplete bytes from each delta and
-/// prepends them to the next one. Only genuinely invalid sequences
-/// (not just incomplete ones at the end) produce U+FFFD.
+/// This decoder buffers trailing incomplete bytes from each delta and prepends them to the next one.
+/// Only genuinely invalid sequences (not just incomplete ones at the end) produce U+FFFD.
 #[derive(Debug, Default)]
 struct Utf8Decoder {
-    /// Trailing bytes from the last delta that didn't form a complete
-    /// UTF-8 character. At most 3 bytes (max continuation length).
+    /// Trailing bytes from the last delta that didn't form a complete UTF-8 character. At most 3 bytes (max continuation length).
     buffer: Vec<u8>,
-    /// Reusable output buffer — avoids allocating a new String per delta.
+    /// Reusable output buffer; avoids allocating a new String per delta.
     /// Cleared on each `decode()` call, grows to high-water mark and stays.
     decoded: String,
 }
 impl Utf8Decoder {
     /// Feed raw bytes and return the decoded string slice.
     ///
-    /// Any trailing incomplete UTF-8 sequence is held back in the internal
-    /// buffer and will be prepended to the next `decode()` call. Genuinely
-    /// invalid byte sequences produce U+FFFD.
+    /// Any trailing incomplete UTF-8 sequence is held back in the internal buffer and will be prepended to the next `decode()` call.
+    /// Genuinely invalid byte sequences produce U+FFFD.
     ///
     /// The returned `&str` is valid until the next `decode()` call.
     fn decode(&mut self, piece: &[u8]) -> &str {
@@ -521,9 +475,8 @@ impl AcpUpdateTracker {
     pub(crate) fn output_since_last_finish(&self) -> bool {
         self.agent_output_epoch != self.epoch_at_last_finish
     }
-    /// Mark all output so far as accounted for without finishing the turn —
-    /// for terminals that must be skipped while a client command owns the
-    /// screen (a full `finish_turn` would flush mid-command state such as
+    /// Mark all output so far as accounted for without finishing the turn.
+    /// For terminals that must be skipped while a client command owns the screen (a full `finish_turn` would flush mid-command state such as
     /// `pending_compaction`).
     pub(crate) fn snapshot_output_epoch(&mut self) {
         self.epoch_at_last_finish = self.agent_output_epoch;
@@ -543,22 +496,19 @@ impl AcpUpdateTracker {
     ///
     /// Priority order (highest first):
     /// 1. External overrides: Retrying, AutoCompacting (from ExtNotification)
-    /// 2. Known-blocking wait (task output / wait / sleep / foreground
-    ///    subagent) — outranks Thinking, ToolRunning, and Responding.
-    /// 3. WritingToolCall — outranks Thinking: the first delta means reasoning
-    ///    ended (the thinking scrollback block stays open until the `ToolCall`).
+    /// 2. Known-blocking wait (task output / wait / sleep / foreground subagent), which outranks Thinking, ToolRunning, and Responding.
+    /// 3. WritingToolCall, which outranks Thinking: the first delta means reasoning ended (the thinking scrollback block stays open until the
+    ///    `ToolCall`).
     /// 4. Thinking (agent is in chain-of-thought)
     /// 5. ToolRunning (a tool call is pending / executing)
     /// 6. Responding (agent is streaming text)
-    /// 7. None (nothing in-flight; the view turns this into Waiting(Model) or
-    ///    Waiting(Subagent) while a turn is running)
+    /// 7. None (nothing in-flight; the view turns this into Waiting(Model) or Waiting(Subagent) while a turn is running)
     ///
-    /// Retry and compaction states are set externally via
-    /// `set_retry_activity()` / `set_compaction_activity()` since they
-    /// come from ExtNotification, not from standard ACP SessionUpdate messages.
+    /// Retry and compaction states are set externally via `set_retry_activity()` / `set_compaction_activity()` since they come from
+    /// ExtNotification, not from standard ACP SessionUpdate messages.
     ///
-    /// When [`Self::session_cwd`] is set, execute activity titles omit a leading
-    /// `cd <cwd> &&` / `;` that only restates the session working directory.
+    /// When [`Self::session_cwd`] is set, execute activity titles omit a leading `cd <cwd> &&` / `;` that only restates the session working
+    /// directory.
     pub fn activity(&self) -> Option<TurnActivity> {
         if self.retry_activity.is_some() {
             return self.retry_activity.clone();
@@ -601,8 +551,8 @@ impl AcpUpdateTracker {
         }
         None
     }
-    /// Spinner activity for a suppressed blocking tool, or `None`. Instant
-    /// task-output polls (`timeout_ms` 0/missing) are excluded.
+    /// Spinner activity for a suppressed blocking tool, or `None`.
+    /// Instant task-output polls (`timeout_ms` 0/missing) are excluded.
     fn activity_known_blocking_wait(&self) -> Option<TurnActivity> {
         let reason = self.blocking_wait()?;
         if matches!(reason, WaitingReason::TaskOutput { waits: false, .. }) {
@@ -612,10 +562,8 @@ impl AcpUpdateTracker {
     }
     /// Highest-priority blocking-tool wait currently in flight, if any.
     ///
-    /// `blocking_waits` is a map (non-deterministic iteration order), so
-    /// collapse it to a single reason by a fixed priority. In practice at most
-    /// one blocking tool runs at a time; the ordering only matters for the
-    /// degenerate multi-tool case.
+    /// `blocking_waits` is a map (non-deterministic iteration order), so collapse it to a single reason by a fixed priority.
+    /// In practice at most one blocking tool runs at a time; the ordering only matters for the degenerate multi-tool case.
     fn blocking_wait(&self) -> Option<WaitingReason> {
         self.blocking_waits
             .values()
@@ -628,8 +576,7 @@ impl AcpUpdateTracker {
             })
             .map(|w| w.reason.clone())
     }
-    /// Drop waits not registered under `current_stream` (stale earlier rounds,
-    /// or an unknown `None` stream); co-batched same-stream waits survive.
+    /// Drop waits not registered under `current_stream` (stale earlier rounds, or an unknown `None` stream); co-batched same-stream waits survive.
     fn drop_stale_blocking_waits(&mut self, current_stream: Option<i64>) {
         self.blocking_waits
             .retain(|_, w| current_stream.is_some() && w.stream_start_ms == current_stream);
@@ -639,24 +586,18 @@ impl AcpUpdateTracker {
             .get(tool_call_id)
             .map(|pending| pending.base.title.as_str())
     }
-    /// Get the scrollback entry_id for a pending tool by tool_call_id.
-    ///
     /// Used by demotion to find the execute block to swap.
     pub fn pending_tool_entry_id(&self, tool_call_id: &str) -> Option<EntryId> {
         self.pending_tools
             .get(tool_call_id)
             .and_then(|t| t.entry_id)
     }
-    /// Remove a tool from pending_tools (for demotion swap).
-    ///
     /// Called when an execute block is being swapped to a BgTask block.
     pub fn remove_pending_tool(&mut self, tool_call_id: &str) {
         self.pending_tools.remove(tool_call_id);
     }
-    /// Get the tool_call_id of the currently running Execute tool, if any.
-    ///
+    /// Tool_call_id of the currently running Execute tool, if any.
     /// Used by demotion (Ctrl+B) to know which tool to background.
-    /// Returns None if no Execute tool is currently pending.
     pub fn running_execute_tool_call_id(&self) -> Option<&str> {
         self.pending_tools
             .iter()
@@ -665,8 +606,8 @@ impl AcpUpdateTracker {
     }
     /// Set a compaction-related activity override.
     ///
-    /// Called by the ACP handler when `ExtNotification` compaction events
-    /// arrive. Cleared automatically by `finish_turn()`.
+    /// Called by the ACP handler when `ExtNotification` compaction events arrive.
+    /// Cleared automatically by `finish_turn()`.
     pub fn set_compaction_activity(&mut self, activity: Option<TurnActivity>) {
         self.compaction_activity = activity;
     }
@@ -690,15 +631,12 @@ impl AcpUpdateTracker {
     }
     /// Set a retry-related activity override.
     ///
-    /// Called by the ACP handler when `ExtNotification` `RetryState::Retrying`
-    /// arrives. Auto-cleared when normal streaming data resumes (in
-    /// `handle_update` and `note_tool_call_arguments_delta`) and on
-    /// `finish_turn()`.
+    /// Called by the ACP handler when `ExtNotification` `RetryState::Retrying` arrives.
+    /// Auto-cleared when normal streaming data resumes (in `handle_update` and `note_tool_call_arguments_delta`) and on `finish_turn()`.
     pub fn set_retry_activity(&mut self, activity: Option<TurnActivity>) {
         self.retry_activity = activity;
     }
-    /// Record a `ToolCallDeltaChunk`; returns `true` only when the visible
-    /// label changed (continuation deltas need no redraw).
+    /// Record a `ToolCallDeltaChunk`; returns `true` only when the visible label changed (continuation deltas need no redraw).
     pub fn note_tool_call_arguments_delta(&mut self, name: Option<&str>, tool_index: u32) -> bool {
         let now = std::time::Instant::now();
         let retry_cleared = self.retry_activity.take().is_some();
@@ -727,16 +665,14 @@ impl AcpUpdateTracker {
         self.writing_tool_call = Some((next, now));
         retry_cleared || changed
     }
-    /// The in-flight write while its deltas are fresh; a stream silent past
-    /// [`WRITING_DELTA_STALE_AFTER`] is treated as no longer writing.
+    /// The in-flight write while its deltas are fresh; a stream silent past [`WRITING_DELTA_STALE_AFTER`] is treated as no longer writing.
     fn fresh_writing_tool_call(&self) -> Option<&WritingToolCall> {
         self.writing_tool_call
             .as_ref()
             .filter(|(_, at)| at.elapsed() < WRITING_DELTA_STALE_AFTER)
             .map(|(writing, _)| writing)
     }
-    /// A write whose delta stream went silent past the cutoff — positive
-    /// evidence of a dead stream (canonical output would have cleared it).
+    /// A write whose delta stream went silent past the cutoff: positive evidence of a dead stream (canonical output would have cleared it).
     pub(crate) fn has_stale_tool_call_write(&self) -> bool {
         self.writing_tool_call
             .as_ref()
@@ -749,20 +685,16 @@ impl AcpUpdateTracker {
             *at = std::time::Instant::now() - age;
         }
     }
-    /// Take pending ACP commands, if any. Returns `None` if no update arrived
-    /// since the last drain.
+    /// Take pending ACP commands, if any. Returns `None` if no update arrived since the last drain.
     ///
-    /// The caller is the single drain site: it copies the commands to
-    /// `AgentSession.available_commands` and bumps the generation counter.
+    /// The caller is the single drain site: it copies the commands to `AgentSession.available_commands` and bumps the generation counter.
     pub fn take_pending_acp_commands(&mut self) -> Option<Vec<acp::AvailableCommand>> {
         self.pending_acp_commands.take()
     }
     /// Take the agent's most recently advertised tool list, if any.
     ///
-    /// Drained alongside `take_pending_acp_commands()` -- the same
-    /// `AvailableCommandsUpdate` carries both. `None` means the shell
-    /// didn't include a `meta.tools` field (older shell, or no update
-    /// since last drain).
+    /// Drained alongside `take_pending_acp_commands()`; the same `AvailableCommandsUpdate` carries both.
+    /// `None` means the shell didn't include a `meta.tools` field (older shell, or no update since last drain).
     pub fn take_pending_acp_tools(&mut self) -> Option<Vec<String>> {
         self.pending_acp_tools.take()
     }
@@ -778,22 +710,19 @@ impl AcpUpdateTracker {
                 if edit.error.is_none() && !edit.hunks.is_empty()
         )
     }
-    /// Stash `entry_id` for live successful Edits with hunks. Skips replay
-    /// because a resume replays every historical edit at once — queueing them
-    /// would thundering-herd N full-file jobs — and replayed edits' files may
-    /// have changed on disk since, so the styles would not match the hunks.
+    /// Stash `entry_id` for live successful Edits with hunks.
+    /// Skips replay: a resume replays every historical edit at once, which would queue N full-file jobs in one burst.
+    /// Replayed edits' files may also have changed on disk since, so the styles would not match the hunks.
     fn queue_edit_hl_if_needed(&mut self, entry_id: EntryId, block: &RenderBlock, is_replay: bool) {
         if !is_replay && Self::edit_wants_file_hl(block) {
             self.pending_edit_hl.push(entry_id);
         }
     }
-    /// Push a completed tool block, queue its edit-HL upgrade if warranted, and
-    /// clear the running state — the shared tail of every completed-tool path.
-    /// Evaluates the predicate before `push_block` consumes the block, so the
-    /// entry needs no re-fetch.
+    /// Push a completed tool block, queue its edit-HL upgrade if warranted, and clear the running state.
+    /// This is the shared tail of every completed-tool path.
+    /// Evaluates the predicate before `push_block` consumes the block, so the entry needs no re-fetch.
     ///
-    /// The returned id may no longer be in the scrollback: a completed Edit
-    /// can coalesce into an adjacent earlier Edit of the same file.
+    /// The returned id may no longer be in the scrollback: a completed Edit can coalesce into an adjacent earlier Edit of the same file.
     fn finish_completed_tool(
         &mut self,
         block: RenderBlock,
@@ -809,10 +738,8 @@ impl AcpUpdateTracker {
         self.try_coalesce_edit(id, scrollback, is_replay);
         id
     }
-    /// The Edit block of `entry` if it qualifies for coalescing with an
-    /// adjacent same-file Edit: completed successfully with hunks, a
-    /// trustworthy one-liner summary, and free of per-entry attachments a
-    /// merge would misplace.
+    /// The Edit block of `entry` if it qualifies for coalescing with an adjacent same-file Edit.
+    /// Qualifying means: completed successfully with hunks, a trustworthy one-liner summary, and no per-entry attachments a merge would misplace.
     fn coalescable_edit(entry: &ScrollbackEntry) -> Option<&EditToolCallBlock> {
         if entry.is_running || entry.is_pending_user_input || entry.hook_data.is_some() {
             return None;
@@ -822,8 +749,7 @@ impl AcpUpdateTracker {
         };
         (edit.error.is_none() && !edit.hunks.is_empty() && !edit.summary_untrusted).then_some(edit)
     }
-    /// Whether the completed Edit entries `earlier` and `later` target the
-    /// same file and may merge into one block.
+    /// Whether the completed Edit entries `earlier` and `later` target the same file and may merge into one block.
     fn edits_can_merge(
         &self,
         scrollback: &ScrollbackState,
@@ -852,17 +778,14 @@ impl AcpUpdateTracker {
             _ => false,
         }
     }
-    /// Coalesce the just-completed Edit at `entry_id` with strictly adjacent
-    /// completed Edits of the same file, so back-to-back edits render as one
-    /// block with a summed diffstat. The earlier entry always survives.
+    /// Coalesce the just-completed Edit at `entry_id` with strictly adjacent completed Edits of the same file.
+    /// Back-to-back edits then render as one block with a summed diffstat. The earlier entry always survives.
     ///
-    /// Checks the previous neighbor (sequential completions) and the next one
-    /// (parallel calls can complete out of push order, so the pair only
-    /// becomes mergeable when the earlier call lands). Loops so runs of 3+
-    /// collapse pairwise.
+    /// Checks the previous neighbor (sequential completions) and the next one.
+    /// Parallel calls can complete out of push order, so a pair only becomes mergeable when the earlier call lands.
+    /// Loops so runs of 3+ collapse pairwise.
     ///
-    /// Ingestion-time only: a later `collapsed_edit_blocks` flip never
-    /// merges or unmerges rows that already landed.
+    /// Ingestion-time only: a later `collapsed_edit_blocks` flip never merges or unmerges rows that already landed.
     fn try_coalesce_edit(
         &mut self,
         entry_id: EntryId,
@@ -905,9 +828,8 @@ impl AcpUpdateTracker {
             return;
         }
     }
-    /// Append `removed`'s hunks onto `survivor` (the earlier entry) —
-    /// stitching overlapping/adjacent ones into unified hunks — and drop
-    /// `removed` from the scrollback and the edit-HL queue.
+    /// Append `removed`'s hunks onto `survivor` (the earlier entry), stitching overlapping/adjacent ones into unified hunks.
+    /// Then drop `removed` from the scrollback and the edit-HL queue.
     fn merge_edit_entries(
         &mut self,
         survivor: EntryId,
@@ -1064,8 +986,7 @@ impl AcpUpdateTracker {
     }
     /// Finish the current thinking block, passing elapsed time to the entry.
     ///
-    /// Empty thinking blocks (pre-created but never received content) are
-    /// removed from scrollback — they'd show a misleading "Thought for 0.0s".
+    /// Empty thinking blocks (pre-created but never received content) are removed from scrollback; they'd show a misleading "Thought for 0.0s".
     /// Only blocks that received actual thinking tokens are kept.
     fn finish_thinking(&mut self, scrollback: &mut ScrollbackState) {
         if let Some(thinking_id) = self.current_thinking.take() {
@@ -1080,11 +1001,9 @@ impl AcpUpdateTracker {
             self.last_thinking_elapsed_ms = None;
         }
     }
-    /// Pre-create a thinking block so "Thinking…" appears immediately
-    /// when the turn starts, before the first ThinkingDelta arrives.
+    /// Pre-create a thinking block so "Thinking…" appears immediately when the turn starts, before the first ThinkingDelta arrives.
     ///
-    /// The tracker's `current_thinking` is set so subsequent ThinkingDelta
-    /// chunks append to this entry instead of creating a new one.
+    /// The tracker's `current_thinking` is set so subsequent ThinkingDelta chunks append to this entry instead of creating a new one.
     /// No-op when `show_thinking_blocks` is off.
     pub fn pre_create_thinking(&mut self, scrollback: &mut ScrollbackState) {
         if !crate::appearance::cache::load_show_thinking_blocks() {
@@ -1099,14 +1018,12 @@ impl AcpUpdateTracker {
     }
     /// Mark that the next UserMessageChunk should be silently dropped.
     ///
-    /// Call this from `dispatch_send_prompt` after pushing the user entry
-    /// directly, so the ACP echo doesn't produce a duplicate.
+    /// Call this from `dispatch_send_prompt` after pushing the user entry directly, so the ACP echo doesn't produce a duplicate.
     pub fn expect_user_echo(&mut self) {
         self.skip_next_user_echo = true;
     }
-    /// Reset stale skip state when no local user block was rendered, so the
-    /// agent's user-message broadcast is the one source of the user echo
-    /// (e.g. the synthetic cron/bash adoption path) instead of being dropped.
+    /// Reset stale skip state when no local user block was rendered (e.g. the synthetic cron/bash adoption path).
+    /// The agent's user-message broadcast then becomes the one source of the user echo instead of being dropped.
     pub fn clear_user_echo_skip(&mut self) {
         self.skip_next_user_echo = false;
         self.skip_next_skill_body = false;
@@ -1430,9 +1347,8 @@ impl AcpUpdateTracker {
     }
     /// Handle a user message chunk (session replay or live followup).
     ///
-    /// If `skip_next_user_echo` is set, this is the ACP echo of a prompt
-    /// we already added to scrollback — drop it but still reset tracking
-    /// state so the agent's response creates fresh entries.
+    /// If `skip_next_user_echo` is set, this is the ACP echo of a prompt we already added to scrollback.
+    /// Drop it but still reset tracking state so the agent's response creates fresh entries.
     fn handle_user_message(
         &mut self,
         chunk: acp::ContentChunk,
@@ -1606,9 +1522,8 @@ fn combined_display_texts_from_chunk(chunk: &acp::ContentChunk) -> Option<Vec<St
         .collect();
     (segs.len() >= 2).then_some(segs)
 }
-/// Parse `skillTokenRanges` content-block meta (`[[start, end], …]`) into
-/// byte ranges. Malformed entries are skipped; bounds/boundary validation
-/// happens in `UserPromptBlock::with_skill_tokens`.
+/// Parse `skillTokenRanges` content-block meta (`[[start, end], …]`) into byte ranges.
+/// Malformed entries are skipped; bounds/boundary validation happens in `UserPromptBlock::with_skill_tokens`.
 fn parse_skill_token_ranges(v: &serde_json::Value) -> Vec<std::ops::Range<usize>> {
     v.as_array()
         .map(|arr| {
@@ -1625,12 +1540,10 @@ fn parse_skill_token_ranges(v: &serde_json::Value) -> Vec<std::ops::Range<usize>
 }
 /// Extract a slash command name from a skill instruction markdown header.
 ///
-/// Matches text starting with `# /command -- ` (the format used by
-/// `InjectSkill`). Returns the `## Input` section's content if present,
-/// prefixed with the command name. Falls back to just the command name.
+/// Matches text starting with `# /command -- ` (the format used by `InjectSkill`).
+/// Returns the `## Input` section's content if present, prefixed with the command name. Falls back to just the command name.
 ///
-/// Example: `"# /loop -- schedule a recurring prompt\n\n...\n## Input\n5m check deploy"`
-/// → `"/loop 5m check deploy"`
+/// Example: `"# /loop -- schedule a recurring prompt\n\n...\n## Input\n5m check deploy"` becomes `"/loop 5m check deploy"`.
 fn extract_skill_header_command(text: &str) -> Option<String> {
     let text = text.strip_prefix("# ")?;
     if !text.starts_with('/') {
@@ -1648,14 +1561,11 @@ fn extract_skill_header_command(text: &str) -> Option<String> {
 /// Whether a `UserMessageChunk` must stay out of scrollback.
 ///
 /// Type-driven (preferred):
-/// 1. `ContentChunk._meta.hideFromScrollback` stamped by the shell from
-///    [`PromptOrigin::hide_user_echo_from_scrollback`]
-/// 2. `SessionNotification._meta.promptId` classified via
-///    [`PromptOrigin::from_prompt_id`]
+/// 1. `ContentChunk._meta.hideFromScrollback` stamped by the shell from [`PromptOrigin::hide_user_echo_from_scrollback`]
+/// 2. `SessionNotification._meta.promptId` classified via [`PromptOrigin::from_prompt_id`]
 ///
-/// Legacy fallback (pre-meta sessions only): bare auto-wake text that used to
-/// be gated by the system-reminder prefix. Cron is handled earlier by
-/// [`extract_cron_prompt_body`].
+/// Legacy fallback (pre-meta sessions only): bare auto-wake text that used to be gated by the system-reminder prefix.
+/// Cron is handled earlier by [`extract_cron_prompt_body`].
 fn user_message_hidden_from_scrollback(
     chunk: &acp::ContentChunk,
     meta: &NotificationMeta,
@@ -1691,8 +1601,7 @@ fn user_message_hidden_from_scrollback(
 /// Matches the format produced by `format_scheduled_task_prompt`:
 /// `"<system-reminder>\nThis is a scheduled task execution...\n</system-reminder>\n\n<prompt>"`
 ///
-/// Returns the prompt text after the closing tag, or `None` if the text
-/// doesn't match the cron framing pattern.
+/// Returns the prompt text after the closing tag, or `None` if the text doesn't match the cron framing pattern.
 fn extract_cron_prompt_body(text: &str) -> Option<String> {
     if !text.starts_with("<system-reminder>") {
         return None;
@@ -1732,9 +1641,8 @@ fn peeled_if_changed(command: &str, session_cwd: Option<&Path>) -> Option<String
 }
 /// True when `s` is an ACP/function tool id rather than a shell command.
 ///
-/// Eager ToolCall messages often set `title` to the function name
-/// (`run_terminal_command`) before `raw_input.command` arrives — using that as
-/// the execute header flashes the internal tool name in the TUI.
+/// Eager ToolCall messages often set `title` to the function name (`run_terminal_command`) before `raw_input.command` arrives.
+/// Using that as the execute header flashes the internal tool name in the TUI.
 fn is_execute_tool_function_name(s: &str) -> bool {
     matches!(
         s.to_ascii_lowercase().as_str(),
@@ -1749,10 +1657,9 @@ fn is_execute_tool_function_name(s: &str) -> bool {
 }
 /// Eager execute-related placeholder that should not be shown to the user.
 ///
-/// Only **empty** execute commands count as placeholders. A real shell
-/// invocation of `bash` / `shell` / etc. must not be dropped on late
-/// `is_background` (would lose demotion + stdout). Other blocks still
-/// matching the tool function name are placeholders.
+/// Only **empty** execute commands count as placeholders.
+/// A real shell invocation of `bash` / `shell` / etc. must not be dropped on late `is_background` (that would lose demotion and stdout).
+/// Other blocks still matching the tool function name are placeholders.
 fn entry_is_execute_placeholder(entry: &crate::scrollback::entry::ScrollbackEntry) -> bool {
     match &entry.block {
         RenderBlock::ToolCall(ToolCallBlock::Execute(ex)) => ex.command.trim().is_empty(),
@@ -1769,8 +1676,8 @@ fn raw_input_command(tc: &acp::ToolCall) -> Option<String> {
 }
 /// Resolve the shell command for an execute tool call.
 ///
-/// Prefer `raw_input.command`. Do **not** fall back to a title that is only the
-/// tool function name (that produces the "Run run_terminal_command" flash).
+/// Prefer `raw_input.command`.
+/// Do **not** fall back to a title that is only the tool function name (that produces the "Run run_terminal_command" flash).
 fn execute_command_from_tool_call(tc: &acp::ToolCall) -> String {
     if let Some(cmd) = raw_input_command(tc) {
         return cmd;
@@ -1782,9 +1689,8 @@ fn execute_command_from_tool_call(tc: &acp::ToolCall) -> String {
 }
 /// Convert an ACP ToolCall to a RenderBlock.
 ///
-/// Parses `tool_call.kind` to create the appropriate block type,
-/// extracting fields from `raw_input` JSON when available. `session_cwd` sets
-/// execute `header_display` when a leading `cd <cwd>` is redundant.
+/// Parses `tool_call.kind` to create the appropriate block type, extracting fields from `raw_input` JSON when available.
+/// `session_cwd` sets execute `header_display` when a leading `cd <cwd>` is redundant.
 fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderBlock {
     let success = !matches!(tc.status, acp::ToolCallStatus::Failed);
     match tc.kind {
@@ -2273,10 +2179,9 @@ fn media_gen_block(tc: &acp::ToolCall, success: bool) -> RenderBlock {
     }
     RenderBlock::ToolCall(ToolCallBlock::Other(block))
 }
-/// Plain-text body of a media-variant tool that returned `ToolOutput::Text`
-/// rather than a media file (the free / X Basic SuperGrok-upsell short-circuit).
-/// `None` for real media outputs — including ZDR upload-only results — so their
-/// typed rendering is untouched.
+/// Plain-text body of a media-variant tool that returned `ToolOutput::Text` rather than a media file.
+/// That happens on the free / X Basic SuperGrok-upsell short-circuit.
+/// `None` for real media outputs (including ZDR upload-only results) so their typed rendering is untouched.
 fn media_gen_text(tc: &acp::ToolCall) -> Option<String> {
     match serde_json::from_value::<ToolOutput>(tc.raw_output.clone()?).ok()? {
         ToolOutput::Text(t) => (!t.text.is_empty()).then_some(t.text),
@@ -2285,8 +2190,7 @@ fn media_gen_text(tc: &acp::ToolCall) -> Option<String> {
 }
 /// Local `(path, is_video)` from typed `raw_output`.
 ///
-/// Returns `None` when `raw_output` is missing/unparseable, not a media
-/// variant, or has no openable local file (ZDR `uploaded_url` / empty path).
+/// Returns `None` when `raw_output` is missing/unparseable, not a media variant, or has no openable local file (ZDR `uploaded_url` / empty path).
 fn media_gen_ref(tc: &acp::ToolCall) -> Option<(std::path::PathBuf, bool)> {
     let (media, is_video) =
         match serde_json::from_value::<ToolOutput>(tc.raw_output.clone()?).ok()? {
@@ -2320,12 +2224,10 @@ fn content_text(tc: &acp::ToolCall) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-/// Check if a tool call is bg-task internal plumbing
-/// (get_command_or_subagent_output, kill_command_or_subagent,
-/// wait_commands_or_subagents, and the external background-await tool).
+/// Check if a tool call is bg-task internal plumbing.
+/// That covers get_command_or_subagent_output, kill_command_or_subagent, wait_commands_or_subagents, and the external background-await tool.
 ///
-/// These are suppressed from scrollback because the bg task pane provides
-/// visibility into task status and output.
+/// These are suppressed from scrollback because the bg task pane already shows task status and output.
 fn is_bg_plumbing_tool(tc: &acp::ToolCall) -> bool {
     matches!(
         tc.title.as_str(),
@@ -2347,11 +2249,9 @@ fn is_bg_plumbing_tool(tc: &acp::ToolCall) -> bool {
             .and_then(|v| v.as_str())
             .is_some_and(|v| matches!(v, "TaskOutput" | "KillTask" | "WaitTasks"))
 }
-/// Classify a *blocking* suppressed tool into the [`WaitingReason`] the turn is
-/// waiting on, or `None` for suppressed tools that don't block the turn (e.g.
-/// `kill_*`, todo/goal/scheduler). Mirrors the title/variant matches in
-/// [`is_bg_plumbing_tool`] so the spinner can name the wait instead of falling
-/// back to a generic "Waiting…".
+/// Classify a *blocking* suppressed tool into the [`WaitingReason`] the turn is waiting on.
+/// `None` for suppressed tools that don't block the turn (e.g. `kill_*`, todo/goal/scheduler).
+/// Mirrors the title/variant matches in [`is_bg_plumbing_tool`] so the spinner can name the wait instead of falling back to a generic "Waiting…".
 fn blocking_wait_reason(tc: &acp::ToolCall) -> Option<WaitingReason> {
     let title = tc.title.as_str();
     let variant = tc
@@ -2424,12 +2324,10 @@ fn task_ids_from_raw_input(raw: &serde_json::Value) -> Vec<String> {
 }
 /// Check if a tool call is a background execute (`is_background=true`).
 ///
-/// These are deferred from scrollback — the `x.ai/task_backgrounded`
-/// notification creates a `BgTask` block instead of an `Execute` block.
+/// These are deferred from scrollback; the `x.ai/task_backgrounded` notification creates a `BgTask` block instead of an `Execute` block.
 ///
-/// Eager ACP messages often use `kind=Other` with `title=run_terminal_command`
-/// before the kind is refined to Execute — still treat those as execute tools
-/// when `raw_input` requests background so we don't flash the function name.
+/// Eager ACP messages often use `kind=Other` with `title=run_terminal_command` before the kind is refined to Execute.
+/// Still treat those as execute tools when `raw_input` requests background so we don't flash the function name.
 fn is_bg_tool(tc: &acp::ToolCall) -> bool {
     let looks_like_execute =
         tc.kind == acp::ToolKind::Execute || is_execute_tool_function_name(&tc.title);
@@ -2441,8 +2339,7 @@ fn is_bg_tool(tc: &acp::ToolCall) -> bool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
 }
-/// Check if an Edit-kind tool call is a whole-file write (write)
-/// rather than a targeted replacement (search_replace / edit).
+/// Check if an Edit-kind tool call is a whole-file write (write) rather than a targeted replacement (search_replace / edit).
 ///
 /// Detection: a Write-family `rawInput.variant` tag.
 fn is_write_tool(tc: &acp::ToolCall) -> bool {
@@ -2455,8 +2352,7 @@ fn is_write_tool(tc: &acp::ToolCall) -> bool {
 }
 /// Extract the serde variant tag from a tool call's `raw_input.variant`.
 ///
-/// Shared helper for all `is_*_tool` suppression checks — avoids
-/// duplicating the `.as_ref()?.get("variant")?.as_str()` chain.
+/// Shared helper for all `is_*_tool` suppression checks; avoids duplicating the `.as_ref()?.get("variant")?.as_str()` chain.
 fn extract_variant(tc: &acp::ToolCall) -> Option<&str> {
     tc.raw_input.as_ref()?.get("variant")?.as_str()
 }
@@ -2474,9 +2370,8 @@ fn is_todo_variant(variant: Option<&str>) -> bool {
 }
 /// Check if a tool call is a todo-related tool.
 ///
-/// Suppressed from scrollback because the dedicated todo pane provides
-/// better visibility. Covers the `todo_write` / `TodoWrite` ids, the
-/// `Updating plan` title, and TodoWrite-family variant tags.
+/// Suppressed from scrollback because the dedicated todo pane provides better visibility.
+/// Covers the `todo_write` / `TodoWrite` ids, the `Updating plan` title, and TodoWrite-family variant tags.
 fn is_todo_tool(tc: &acp::ToolCall) -> bool {
     matches!(
         tc.title.as_str(),
@@ -2485,9 +2380,8 @@ fn is_todo_tool(tc: &acp::ToolCall) -> bool {
 }
 /// Check if a tool call is a task tool (subagent spawn).
 ///
-/// Suppressed from scrollback because the SubagentBlock (created from
-/// SubagentSpawned notification) provides better visibility. Covers the
-/// `task` / `Task` / `spawn_subagent` ids and Task-family variant tags.
+/// Suppressed from scrollback because the SubagentBlock (created from the SubagentSpawned notification) provides better visibility.
+/// Covers the `task` / `Task` / `spawn_subagent` ids and Task-family variant tags.
 fn is_task_tool(tc: &acp::ToolCall) -> bool {
     xai_grok_tools::is_task_tool_id(&tc.title) || is_task_variant(extract_variant(tc))
 }
@@ -2650,15 +2544,12 @@ fn extract_listdir_content(raw: &Option<serde_json::Value>) -> Option<String> {
         _ => None,
     }
 }
-/// Extract the agent's advertised toolset from
-/// `AvailableCommandsUpdate.meta`.
+/// Extract the agent's advertised toolset from `AvailableCommandsUpdate.meta`.
 ///
 /// Wire format set by the shell: `{"tools": ["read_file", ...]}`.
-/// Returns `None` if `meta` is absent, has no `tools` array, or the
-/// array contains no string entries (defensive against future shape
-/// drift). An empty `Vec` would mean "the shell told us there are zero
-/// tools" -- pager `CommandRegistry::set_available_tools(empty)` then
-/// hides every tool-gated command.
+/// Returns `None` if `meta` is absent, has no `tools` array, or the array contains no string entries (defensive against future shape drift).
+/// An empty `Vec` would mean "the shell told us there are zero tools".
+/// Pager `CommandRegistry::set_available_tools(empty)` then hides every tool-gated command.
 fn parse_tools_meta(meta: Option<&acp::Meta>) -> Option<Vec<String>> {
     let arr = meta?.get("tools")?.as_array()?;
     Some(
@@ -2667,12 +2558,11 @@ fn parse_tools_meta(meta: Option<&acp::Meta>) -> Option<Vec<String>> {
             .collect(),
     )
 }
-/// Compact one-line description of a `SessionUpdate` for the always-on
-/// `acp_update` log target.
+/// Compact one-line description of a `SessionUpdate` for the always-on `acp_update` log target.
 ///
-/// Deliberately avoids serializing payloads: emits variant names, ids,
-/// statuses, and *sizes* only, so the line stays O(100B) no matter how large
-/// the update is. Full payloads go to the opt-in `acp_update_payload` target.
+/// Deliberately avoids serializing payloads: emits variant names, ids, statuses, and *sizes* only.
+/// The line stays O(100B) no matter how large the update is.
+/// Full payloads go to the opt-in `acp_update_payload` target.
 fn update_summary(update: &acp::SessionUpdate) -> String {
     match update {
         acp::SessionUpdate::UserMessageChunk(chunk) => {
@@ -2751,10 +2641,9 @@ fn content_block_summary(content: &acp::ContentBlock) -> String {
 }
 /// Cheap size descriptor for a `serde_json::Value` without serializing it.
 ///
-/// Strings report byte length; arrays report element count (bash raw_output
-/// is a `Vec<u8>`, so element count == output bytes); objects report key
-/// count plus the summed size of direct string/array members (one level, no
-/// recursion). This keeps the cost O(top-level members), never O(payload).
+/// Strings report byte length; arrays report element count (bash raw_output is a `Vec<u8>`, so element count equals output bytes).
+/// Objects report key count plus the summed size of direct string/array members (one level, no recursion).
+/// This keeps the cost O(top-level members), never O(payload).
 fn json_size_hint(v: &serde_json::Value) -> String {
     use serde_json::Value;
     match v {
@@ -2832,9 +2721,8 @@ fn parse_search_tool_results(content: &str) -> Vec<DiscoveredTool> {
 }
 /// Extract output text from a use_tool's raw_output.
 ///
-/// MCP tools don't put content in ACP content blocks — they only set raw_output.
-/// This extracts the text from ToolOutput::MCP, ToolOutput::Text, or
-/// ToolOutput::Dynamic variants.
+/// MCP tools don't put content in ACP content blocks; they only set raw_output.
+/// This extracts the text from ToolOutput::MCP, ToolOutput::Text, or ToolOutput::Dynamic variants.
 fn extract_use_tool_output(raw: &Option<serde_json::Value>) -> Option<String> {
     let val = raw.as_ref()?;
     if let Ok(output) = serde_json::from_value::<ToolOutput>(val.clone()) {

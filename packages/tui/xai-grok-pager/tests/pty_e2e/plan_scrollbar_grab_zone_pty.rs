@@ -4,15 +4,12 @@ use super::common::*;
 const TAG: &str = "SBGRAB";
 const PLAN_LINES: usize = 120;
 
-/// PTY: presses, wheels, and drags on the modal border column next to the
-/// scrollbar track must scroll the plan. Users read the thumb + border as
-/// one two-column scrollbar and press the border half (reported on macOS
-/// Terminal.app and ghostty over SSH), which used to fall into the
-/// click-outside-modal path.
+/// PTY: presses, wheels, and drags on the modal border column next to the scrollbar track must scroll the plan.
+/// Users read the thumb and border as one two-column scrollbar and press the border half (reported on macOS Terminal.app and ghostty over SSH).
+/// That press used to fall into the click-outside-modal path.
 ///
-/// Also pins the thumb contract `bg == fg`: Terminal.app leaves line-gap
-/// pixels unpainted under a foreground-only `█`, striping the thumb with
-/// dark bars.
+/// Also pins the thumb contract `bg == fg`.
+/// Terminal.app leaves line-gap pixels unpainted under a foreground-only `█`, striping the thumb with dark bars.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn plan_scrollbar_grab_zone_pty() {
@@ -38,9 +35,8 @@ async fn plan_scrollbar_grab_zone_pty() {
     harness
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(40))
         .expect("first turn streams");
-    // Submitting `exit_plan_mode` before the first turn is idle can consume the
-    // scripted tool call while the session is still finalizing; Plan Exit then
-    // hangs without parking approval chrome.
+    // Submitting `exit_plan_mode` before the first turn is idle can consume the scripted tool call while the session is still finalizing
+    // Plan Exit then hangs without parking approval chrome
     harness
         .wait_for_turn_idle(Duration::from_secs(20))
         .expect("first turn idle");
@@ -128,8 +124,7 @@ async fn plan_scrollbar_grab_zone_pty() {
             )
         });
 
-    // A single synthetic notch was observed to be swallowed by the
-    // scroll-stream cadence; real wheels emit bursts.
+    // A single synthetic wheel notch was observed to get swallowed by the scroll handling; real wheels emit bursts
     let wheel_up: String = (0..6)
         .map(|_| sgr_mouse(64, track_bottom_row, border_col, 'M'))
         .collect();

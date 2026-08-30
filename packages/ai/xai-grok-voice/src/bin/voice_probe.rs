@@ -134,18 +134,9 @@ fn load_config(path: Option<&std::path::Path>) -> VoiceConfig {
     {
         return VoiceConfig::from_config_table(&table, env_base.as_deref());
     }
-    if let Ok(home) = std::env::var("GROK_HOME")
-        && let Ok(raw) = std::fs::read_to_string(PathBuf::from(home).join("config.toml"))
+    if let Some(home) = xai_dirs::resolve_grok_home()
+        && let Ok(raw) = std::fs::read_to_string(home.join("config.toml"))
         && let Ok(table) = toml::from_str::<toml::Table>(&raw)
-    {
-        return VoiceConfig::from_config_table(&table, env_base.as_deref());
-    }
-    if let Ok(raw) = std::fs::read_to_string(
-        std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default()
-            .join(".grok/config.toml"),
-    ) && let Ok(table) = toml::from_str::<toml::Table>(&raw)
     {
         return VoiceConfig::from_config_table(&table, env_base.as_deref());
     }

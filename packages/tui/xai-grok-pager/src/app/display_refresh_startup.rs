@@ -1,8 +1,7 @@
-//! Display-refresh probe + motion cadence at TUI startup.
+//! Display-refresh probe and motion cadence at TUI startup.
 //!
-//! Owns env cadence knobs, fail-closed probe planning (sync only when auto can
-//! change a clock), paint-clock resolution, and the terminal + display-refresh
-//! telemetry `spawn_blocking`. Keeps the event loop free of this policy glue.
+//! Owns env cadence knobs, fail-closed probe planning (sync only when auto can change a clock), and paint-clock resolution.
+//! Also owns the terminal and display-refresh telemetry `spawn_blocking`. Keeps the event loop free of this policy code.
 
 use std::time::Duration;
 
@@ -12,8 +11,7 @@ use xai_grok_shell::util::config::{
     resolve_motion_cadence,
 };
 
-/// Inclusive bounds for motion cadence env knobs (`GROK_MIN_DRAW_MS`,
-/// `GROK_SCROLL_CADENCE_MS`).
+/// Inclusive bounds for motion cadence env knobs (`GROK_MIN_DRAW_MS`, `GROK_SCROLL_CADENCE_MS`).
 const CADENCE_ENV_MIN_MS: u64 = 1;
 const CADENCE_ENV_MAX_MS: u64 = 100;
 
@@ -24,7 +22,7 @@ pub struct MotionClocks {
     pub scroll_cadence: Duration,
 }
 
-/// Pure parse for cadence ms: trim/empty/invalid → `default_ms`, clamp 1..=100.
+/// Pure parse for cadence ms: trimmed empty or invalid input falls back to `default_ms`; the result clamps to 1..=100.
 fn parse_cadence_ms(raw: Option<&str>, default_ms: u64) -> u64 {
     raw.and_then(|v| {
         let t = v.trim();
@@ -38,8 +36,8 @@ fn parse_cadence_ms(raw: Option<&str>, default_ms: u64) -> u64 {
     .clamp(CADENCE_ENV_MIN_MS, CADENCE_ENV_MAX_MS)
 }
 
-/// Read a cadence env knob: `(set, ms)`. `set` is true when the var is present
-/// (empty/invalid still counts as set → `default_ms` after clamp 1..=100).
+/// Read a cadence env knob: `(set, ms)`. `set` is true when the var is present.
+/// (Empty/invalid still counts as set and yields `default_ms` after the 1..=100 clamp.)
 fn cadence_ms_from_env(name: &str, default_ms: u64) -> (bool, u64) {
     match std::env::var(name) {
         Ok(raw) => (true, parse_cadence_ms(Some(&raw), default_ms)),
@@ -51,7 +49,7 @@ fn cadence_ms_from_env(name: &str, default_ms: u64) -> (bool, u64) {
 enum ProbePlan {
     /// Kill switch: no FFI; emit skipped/disabled.
     Disabled,
-    /// Auto-cadence needs Hz before paint clocks pin — probe on the main path.
+    /// Auto-cadence needs Hz before paint clocks pin; probe on the main path.
     Sync(crate::host::DisplayRefreshProbeResult),
     /// Telemetry-only: probe in the background task (default path).
     Async,
@@ -63,8 +61,7 @@ struct StartupTel {
     cadence: MotionCadence,
 }
 
-/// Resolve policy, pin motion clocks, and spawn terminal + display-refresh
-/// telemetry off the first-paint path.
+/// Resolve policy, pin motion clocks, and spawn terminal and display-refresh telemetry off the first-paint path.
 pub fn start(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,

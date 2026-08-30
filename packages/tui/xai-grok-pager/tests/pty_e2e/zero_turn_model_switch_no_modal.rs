@@ -2,9 +2,7 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 8. **Zero-turn model switch — no modal, silent rebuild.**
-/// Switching to a model with a different agent type before any prompts
-/// are sent should succeed silently (shell auto-rebuilds at turn_count == 0).
+/// Switching to a model with a different agent type before any prompts are sent should succeed silently (shell auto-rebuilds at turn_count == 0).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn zero_turn_model_switch_no_modal() {
@@ -24,10 +22,8 @@ async fn zero_turn_model_switch_no_modal() {
         .inject_keys(b"/model cursor-model\r")
         .expect("type model switch");
 
-    // The "Switched to" scrollback line is raced away when the switch lands
-    // before the session exists (deferred_model_switch applies silently on
-    // SessionCreated). Converge on signals common to both paths: prompt
-    // consumed and the status bar showing the new model.
+    // When the switch lands before the session exists, deferred_model_switch applies it silently on SessionCreated and no "Switched to" line prints
+    // Wait for what both paths show: the prompt is consumed and the status bar names the new model
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
         harness.update(Duration::from_millis(100));
@@ -41,7 +37,6 @@ async fn zero_turn_model_switch_no_modal() {
         );
     }
 
-    // No modal should appear.
     assert!(
         !harness.contains_text("requires starting a new session"),
         "modal should NOT appear for zero-turn switch\nscreen:\n{}",

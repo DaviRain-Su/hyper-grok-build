@@ -51,7 +51,7 @@ pub async fn run(args: TraceArgs, agent_config: &AgentConfig) -> Result<()> {
         if !args.json {
             eprintln!(
                 "Trace uploads disabled. Set [telemetry] trace_upload = true in {}",
-                crate::util::display_user_grok_path("config.toml")
+                crate::util::display_user_grok_path(xai_grok_config::USER_CONFIG_FILENAME)
             );
             eprintln!("Falling back to local export.");
         }
@@ -163,7 +163,7 @@ struct ExportMetadata {
     memtrace_files: usize,
 }
 
-/// No URLs, paths, or bucket names -- only booleans and config source indicators.
+/// No URLs, paths, or bucket names, only booleans and config source indicators.
 #[derive(serde::Serialize)]
 struct TraceConfigSnapshot {
     trace_upload_enabled: bool,
@@ -455,8 +455,7 @@ async fn run_upload(
     let archive = build_session_tar(&session_dir, session_id, agent_config)?;
     let archive_size = archive.len();
 
-    // Proxy-mode uploads don't need a bucket (the proxy owns the
-    // destination); direct GCS uploads do.
+    // Proxy-mode uploads don't need a bucket (the proxy owns the destination); direct GCS uploads do
     let bucket_url = agent_config
         .endpoints
         .resolve_trace_bucket_url()
@@ -550,7 +549,7 @@ pub struct UploadAttempt<'a> {
 }
 
 impl UploadAttempt<'_> {
-    /// Saves local bundle + debug log, prints diagnostics.
+    /// Saves local bundle and debug log, prints diagnostics.
     pub fn handle_failure(&self, error: &anyhow::Error) -> anyhow::Error {
         let export_dir = trace_exports_dir();
         std::fs::create_dir_all(&export_dir).ok();

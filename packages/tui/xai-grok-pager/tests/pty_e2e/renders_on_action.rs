@@ -2,11 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 3. **Pager renders when action happens.**
-/// A resize after the splash forces the pager to emit at least one
-/// synchronized-update frame (`CSI ? 2026 h/l`). The pager is event-driven
-/// and idle-frame-free, so we drive the event ourselves rather than
-/// asserting `frame_count > 0` from boot.
+/// A resize after the splash forces the pager to emit at least one synchronized-update frame (`CSI ? 2026 h/l`).
+/// The pager draws only in response to events and never emits idle frames, so the test drives a resize rather than asserting `frame_count > 0` from boot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn renders_on_action() {

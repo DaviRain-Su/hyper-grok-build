@@ -94,8 +94,7 @@ mod tests {
         };
         let user_config = user_home.join("config.toml");
         if user_config.is_file() {
-            #[allow(deprecated)]
-            let home = std::env::home_dir().expect("home dir");
+            let home = xai_dirs::home_dir().expect("home dir");
             let from_home = find_project_configs(&home);
             assert!(
                 !from_home.iter().any(|p| is_user_grok_config_file(p)),

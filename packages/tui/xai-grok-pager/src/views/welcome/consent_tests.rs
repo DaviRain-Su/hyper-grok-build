@@ -72,8 +72,7 @@ fn row_containing(buf: &Buffer, needle: &str) -> Option<String> {
         .find(|row| row.contains(needle))
 }
 
-/// The label underlines as one span, spaces and the key it answers to included, and no whitespace
-/// appears between segments.
+/// The label underlines as one span, spaces and the key it answers to included, and no whitespace appears between segments.
 #[test]
 fn a_link_label_paints_exactly_as_authored() {
     let (buf, result) = render(100, 40);

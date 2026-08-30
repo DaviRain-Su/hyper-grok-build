@@ -15,6 +15,7 @@ members = [
     "packages/platform/xai-codebase-graph",
     "packages/agent/xai-compaction-transcript",
     "packages/platform/xai-crash-handler",
+    "packages/platform/xai-dirs",
     "packages/platform/xai-fast-worktree",
     "packages/platform/xai-file-utils",
     "packages/platform/xai-fsnotify",
@@ -27,19 +28,13 @@ members = [
     "packages/coding-agent/xai-grok-bundle",
     "packages/coding-agent/xai-grok-config",
     "packages/coding-agent/xai-grok-config-types",
-    "packages/coding-agent/xai-grok-dashboard",
     "packages/platform/xai-grok-dashboard-store",
     "packages/tools/xai-grok-diag-server",
     "packages/platform/xai-grok-env",
     "packages/platform/xai-grok-extra-ca",
     "packages/tools/xai-grok-foreign-sessions",
-    "packages/platform/xai-dirs",
+    "packages/tools/xai-grok-gboom",
     "packages/coding-agent/xai-grok-hooks",
-    "packages/extensions/xai-grok-extension-api",
-    "packages/extensions/xai-grok-extension-macros",
-    "packages/extensions/xai-grok-extension-runtime",
-    "packages/extensions/xai-grok-extension-sdk",
-    "packages/extensions/xai-grok-scheme-runtime",
     "packages/ai/xai-grok-http",
     "packages/tui/xai-grok-markdown",
     "packages/tui/xai-grok-markdown-core",
@@ -80,9 +75,6 @@ members = [
     "packages/tools/xai-grok-workspace-daemon",
     "packages/tools/xai-grok-workspace-types",
     "packages/coding-agent/xai-hooks-plugins-types",
-    "packages/agent/xai-hyper-core",
-    "packages/agent/xai-hyper-host",
-    "packages/coding-agent/xai-hyper-web",
     "packages/platform/xai-hunk-tracker",
     "packages/ai/xai-mixpanel",
     "packages/agent/xai-prompt-queue",
@@ -100,6 +92,7 @@ members = [
     "packages/tools/xai-computer-hub-sdk",
     "packages/agent/xai-grok-compaction",
     "packages/agent/xai-interjection-core",
+    "packages/coding-agent/xai-message-delivery-core",
     "packages/platform/xai-test-utils",
     "packages/tools/xai-tool-protocol",
     "packages/tools/xai-tool-runtime",
@@ -117,6 +110,23 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+audiopus_sys = { version = "0.2.2", features = ["static"] }
+enum_delegate = "0.2"
+flume = "0.11"
+gcloud-auth = { version = "1.3.0", default-features = false, features = ["jwt-aws-lc-rs", "external-account"] }
+opus = "0.3.1"
+token-source = "1.0.0"
+webrtc = "0.17.2"
+xai-grok-extension-api = { path = "packages/extensions/xai-grok-extension-api" }
+xai-grok-extension-macros = { path = "packages/extensions/xai-grok-extension-macros" }
+xai-grok-extension-runtime = { path = "packages/extensions/xai-grok-extension-runtime" }
+xai-grok-extension-sdk = { path = "packages/extensions/xai-grok-extension-sdk" }
+xai-grok-pager-diff = { path = "packages/tui/xai-grok-pager-diff" }
+xai-grok-scheme-runtime = { path = "packages/extensions/xai-grok-scheme-runtime" }
+xai-grok-workspace-daemon = { path = "packages/tools/xai-grok-workspace-daemon" }
+xai-hyper-core = { path = "packages/agent/xai-hyper-core" }
+xai-hyper-host = { path = "packages/agent/xai-hyper-host" }
+xai-hyper-web = { path = "packages/coding-agent/xai-hyper-web" }
 agent-client-protocol = { version = "0.10.4", features = ["unstable"] }
 alacritty_terminal = "0.26.0"
 ansi-to-tui = "7.0.0"
@@ -134,11 +144,6 @@ async-lsp = { version = "0.2.3", features = ["tokio", "tracing"] }
 async-openai = { version = "0.33.0", features = ["responses"] }
 async-stream = "0.3"
 async-trait = "0.1"
-# Pinned for the xai-grok-voice `live` subsystem (Codex Live WebRTC media):
-# `audiopus_sys` is built statically so the release binary links no system
-# libopus. Versions match the OMP (oh-my-pi v17.1.1, commit e9c8a35) native
-# media stack that this subsystem ports, to keep Opus/WebRTC ABI compatible.
-audiopus_sys = { version = "0.2.2", features = ["static"] }
 axum = { version = "0.8", features = ["macros", "ws"] }
 axum-server = "0.8"
 backon = { version = "1.6" }
@@ -163,12 +168,9 @@ derive_more = { version = "2", features = ["add", "add_assign", "debug", "deref"
 dhat = "0.3"
 dirs = "5.0"
 documented = "0.9"
-# Bounded async channel for the live media input/playback queues (OMP port).
-flume = "0.11"
 dunce = "1"
 educe = "0.6.0"
 encoding_rs = "0.8.35"
-enum_delegate = "0.2"
 env_logger = "0.11"
 eventsource-stream = "0.2"
 fastrace = { version = "0.7" }
@@ -183,7 +185,6 @@ fs2 = "0.4"
 futures = "0.3"
 futures-util = "0.3"
 fuzzy-matcher = "0.3.7"
-gcloud-auth = { version = "1.3.0", default-features = false, features = ["jwt-aws-lc-rs", "external-account"] }
 gcloud-storage = { version = "1.3.0", default-features = false, features = ["auth", "jwt-aws-lc-rs", "external-account"] }
 gethostname = "1"
 gix = { version = "0.83", default-features = false, features = ["sha1"] }
@@ -226,8 +227,6 @@ opentelemetry-http = { version = "0.32", features = ["reqwest-blocking"] }
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "reqwest-blocking-client", "tls-roots"] }
 opentelemetry-proto = { version = "0.32", features = ["gen-tonic"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["spec_unstable_metrics_views"] }
-# Pure-Rust Opus codec bindings for the live media encoder/decoder (OMP port).
-opus = "0.3.1"
 parking_lot = "0.12.4"
 pbjson-build = "0.9"
 pdf_oxide = { version = "0.3.43", features = ["rendering"] }
@@ -276,7 +275,7 @@ smallvec = "1"
 strip-ansi-escapes = "0.2.1"
 strum = { version = "0.27", features = ["derive"] }
 supports-color = "3.0"
-syntect = "5.3"
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
 tar = "0.4"
 tempfile = "3"
 terminput = "0.3"
@@ -291,7 +290,6 @@ tiny-skia = "0.12"
 tokio = { version = "1", features = ["full"] }
 tokio-retry = "0.3"
 tokio-stream = { version = "0.1", features = ["net"] }
-token-source = "1.0.0"
 tokio-tungstenite = "0.28"
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.9"
@@ -319,9 +317,6 @@ vte = "0.15.0"
 wait-timeout = "0.2"
 walkdir = "2"
 webbrowser = { version = "1.0.4" }
-# WebRTC peer + Opus media for the Codex Live subsystem (OMP port). Pinned to
-# match the OMP native media stack (v17.1.1, commit e9c8a35) for ABI parity.
-webrtc = "0.17.2"
 webpki-roots = "0.26"
 which = "8"
 whoami = "1.4"
@@ -348,10 +343,6 @@ xai-grok-config-types = { path = "packages/coding-agent/xai-grok-config-types" }
 xai-grok-dashboard-store = { path = "packages/platform/xai-grok-dashboard-store" }
 xai-grok-diag-server = { path = "packages/tools/xai-grok-diag-server" }
 xai-grok-env = { path = "packages/platform/xai-grok-env" }
-xai-grok-extension-api = { path = "packages/extensions/xai-grok-extension-api" }
-xai-grok-extension-macros = { path = "packages/extensions/xai-grok-extension-macros" }
-xai-grok-extension-runtime = { path = "packages/extensions/xai-grok-extension-runtime" }
-xai-grok-extension-sdk = { path = "packages/extensions/xai-grok-extension-sdk" }
 xai-grok-extra-ca = { path = "packages/platform/xai-grok-extra-ca" }
 xai-grok-foreign-sessions = { path = "packages/tools/xai-grok-foreign-sessions" }
 xai-grok-http = { path = "packages/ai/xai-grok-http" }
@@ -361,9 +352,7 @@ xai-grok-mcp = { path = "packages/coding-agent/xai-grok-mcp" }
 xai-grok-memory = { path = "packages/coding-agent/xai-grok-memory" }
 xai-grok-mermaid = { path = "packages/tui/xai-grok-mermaid" }
 xai-grok-models = { path = "packages/ai/xai-grok-models" }
-xai-grok-pager-diff = { path = "packages/tui/xai-grok-pager-diff" }
 xai-grok-sampler = { path = "packages/ai/xai-grok-sampler" }
-xai-grok-scheme-runtime = { path = "packages/extensions/xai-grok-scheme-runtime" }
 xai-grok-secrets = { path = "packages/platform/xai-grok-secrets" }
 xai-grok-session-events = { path = "packages/platform/xai-grok-session-events" }
 xai-grok-session-search = { path = "packages/coding-agent/xai-grok-session-search" }
@@ -379,13 +368,10 @@ xai-grok-tools = { path = "packages/tools/xai-grok-tools" }
 xai-grok-tools-api = { path = "packages/tools/xai-grok-tools-api" }
 xai-grok-version = { path = "packages/platform/xai-grok-version" }
 xai-grok-workspace = { path = "packages/tools/xai-grok-workspace", default-features = false }
-xai-grok-workspace-daemon = { path = "packages/tools/xai-grok-workspace-daemon" }
 xai-grok-workspace-types = { path = "packages/tools/xai-grok-workspace-types" }
 xai-hooks-plugins-types = { path = "packages/coding-agent/xai-hooks-plugins-types" }
-xai-hyper-core = { path = "packages/agent/xai-hyper-core" }
-xai-hyper-host = { path = "packages/agent/xai-hyper-host" }
-xai-hyper-web = { path = "packages/coding-agent/xai-hyper-web" }
 xai-interjection-core = { path = "packages/agent/xai-interjection-core" }
+xai-message-delivery-core = { path = "packages/coding-agent/xai-message-delivery-core" }
 xai-mixpanel = { path = "packages/ai/xai-mixpanel" }
 xai-prompt-queue = { path = "packages/agent/xai-prompt-queue" }
 xai-proto-build = { path = "packages/build/xai-proto-build" }
@@ -414,16 +400,15 @@ panic = "abort"
 #
 # Hardening: thin LTO for cross-crate optimization with reasonable link times,
 # codegen-units=1 maximizes optimization (whole-program analysis, no CGU boundaries).
-# Distribution archives do not publish debug sidecars, so do not emit embedded
-# debug metadata and ask each target linker to remove non-runtime symbols. This
-# avoids the 1.36 GB unstripped Linux binaries shipped in v0.2.114-r2.
+# debug=1 emits line-tables DWARF; strip=false keeps symbols so CI can extract
+# .debug sidecars (Linux) or .dSYM bundles (macOS) before stripping post-build.
 # Linker flags (RELRO, NX stack) are set per-target in .cargo/config.toml.
 [profile.release-dist]
 inherits = "release"
 lto = "thin"
 codegen-units = 1
-strip = "symbols"
-debug = 0
+strip = false
+debug = 1
 split-debuginfo = "off"
 
 # Production profile for latency-sensitive x-product services (VF, home-mixer).
@@ -463,6 +448,10 @@ debug = "line-tables-only"
 opt-level = 0
 lto = false
 incremental = true
+
+# Skip debug info for non-workspace dependencies; workspace crates keep line-tables-only.
+[profile.dev.package."*"]
+debug = false
 
 [profile.bench]
 debug = true

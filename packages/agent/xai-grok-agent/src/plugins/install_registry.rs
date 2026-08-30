@@ -274,7 +274,7 @@ impl InstallRegistry {
         let root = xai_grok_config::load_effective_config_disk_only().ok()?;
         let value = root.get("plugins")?.get("install_dir")?.as_str()?;
         let expanded = if let Some(stripped) = value.strip_prefix("~/") {
-            dirs::home_dir()?.join(stripped)
+            xai_dirs::home_dir()?.join(stripped)
         } else {
             PathBuf::from(value)
         };

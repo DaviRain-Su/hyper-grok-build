@@ -1,30 +1,29 @@
-//! The payload clients receive. What each field means is documented once, in
-//! `xai-grok-pager/docs/user-guide/25-status-line.md`, which a test holds to
-//! this type; the comments here record only what that guide cannot.
+//! `StatusLineContext` is the payload clients receive.
+//! What each field means is documented once, in `xai-grok-pager/docs/user-guide/25-status-line.md`, and a test holds that guide to this type.
+//! The comments here record only what that guide cannot.
 //!
-//! Two rules hold it together: a value Grok cannot source is `None` rather
-//! than zero, and fields are snake_case, the one exception to the camelCase
-//! rule in `xai-grok-pager/docs/internal/28-extension-methods.md`, because
-//! renaming one silently breaks every script that reads it.
+//! Two rules hold it together.
+//! A value Grok cannot source is `None` rather than zero.
+//! Fields are snake_case, the one exception to the camelCase rule in `xai-grok-pager/docs/internal/28-extension-methods.md`.
+//! They stay that way because renaming one silently breaks every script that reads it.
 
 use serde::{Deserialize, Serialize};
 
-/// The payload's shape, which a script branches on instead of the release in
-/// `version`. Adding a field never bumps it; removing or retyping one does.
+/// This number names the payload's shape, which a script branches on instead of the release in `version`.
+/// Adding a field never bumps it; removing or retyping one does.
 pub const STATUS_LINE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatusLineContext {
-    /// The one field whose own `default` matters: `Default` sets the current
-    /// version, so without this an old payload would claim to be current.
+    /// The one field whose own `default` matters: `Default` sets the current version, so without this an old payload would claim to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_version: Option<u32>,
     pub cwd: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    /// Filled by the client, not the agent, since the name is renameable
-    /// locally. Absent from the notification, present on a command row's stdin.
+    /// The client fills this, not the agent, since the name is renameable locally.
+    /// It is absent from the notification and present on a command row's stdin.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,7 +78,7 @@ impl Default for StatusLineContext {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatusLineTurn {
-    /// Unix milliseconds, so a client subtracts it from its own clock.
+    /// The value is Unix milliseconds, so a client subtracts it from its own clock.
     pub started_at_ms: i64,
 }
 
@@ -114,7 +113,7 @@ pub struct StatusLineEffort {
 #[serde(default)]
 pub struct StatusLineWorkspace {
     pub current_dir: String,
-    /// Not `project_dir`, which names a launch directory elsewhere.
+    /// This is not `project_dir`, which names a launch directory elsewhere.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,7 +138,7 @@ pub struct StatusLineRepo {
 pub struct StatusLineCost {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_cost_usd: Option<f64>,
-    /// Since this process attached, not since the session was created.
+    /// The clock starts when this process attached, not when the session was created.
     pub total_duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_api_duration_ms: Option<u64>,
@@ -152,12 +151,12 @@ pub struct StatusLineContextWindow {
     pub context_window_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
-    /// Not `total_*`, which is used elsewhere for the live window.
+    /// This is not `total_*`, which is used elsewhere for the live window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_output_tokens: Option<u64>,
-    /// Cumulative, where `current_usage` elsewhere is one call.
+    /// This is cumulative, where `current_usage` elsewhere is one call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_usage: Option<StatusLineSessionUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -171,7 +170,7 @@ pub struct StatusLineContextWindow {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatusLineSessionUsage {
-    /// Disjoint from the cache buckets, so the three sum without overlap.
+    /// This count is disjoint from the cache buckets, so the three sum without overlap.
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_input_tokens: u64,

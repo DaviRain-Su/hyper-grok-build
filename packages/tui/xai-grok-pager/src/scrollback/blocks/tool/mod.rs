@@ -1,5 +1,3 @@
-//! Tool call blocks - sum type for different tool types.
-
 mod edit;
 mod execute;
 pub(crate) mod hook;
@@ -61,14 +59,8 @@ pub struct LineRange {
 }
 
 impl LineRange {
-    /// Create a new line range.
     pub fn new(start: usize, end: usize) -> Self {
         Self { start, end }
-    }
-
-    /// Format as "(start:end)" for display.
-    pub fn display(&self) -> String {
-        format!("{}:{}", self.start, self.end)
     }
 }
 
@@ -78,11 +70,10 @@ impl fmt::Display for LineRange {
     }
 }
 
-/// Semantic class of a verb-groupable (non-destructive) run member, naming
-/// what a folded run of consecutive rows touched: "Read 3 files", "Searched
-/// 4 patterns". Most kinds classify tool blocks via
-/// [`ToolCallBlock::verb_group_kind`]; `Subagent` classifies subagent
-/// lifecycle render blocks, which are not tool calls.
+/// Names what a verb-groupable (non-destructive) run member touched.
+/// A folded run of consecutive rows renders as "Read 3 files" or "Searched 4 patterns".
+/// Most kinds classify tool blocks via [`ToolCallBlock::verb_group_kind`].
+/// `Subagent` classifies subagent lifecycle render blocks, which are not tool calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VerbGroupKind {
     /// Plain file reads.
@@ -103,9 +94,8 @@ pub enum VerbGroupKind {
     IntegrationSearch,
     /// Subagent lifecycle rows (`RenderBlock::Subagent`).
     Subagent,
-    /// Shell commands. Label-only: commands never fold eagerly
-    /// ([`ToolCallBlock::verb_group_kind`] excludes them), but a truncation
-    /// header describing hidden rows buckets them ("Ran 6 commands").
+    /// Shell commands. Label-only: commands never fold eagerly ([`ToolCallBlock::verb_group_kind`] excludes them).
+    /// A truncation header describing hidden rows still buckets them ("Ran 6 commands").
     Command,
     /// File edits. Label-only, like [`Self::Command`].
     EditFile,
@@ -197,39 +187,29 @@ impl VerbGroupKind {
     }
 }
 
-/// Tool call block - a sum type for different tool types.
-///
-/// BlockContent is manually implemented (not via enum_delegate) so we can
-/// intercept `output()` to prepend the tool bullet configured in appearance.
+/// BlockContent is implemented via match-based delegation so we can intercept `output()` to prepend the tool bullet configured in appearance.
 #[derive(Debug, Clone)]
 pub enum ToolCallBlock {
-    /// Execute a shell command.
     Execute(ExecuteToolCallBlock),
-    /// Read a file.
     Read(ReadToolCallBlock),
     /// Edit a file (with diff).
     Edit(EditToolCallBlock),
-    /// List directory contents.
     ListDir(ListDirToolCallBlock),
-    /// Search/grep for pattern.
     Search(SearchToolCallBlock),
-    /// Web fetch (URL content retrieval).
     WebFetch(WebFetchToolCallBlock),
-    /// Web search (web search with citations).
+    /// Web search with citations.
     WebSearch(WebSearchToolCallBlock),
     /// MCP integration tool discovery (search_tool).
     IntegrationSearch(IntegrationSearchToolCallBlock),
     /// MCP integration tool dispatch (use_tool).
     UseTool(UseToolCallBlock),
-    /// Memory search with structured result display.
     MemorySearch(MemorySearchToolCallBlock),
     SentMessage(SentMessageToolCallBlock),
     /// Skill invocation (user skills / slash commands via the Skill tool).
     Skill(OtherToolCallBlock),
-    /// Other/unknown tool types.
     Other(OtherToolCallBlock),
     /// Lifecycle event (e.g. `user_prompt_submit`, `session_start`).
-    /// Not a real tool call — skipped by `last_tool_call_entry_id()`.
+    /// Not a real tool call, so `last_tool_call_entry_id()` skips it.
     Lifecycle(LifecycleEventBlock),
 }
 
@@ -347,10 +327,8 @@ impl BlockContent for ToolCallBlock {
 impl ToolCallBlock {
     /// Transfer timing data from another block of the same variant.
     ///
-    /// Used when a running block is replaced with its completed version
-    /// (e.g., in `handle_tool_call_update` completion path). The new block
-    /// inherits `started_at` from the old block so `finish()` can compute
-    /// real elapsed time.
+    /// Used when a running block is replaced with its completed version (e.g., in the `handle_tool_call_update` completion path).
+    /// The new block inherits `started_at` from the old block so `finish()` can compute real elapsed time.
     pub fn transfer_timing_from(&mut self, old: &ToolCallBlock) {
         match (self, old) {
             (ToolCallBlock::Execute(new), ToolCallBlock::Execute(old)) => {
@@ -431,9 +409,8 @@ impl ToolCallBlock {
 
     /// Set `started_at` on the inner variant block.
     ///
-    /// Unlike `transfer_timing_from`, this works across variant boundaries
-    /// (e.g. setting `started_at` on a `Search` block from a value captured
-    /// when the block was still `Other`).
+    /// Unlike `transfer_timing_from`, this works across variant boundaries.
+    /// For example, it can set `started_at` on a `Search` block from a value captured when the block was still `Other`.
     pub fn set_started_at(&mut self, instant: std::time::Instant) {
         match self {
             ToolCallBlock::Execute(b) => b.started_at = Some(instant),
@@ -456,9 +433,9 @@ impl ToolCallBlock {
 
     /// Start timing for this block (sets `started_at = now`).
     ///
-    /// Called when a block enters running UI state. Only blocks that
-    /// actually run in the UI get meaningful timing. Pre-completed blocks
-    /// keep `started_at = None` and show no timing data.
+    /// Called when a block enters running UI state.
+    /// Only blocks that actually run in the UI get meaningful timing.
+    /// Pre-completed blocks keep `started_at = None` and show no timing data.
     pub fn start_timing(&mut self) {
         match self {
             ToolCallBlock::Execute(b) => {
@@ -559,12 +536,10 @@ impl ToolCallBlock {
         }
     }
 
-    /// Full stored SOURCE text of this tool call for full-text scrollback
-    /// search.
+    /// Full stored SOURCE text of this tool call for full-text scrollback search.
     ///
-    /// Reads stored source fields and the `copy_text` accessors that read
-    /// source data — never lays out (`output()` / word-wrap) or
-    /// syntax-highlights — so indexing stays cheap.
+    /// Reads stored source fields and the `copy_text` accessors that read source data.
+    /// It never lays out (`output()`, word-wrap) or syntax-highlights, so indexing stays cheap.
     pub(crate) fn searchable_text(&self) -> Option<String> {
         match self {
             ToolCallBlock::Execute(b) => join_searchable([
@@ -638,8 +613,7 @@ impl ToolCallBlock {
         }
     }
 
-    /// Verb-group kind; `None` renders standalone and splits verb-group runs
-    /// (still dense-packs via `is_groupable`).
+    /// Verb-group kind; `None` renders standalone and splits verb-group runs (still dense-packs via `is_groupable`).
     pub fn verb_group_kind(&self) -> Option<VerbGroupKind> {
         match self {
             ToolCallBlock::Read(b) => Some(if b.is_skill_read() {
@@ -663,12 +637,10 @@ impl ToolCallBlock {
         }
     }
 
-    /// Bucket identity for aggregated header LABELS. Superset of
-    /// [`Self::verb_group_kind`]: the action kinds excluded from eager verb
-    /// folding still get a bucket when a truncation header describes the
-    /// rows it hides. `None` only for lifecycle chrome, which is never
-    /// worth labeling. Variants are listed explicitly so a new
-    /// `ToolCallBlock` variant must decide here too.
+    /// The bucket a row falls into for aggregated header LABELS; a superset of [`Self::verb_group_kind`].
+    /// The action kinds excluded from eager verb folding still get a bucket when a truncation header describes the rows it hides.
+    /// `None` is returned only for lifecycle rows, which are never worth labeling.
+    /// Variants are listed explicitly so a new `ToolCallBlock` variant must decide here too.
     pub fn label_kind(&self) -> Option<VerbGroupKind> {
         match self {
             ToolCallBlock::Execute(_) => Some(VerbGroupKind::Command),
@@ -770,8 +742,7 @@ mod tests {
             ToolCallBlock::Lifecycle(LifecycleEventBlock::new("session_start")),
         ];
         for block in &blocks {
-            // Exhaustive on purpose: a new variant fails compilation here
-            // until it gets an explicit verb-grouping decision.
+            // Exhaustive on purpose: a new variant fails compilation here until it gets an explicit verb-grouping decision
             let expected = match block {
                 ToolCallBlock::Read(b) if b.is_skill_read() => Some(VerbGroupKind::Skill),
                 ToolCallBlock::Read(_) => Some(VerbGroupKind::File),

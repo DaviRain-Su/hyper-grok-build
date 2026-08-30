@@ -2,22 +2,20 @@
 //!
 //! Three rendering paths exist:
 //!
-//! 1. **`render_picker()`** -- full-frame picker used by the welcome-screen
-//!    session picker. Handles frame, search bar, divider, entries, and
-//!    shortcuts. Two layout modes:
-//!    - **FullScreen** — centered content filling the available area (session picker).
-//! - **Floating** — dimmed background with a bordered popup (command palette, arg picker).
+//! 1. **`render_picker()`**: the full-frame picker used by the welcome-screen session picker.
+//!    Handles frame, search bar, divider, entries, and shortcuts. Two layout modes:
+//!    - **FullScreen**: centered content filling the available area (session picker).
+//!    - **Floating**: dimmed background with a bordered popup (command palette, arg picker).
 //!
-//! 2. **`render_picker_content()`** -- content-only rendering (entries +
-//!    scrollbar) into a provided area. Used by modal popups (command
-//!    palette, arg picker, session picker, doc picker) whose chrome is
-//!    handled by [`super::modal_window::render_modal_window`].
+//! 2. **`render_picker_content()`**: content-only rendering (entries and scrollbar) into a provided area.
+//!    Used by modal popups (command palette, arg picker, session picker, doc picker).
+//!    Their chrome is handled by [`super::modal_window::render_modal_window`].
 //!
-//! 3. **Shared primitives** -- `render_search_bar`, `render_divider`,
-//!    `render_picker_row`, `render_picker_entry`, `handle_picker_input`,
-//!    etc. are used by both paths above.
+//! 3. **Shared primitives**: `render_search_bar`, `render_divider`, `render_picker_row`, `render_picker_entry`, `handle_picker_input`, etc.
+//!    Both paths above use them.
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
@@ -33,10 +31,10 @@ use crate::render::wrapping::word_wrap_line;
 use crate::theme::Theme;
 use crate::views::shortcuts_bar::{HintItem, PendingHint, ShortcutsBar};
 
-/// Effective base background for picker chrome. In minimal mode every UI element
-/// is terminal-transparent (`Color::Reset`) — no opaque panels, no selection /
-/// hover bands (selection is shown via accent label text instead). Otherwise the
-/// caller-provided `bg` (or the default `bg_base`) is used.
+/// Effective base background for picker chrome.
+/// In minimal mode every UI element is terminal-transparent (`Color::Reset`): no opaque panels, no selection or hover bands.
+/// Selection there shows via accent label text instead.
+/// Otherwise the caller-provided `bg` (or the default `bg_base`) is used.
 fn picker_base_bg(bg: Option<Color>, theme: &Theme) -> Color {
     if crate::views::modal_window::embedded() {
         Color::Reset
@@ -49,7 +47,7 @@ fn picker_base_bg(bg: Option<Color>, theme: &Theme) -> Color {
 // Types
 // ---------------------------------------------------------------------------
 
-/// A single entry in a picker list — either a section header or a selectable row.
+/// A single entry in a picker list: either a section header or a selectable row.
 pub enum PickerEntry<'a> {
     /// Non-selectable section header (rendered as `── label ──`).
     Header { label: &'a str },
@@ -57,11 +55,10 @@ pub enum PickerEntry<'a> {
     Row(PickerRow<'a>),
 }
 
-/// A selectable row in a picker list.
 pub struct PickerRow<'a> {
     /// Primary label text (left-aligned).
     pub label: &'a str,
-    /// Secondary text (right-aligned, e.g. shortcut, ID+time, description).
+    /// Secondary text (right-aligned, e.g. shortcut, ID and time, description).
     pub right_label: &'a str,
     /// Whether this row is the selected/cursor row.
     pub selected: bool,
@@ -72,26 +69,24 @@ pub struct PickerRow<'a> {
     /// Additional lines rendered below the label (e.g., command details).
     /// Shown only when expanded.
     pub description_lines: &'a [&'a str],
-    /// Secondary lines rendered below the label while the row is collapsed
-    /// (e.g., an at-a-glance summary). Hidden when expanded, where
-    /// `description_lines` and `fields` take over.
+    /// Secondary lines rendered below the label while the row is collapsed (e.g., an at-a-glance summary).
+    /// Hidden when expanded, where `description_lines` and `fields` take over.
     pub summary_lines: &'a [&'a str],
     /// Whether this row should be dimmed (e.g., disabled plugins/hooks).
     pub dimmed: bool,
-    /// Indentation level (0 = top-level, 1 = nested under a group header, etc.).
+    /// Indentation level (0 is top-level, 1 is nested under a group header, etc.).
     /// Each level adds 2 spaces of left padding.
     pub indent: u8,
     /// Optional badge text shown right after the label (e.g., "[installed]").
     pub badge: &'a str,
     /// Color for the badge text. If `None`, uses `gray`.
     pub badge_color: Option<ratatui::style::Color>,
-    /// Whether this row is a collapsible group header. When true, the
-    /// ›/◆ fold indicator is shown even if `fields` and
-    /// `description_lines` are empty. The `expanded` field controls
-    /// which glyph is rendered.
+    /// Whether this row is a collapsible group header.
+    /// When true, the ›/◆ fold indicator is shown even if `fields` and `description_lines` are empty.
+    /// The `expanded` field controls which glyph is rendered.
     pub collapsible: bool,
-    /// Underline the final description line (when expanded) so it reads as a
-    /// clickable link. Used for the Managed connectors URL.
+    /// Underline the final description line (when expanded) so it reads as a clickable link.
+    /// Used for the Managed connectors URL.
     pub underline_last_desc: bool,
 }
 
@@ -111,9 +106,9 @@ pub struct PickerFrame {
 
 /// How the picker is framed on screen.
 ///
-/// Used by the welcome-screen session picker. Modal popups (command
-/// palette, arg picker, etc.) use [`super::modal_window::ModalWindow`]
-/// for chrome and [`render_picker_content`] for the entry list.
+/// Used by the welcome-screen session picker.
+/// Modal popups (command palette, arg picker, etc.) use [`super::modal_window::ModalWindow`] for chrome.
+/// They use [`render_picker_content`] for the entry list.
 #[derive(Debug, Clone, Default)]
 pub enum PickerMode {
     /// Centered content filling the given area (no border, no dim).
@@ -126,7 +121,6 @@ pub enum PickerMode {
 }
 
 impl PickerMode {
-    /// Toggle between modes.
     pub fn toggle(self) -> Self {
         match self {
             Self::FullScreen => Self::Popup(PopupConfig::default()),
@@ -138,8 +132,8 @@ impl PickerMode {
 
 /// Render a picker frame in the given mode.
 ///
-/// Dispatches to [`render_floating_frame`] or [`render_fullscreen_frame`]
-/// based on `mode`. Returns `None` if the area is too small.
+/// Dispatches to [`render_floating_frame`] or [`render_fullscreen_frame`] based on `mode`.
+/// Returns `None` if the area is too small.
 pub fn render_picker_frame(
     buf: &mut Buffer,
     area: Rect,
@@ -153,8 +147,8 @@ pub fn render_picker_frame(
         PickerMode::Popup(popup_cfg) => {
             // Use the popup frame (configurable dimensions), then wrap in PickerFrame.
             let inner = render_popup_frame(buf, area, theme, &popup_cfg)?;
-            // In Popup mode, the close button is rendered later (by tab bar or search bar),
-            // so return a default close_button rect that will be overwritten.
+            // In Popup mode the close button is rendered later (by tab bar or search bar)
+            // Return a default close_button rect that will be overwritten
             Some(PickerFrame {
                 content: inner,
                 close_button: Rect::default(),
@@ -168,8 +162,7 @@ pub fn render_picker_frame(
 // Scroll computation
 // ---------------------------------------------------------------------------
 
-/// Compute minimal scroll offset to keep `selected` visible in a window of `visible` items
-/// out of `total`.
+/// Compute minimal scroll offset to keep `selected` visible in a window of `visible` items out of `total`.
 pub fn compute_scroll_offset(
     selected: usize,
     total: usize,
@@ -401,9 +394,8 @@ fn render_line_editor_search_bar_with_label(
     );
 }
 
-/// Like [`render_search_bar`] but with a caller-supplied prompt `label`
-/// (e.g. `" path: "`) instead of the default `" search: "`. The label
-/// width is measured in bytes (ASCII), matching the input-window math.
+/// Like [`render_search_bar`] but with a caller-supplied prompt `label` (e.g. `" path: "`) instead of the default `" search: "`.
+/// The label width is measured in bytes (ASCII), matching the input-window math.
 #[allow(clippy::too_many_arguments)]
 pub fn render_search_bar_with_label(
     buf: &mut Buffer,
@@ -527,9 +519,8 @@ fn render_search_bar_with_label_viewport(
         if active || always_active {
             let cursor_x = input_x + cursor_display_w;
             if cursor_x < x + width {
-                // Inverse-video the cell at the cursor position so the
-                // character underneath remains visible (matching the
-                // rename overlay's cursor style).
+                // Inverse-video the cell at the cursor position so the character underneath remains visible
+                // This matches the rename overlay's cursor style
                 if let Some(cell) = buf.cell_mut((cursor_x, y)) {
                     let cursor_fg = if let Some(c) = bg { c } else { theme.bg_base };
                     cell.set_style(Style::default().fg(cursor_fg).bg(theme.text_primary));
@@ -562,8 +553,7 @@ pub fn render_divider(
     theme: &Theme,
     bg: Option<ratatui::style::Color>,
 ) {
-    // In minimal mode every element is terminal-transparent, so ignore any
-    // caller-supplied opaque background (e.g. `bg_base`) and force `Reset`.
+    // In minimal mode every element is terminal-transparent, so ignore any caller-supplied opaque background (e.g. `bg_base`) and force `Reset`.
     let bg = if crate::views::modal_window::embedded() {
         Some(Color::Reset)
     } else {
@@ -671,9 +661,9 @@ pub fn render_tab_bar(
 /// Configuration for a centered popup frame.
 #[derive(Debug, Clone)]
 pub struct PopupConfig {
-    /// Width as a fraction of the available area (0.0 - 1.0).
+    /// Width as a fraction of the available area (0.0 to 1.0).
     pub width_pct: f32,
-    /// Height as a fraction of the available area (0.0 - 1.0).
+    /// Height as a fraction of the available area (0.0 to 1.0).
     pub height_pct: f32,
     /// Minimum popup dimensions.
     pub min_width: u16,
@@ -693,11 +683,9 @@ impl Default for PopupConfig {
 
 /// Render a centered popup frame with dimmed background and rounded border.
 ///
-/// Returns the inner content area. The close button is NOT rendered here;
-/// callers typically render it via [`render_tab_bar`] or [`render_close_button`]
-/// on the first row of the content area.
-///
-/// Returns `None` if the area is too small.
+/// Returns the inner content area, or `None` if the area is too small.
+/// The close button is NOT rendered here.
+/// Callers typically render it via [`render_tab_bar`] or [`render_close_button`] on the first row of the content area.
 pub fn render_popup_frame(
     buf: &mut Buffer,
     area: Rect,
@@ -718,8 +706,7 @@ pub fn render_popup_frame(
         .max(config.min_height)
         .min(area.height.saturating_sub(2));
 
-    // Pre-check inner dimensions (border is 1 cell on each side) before any
-    // rendering so we never leave a half-drawn popup on screen.
+    // Pre-check inner dimensions (border is 1 cell on each side) before any rendering so we never leave a half-drawn popup on screen
     if popup_h.saturating_sub(2) < 3 || popup_w.saturating_sub(2) < 10 {
         return None;
     }
@@ -757,9 +744,8 @@ pub fn render_popup_frame(
 ///
 /// Draws e.g. `Enabled  f` at the right edge. Used by plugin/hooks modal.
 ///
-/// `active` controls the label styling: when `false` (default/"All" state),
-/// the label renders in `gray_dim`; when `true` (filter active), in `gray`;
-/// when `hovered`, in `text_primary + BOLD`.
+/// `active` controls the label styling: when `false` (default/"All" state), it renders in `gray_dim`; when `true` (filter active), in `gray`.
+/// When hovered, it renders in `text_primary + BOLD`.
 #[allow(clippy::too_many_arguments)]
 pub fn render_filter_indicator(
     buf: &mut Buffer,
@@ -813,14 +799,6 @@ pub fn render_filter_indicator(
 // Picker rows
 // ---------------------------------------------------------------------------
 
-/// Render a single picker row with unified visual style:
-/// - Selected: `\u{276f} label` in `text_primary+BOLD`, `bg_visual` background.
-/// - Normal: `  label` in `gray_bright`.
-/// - Right text: right-aligned in `gray_dim` (or `gray+bg_visual` when selected).
-///
-/// Compute the exact number of visual rows a picker row will consume
-/// at the given width. Used for scroll offset calculation.
-/// Return the byte offset in `s` that covers at most `max_width` display columns.
 /// Parse `[bracket]` highlight markers in a string into styled spans.
 /// Text inside `[...]` gets `highlight_style`, the rest gets `base_style`.
 /// Brackets are stripped from the output.
@@ -836,7 +814,7 @@ fn parse_highlight_spans<'a>(s: &'a str, base_style: Style, highlight_style: Sty
             spans.push(Span::styled(&rest[..close], highlight_style));
             rest = &rest[close + 1..];
         } else {
-            // Unmatched '[' — render literally.
+            // Unmatched '[': render it literally
             spans.push(Span::styled("[", base_style));
         }
     }
@@ -874,6 +852,7 @@ fn render_styled_spans(buf: &mut Buffer, spans: &Line<'_>, x: u16, y: u16, max_w
     }
 }
 
+/// Return the byte offset in `s` that covers at most `max_width` display columns.
 fn byte_offset_for_width(s: &str, max_width: usize) -> usize {
     let mut w = 0usize;
     for (i, ch) in s.char_indices() {
@@ -898,6 +877,8 @@ fn description_visual_rows(desc: &str, max_w: usize) -> usize {
 /// Left indent (columns) for picker row description and detail lines.
 const DESC_INDENT: u16 = 4;
 
+/// Compute the exact number of visual rows a picker row will consume at the given width.
+/// Used for scroll offset calculation.
 pub fn compute_row_height(row: &PickerRow<'_>, width: u16) -> usize {
     let mut rows = 1usize; // main label line
     let indent = DESC_INDENT;
@@ -930,20 +911,21 @@ pub fn compute_row_height(row: &PickerRow<'_>, width: u16) -> usize {
     }
     rows
 }
-///
-/// When `row.expanded && !row.fields.is_empty()`, renders key-value detail lines
-/// below (indented, label in `gray`, value in `gray_bright`).
-///
-/// Rows consumed by a rendered picker row/entry, plus the row band of its
-/// underlined link line (recorded from what is painted) for click hit-testing.
+
+/// Rows consumed by a rendered picker row/entry, plus the row band of its underlined link line (recorded from what is painted) for click hit-testing.
 pub struct RenderedRow {
     pub rows: u16,
     pub link_band: Option<std::ops::Range<u16>>,
 }
 
-/// `max_rows` caps rendering to available vertical space; detail fields beyond
-/// that limit are not drawn.
+/// Render a single picker row with unified visual style:
+/// - Selected: `\u{276f} label` in `text_primary+BOLD`, `bg_visual` background.
+/// - Normal: `  label` in `gray_bright`.
+/// - Right text: right-aligned in `gray_dim` (or `gray+bg_visual` when selected).
 ///
+/// When `row.expanded && !row.fields.is_empty()`, renders key-value detail lines below (indented, label in `gray`, value in `gray_bright`).
+///
+/// `max_rows` caps rendering to available vertical space; detail fields beyond that limit are not drawn.
 /// `bg` is the base background color (used in Floating mode popups).
 #[allow(clippy::too_many_arguments)]
 pub fn render_picker_row(
@@ -988,10 +970,8 @@ pub fn render_picker_row(
     } else {
         String::new()
     };
-    // Show ›/◆ fold indicator for expandable rows (those with fields
-    // or description lines). Non-expandable rows show a ◆ diamond.
-    // Selection is indicated by bg_hover/bg_visual row highlight
-    // (no ❯ cursor glyph), matching the import-claude modal's style.
+    // Show the ›/◆ fold indicator for expandable rows (those with fields or description lines); non-expandable rows show a ◆ diamond
+    // Selection is indicated by the bg_hover/bg_visual row highlight (no ❯ cursor glyph), matching the import-claude modal's style
     let is_expandable =
         row.collapsible || !row.fields.is_empty() || !row.description_lines.is_empty();
     let fold_width: u16 = 2; // "› " or "◆ "
@@ -1132,8 +1112,7 @@ pub fn render_picker_row(
         for (li, desc) in secondary_lines.iter().enumerate() {
             let is_link = row.underline_last_desc && row.expanded && li == last_line;
             let hl = if is_link { link_style } else { highlight_style };
-            // Render with [bracket] highlight markers: text inside
-            // [...] is shown in bold/bright, brackets are stripped.
+            // Render with [bracket] highlight markers: text inside [...] is shown in bold/bright, brackets are stripped
             let line = parse_highlight_spans(desc, desc_style, hl);
             let wrapped = word_wrap_line(&line, max_w);
             let link_start = y + rows;
@@ -1163,7 +1142,7 @@ pub fn render_picker_row(
             }
             let fy = y + rows;
             if field.label.is_empty() {
-                // Loading indicator or similar \u{2014} no label column.
+                // Loading indicator or similar: no label column
                 let line = Line::from(Span::styled(
                     field.value,
                     Style::default().fg(theme.gray_dim).bg(base_bg),
@@ -1173,7 +1152,7 @@ pub fn render_picker_row(
                 let label_text = format!("{:<12} ", field.label);
                 let label_col = label_text.len() as u16;
                 let max_val_w = width.saturating_sub(indent + label_col) as usize;
-                // First line: label + start of value.
+                // First line: label then the start of the value
                 let val = field.value;
                 let first_chunk_len = byte_offset_for_width(val, max_val_w);
                 let first_break = if val.width() <= max_val_w {
@@ -1327,7 +1306,6 @@ pub fn render_floating_frame(
         return None;
     }
 
-    // Dim background.
     crate::views::file_search::line_viewer::dim_area(buf, area, theme.bg_base, 0.5);
 
     // Compute popup area (65% width, fixed height for 20 entries).
@@ -1392,10 +1370,10 @@ pub struct BorderedFrame {
 /// \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}
 /// ```
 ///
-/// The caller is responsible for rendering title and content into the
-/// returned rects. This function only draws the frame chrome.
+/// The caller is responsible for rendering title and content into the returned rects.
+/// This function only draws the frame chrome.
 ///
-/// Returns `None` if the area is too small (< 5 rows or < 10 cols).
+/// Returns `None` if the area is too small (fewer than 5 rows or 10 cols).
 pub fn render_bordered_frame(
     buf: &mut Buffer,
     area: Rect,
@@ -1415,7 +1393,7 @@ pub fn render_bordered_frame(
     Clear.render(area, buf);
     buf.set_style(area, Style::default().bg(bg));
 
-    // Header block: top border + title row (no bottom border).
+    // Header block: top border and title row (no bottom border)
     let header_area = Rect {
         x: area.x,
         y: area.y,
@@ -1518,7 +1496,7 @@ pub fn render_fullscreen_frame(
             close_button,
         })
     } else {
-        // No title: reclaim the title row + separator for content.
+        // No title: reclaim the title row and separator for content
         let extra = frame.content.y.saturating_sub(frame.title_row.y);
         let content = Rect {
             x: frame.content.x + 1,
@@ -1537,17 +1515,13 @@ pub fn render_fullscreen_frame(
 // Unified picker: state, config, outcome, render, input
 // ---------------------------------------------------------------------------
 
-/// Persistent picker state -- callers own this and pass `&mut` to input.
+/// Persistent picker state; callers own this and pass `&mut` to input.
 ///
-/// Fields used by both the `render_picker()` path (welcome screen) and
-/// the `ModalWindow` + `render_picker_content()` path (modal popups):
-/// `selected`, query editor, `search_active`, `expanded`, `hovered`,
-/// `scroll_offset`, `hit_areas`.
+/// Fields used by both the `render_picker()` path (welcome screen) and the `ModalWindow`/`render_picker_content()` path (modal popups):
+/// `selected`, query editor, `search_active`, `expanded`, `hovered`, `scroll_offset`, `hit_areas`.
 ///
-/// Fields used **only** by the `render_picker()` path (welcome screen):
-/// `mode`, `close_hovered`, `tab_hit_areas`, `filter_area`,
-/// `filter_hovered`. Modal popups delegate these responsibilities to
-/// [`super::modal_window::ModalWindowState`].
+/// Fields used **only** by the `render_picker()` path (welcome screen): `mode`, `close_hovered`, `tab_hit_areas`, `filter_area`, `filter_hovered`.
+/// Modal popups delegate these responsibilities to [`super::modal_window::ModalWindowState`].
 #[derive(Debug, Clone)]
 pub struct PickerState {
     /// Currently selected index in the filtered entries list.
@@ -1556,24 +1530,23 @@ pub struct PickerState {
     query: LineEditor,
     /// Whether the search input is focused (only relevant when `show_search_hint` is true).
     pub search_active: bool,
-    /// Indices of expanded entries in original data (empty = all collapsed). Caller-managed.
+    /// Indices of expanded entries in original data (empty means all collapsed). The caller manages this set.
     pub expanded: HashSet<usize>,
-    /// Display mode (Floating, FullScreen, or Popup). Only used by
-    /// `render_picker()` (welcome screen); modal popups ignore this.
+    /// Display mode (Floating, FullScreen, or Popup).
+    /// Only used by `render_picker()` (welcome screen); modal popups ignore this.
     pub mode: PickerMode,
-    /// Whether the mouse is hovering over the close button. Only used by
-    /// `render_picker()` (welcome screen); modal popups use
-    /// `ModalWindowState::close_hovered`.
+    /// Whether the mouse is hovering over the close button.
+    /// Only used by `render_picker()` (welcome screen); modal popups use `ModalWindowState::close_hovered`.
     pub close_hovered: bool,
     /// Mouse-hover highlight (independent of selected). `None` when not hovering.
     pub hovered: Option<usize>,
-    /// Mouse-scroll viewport offset (visual row). `None` = auto-center on `selected`.
-    /// Keyboard nav resets to `None`.
+    /// Mouse-scroll viewport offset (visual row). `None` means auto-center on `selected`.
+    /// Keyboard nav resets it to `None`.
     pub scroll_offset: Option<usize>,
     /// Hit areas from the last render (for mouse hit-testing).
     pub hit_areas: Option<PickerHitAreas>,
-    /// Entry index and absolute row band of the underlined link line from the
-    /// last render (the Managed connectors URL), for click-to-open hit-testing.
+    /// Entry index and absolute row band of the underlined link line from the last render (the Managed connectors URL).
+    /// Read for click-to-open hit-testing.
     pub link_band: Option<(usize, std::ops::Range<u16>)>,
     /// Hit areas for tab labels (one per tab, `None` if tab didn't fit).
     pub tab_hit_areas: Option<Vec<Option<Rect>>>,
@@ -1583,7 +1556,9 @@ pub struct PickerState {
     pub filter_hovered: bool,
     /// Whether the tab bar region has keyboard focus. When true, Left/Right cycle tabs.
     pub tabs_focused: bool,
-    /// Suppress the list selection highlight while keyboard focus is on the search bar (via edge navigation); cleared once the selection is meaningful again (typing, navigating back into the list, mouse click/hover). Session-picker rows gate their `selected` flag on `!selection_hidden`.
+    /// Suppress the list selection highlight while keyboard focus is on the search bar (via edge navigation).
+    /// Cleared once the selection is meaningful again (typing, navigating back into the list, mouse click/hover).
+    /// Session-picker rows gate their `selected` flag on `!selection_hidden`.
     pub selection_hidden: bool,
 }
 
@@ -1610,7 +1585,6 @@ impl Default for PickerState {
 }
 
 impl PickerState {
-    /// Create a new `PickerState` with the given display mode.
     pub fn with_mode(mode: PickerMode) -> Self {
         Self {
             mode,
@@ -1618,10 +1592,9 @@ impl PickerState {
         }
     }
 
-    /// Open directly in input mode (`search_active = true`) — for type-to-find
-    /// pickers (command palette, `/model` & `/theme` arg picker) so typing
-    /// filters immediately. Under `vim_normal_first`, Esc still drops to nav and
-    /// `i` re-enters input.
+    /// Open directly in input mode (`search_active = true`), so typing filters immediately.
+    /// Type-to-find pickers (command palette, the `/model` and `/theme` arg picker) use this.
+    /// Under `vim_normal_first`, Esc still drops to nav and `i` re-enters input.
     pub fn input_active() -> Self {
         Self {
             search_active: true,
@@ -1629,8 +1602,7 @@ impl PickerState {
         }
     }
 
-    /// Reset transient state (query, selection, search, expanded) while
-    /// preserving the display mode and clearing hit areas.
+    /// Reset transient state (query, selection, search, expanded) while preserving the display mode and clearing hit areas.
     pub fn reset(&mut self) {
         self.selected = 0;
         self.query.reset();
@@ -1646,9 +1618,9 @@ impl PickerState {
         self.selection_hidden = false;
     }
 
-    /// Clear the search query and the selection/scroll state that tracks it,
-    /// returning to an empty-query view without touching focus flags
-    /// (`tabs_focused`) or hit areas. Used by the vim Esc-to-nav-mode path.
+    /// Clear the search query and the selection/scroll state that tracks it.
+    /// This returns the picker to an empty-query view without touching focus flags (`tabs_focused`) or hit areas.
+    /// Used by the vim Esc-to-nav-mode path.
     pub fn clear_query(&mut self) {
         self.query.reset();
         self.scroll_offset = None;
@@ -1678,10 +1650,8 @@ impl PickerState {
         self.query.insert_paste(text)
     }
 
-    /// When a search query is active on an expandable picker, force-expand
-    /// all entries so that matches inside collapsed groups/trees are
-    /// explicitly visible. Individual items can still be manually collapsed
-    /// by the user (those toggles are respected).
+    /// When a search query is active on an expandable picker, force-expand all entries so matches inside collapsed groups/trees are visible.
+    /// The user can still manually collapse individual items (those toggles are respected).
     pub fn expand_all_for_search(&mut self, entry_count: usize) {
         if entry_count > 0 {
             for i in 0..entry_count {
@@ -1700,8 +1670,7 @@ pub struct PickerHitAreas {
     pub search_bar: Rect,
     /// Per-item click rects (only selectable rows, not headers).
     pub item_rects: Vec<Rect>,
-    /// Maps visual index → entry index: `item_rects[i]` corresponds to
-    /// `entries[entry_indices[i]]`.
+    /// Maps visual index to entry index: `item_rects[i]` corresponds to `entries[entry_indices[i]]`.
     pub entry_indices: Vec<usize>,
     /// One rect per tab label; `None` if the tab didn't fit.
     pub tab_rects: Vec<Option<Rect>>,
@@ -1720,90 +1689,81 @@ pub struct PickerConfig<'a> {
     pub expandable: bool,
     /// Whether Esc clears the query before closing.
     pub esc_clears_query: bool,
-    /// Keybinding hints rendered at the bottom — inside the frame in fullscreen,
-    /// at the bottom of the full area in floating mode.
+    /// Keybinding hints rendered at the bottom: inside the frame in fullscreen, at the bottom of the full area in floating mode.
     pub shortcuts: Option<&'a [HintItem]>,
     /// Pending double-press confirmation (replaces all shortcuts with "press again").
     pub pending_hint: Option<PendingHint>,
-    /// External area for shortcuts in floating mode. When provided, shortcuts
-    /// render here instead of at the bottom of `area`. Lets the caller align
-    /// shortcuts with the surrounding layout (e.g. `layout.shortcuts`).
+    /// External area for shortcuts in floating mode.
+    /// When provided, shortcuts render here instead of at the bottom of `area`.
+    /// This lets the caller align shortcuts with the surrounding layout (e.g. `layout.shortcuts`).
     pub shortcuts_area: Option<Rect>,
-    /// Per-entry selectability: `non_selectable[i]` is true if entry `i` should
-    /// be skipped during Up/Down navigation (e.g. section headers).
-    /// Can be shorter than entry count (missing entries are selectable).
+    /// Per-entry selectability: `non_selectable[i]` is true if entry `i` should be skipped during Up/Down navigation (e.g. section headers).
+    /// It can be shorter than the entry count (missing entries are selectable).
     pub non_selectable: &'a [bool],
     /// Non-selectable rows that still accept clicks (e.g. MCP section labels).
-    /// Same length semantics as [`Self::non_selectable`].
+    /// Same length rules as [`Self::non_selectable`].
     pub non_selectable_clickable: &'a [bool],
-    /// Tab labels for a tab bar at the top. None = no tabs.
+    /// Tab labels for a tab bar at the top. None means no tabs.
     pub tabs: Option<&'a [&'a str]>,
     /// Active tab index (only used if tabs is Some).
     pub active_tab: usize,
-    /// Filter indicator in the search bar. None = no filter.
+    /// Filter indicator in the search bar. None means no filter.
     pub filter_label: Option<&'a str>,
     /// Key hint for the filter (e.g., "f").
     pub filter_key_hint: Option<&'a str>,
     /// Whether the filter is active (not in its default state).
     pub filter_active: bool,
-    /// Pinned single-line note rendered between the search/filter chrome and
-    /// the first entry (e.g. the hidden-external sessions hint). Render-only:
-    /// never part of the entry list, hit areas, or scrolling.
+    /// Pinned single-line note rendered between the search/filter chrome and the first entry (e.g. the hidden-external sessions hint).
+    /// Render-only: never part of the entry list, hit areas, or scrolling.
     pub header_note: Option<&'a str>,
     /// Custom action keys that produce `PickerOutcome::Action`.
     /// Each entry is `(key_char, description)` shown in shortcuts.
     pub action_keys: &'a [(char, &'a str)],
-    /// If true, suppress the search bar entirely (and any text input into
-    /// `state.query()`). The first content row is replaced by `config.title`
-    /// rendered as a plain title. Useful for read-only cheatsheet modals.
+    /// If true, suppress the search bar entirely (and any text input into `state.query()`).
+    /// The first content row is replaced by `config.title` rendered as a plain title.
+    /// Useful for read-only cheatsheet modals.
     pub disable_search: bool,
-    /// If true, render the bottom shortcuts bar using ONLY `config.shortcuts`
-    /// (no auto-added nav / e:expand / y:copy / action_keys entries). The
-    /// underlying key dispatch is unaffected — the keys still work, they
-    /// just aren't advertised in the bar. Useful for compact bars that
-    /// surface only the most important hints; the full list lives in the
-    /// shortcuts cheatsheet modal.
+    /// If true, render the bottom shortcuts bar using ONLY `config.shortcuts` (no auto-added nav / e:expand / y:copy / action_keys entries).
+    /// The underlying key dispatch is unaffected: the keys still work, they just aren't advertised in the bar.
+    /// Useful for compact bars that show only the most important hints; the full list lives in the shortcuts cheatsheet modal.
     pub compact_bottom_bar: bool,
-    /// If true (and `show_search_hint` is also true), only `/` or a click
-    /// on the search bar activates search mode. Typing arbitrary
-    /// printable characters is ignored instead of auto-starting a query.
-    /// Default behavior (false) auto-activates search on any printable
-    /// character — useful for fuzzy pickers but disruptive for tabs
-    /// where letters double as action keys.
+    /// If true (and `show_search_hint` is also true), only `/` or a click on the search bar activates search mode.
+    /// Typing arbitrary printable characters is ignored instead of auto-starting a query.
+    /// Default behavior (false) auto-activates search on any printable character.
+    /// That suits fuzzy pickers but disrupts tabs where letters double as action keys.
     pub search_only_on_slash: bool,
-    /// When true, the picker opens/stays in nav mode (vim) whenever search is
-    /// not active: j/k navigate and printable chars don't type; `i`/`/` enter
-    /// search (unless search is disabled, or the char is bound as an action key
-    /// on the picker, which takes precedence). Type-to-find pickers still open in
-    /// input via [`PickerState::input_active`] and drop to nav on Esc. Callers
-    /// gate this to `load_vim_mode()`. Mirrors scrollback vim-mode.
+    /// When true, the picker opens and stays in nav mode (vim) whenever search is not active: j/k navigate and printable chars don't type.
+    /// `i`/`/` enter search, unless search is disabled or the char is bound as an action key on the picker (which takes precedence).
+    /// Type-to-find pickers still open in input via [`PickerState::input_active`] and drop to nav on Esc.
+    /// Callers gate this to `load_vim_mode()`; it mirrors scrollback vim-mode.
     pub vim_normal_first: bool,
 }
 
 /// Standard picker shortcuts: navigate, select, close.
 ///
-/// Rebuilt per call so runtime language switches (Settings › Language) take
-/// effect — the old `LazyLock<Vec<HintItem>>` static froze the startup
-/// locale. Three items per call is negligible next to a picker render.
-pub fn picker_shortcuts() -> Vec<HintItem> {
-    vec![
-        HintItem {
-            keys: vec![],
-            label: rust_i18n::t!("hints.nav"),
-            custom_display: Some("\u{2191}/\u{2193}"),
-            description: None,
-            pinned: false,
-        },
-        HintItem::new(crate::key!(Enter), rust_i18n::t!("hints.select")),
-        HintItem::new(crate::key!(Esc), rust_i18n::t!("hints.close")),
-    ]
+/// Returns a static reference, so there is no per-call allocation.
+pub fn picker_shortcuts() -> &'static [HintItem] {
+    static SHORTCUTS: LazyLock<Vec<HintItem>> = LazyLock::new(|| {
+        vec![
+            HintItem {
+                keys: vec![],
+                label: "nav".into(),
+                custom_display: Some("\u{2191}/\u{2193}"),
+                description: None,
+                pinned: false,
+            },
+            HintItem::new(crate::key!(Enter), "select"),
+            HintItem::new(crate::key!(Esc), "close"),
+        ]
+    });
+    &SHORTCUTS
 }
 
 /// What happened after processing an input event.
 pub enum PickerOutcome {
     /// User selected entry at this index (in the filtered entries list).
     Selected(usize),
-    /// User pressed Esc / clicked close — caller decides how to handle.
+    /// User pressed Esc or clicked close; the caller decides how to handle it.
     Closed,
     /// User wants to expand/toggle entry at this index (if config.expandable).
     Expand(usize),
@@ -1822,7 +1782,7 @@ pub enum PickerOutcome {
     Unchanged,
     /// User switched to tab at given index.
     TabChanged(usize),
-    /// User clicked/pressed the filter key — caller should cycle the filter.
+    /// User clicked or pressed the filter key; the caller should cycle the filter.
     FilterCycled,
     /// Custom action key pressed.
     Action(char),
@@ -1830,29 +1790,25 @@ pub enum PickerOutcome {
     NonSelectableClick(usize),
 }
 
-/// Hit areas for picker content (entries + scrollbar, no frame/tabs/search chrome).
+/// Hit areas for picker content (entries and scrollbar, no frame/tabs/search chrome).
 ///
-/// Returned by [`render_picker_content`] so callers that render their own
-/// frame/chrome (via [`super::modal_window`]) can wire up mouse hit-testing
-/// for the content portion independently of the picker's built-in frame.
+/// Returned by [`render_picker_content`] so callers that render their own chrome (via [`super::modal_window`]) can wire up mouse hit-testing.
+/// The content hit areas stay independent of the picker's built-in frame.
 #[derive(Debug, Clone)]
 pub struct PickerContentHitAreas {
     /// Per-item click rects (only selectable rows, not headers).
     pub item_rects: Vec<Rect>,
-    /// Maps visual index → entry index: `item_rects[i]` corresponds to
-    /// `entries[entry_indices[i]]`.
+    /// Maps visual index to entry index: `item_rects[i]` corresponds to `entries[entry_indices[i]]`.
     pub entry_indices: Vec<usize>,
 }
 
-/// Render picker content (entries + scrollbar) into the given area.
+/// Render picker content (entries and scrollbar) into the given area.
 ///
-/// This is the content-only portion of [`render_picker`], extracted so
-/// callers that render their own frame/chrome (via [`super::modal_window`])
-/// can draw entries into a provided content area without the picker's
-/// built-in frame, tab bar, or search bar.
+/// This is the content-only portion of [`render_picker`].
+/// Callers that render their own chrome (via [`super::modal_window`]) can draw entries into a provided content area.
+/// No built-in frame, tab bar, or search bar is drawn.
 ///
-/// The existing [`render_picker`] calls this internally for backwards
-/// compatibility with non-migrated callers.
+/// The existing [`render_picker`] calls this internally for backwards compatibility with non-migrated callers.
 #[allow(clippy::too_many_arguments)]
 pub fn render_picker_content(
     buf: &mut Buffer,
@@ -1880,9 +1836,8 @@ pub fn render_picker_content(
     )
 }
 
-/// Like [`render_picker_content`] but with an explicit scrollbar
-/// x-position. When `scrollbar_x` is `Some(x)`, the scrollbar is
-/// rendered at that column instead of `content_area.x + content_area.width - 1`.
+/// Like [`render_picker_content`] but with an explicit scrollbar x-position.
+/// When `scrollbar_x` is `Some(x)`, the scrollbar is rendered at that column instead of `content_area.x + content_area.width - 1`.
 /// Used by modals with h_pad to place the scrollbar flush against the border.
 /// `loading_tick` animates the loading spinner (pass 0 for a static frame).
 #[allow(clippy::too_many_arguments)]
@@ -1942,7 +1897,7 @@ pub fn render_picker_in_modal(
     );
 }
 
-/// Explicit search cursor/hint (ShortcutsHelp).
+/// Like [`render_picker_in_modal`] but with explicit search cursor/hint flags (used by ShortcutsHelp).
 #[allow(clippy::too_many_arguments)]
 pub fn render_picker_in_modal_inner(
     buf: &mut Buffer,
@@ -2031,7 +1986,7 @@ fn render_picker_content_inner(
         return empty_hit;
     }
 
-    // Loading state — animated dot spinner centered in the content area.
+    // Loading state: animated dot spinner centered in the content area
     if loading {
         let spinner_frames = crate::glyphs::dot_spinner_frames();
         let frame = spinner_frames[(loading_tick / 4) as usize % spinner_frames.len()];
@@ -2189,8 +2144,7 @@ fn render_picker_content_inner(
     }
     state.link_band = link_band;
 
-    // Scrollbar. (Globally suppressed in minimal mode via
-    // `render::scrollbar::set_scrollbars_hidden`.)
+    // Scrollbar. (Globally suppressed in minimal mode via `render::scrollbar::set_scrollbars_hidden`.)
     if needs_scroll {
         let sb_x = scrollbar_x_override.unwrap_or(content_area.x + content_area.width - 1);
         let sb_area = Rect::new(sb_x, content_area.y, 1, max_visible as u16);
@@ -2215,8 +2169,7 @@ fn render_picker_content_inner(
 
 /// Render the unified picker. Caller provides filtered entries.
 ///
-/// Returns hit areas for mouse interaction. The caller stores these in
-/// `state.hit_areas` for use by `handle_picker_input`.
+/// Returns hit areas for mouse interaction; the caller stores these in `state.hit_areas` for use by `handle_picker_input`.
 /// `loading_tick` animates the loading spinner (pass 0 for a static frame).
 #[allow(clippy::too_many_arguments)]
 pub fn render_picker(
@@ -2289,8 +2242,7 @@ pub fn render_picker(
     };
 
     // ── Tab bar (optional) ──
-    // When tabs are configured, render a tab bar on the first row of the content
-    // area and advance the content origin downward.
+    // When tabs are configured, render a tab bar on the first row of the content area and advance the content origin downward
     let mut close_button = frame.close_button;
     let mut tab_rects_out: Vec<Option<Rect>> = vec![];
     let content = if let Some(tabs) = config.tabs {
@@ -2306,7 +2258,7 @@ pub fn render_picker(
         );
         close_button = tab_hit.close_button;
         tab_rects_out = tab_hit.tab_rects;
-        // Advance content below tab bar + divider.
+        // Advance content below the tab bar and divider
         let tab_rows = 1u16; // tab bar
         let div_y = content.y + tab_rows;
         if div_y < content.y + content.height {
@@ -2341,11 +2293,8 @@ pub fn render_picker(
     };
 
     if config.disable_search {
-        // Replace the search bar row with a plain title (e.g. "Keyboard
-        // Shortcuts" for the cheatsheet modal). Mirrors the search-bar
-        // padding for visual consistency. Renders a [\u{2717}] close button at
-        // the right edge so popup-mode pickers (which don't draw one in
-        // the frame) still have a discoverable close affordance.
+        // Replace the search bar row with a plain title (e.g. "Keyboard Shortcuts" for the cheatsheet modal).
+        // Mirrors the search-bar padding for visual consistency
         let title_text = config.title.unwrap_or("");
         let title_style = Style::default()
             .fg(theme.text_primary)
@@ -2385,9 +2334,9 @@ pub fn render_picker(
                 rest,
             );
         }
-        // Render [\u{2717}] close button on the right edge of the title row,
-        // matching the floating-frame close-button style. Stash its rect
-        // in close_button so handle_picker_input can hit-test clicks.
+        // Render the [\u{2717}] close button on the right edge of the title row, matching the floating-frame close-button style
+        // Popup-mode pickers don't draw one in the frame, so this keeps a discoverable close affordance
+        // Stash its rect in close_button so handle_picker_input can hit-test clicks
         if config.tabs.is_none() {
             close_button = render_close_button(
                 buf,
@@ -2400,7 +2349,8 @@ pub fn render_picker(
             );
         }
     } else {
-        // Cursor tracks focus (`search_active`) for every picker — like the Settings pane; `show_search_hint` is input-only and no longer forces an always-on cursor.
+        // The cursor tracks focus (`search_active`) for every picker, like the Settings pane
+        // `show_search_hint` is input-only and does not force an always-on cursor
         render_picker_search_bar(
             buf,
             content.x,
@@ -2443,8 +2393,7 @@ pub fn render_picker(
 
     let mut entries_start_y = sep_y + 1;
 
-    // Pinned header note: reserve the first list row so it stays visible
-    // regardless of list scroll.
+    // Pinned header note: reserve the first list row so it stays visible regardless of list scroll
     if let Some(note) = config.header_note
         && entries_start_y < content.y + content.height
     {
@@ -2464,7 +2413,7 @@ pub fn render_picker(
         entries_start_y += 1;
     }
 
-    // Delegate entry rendering + scrollbar to render_picker_content.
+    // Delegate entry rendering and the scrollbar to render_picker_content
     let entries_area = Rect {
         x: content.x,
         y: entries_start_y,
@@ -2488,33 +2437,29 @@ pub fn render_picker(
     let entry_indices = content_hit.entry_indices;
 
     // Shortcuts rendering (both modes).
-    // Combine base shortcuts + expandable hints + action keys, OR — when
-    // compact_bottom_bar is set — render only `config.shortcuts`.
+    // Combine base shortcuts, expandable hints, and action keys; when compact_bottom_bar is set, render only `config.shortcuts`
     if let Some(sy) = shortcuts_y {
         let mut all_hints: Vec<HintItem> = Vec::new();
         // Base shortcuts (nav, select, close).
         if let Some(shortcuts) = config.shortcuts {
             all_hints.extend_from_slice(shortcuts);
         }
-        // Surface `i` in vim nav mode so users discover how to start typing.
+        // Show `i` in vim nav mode so users discover how to start typing
         if config.vim_normal_first && !state.search_active {
-            all_hints.push(HintItem::new(
-                crate::key!('i'),
-                rust_i18n::t!("hints.search"),
-            ));
+            all_hints.push(HintItem::new(crate::key!('i'), "search"));
         }
-        // Expandable: add e=expand and y=copy hints.
+        // Expandable: add the e (expand) and y (copy) hints
         if config.expandable && !config.compact_bottom_bar {
             all_hints.push(HintItem {
                 keys: vec![],
-                label: rust_i18n::t!("hints.expand"),
+                label: "expand".into(),
                 custom_display: Some("e/Shift+e"),
                 description: None,
                 pinned: false,
             });
             all_hints.push(HintItem {
                 keys: vec![],
-                label: rust_i18n::t!("hints.copy"),
+                label: "copy".into(),
                 custom_display: Some("y"),
                 description: None,
                 pinned: false,
@@ -2550,7 +2495,7 @@ pub fn render_picker(
             // Inset by 1 cell so hints don't hug the left border.
             let shortcuts_rect = Rect::new(shortcuts_x + 1, sy, shortcuts_w.saturating_sub(1), 1);
             ShortcutsBar::new(&all_hints)
-                .with_pending(config.pending_hint.clone())
+                .with_pending(config.pending_hint)
                 .render(shortcuts_rect, buf);
         }
     }
@@ -2567,10 +2512,9 @@ pub fn render_picker(
 
 /// First selectable index at or after `selected`.
 ///
-/// Scans forward from the clamped selection, then restarts from the top when
-/// needed. If every row is non-selectable, both scans stop at the last index,
-/// so that last index is returned. Shared by picker input clamping and modal
-/// render so highlight and footer stay aligned.
+/// Scans forward from the clamped selection, then restarts from the top when needed.
+/// If every row is non-selectable, both scans stop at the last index, so that last index is returned.
+/// Shared by picker input clamping and modal render so highlight and footer stay aligned.
 pub fn first_selectable_index(
     selected: usize,
     entry_count: usize,
@@ -2618,12 +2562,10 @@ pub fn handle_picker_input(
             .copied()
             .unwrap_or(false)
     };
-    // Clamp selected to valid range — entries may have changed since last input
-    // (e.g., query filter reduced the list).
+    // Clamp selected to valid range: entries may have changed since last input (e.g., query filter reduced the list)
     clamp_picker_selection(state, entry_count, config.non_selectable);
 
-    // Precompute first/last selectable for boundary-aware Up/Down navigation
-    // (search focus at edges, skipping any non-selectable headers).
+    // Precompute first/last selectable for boundary-aware Up/Down navigation (search focus at edges, skipping any non-selectable headers)
     let first_selectable = if entry_count == 0 {
         0
     } else {
@@ -2781,8 +2723,7 @@ pub fn handle_picker_input(
         text: impl AsRef<str>,
         config: &PickerConfig<'_>,
     ) -> PickerOutcome {
-        // vim_normal_first: printables don't type until search is entered, so a
-        // paste while in nav mode is ignored.
+        // vim_normal_first: printables don't type until search is entered, so a paste while in nav mode is ignored
         if config.vim_normal_first && !state.search_active {
             return PickerOutcome::Unchanged;
         }
@@ -2810,15 +2751,13 @@ pub fn handle_picker_input(
             return PickerOutcome::Unchanged;
         }
 
-        // Search mode (currently active). Also reachable for vim_normal_first
-        // pickers without a search hint, so typing/Esc/Backspace work once
-        // search is entered via `i`/`/`.
+        // Search mode (currently active)
+        // Also reachable for vim_normal_first pickers without a search hint, so typing/Esc/Backspace work once search is entered via `i`/`/`
         if (config.show_search_hint || config.vim_normal_first) && state.search_active {
             if key.code == KeyCode::Esc {
                 let query_changed = config.vim_normal_first && !state.query().is_empty();
                 state.search_active = false;
-                // vim_normal_first: Esc leaves search for nav mode and clears the
-                // query in one step (mirrors scrollback vim-mode).
+                // vim_normal_first: Esc leaves search for nav mode and clears the query in one step (mirrors scrollback vim-mode)
                 if config.vim_normal_first {
                     state.clear_query();
                 }
@@ -2844,8 +2783,7 @@ pub fn handle_picker_input(
                     }
                 }
             }
-            // Up/Down/Enter exit search mode, then (for arrows) navigate to the
-            // adjacent "edge" item to support cycling between search and list.
+            // Up/Down/Enter exit search mode, then (for arrows) navigate to the adjacent "edge" item to support cycling between search and list
             if key.code == KeyCode::Up || key.code == KeyCode::Down || key.code == KeyCode::Enter {
                 state.search_active = false;
                 state.selection_hidden = false;
@@ -2858,8 +2796,7 @@ pub fn handle_picker_input(
                             state.selected = first_selectable;
                         }
                     } else {
-                        // Up from search: if tabs configured, move focus to the
-                        // tab bar region so Left/Right can cycle tabs.
+                        // Up from search: if tabs configured, move focus to the tab bar region so Left/Right can cycle tabs
                         if config.tabs.is_some() {
                             state.tabs_focused = true;
                         } else if entry_count > 0 {
@@ -2888,15 +2825,12 @@ pub fn handle_picker_input(
             }
         }
 
-        // j/k alias to Down/Up for nav when a search hint is shown (hint mode)
-        // or under vim_normal_first (always-active pickers included).
+        // j/k alias to Down/Up for nav when a search hint is shown (hint mode) or under vim_normal_first (always-active pickers included)
         let jk_navigates = config.show_search_hint || config.vim_normal_first;
 
-        // When the tabs region is focused (reached by Up arrow from search
-        // or top of list when tabs are configured), handle arrows for tab
-        // cycling (delegated to the tabs block above), boundary Down/Up to
-        // move focus back into content/search, and printable chars to start
-        // a query (exiting tabs focus).
+        // When the tabs region is focused (reached by Up from search or the top of the list when tabs are configured), three key groups apply
+        // Arrows cycle tabs (delegated to the tabs block above) and boundary Down/Up move focus back into content/search
+        // Printable chars start a query (exiting tabs focus)
         if state.tabs_focused {
             let is_down_j = jk_navigates
                 && !state.search_active
@@ -2905,10 +2839,8 @@ pub fn handle_picker_input(
             let is_down = key.code == KeyCode::Down || is_down_j;
             if is_down {
                 state.tabs_focused = false;
-                // Down from the tabs region goes to search (so the full
-                // arrow cycle is: list bottom → tabs → search → list top).
-                // Under vim_normal_first nav never opens search, so j/Down from
-                // the tabs region moves into the list instead.
+                // Down from the tabs region goes to search, completing the arrow cycle (list bottom, tabs, search, list top)
+                // Under vim_normal_first nav never opens search, so j/Down from the tabs region moves into the list instead
                 if config.show_search_hint && !config.vim_normal_first {
                     state.search_active = true;
                     state.selection_hidden = true;
@@ -2939,14 +2871,12 @@ pub fn handle_picker_input(
             }
 
             if key.code == KeyCode::Enter {
-                // "Activating" the tab bar does nothing special; leave focus
-                // or drop it. Drop it to return to content.
+                // "Activating" the tab bar does nothing special; drop the focus and return to content
                 state.tabs_focused = false;
                 return PickerOutcome::Changed;
             }
 
-            // Printable characters while tabs focused: exit focus and start
-            // a search query (mirrors behavior from non-active search hint).
+            // Printable characters while tabs focused: exit focus and start a search query (mirrors behavior from non-active search hint)
             if config.show_search_hint && !state.search_active {
                 if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
                     state.tabs_focused = false;
@@ -2974,10 +2904,8 @@ pub fn handle_picker_input(
                 }
             }
 
-            // For other keys (including action keys, Esc, etc.) while tabs
-            // focused we fall through so the normal paths (Tab switch,
-            // action keys, Esc close, etc.) can still apply. L/R are
-            // handled in the tabs block later and will have returned already.
+            // For other keys (action keys, Esc, etc.) while tabs focused we fall through so the normal paths can still apply
+            // L/R fall through too; the tabs block later returns for them
         }
 
         // Ctrl+F: toggle mode.
@@ -3012,7 +2940,7 @@ pub fn handle_picker_input(
             return PickerOutcome::Changed;
         }
 
-        // Navigation: Down (+ j in hint or vim_normal_first mode).
+        // Navigation: Down (and j in hint or vim_normal_first mode)
         let is_down_j = jk_navigates
             && !state.search_active
             && key.code == KeyCode::Char('j')
@@ -3021,12 +2949,10 @@ pub fn handle_picker_input(
         if is_down {
             let at_bottom = entry_count == 0 || state.selected == last_selectable;
 
-            // Under vim_normal_first, j/Down clamp at the list bottom (the field
-            // doc promises only `i`/`/` open search; never auto-jump to tabs).
+            // Under vim_normal_first, j/Down clamp at the list bottom (the field doc promises only `i`/`/` open search; never auto-jump to tabs)
             if at_bottom && !state.search_active && !config.vim_normal_first {
-                // When a tab bar is present, Down from the last list item
-                // moves focus to the tabs region (so Left/Right can cycle
-                // tabs) instead of the search bar.
+                // With a tab bar, Down from the last list item moves focus to the tabs region instead of the search bar
+                // There Left/Right can cycle tabs
                 if config.tabs.is_some() {
                     state.tabs_focused = true;
                     state.search_active = false;
@@ -3061,7 +2987,7 @@ pub fn handle_picker_input(
             return PickerOutcome::Changed;
         }
 
-        // Navigation: Up (+ k in hint or vim_normal_first mode).
+        // Navigation: Up (and k in hint or vim_normal_first mode)
         let is_up_k = jk_navigates
             && !state.search_active
             && key.code == KeyCode::Char('k')
@@ -3070,8 +2996,7 @@ pub fn handle_picker_input(
         if is_up {
             let at_top = entry_count == 0 || state.selected == first_selectable;
 
-            // Under vim_normal_first, k/Up clamp at the list top (only `i`/`/`
-            // open search).
+            // Under vim_normal_first, k/Up clamp at the list top (only `i`/`/` open search)
             if at_top && config.show_search_hint && !state.search_active && !config.vim_normal_first
             {
                 state.search_active = true;
@@ -3099,7 +3024,7 @@ pub fn handle_picker_input(
             return PickerOutcome::Changed;
         }
 
-        // ── Custom action keys (checked first — override built-in expand/copy) ──
+        // ── Custom action keys (checked first; they override built-in expand/copy) ──
         // Only when not in search mode.
         if !state.search_active {
             for &(action_char, _) in config.action_keys {
@@ -3120,8 +3045,7 @@ pub fn handle_picker_input(
             if key.code == KeyCode::Char('E') {
                 return PickerOutcome::Collapse(state.selected);
             }
-            // Outside search, arrows always act on the selected row; the
-            // retained query only filters which rows are visible.
+            // Outside search, arrows always act on the selected row; the retained query only filters which rows are visible
             if key.code == KeyCode::Right {
                 return PickerOutcome::Expand(state.selected);
             }
@@ -3129,8 +3053,7 @@ pub fn handle_picker_input(
                 return PickerOutcome::Collapse(state.selected);
             }
             if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
-                // Space triggers the 'toggle' action if one is configured,
-                // otherwise falls through.
+                // Space triggers the 'toggle' action if one is configured, otherwise falls through
                 if config.action_keys.iter().any(|&(_, desc)| desc == "toggle") {
                     return PickerOutcome::Action(' ');
                 }
@@ -3138,14 +3061,11 @@ pub fn handle_picker_input(
         }
 
         // ── Tab switching ──
-        // Tab/Shift-Tab (and BackTab) always cycle tabs when configured
-        // (and not in search).
+        // Tab/Shift-Tab (and BackTab) always cycle tabs when configured (and not in search)
         //
-        // When the tab bar region has been focused via Up/Down arrows
-        // (`tabs_focused`), Left/Right (and h/l) also cycle tabs. This
-        // lets callers make L/R expand/collapse the *selected list item*
-        // by default, while still allowing arrow nav of the tab bar after
-        // the user explicitly arrows "up" to it.
+        // When the tab bar region has been focused via Up/Down arrows (`tabs_focused`), Left/Right (and h/l) also cycle tabs
+        // This lets callers make L/R expand/collapse the *selected list item* by default
+        // Arrow nav of the tab bar still works after the user explicitly arrows "up" to it
         if let Some(tabs) = config.tabs {
             let tab_count = tabs.len();
             if tab_count > 1 && !state.search_active {
@@ -3189,10 +3109,9 @@ pub fn handle_picker_input(
         {
             return PickerOutcome::FilterCycled;
         }
-        // vim_normal_first opens the picker in nav mode; `/` or `i` is the only
-        // way into search (printable chars don't type until then). Mirrors
-        // scrollback vim-mode. This intentionally shadows the hint `/` handler
-        // below under vim and also covers always-active pickers (no search hint).
+        // vim_normal_first opens the picker in nav mode; `/` or `i` is the only way into search (printable chars don't type until then)
+        // Mirrors scrollback vim-mode
+        // This intentionally shadows the hint `/` handler below under vim and also covers always-active pickers (no search hint)
         if config.vim_normal_first
             && !state.search_active
             && !config.disable_search
@@ -3245,7 +3164,7 @@ pub fn handle_picker_input(
             }
         }
 
-        return PickerOutcome::Unchanged; // unhandled key — no state change
+        return PickerOutcome::Unchanged; // unhandled key, no state change
     }
 
     // ── Paste ──
@@ -3265,8 +3184,8 @@ mod tests {
     use super::*;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
-    // Minimal picker config for input tests. Flip `vim_normal_first` per-test to
-    // exercise the dormant nav mode; everything else mirrors a basic picker.
+    // Minimal picker config for input tests
+    // Flip `vim_normal_first` per-test to exercise the dormant nav mode; everything else mirrors a basic picker
     fn cfg(show_search_hint: bool, vim_normal_first: bool) -> PickerConfig<'static> {
         PickerConfig {
             title: None,
@@ -3306,7 +3225,7 @@ mod tests {
 
     #[test]
     fn flag_off_always_active_char_types() {
-        // show_search_hint=false: always-active search still types as today.
+        // show_search_hint=false: always-active search types immediately
         let config = cfg(false, false);
         let mut state = PickerState::default();
         let outcome = handle_picker_input(&press('a'), &mut state, 3, &config);
@@ -3316,7 +3235,7 @@ mod tests {
 
     #[test]
     fn flag_off_hint_char_auto_activates_search() {
-        // show_search_hint=true: a non-jk char auto-activates search as today.
+        // show_search_hint=true: a non-jk char auto-activates search
         let config = cfg(true, false);
         let mut state = PickerState::default();
         let outcome = handle_picker_input(&press('a'), &mut state, 3, &config);
@@ -3327,9 +3246,8 @@ mod tests {
 
     #[test]
     fn always_active_slash_on_empty_query_focuses_search_without_typing() {
-        // show_search_hint=false picker (e.g. the `/docs` how-to picker) shows
-        // the "/ to search" placeholder while unfocused: pressing the
-        // advertised `/` must focus search, not type a literal `/`.
+        // A show_search_hint=false picker (e.g. the `/docs` how-to picker) shows the "/ to search" placeholder while unfocused.
+        // Pressing the advertised `/` must focus search, not type a literal `/`
         let config = cfg(false, false);
         let mut state = PickerState::default();
         let outcome = handle_picker_input(&press('/'), &mut state, 3, &config);
@@ -3344,8 +3262,7 @@ mod tests {
 
     #[test]
     fn always_active_slash_mid_query_inserts_literal_slash() {
-        // A `/` typed into a non-empty query is plausible query text
-        // (path-like searches) and must keep inserting.
+        // A `/` typed into a non-empty query is plausible query text (path-like searches) and must keep inserting
         let config = cfg(false, false);
         let mut state = PickerState::default();
         handle_picker_input(&press('a'), &mut state, 3, &config);
@@ -3359,10 +3276,9 @@ mod tests {
 
     #[test]
     fn always_active_slash_inserts_when_search_already_focused() {
-        // Pickers that open input-focused (`input_active()`: command palette,
-        // arg picker; the dashboard location picker) never show the
-        // "/ to search" placeholder, so a leading `/` there is query text
-        // (e.g. an absolute path) and must insert even on an empty query.
+        // Pickers that open input-focused never show the "/ to search" placeholder
+        // `input_active()` covers the command palette, the arg picker, and the dashboard location picker
+        // A leading `/` there is query text (e.g. an absolute path) and must insert even on an empty query.
         let config = cfg(false, false);
         let mut state = PickerState::input_active();
         let outcome = handle_picker_input(&press('/'), &mut state, 3, &config);
@@ -3372,7 +3288,7 @@ mod tests {
 
     #[test]
     fn hint_slash_still_activates_search_without_typing() {
-        // show_search_hint=true pickers keep their existing `/` handling.
+        // show_search_hint=true pickers keep the `/` focus-search handling
         let config = cfg(true, false);
         let mut state = PickerState::default();
         let outcome = handle_picker_input(&press('/'), &mut state, 3, &config);
@@ -3386,18 +3302,16 @@ mod tests {
 
     #[test]
     fn search_bar_cursor_visible_only_when_search_active() {
-        let _theme = crate::test_util::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
-        // A `show_search_hint: false` picker (command palette / arg-picker family):
-        // the cursor must track focus (`search_active`), not render always-on.
+        // A `show_search_hint: false` picker (command palette / arg-picker family)
+        // The cursor must track focus (`search_active`), not render always-on
         let theme = Theme::current();
         let config = cfg(false, false);
         let area = Rect::new(0, 0, 60, 16);
 
-        // Render the picker; report whether the search row drew a cursor (an
-        // inverse-video cell whose bg == text_primary) plus its visible text.
+        // Render the picker; report whether the search row drew a cursor (an inverse-video cell whose bg == text_primary) plus its visible text
         let render_search_row = |search_active: bool| -> (bool, String) {
             let mut state = PickerState::with_mode(PickerMode::FullScreen);
             state.search_active = search_active;
@@ -3545,8 +3459,7 @@ mod tests {
         use ratatui::layout::Rect;
 
         let theme = Theme::current();
-        // Wide enough that each description line fits on a single visual row:
-        // y+0 = label, y+1 = instruction, y+2 = bracket-highlighted URL.
+        // Wide enough that each description line fits on one visual row: y+0 is the label, y+1 the instruction, y+2 the bracket-highlighted URL
         let area = Rect::new(0, 0, 60, 6);
         let desc: &[&str] = &["some instruction text", "[example.com/link]"];
 
@@ -3595,10 +3508,9 @@ mod tests {
         };
 
         let (on, on_band) = render(true);
-        // Only the final (link) description line (row y+2) is underlined; the
-        // label (y+0) and instruction (y+1) rows are not.
+        // Only the final (link) description line (row y+2) is underlined; the label (y+0) and instruction (y+1) rows are not
         assert_eq!(underlined_rows(&on), vec![2]);
-        // Render <-> hit-test parity: the recorded band equals the painted rows.
+        // Render and hit-test agree: the recorded band equals the painted rows
         assert_eq!(on_band, Some(2..3));
 
         let (off, off_band) = render(false);
@@ -3634,8 +3546,7 @@ mod tests {
     }
 
     /// `input_active()` opens directly in input mode; `default()` does not.
-    /// Used by type-to-find pickers (command palette, `/model` & `/theme` arg
-    /// picker) so typing filters immediately on open.
+    /// Type-to-find pickers (command palette, the `/model` and `/theme` arg picker) use it so typing filters immediately on open.
     #[test]
     fn input_active_starts_in_search_mode() {
         assert!(PickerState::input_active().search_active);
@@ -3763,8 +3674,7 @@ mod tests {
 
     #[test]
     fn vim_j_at_bottom_clamps_without_opening_search() {
-        // Edge-cycle is disabled under vim: j at the last item stays put and
-        // never opens search or jumps to the tabs region.
+        // Edge-cycle is disabled under vim: j at the last item stays put and never opens search or jumps to the tabs region
         for hint in [true, false] {
             let config = cfg(hint, true);
             let mut state = PickerState {
@@ -3805,8 +3715,7 @@ mod tests {
 
     #[test]
     fn vim_action_key_takes_precedence_over_i_entry() {
-        // A picker binding `i` as an action key (e.g. extensions install/auth)
-        // triggers the action; the vim `i` search-entry does not shadow it.
+        // A picker binding `i` as an action key (e.g. extensions install/auth) triggers the action; the vim `i` search-entry does not shadow it.
         let mut config = cfg(true, true);
         config.action_keys = &[('i', "x")];
         let mut state = PickerState::default();
@@ -3852,8 +3761,7 @@ mod tests {
 
     #[test]
     fn vim_disable_search_makes_i_and_slash_inert() {
-        // disable_search pickers (read-only cheatsheets) use no search hint;
-        // under vim, `i` and `/` must not enter search.
+        // disable_search pickers (read-only cheatsheets) use no search hint; under vim, `i` and `/` must not enter search
         let mut config = cfg(false, true);
         config.disable_search = true;
         for c in ['i', '/'] {
@@ -3883,8 +3791,8 @@ mod tests {
 
     #[test]
     fn vim_i_up_j_does_not_reopen_search_with_tabs() {
-        // i (enter search) → Up (exit into tabs region) → j must move into the
-        // list, not reopen search (only `i`/`/` start search under vim).
+        // After i (enter search) then Up (exit into the tabs region), j must move into the list
+        // It must not reopen search (only `i`/`/` start search under vim)
         let mut config = cfg(true, true);
         config.tabs = Some(&["a", "b"]);
         let mut state = PickerState::default();

@@ -519,7 +519,7 @@ impl ToolServerHandler for SessionRoutedToolHandler {
             match transport {
                 Some(transport) => {
                     let outcome = crate::permission::request_permission_via_hub(
-                        &transport, &access, &call_id,
+                        &transport, &access, &call_id, None,
                     )
                     .await;
                     if !crate::permission::prompt_outcome_allows(&outcome) {
@@ -576,13 +576,10 @@ impl ToolServerHandler for SessionRoutedToolHandler {
         let guard = CallCompletedGuard::new(tracker, call_id, Some(session_label.clone()));
         Box::pin(async_stream::stream! {
             use futures::StreamExt;
-            // Move the guard into the stream so completion accounting spans the
-            // full stream lifetime (and fires on drop if never consumed).
             let mut _guard = guard;
             let mut inner = inner;
             while let Some(item) = inner.next().await {
                 match item {
-                    // Rollout gate lives downstream in the sampler.
                     ToolStreamItem::Progress(p) => {
                         let p = match &virt {
                             Some(v) => v.rewrite_progress(p),
@@ -591,7 +588,6 @@ impl ToolServerHandler for SessionRoutedToolHandler {
                         yield ToolStreamItem::Progress(p);
                     }
                     ToolStreamItem::Terminal(Ok(run_result)) => {
-                        // Background-task accounting lives in the activity feed, not here.
                         _guard.set_outcome(xai_grok_session_events::ToolOutcome::Success);
                         let output = run_result.into_typed_tool_output(tool_id);
                         let output = match &virt {
@@ -614,20 +610,11 @@ impl ToolServerHandler for SessionRoutedToolHandler {
                             Some(v) => v.rewrite_error(e),
                             None => e,
                         };
-                        // Forward the inner ToolError (after path rewrite) so
-                        // the harness and dashboards keep its kind + structured
-                        // details (e.g. invalid-argument vs crashed subprocess).
                         yield ToolStreamItem::Terminal(Err(e));
                         return;
                     }
                 }
             }
-            // Defensive fallback: every terminal arm above `return`s, so this is
-            // only reached if the inner `call_streaming` stream ended without a
-            // terminal. That is unreachable under the `call_streaming` contract
-            // (it yields exactly one terminal on every code path), but we emit a
-            // terminal here anyway so the "exactly one Terminal" invariant is
-            // enforced locally rather than merely inherited from the inner layer.
             yield ToolStreamItem::Terminal(Err(ToolError::new(
                 ToolErrorKind::TerminalError,
                 "tool stream ended without a terminal",

@@ -244,7 +244,7 @@ impl MvpAgent {
 
             // Persist the grant, then flip the cached untrusted verdict to trusted
             // (the `Some(false)` arm of `resolve_and_record` re-reads the store).
-            folder_trust::grant_folder_trust(&cwd);
+            xai_grok_workspace::folder_trust::grant_folder_trust(&cwd);
             folder_trust::resolve_and_record(&cwd, remote.as_ref(), false);
 
             reload_project_servers_after_grant(ReloadAfterGrant {

@@ -1,6 +1,6 @@
-// Demo artifact generator (and smoke assert) for basename-only collapsed
-// Read headers. Writes asciicast + HTML under /tmp/basename_path_video for
-// agg → gif/mp4. Not meant as a permanent product regression pin.
+// Generates demo artifacts for the collapsed Read header, which shows only the file's basename, and asserts that it does
+// Writes an asciicast and HTML under /tmp/basename_path_video for agg to turn into a gif or mp4
+// Not meant to live on as a permanent regression test
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -11,17 +11,17 @@ use std::time::Instant;
 
 const DONE_SENTINEL: &str = "BASENAME_PATH_DEMO_DONE";
 const ARTIFACT_DIR: &str = "/tmp/basename_path_video";
-/// Unique basename so on-screen match is unambiguous.
+/// The basename is unique so the on-screen match is unambiguous.
 const FILE_NAME: &str = "basename_demo_target.rs";
-/// Nested dirs so full abs path is long and would dominate a collapsed header.
+/// The dirs nest deep so the full absolute path is long and would dominate a collapsed header.
 const NEST: &str = "very/deep/nested/project/src/module";
 
 fn screen_shows_full_path(screen: &str, full_path: &str) -> bool {
     if screen.contains(full_path) {
         return true;
     }
-    // Modal wraps long paths mid-segment-list (e.g. `…/src/` then `module/file`).
-    // Require nest markers that never appear in HOME chrome alone.
+    // The modal wraps long paths mid-list (e.g. `…/src/` then `module/file`).
+    // Match nest segments that a HOME path shown elsewhere on screen cannot contain
     let joined = screen.replace('\n', "");
     if joined.contains(NEST) && joined.contains(FILE_NAME) {
         return true;
@@ -48,8 +48,8 @@ fn write_asciicast(path: &Path, cols: u16, rows: u16, events: &[(f64, String)]) 
     }
 }
 
-/// PTY demo: long abs path → collapsed header shows basename only; open block
-/// viewer and show full path in modal preamble. Dumps asciicast for video.
+/// PTY demo: with a long absolute path the collapsed header shows only the basename; the block viewer's modal preamble shows the full path.
+/// Dumps an asciicast for the video.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "demo video generator; run with cargo test -p xai-grok-pager --test pty_e2e_smoke basename_path_demo_pty -- --ignored --nocapture"]
 async fn basename_path_demo_pty() {
@@ -74,9 +74,8 @@ async fn basename_path_demo_pty() {
     let binary = pager_binary().expect("resolve pager binary");
     let rows = DEFAULT_ROWS;
     let cols = DEFAULT_COLS;
-    // The demo shows the RAW basename-only `Read {path}` header; with
-    // verb-group folding on (default), a lone read folds into "Read 1 file"
-    // and the basename row never renders.
+    // The demo shows the RAW basename-only `Read {path}` header
+    // With verb-group folding on (the default), a lone read folds into "Read 1 file" and the basename row never renders
     seed_ui_config(&content, "group_tool_verbs = false");
     let mut harness = PtyHarness::spawn_with_content_in_dir(
         &binary,
@@ -116,7 +115,7 @@ async fn basename_path_demo_pty() {
             harness.screen_contents()
         );
     }
-    // Hold welcome for the video.
+    // Hold the welcome screen for the video
     for _ in 0..15 {
         sample(&mut harness);
     }
@@ -125,7 +124,7 @@ async fn basename_path_demo_pty() {
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit prompt");
 
-    // Wait for collapsed Read header with basename.
+    // Wait for the collapsed Read header with the basename
     let read_deadline = Instant::now() + Duration::from_secs(60);
     loop {
         sample(&mut harness);
@@ -138,7 +137,7 @@ async fn basename_path_demo_pty() {
         }
     }
 
-    // Settle turn.
+    // Wait for the turn to complete
     let settle_deadline = Instant::now() + Duration::from_secs(45);
     loop {
         sample(&mut harness);
@@ -153,7 +152,7 @@ async fn basename_path_demo_pty() {
         }
     }
 
-    // Hold collapsed view so the video can show basename-only header.
+    // Hold the collapsed view so the video can show the basename-only header
     for _ in 0..40 {
         sample(&mut harness);
     }
@@ -170,7 +169,7 @@ async fn basename_path_demo_pty() {
     )
     .ok();
 
-    // Collapsed header must show basename, not the nested parent segments.
+    // The collapsed header must show the basename, not the nested parent segments
     assert!(
         collapsed.contains(FILE_NAME),
         "collapsed screen must show basename; screen:\n{collapsed}"
@@ -179,9 +178,8 @@ async fn basename_path_demo_pty() {
         collapsed.contains("Read "),
         "collapsed screen must show Read label; screen:\n{collapsed}"
     );
-    // Parent nest segment should not appear next to the tool label on the
-    // collapsed one-liner (full path may still appear elsewhere rarely; the
-    // header itself is basename-only — check the Read line specifically).
+    // The parent nest segments must not appear next to the tool label on the collapsed one-liner
+    // The full path may still rarely appear elsewhere; the header itself is basename-only, so check the Read line specifically
     let mut saw_basename_header = false;
     for line in collapsed.lines() {
         if line.contains("Read ") && line.contains(FILE_NAME) {
@@ -199,8 +197,8 @@ async fn basename_path_demo_pty() {
         "expected a Read {FILE_NAME} header line; screen:\n{collapsed}"
     );
 
-    // Open block viewer: Tab → select Read line (click) → Ctrl+f (OpenBlockViewer
-    // alt binding; Enter alone may toggle a verb-group header instead).
+    // Open the block viewer: Tab to focus scrollback, click the Read line, then Ctrl+f
+    // Ctrl+f is the OpenBlockViewer alt binding; Enter alone may toggle a verb-group header instead
     harness.inject_keys(b"\t").expect("focus scrollback");
     for _ in 0..10 {
         sample(&mut harness);
@@ -225,7 +223,7 @@ async fn basename_path_demo_pty() {
         }
     }
 
-    // Ctrl+f = OpenBlockViewer (alt key).
+    // Ctrl+f is the OpenBlockViewer alt binding
     harness.inject_keys(b"\x06").expect("Ctrl+f open viewer");
 
     let modal_deadline = Instant::now() + Duration::from_secs(15);
@@ -237,10 +235,10 @@ async fn basename_path_demo_pty() {
         }
     };
 
-    // If viewer didn't open, fold-expand the Read block (Truncated header uses
-    // full path via width: None) — still demos the dual display.
+    // If the viewer did not open, fold-expand the Read block instead
+    // The Truncated header uses the full path (width: None), so it still demos the dual display
     if !screen_shows_full_path(&expanded_screen, &full_path) {
-        // Esc out of any partial overlay, then click + Enter (toggle fold / group).
+        // Esc out of any partial overlay, then click and press Enter to toggle the fold or group
         harness.inject_keys(b"\x1b").expect("esc");
         for _ in 0..6 {
             sample(&mut harness);
@@ -272,7 +270,7 @@ async fn basename_path_demo_pty() {
         }
     }
 
-    // Hold expanded/modal view for the video.
+    // Hold the expanded or modal view for the video
     for _ in 0..50 {
         sample(&mut harness);
     }

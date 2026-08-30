@@ -2,166 +2,75 @@ use agent_client_protocol as acp;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
-/// A permission event capturing the decision made for a tool call.
-/// Used for telemetry to track permission patterns and user behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionEvent {
-    /// Tool call ID from the model
     pub tool_id: String,
-    /// Name of the tool being executed
     pub tool_name: String,
-    /// Type of access requested (read, edit, bash, mcp)
     pub access_kind: String,
-    /// Additional context (e.g., file path for edit, command for bash)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_detail: Option<String>,
-    /// Whether YOLO mode was enabled when this decision was made
     pub yolo_mode: bool,
-    /// Whether this was auto-approved (by YOLO mode or policy rules)
     pub auto_approved: bool,
-    /// Whether the user was prompted for this decision
     pub user_prompted: bool,
-    /// The final decision (allow, reject)
     pub decision: String,
-    /// The user's choice when prompted (allow_once, allow_always, reject_once,
-    /// etc.); None on auto/non-prompt decisions. The trigger lives in `decision_reason`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_outcome: Option<String>,
-    /// Rejection reason if rejected
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reject_reason: Option<String>,
-    /// When this decision was made
     pub timestamp: DateTime<Utc>,
-    /// If this permission was requested by a subagent, the subagent's session ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_session_id: Option<String>,
-    /// If this permission was requested by a subagent, its type (e.g. "explore").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_type: Option<String>,
-    /// If this permission was requested by a subagent, its description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_description: Option<String>,
-    /// Effective permission mode governing this decision (not the trigger):
-    /// "ask" | "auto" | "always-approve". Hyphenated to match
-    /// `config.ui.permission_mode` in the same trace (differs from the telemetry
-    /// enum's underscore Mixpanel serde).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
-    /// The trigger that produced this decision, distinct from `prompt_outcome`
-    /// (which records the user's choice when prompted). Lets a trace show *why*
-    /// a request reached a prompt even when `user_prompted=true`. Values:
-    /// yolo, policy_allow, policy_deny, policy_ask, bash_command_gate_ask,
-    /// shell_file_gate_ask, auto_fast_path,
-    /// auto_classifier_allow, auto_classifier_deny,
-    /// auto_classifier_timeout, auto_classifier_unavailable, auto_denial_limit,
-    /// sandbox_auto, persisted_grant, session_grant, static_allowlist, safe_command,
-    /// session_deny, prompt_deny, needs_user, bash_request_floor, opaque_shell,
-    /// requester_gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_reason: Option<String>,
-    /// Auto-classifier path: "llm" | "heuristic" | "timeout" |
-    /// "transport_error" | "fast_path".
-    /// Absent when auto mode did not classify or take its fast path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classifier_source: Option<String>,
-    /// Elapsed milliseconds spent in classification alone, including heuristic work;
-    /// absent when no classifier ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classifier_latency_ms: Option<u64>,
-    /// Consecutive auto-classifier denials at decision time; absent outside auto mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_denials_consecutive: Option<u32>,
-    /// Total auto-classifier denials at decision time; absent outside auto mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_denials_total: Option<u32>,
-    /// Elapsed milliseconds from the actor dequeuing this request to the decision
-    /// resolving. The timer starts at dequeue, so it excludes time the request
-    /// waited in the channel behind others; small for fast auto paths but
-    /// non-trivial when an auto classifier side-query runs before the decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_ms: Option<u64>,
-    /// Concurrent in-flight permission requests (this one included) at emit time,
-    /// counted across the shared handle so overlapping subagent requests show up.
-    /// The per-turn "hit yes N times" count is instead the number of
-    /// `user_prompted=true` events in the turn, not this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_depth: Option<u32>,
-    /// Ordered, deduplicated classifier finding tokens for this request. Three
-    /// distinct states (do not conflate `None` with `Some([])`):
-    /// - `None`: legacy trace, or the request never entered the Auto classifier
-    ///   route (fast-path allow, policy/gate decision, non-Bash access).
-    /// - `Some([])`: the classifier route was selected and the exact attempted
-    ///   assessment was empty. This is *not* a proven-clean classification.
-    /// - `Some(tokens)`: the classifier route was selected with these findings.
-    /// Projected once from the exact `BashSecurityAssessment` handed to the
-    /// classifier (`BashSecurityAssessment::tokens`); telemetry/traces never
-    /// recompute findings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_findings: Option<Vec<String>>,
-    /// Classifier verdict when the Auto classifier route produced one:
-    /// `"allow" | "block" | "unavailable"`. `None` when the request never
-    /// reached a classifier verdict (legacy, fast path, non-classified route, or
-    /// requester gone mid-classify).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classifier_verdict: Option<String>,
-    /// Whether the `remember_tool_approvals` gate was enabled for this
-    /// decision. `None` on legacy traces only; the manager always sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remember_tool_approvals: Option<bool>,
 }
-/// A permission decision plus the authoritative manager [`PermissionEvent`] that
-/// produced it. The manager builds exactly one event per decision, sends one
-/// clone to the trace `event_tx`, and returns the identical event here so the
-/// shell can source content-free analytics fields (permission mode, wait time,
-/// classifier verdict/findings) from the manager rather than re-deriving them.
-///
-/// `event` is `None` for event-less paths (`AllowAll`, or a manager channel
-/// send/receive failure). Callers must omit manager-only analytics fields in
-/// that case instead of fabricating them. The shell never re-enqueues the
-/// returned event — the manager already emitted the sole trace copy.
 #[derive(Debug, Clone)]
 pub struct PermissionResolution {
     pub decision: Decision,
     pub event: Option<PermissionEvent>,
 }
-/// Identifies the type of client connecting to the agent.
-/// Used to determine which permission UI features to enable
-/// and which feedback/experiment client type to report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ClientType {
-    /// Generic client - show simple permission options with full command text
     #[default]
     #[serde(rename = "generic", alias = "grok-shell", alias = "grok_shell")]
     Generic,
-    /// Grok TUI client - show fancy options with interactive bash term selection
     #[serde(rename = "grok-tui", alias = "grok_tui")]
     GrokTUI,
-    /// Grok Web client - identified by clientIdentifier "grok-web"
     #[serde(rename = "grok_web")]
     GrokWeb,
-    /// Named client (`"nebula"`) — uses the generic permission UI
     #[serde(rename = "nebula")]
     Nebula,
-    /// IDE extension client (VS Code and similar) - identified by clientIdentifier "grok-code-extension"
     #[serde(rename = "extension")]
     Extension,
-    /// Grok Pager client - TUI-like terminal pager with interactive permission UI.
-    /// Treated identically to GrokTUI for permission options (gets bash highlights +
-    /// interactive selection). Reports as "pager" for telemetry attribution.
-    ///
-    /// Accepts both the hyphenated `"grok-pager"` (what the pager actually
-    /// sends over the wire, matching `PAGER_CLIENT_TYPE`) and the underscored
-    /// `"grok_pager"` form for symmetry with the rest of this enum.
     #[serde(rename = "grok-pager", alias = "grok_pager")]
     GrokPager,
-    /// Grok Desktop (Electron) client - identified by clientIdentifier "grok-desktop".
-    /// Uses TUI-style bash permission options (primary command extraction + prefix matching)
-    /// but without interactive `<`/`>` word selection.
     #[serde(rename = "grok_desktop")]
     Desktop,
 }
 impl ClientType {
-    /// Product token for the `User-Agent` header (e.g. `grok-pager`).
     pub fn user_agent_label(&self) -> &'static str {
         match self {
             Self::Generic => "grok-shell",
@@ -173,7 +82,6 @@ impl ClientType {
             Self::Desktop => "grok-desktop",
         }
     }
-    /// Resolve from ACP `clientIdentifier` string (e.g. `"grok-web"`, `"grok-desktop"`).
     pub fn from_client_identifier(id: Option<&str>) -> Self {
         match id {
             Some("grok-web") => Self::GrokWeb,
@@ -184,7 +92,6 @@ impl ClientType {
             _ => Self::Generic,
         }
     }
-    /// Label for feedback reporting and experiment filtering.
     pub fn feedback_label(&self) -> &'static str {
         match self {
             Self::GrokTUI | Self::GrokPager => "tui",
@@ -195,11 +102,6 @@ impl ClientType {
             Self::Desktop => "desktop",
         }
     }
-    /// Whether a classifier Block can raise a permission prompt for this client.
-    /// Generic (headless / unidentified) cannot: a `Cancelled` prompt aborts the
-    /// turn, so its Block stays `PolicyDeny`. Every other variant — including any
-    /// added later — defaults to prompting. Which client type a session gets is
-    /// the manager's concern, not this pure predicate's.
     pub const fn can_present_permission_prompt(self) -> bool {
         !matches!(self, Self::Generic)
     }
@@ -214,17 +116,12 @@ pub enum AccessKind {
     },
     Edit(String),
     Bash(String),
-    /// An MCP tool call: the tool name plus its raw JSON args. The args are
-    /// carried so the auto-mode classifier (and telemetry) can judge what the
-    /// call actually does, not just its name.
     MCPTool {
         name: String,
         input: serde_json::Value,
     },
     WebFetch(String),
     WebSearch(String),
-    /// Send content to an active subagent. Carries destination identity only;
-    /// model-authored message text never enters permission state or telemetry.
     AgentMessage {
         subagent_id: String,
     },
@@ -232,16 +129,10 @@ pub enum AccessKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow,
-    /// A policy `ask` rule matched; prompt the user.
     Ask,
     FollowupMessage(String),
     Reject(String),
-    /// A policy deny rule matched. Distinguished from `Reject` (user-initiated)
-    /// so the caller can return the error to the LLM instead of cancelling
-    /// the turn — the agent should see the denial and adapt.
     PolicyDeny(String),
-    /// The user cancelled the turn (e.g. Cmd+C during permission prompt).
-    /// Distinguished from `Reject` so the caller can return `StopReason::Cancelled`.
     Cancelled,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -280,43 +171,75 @@ impl<'de> Deserialize<'de> for EditPolicy {
         deserializer.deserialize_str(V)
     }
 }
-/// The requesting session's execution cwd for one permission request. Shared
-/// parent/subagent managers serve sessions whose cwd differs from the
-/// manager's, so path rules and edit-target resolution must anchor to where
-/// the requesting tool actually resolves paths, not where the manager lives.
 #[derive(Debug, Clone)]
 pub struct RequestPathContext {
     pub real_cwd: std::path::PathBuf,
     pub display_cwd: Option<std::path::PathBuf>,
 }
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookAsk {
+    pub hook_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+pub const HOOK_ASK_META_KEY: &str = "hookAsk";
+const HOOK_ASK_SEPARATOR: &str = " — ";
+impl HookAsk {
+    pub fn ask_line(&self) -> String {
+        let hook_name = &self.hook_name;
+        let reason = self.reason.as_deref().unwrap_or_default();
+        let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+        if reason.is_empty() {
+            format!("hook '{hook_name}' asks for confirmation")
+        } else {
+            format!("hook '{hook_name}' asks: {reason}")
+        }
+    }
+    pub fn prompt_header(&self, action: &str) -> String {
+        format!("{action}{HOOK_ASK_SEPARATOR}{}", self.ask_line())
+    }
+    pub fn strip_prompt_header<'a>(&self, title: &'a str) -> &'a str {
+        title
+            .strip_suffix(self.ask_line().as_str())
+            .and_then(|action| action.strip_suffix(HOOK_ASK_SEPARATOR))
+            .unwrap_or(title)
+    }
+}
+#[derive(Debug, Clone)]
+pub struct PermissionRequest {
+    pub access: AccessKind,
+    pub tool_call_update: acp::ToolCallUpdate,
+    pub path_context: Option<RequestPathContext>,
+    pub session_id: Option<String>,
+    pub subagent_type: Option<String>,
+    pub subagent_description: Option<String>,
+    pub hook_ask: Option<HookAsk>,
+}
+impl PermissionRequest {
+    pub fn new(access: AccessKind, tool_call_update: acp::ToolCallUpdate) -> Self {
+        Self {
+            access,
+            tool_call_update,
+            path_context: None,
+            session_id: None,
+            subagent_type: None,
+            subagent_description: None,
+            hook_ask: None,
+        }
+    }
+}
 #[allow(clippy::large_enum_variant)]
 pub enum PermissionCommand {
     Request {
-        access: AccessKind,
-        tool_call_update: acp::ToolCallUpdate,
-        path_context: Option<RequestPathContext>,
+        request: PermissionRequest,
         respond_to: oneshot::Sender<PermissionResolution>,
-        /// Session ID originating this request. Used to attribute
-        /// permission events to child subagents.
-        session_id: Option<String>,
-        /// Subagent type if this request is from a child (e.g. "explore").
-        subagent_type: Option<String>,
-        /// Subagent description if this request is from a child.
-        subagent_description: Option<String>,
     },
-    /// Set the YOLO mode (auto-approve all permissions)
     SetYoloMode(bool),
-    /// Set auto mode (LLM classifier for non-fast-path tools). Mutually
-    /// exclusive with YOLO at the handle level; enabling auto clears yolo
-    /// and vice versa when applied by the actor.
     SetAutoMode(bool),
-    /// Install or replace the permission classifier used in auto mode.
     SetClassifier(Option<std::sync::Arc<dyn super::auto_mode::PermissionClassifier>>),
-    /// Recent transcript turns for classifier context (compacted by caller).
     SetClassifierTranscript(Vec<super::auto_mode::ClassifierTurn>),
-    /// Project AGENTS.md instructions for classifier context (None clears).
     SetProjectInstructions(Option<String>),
-    /// Reset per-tool permission state back to defaults.
     ResetState,
     Shutdown,
 }
@@ -400,19 +323,12 @@ fn access_kind_from_dynamic(value: &serde_json::Value) -> AccessKind {
     }
     AccessKind::Read(None)
 }
-/// Permission policy configuration (duplicated from util/config.rs for Phase 1 move independence; identical).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct PermissionConfig {
     pub rules: Vec<PermissionRule>,
-    /// What to do when no rule or pre-decision resolves a tool call.
     #[serde(default)]
     pub prompt_policy: PromptPolicy,
-    /// Whether any settings layer explicitly set `permissions.defaultMode`.
-    /// `prompt_policy == Ask` alone cannot distinguish "nothing configured"
-    /// from an explicit `default` / `plan` / `acceptEdits` / invalid-value
-    /// fail-safe (all of which project to `Ask`), so mode-sensitive callers
-    /// (`apply_permission_mode_hint`) key on this provenance bit instead.
     #[serde(default)]
     pub default_mode_configured: bool,
 }
@@ -425,27 +341,15 @@ impl PermissionConfig {
         }
     }
 }
-/// What to do when the permission manager would normally prompt the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PromptPolicy {
-    /// Prompt the user for approval (default).
     #[default]
     Ask,
-    /// Deny without prompting (`permissions.defaultMode: "dontAsk"`).
     Deny,
-    /// Use the auto-mode classifier (`permissions.defaultMode: "auto"`).
-    /// Seeded into the permission manager's auto flag at session start.
     Auto,
-    /// Resolve as allow without prompting. Not reachable from settings
-    /// `defaultMode`; set only at spawn time for headless sessions whose
-    /// client pre-declared an allow answer
-    /// (`startupHints.permissionMode: "alwaysAllow"`). Hard deny rules and
-    /// pre-prompt rejections still apply — this only replaces the prompt
-    /// itself, exactly like a connected client answering allow.
     Allow,
 }
-/// A single permission rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRule {
     pub action: RuleAction,
@@ -462,7 +366,6 @@ pub enum PatternMode {
     Glob,
     Domain,
 }
-/// Action to take when rule matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum RuleAction {
@@ -471,7 +374,6 @@ pub enum RuleAction {
     Deny,
     Ask,
 }
-/// Tool filter for permission rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -488,33 +390,15 @@ pub enum ToolFilter {
     #[serde(rename = "agent_message", alias = "agentmessage")]
     AgentMessage,
 }
-/// Where a requirement/permission was loaded from (duplicated for claude_compat).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequirementSource {
     Unknown,
-    /// User-writable `~/.grok/requirements.toml` — untrusted for keeping a
-    /// catch-all allow under the pin (a restricted user can edit it).
-    Requirements {
-        path: std::path::PathBuf,
-    },
-    /// Root-owned system-dir `requirements.toml`. Distinguished at load time
-    /// (`RequirementsLayer::is_system`), never inferred from `path`.
-    SystemRequirements {
-        path: std::path::PathBuf,
-    },
-    ManagedSettings {
-        path: std::path::PathBuf,
-    },
-    /// Defaults tier; never an admin source.
-    ManagedConfig {
-        path: std::path::PathBuf,
-    },
-    Config {
-        path: std::path::PathBuf,
-    },
-    Settings {
-        path: std::path::PathBuf,
-    },
+    Requirements { path: std::path::PathBuf },
+    SystemRequirements { path: std::path::PathBuf },
+    ManagedSettings { path: std::path::PathBuf },
+    ManagedConfig { path: std::path::PathBuf },
+    Config { path: std::path::PathBuf },
+    Settings { path: std::path::PathBuf },
 }
 impl std::fmt::Display for RequirementSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -535,7 +419,6 @@ impl std::fmt::Display for RequirementSource {
         }
     }
 }
-/// A value paired with its source (duplicated).
 #[derive(Debug, Clone)]
 pub struct Sourced<T> {
     pub value: T,
@@ -544,6 +427,34 @@ pub struct Sourced<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hook_ask_header_keeps_the_action_and_names_the_hook() {
+        let with_reason = HookAsk {
+            hook_name: "guard".to_owned(),
+            reason: Some("confirm this".to_owned()),
+        };
+        let header = with_reason.prompt_header("Run `deploy`");
+        assert_eq!(header, "Run `deploy` — hook 'guard' asks: confirm this");
+        assert_eq!(with_reason.strip_prompt_header(&header), "Run `deploy`");
+        let bare = HookAsk {
+            hook_name: "guard".to_owned(),
+            reason: None,
+        };
+        assert_eq!(
+            bare.prompt_header("Run `deploy`"),
+            "Run `deploy` — hook 'guard' asks for confirmation"
+        );
+        let blank = HookAsk {
+            hook_name: "guard".to_owned(),
+            reason: Some("  \n".to_owned()),
+        };
+        assert_eq!(blank.ask_line(), bare.ask_line());
+        let multiline = HookAsk {
+            hook_name: "guard".to_owned(),
+            reason: Some("confirm\nthis".to_owned()),
+        };
+        assert_eq!(multiline.ask_line(), with_reason.ask_line());
+    }
     #[test]
     fn agent_message_tool_filter_serde_is_dedicated_and_unknown_is_rejected() {
         let filter: ToolFilter = serde_json::from_str(r#""agent_message""#).unwrap();

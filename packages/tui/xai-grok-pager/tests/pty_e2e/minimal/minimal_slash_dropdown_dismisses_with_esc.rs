@@ -2,10 +2,8 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// Minimal overlay host: typing `/` opens a prompt-anchored slash
-/// dropdown above the prompt (growing the pinned live viewport to make room),
-/// and a single Esc dismisses it. The pane-level slash handler must consume the
-/// Esc before the idle clear / rewind policy ever runs.
+/// In the minimal overlay host, typing `/` opens a slash dropdown above the prompt, growing the pinned live viewport to make room.
+/// A single Esc dismisses it: the pane's slash handler must consume the Esc before the idle clear or the rewind policy runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_slash_dropdown_dismisses_with_esc() {
@@ -13,9 +11,8 @@ async fn minimal_slash_dropdown_dismisses_with_esc() {
     let mut harness = spawn_minimal(&content);
     wait_minimal_ready(&mut harness);
 
-    // "/mod" narrows to `/model`, whose description renders only inside the
-    // dropdown — not in the typed text nor the `minimal · /help` status line —
-    // so it's an unambiguous "dropdown is open" sentinel.
+    // "/mod" narrows to `/model`, whose description renders only inside the dropdown, not in the typed text or the `minimal · /help` status line
+    // Seeing it therefore proves the dropdown is open
     inject_keys_paced(&mut harness, b"/mod");
     harness
         .wait_for_text("Switch the active model", Duration::from_secs(10))
@@ -29,7 +26,7 @@ async fn minimal_slash_dropdown_dismisses_with_esc() {
         !screen.contains("Switch the active model"),
         "Esc must dismiss the slash dropdown\nscreen:\n{screen}"
     );
-    // Dismiss only — Esc must not have armed the idle clear or opened rewind.
+    // Dismiss only: Esc must not fall through to the idle clear or open rewind
     assert!(
         !screen.contains("press again to clear"),
         "slash-dropdown Esc must not fall through to the idle clear\nscreen:\n{screen}"

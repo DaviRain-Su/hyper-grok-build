@@ -1447,8 +1447,73 @@ async fn remove_stale_pager(bin_dir: &std::path::Path) {
     }
 }
 
-/// Fetch a CLI object from GCS. On Windows the public bucket may use a `.exe`
-/// suffix; try that first, then the extensionless name used on macOS/Linux.
+async fn download_plain(url: &str, dest: &std::path::Path, with_progress: bool) -> Result<()> {
+    if with_progress {
+        download_with_progress(url, dest).await
+    } else {
+        download_silent(url, dest).await
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Codec {
+    Zstd,
+    Gzip,
+}
+
+// Cap decode output so a crafted or corrupt archive cannot expand unbounded and
+// fill the disk. A real CLI binary is ~170 MiB; 512 MiB leaves 3x headroom.
+const MAX_DECODED_BYTES: u64 = 512 * 1024 * 1024;
+
+async fn download_and_decode(
+    url: &str,
+    dest: &std::path::Path,
+    codec: Codec,
+    with_progress: bool,
+) -> Result<()> {
+    let comp_tmp = tmp_download_path(dest);
+    if let Err(e) = download_plain(url, &comp_tmp, with_progress).await {
+        let _ = tokio::fs::remove_file(&comp_tmp).await;
+        return Err(e);
+    }
+
+    let bin_tmp = tmp_download_path(dest);
+    let (comp_in, bin_out) = (comp_tmp.clone(), bin_tmp.clone());
+    let decoded = tokio::task::spawn_blocking(move || -> Result<()> {
+        use std::io::Read as _;
+        let src = std::fs::File::open(&comp_in)
+            .with_context(|| format!("open compressed download {}", comp_in.display()))?;
+        let decoder: Box<dyn std::io::Read> = match codec {
+            Codec::Zstd => {
+                Box::new(zstd::stream::read::Decoder::new(src).context("init zstd decoder")?)
+            }
+            Codec::Gzip => Box::new(flate2::read::GzDecoder::new(src)),
+        };
+        let mut out = std::fs::File::create(&bin_out)
+            .with_context(|| format!("create decoded binary {}", bin_out.display()))?;
+        let mut capped = decoder.take(MAX_DECODED_BYTES + 1);
+        let written = std::io::copy(&mut capped, &mut out).context("decode")?;
+        if written > MAX_DECODED_BYTES {
+            anyhow::bail!("decoded artifact exceeds the {MAX_DECODED_BYTES}-byte cap");
+        }
+        Ok(())
+    })
+    .await;
+    let _ = tokio::fs::remove_file(&comp_tmp).await;
+
+    match decoded {
+        Ok(Ok(())) => publish_downloaded_artifact(&bin_tmp, dest).await,
+        Ok(Err(e)) => {
+            let _ = tokio::fs::remove_file(&bin_tmp).await;
+            Err(e)
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&bin_tmp).await;
+            Err(anyhow::anyhow!("decode task panicked: {e}"))
+        }
+    }
+}
+
 async fn download_cli_artifact_from_gcs(
     gcs_base_url: &str,
     object_name: &str,
@@ -1456,25 +1521,28 @@ async fn download_cli_artifact_from_gcs(
     with_progress: bool,
 ) -> Result<()> {
     let base = gcs_base_url.trim_end_matches('/');
-    #[cfg(windows)]
-    {
-        let with_exe = format!("{}/{}.exe", base, object_name);
-        let r = if with_progress {
-            download_with_progress(&with_exe, dest).await
-        } else {
-            download_silent(&with_exe, dest).await
-        };
-        match r {
+
+    for (suffix, codec) in [("zst", Codec::Zstd), ("gz", Codec::Gzip)] {
+        let url = format!("{base}/{object_name}.{suffix}");
+        match download_and_decode(&url, dest, codec, with_progress).await {
             Ok(()) => return Ok(()),
-            Err(e) => tracing::debug!("{with_exe} not found, trying extensionless: {e}"),
+            Err(e) => tracing::debug!("compressed .{suffix} unusable, trying next: {e}"),
         }
     }
-    let url = format!("{}/{}", base, object_name);
-    if with_progress {
-        download_with_progress(&url, dest).await
-    } else {
-        download_silent(&url, dest).await
+
+    let mut plain = Vec::new();
+    #[cfg(windows)]
+    plain.push(format!("{base}/{object_name}.exe"));
+    plain.push(format!("{base}/{object_name}"));
+
+    let mut last_err = None;
+    for url in &plain {
+        match download_plain(url, dest, with_progress).await {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = Some(e),
+        }
     }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no artifact at {base}/{object_name}")))
 }
 
 /// Returns the version that was actually activated.
@@ -1750,8 +1818,7 @@ async fn activate_verified_download(download: &VerifiedDownload) -> Result<()> {
 async fn regenerate_completions(binary: &std::path::Path, grok_home: &std::path::Path) {
     // Derive $HOME independently — grok_home may be overridden via GROK_HOME
     // env var, so grok_home.parent() isn't necessarily the user's home dir.
-    #[allow(deprecated)]
-    let user_home = std::env::home_dir().unwrap_or_default();
+    let user_home = xai_dirs::home_dir().unwrap_or_default();
 
     let completions: &[(&str, std::path::PathBuf)] = &[
         ("bash", grok_home.join("completions/bash/grok.bash")),

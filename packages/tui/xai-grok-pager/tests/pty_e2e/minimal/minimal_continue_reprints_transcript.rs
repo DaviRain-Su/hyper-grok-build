@@ -2,12 +2,9 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// Resuming a minimal session with `--continue` reprints
-/// the prior transcript into native scrollback. Minimal has no separate history
-/// pane (the terminal owns history), so a resumed session would otherwise look
-/// empty — rather than a compact resume marker, minimal reprints the full
-/// transcript instead. This asserts the prior
-/// turn's content reappears after resume and a follow-up turn still works.
+/// Resuming a minimal session with `--continue` reprints the full prior transcript into native scrollback, not just a compact resume marker.
+/// Minimal has no separate history pane (the terminal owns history), so a resumed session would otherwise look empty.
+/// This asserts the prior turn's content reappears after resume and a follow-up turn still works.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_continue_reprints_transcript() {
@@ -26,18 +23,16 @@ async fn minimal_continue_reprints_transcript() {
     first
         .wait_for_full_text(&turn_sentinel(1), Duration::from_secs(30))
         .expect("turn 1 committed to scrollback");
-    // Idle before quit so the agent finishes turn completion + updates.jsonl
-    // flush. Quitting mid-finalize under suite load left `--continue` loading a
-    // session with the user message but no assistant payload (resume then
-    // shows "Loading session…" / empty chrome past RESUME_TIMEOUT).
+    // Idle before quit so the agent finishes the turn and flushes updates.jsonl
+    // Quitting during that finalize under suite load left `--continue` loading a session with the user message but no assistant payload
+    // Resume then showed "Loading session…" or an empty UI past RESUME_TIMEOUT
     first
         .wait_for_text(MINIMAL_IDLE_SENTINEL, Duration::from_secs(15))
         .expect("turn 1 returned to idle before quit");
     first.update(Duration::from_millis(300));
     quit_minimal(&mut first);
 
-    // Resume the same session. The transcript is reprinted into native
-    // scrollback (no separate history pane in minimal).
+    // Resume the same session
     let mut resumed = spawn_minimal_in_dir(
         &content,
         DEFAULT_ROWS,

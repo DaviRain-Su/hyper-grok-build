@@ -2,14 +2,11 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Regression, Linux-hermetic: under Otty (`TERM_PROGRAM=otty` — the
-/// only terminal known to deliver macOS IME commits as bracketed paste),
-/// bracketed text that did not come from the system clipboard must not attach
-/// the unrelated clipboard image. Any other terminal keeps the historical
-/// probe behavior, asserted here with a second, TERM_PROGRAM-less spawn. A
-/// fake `wl-paste`/`wl-copy` pair on `PATH` plays the clipboard; the sibling
-/// `bracketed_ime_paste_skips_clipboard_image_macos` covers the reported
-/// agent-prompt surface on a real pasteboard.
+/// Regression, hermetic on Linux: bracketed text that did not come from the system clipboard must not attach the unrelated clipboard image.
+/// This only applies under Otty (`TERM_PROGRAM=otty`), the only terminal known to deliver macOS IME commits as bracketed paste.
+/// Any other terminal keeps the historical probe behavior, asserted here with a second spawn that has no TERM_PROGRAM.
+/// A fake `wl-paste`/`wl-copy` pair on `PATH` plays the clipboard.
+/// The sibling `bracketed_ime_paste_skips_clipboard_image_macos` covers the agent prompt, where the bug was reported, on a real pasteboard.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
@@ -55,8 +52,7 @@ async fn bracketed_ime_paste_skips_clipboard_image_linux() {
         ("DISPLAY", ""),
     ];
 
-    /// Spawn the pager with `extra_env` and drive it to the dashboard, where
-    /// bracketed paste routes to the dispatch input.
+    /// Spawn the pager with `extra_env` and drive it to the dashboard, where bracketed paste routes to the dispatch input.
     fn spawn_on_dashboard(
         content: &ContentController,
         base_env: &[(&str, &str)],
@@ -95,7 +91,7 @@ async fn bracketed_ime_paste_skips_clipboard_image_linux() {
         harness
     }
 
-    // ── Otty: IME-style bracketed paste, image-only clipboard → no image ──
+    // ── Otty: IME-style bracketed paste while the clipboard holds only an image; no image attaches ──
     let mut harness =
         spawn_on_dashboard(&content, &base_env, &[EnvOp::set("TERM_PROGRAM", "otty")]);
     harness
@@ -111,7 +107,7 @@ async fn bracketed_ime_paste_skips_clipboard_image_linux() {
         harness.screen_contents()
     );
 
-    // ── Otty (positive control): payload == clipboard caption → image ──
+    // ── Otty (positive control): the payload matches the clipboard caption, so the image attaches ──
     std::fs::write(&text_file, CAPTION.as_bytes()).expect("genuine-paste clipboard text");
     harness
         .inject_keys(format!("\x1b[200~{CAPTION}\x1b[201~").as_bytes())
@@ -129,8 +125,7 @@ async fn bracketed_ime_paste_skips_clipboard_image_linux() {
     );
     harness.quit().expect("clean quit");
 
-    // ── No TERM_PROGRAM (any other terminal): historical behavior intact —
-    //    the same mismatched bracketed payload still attaches the image ──
+    // ── No TERM_PROGRAM (any other terminal): historical behavior intact, the same mismatched bracketed payload still attaches the image ──
     std::fs::write(&text_file, b"").expect("reset clipboard text");
     let mut harness = spawn_on_dashboard(&content, &base_env, &[]);
     harness

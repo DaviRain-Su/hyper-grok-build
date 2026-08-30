@@ -1,7 +1,4 @@
-//! Reusable buffers and internal data types for markdown parsing and rendering.
-//!
-//! This module contains all the intermediate data structures used by
-//! MarkdownHighlighter during parsing and rendering.
+//! Reusable buffers and internal data types used by `MarkdownHighlighter` during markdown parsing and rendering.
 
 use std::ops::Range;
 
@@ -18,12 +15,10 @@ pub struct Highlight {
 
 /// Syntax-highlighted code block replacement.
 ///
-/// Stores the raw highlighted spans per line (intermediate representation).
-/// This allows rendering to either ANSI strings or ratatui Lines on demand.
+/// The raw spans render to either ANSI strings or ratatui Lines on demand.
 #[derive(Debug, Clone)]
 pub struct Replace {
-    /// Raw highlighted spans per line: Vec<(style, text)>.
-    /// Each inner Vec represents one line of the code block.
+    /// Raw highlighted spans; each inner Vec is one line of the code block.
     pub highlighted: Vec<Vec<(SyntectStyle, String)>>,
     /// Source byte range this replaces.
     pub range: Range<usize>,
@@ -45,16 +40,14 @@ pub struct LinkTarget {
 
 /// Parse-time record of a closed fenced code block.
 ///
-/// Populated in the `Tag::CodeBlock` arm of `MarkdownParser`; consumed during
-/// rendering (see `output::build_code_block_spans`) to produce the public
-/// [`crate::CodeBlockSpan`] once the output line range is known. Only **closed**
-/// fences are recorded — an unterminated trailing fence yields no entry.
+/// Populated in the `Tag::CodeBlock` arm of `MarkdownParser`.
+/// Consumed during rendering (see `output::build_code_block_spans`) to produce [`crate::CodeBlockSpan`] once the output line range is known.
+/// Only **closed** fences are recorded; an unterminated trailing fence yields no entry.
 #[derive(Debug, Clone)]
 pub struct CodeBlockMeta {
     /// Fence info string (e.g. `"mermaid"`), verbatim from pulldown-cmark.
     pub info: String,
-    /// De-prefixed body content (container markers stripped, CRLF normalized) —
-    /// pulldown's merged body text, i.e. the clean code/diagram source.
+    /// De-prefixed body content (container markers stripped, CRLF normalized): pulldown's merged body text, the clean code/diagram source.
     pub body: String,
     /// Source byte range of the fence body (delimiter lines excluded).
     pub body_source_range: Range<usize>,
@@ -69,11 +62,9 @@ pub struct Transform {
     pub(crate) to: String,
     /// Apply this transform even in raw (non-pretty) mode.
     ///
-    /// Invariant: `to.len() == range.end - range.start` and the
-    /// substitution must stay valid UTF-8 at the same byte offsets.
-    /// `render_ansi` substitutes force transforms in place into a byte
-    /// buffer; violating the invariant panics at `copy_from_slice` or
-    /// `String::from_utf8` before any bytes escape the renderer.
+    /// Invariant: `to.len() == range.end - range.start` and the substitution must stay valid UTF-8 at the same byte offsets.
+    /// `render_ansi` substitutes force transforms in place into a byte buffer.
+    /// Violating the invariant panics at `copy_from_slice` or `String::from_utf8` before any bytes escape the renderer.
     pub(crate) force: bool,
 }
 
@@ -84,8 +75,8 @@ pub struct CellSpan {
     pub bold: bool,
     pub italic: bool,
     pub code: bool,
-    /// Hyperlink (url, id) when this span is inside a `[label](url)` link
-    /// or autolink inside a table cell. `None` for plain text.
+    /// Hyperlink (url, id) when this span is inside a `[label](url)` link or autolink inside a table cell.
+    /// `None` for plain text.
     pub link: Option<(String, u32)>,
 }
 
@@ -123,7 +114,6 @@ impl StyledCell {
         self.spans.iter().map(|s| s.text.as_str()).collect()
     }
 
-    /// Clear the cell content.
     pub fn clear(&mut self) {
         self.spans.clear();
     }
@@ -136,7 +126,7 @@ pub struct TableState {
     pub alignments: Vec<pulldown_cmark::Alignment>,
     /// Header row cells.
     pub header: Vec<StyledCell>,
-    /// Body rows (each row is a Vec of styled cells).
+    /// Body rows.
     pub rows: Vec<Vec<StyledCell>>,
     /// Current row being built.
     pub current_row: Vec<StyledCell>,
@@ -146,10 +136,8 @@ pub struct TableState {
     pub cell_bold: bool,
     pub cell_italic: bool,
     pub cell_code: bool,
-    /// Current link state: `Some((url, id))` while inside a `Tag::Link` /
-    /// `Tag::Image` inside a table cell.  Text events captured while this
-    /// is set produce link-tagged `CellSpan`s so the table renderer can
-    /// apply link styling and emit `HyperlinkTarget`s.
+    /// Current link state: `Some((url, id))` while inside a `Tag::Link` / `Tag::Image` inside a table cell.
+    /// Text events while this is set produce link-tagged `CellSpan`s so the table renderer can apply link styling and emit `HyperlinkTarget`s.
     pub cell_link: Option<(String, u32)>,
     /// Whether we're in the header section.
     pub in_header: bool,
@@ -186,12 +174,30 @@ impl TableState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellJoin {
+    Tight,
+    /// Exact source substring omitted between fragments (usually `" "`).
+    Gap(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableCellCopy {
+    pub text: String,
+    pub joins: Vec<CellJoin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableCopyMeta {
+    pub line_index: usize,
+    pub line_count: usize,
+    pub n_cols: usize,
+    pub cells: Vec<TableCellCopy>,
+}
+
 /// One hyperlink target inside a formatted table.
 ///
-/// Coordinates are local to the table's `styled_lines`:
-/// `line_offset` indexes into `TableReplace::styled_lines`; the renderer
-/// adds the current absolute line count to produce a public
-/// `HyperlinkTarget`.
+/// Coordinates are local to the table's `styled_lines`; the renderer adds the current absolute line count to produce a public `HyperlinkTarget`.
 #[derive(Debug, Clone)]
 pub struct TableHyperlink {
     /// Index within `TableReplace::styled_lines`.
@@ -215,23 +221,19 @@ pub struct TableReplace {
     pub range: Range<usize>,
     /// Per-rendered-line source offset from the table start.
     ///
-    /// Maps each entry in `styled_lines` to the source line offset
-    /// within the table (0 = header, 1 = separator, 2+ = body rows).
-    /// Used by the renderer to produce correct `line_source_map` entries
-    /// instead of the naive `table_start + line_idx` which overshoots
-    /// when the rendered table has more lines than the source (borders,
-    /// separators, wrapped cells).
+    /// Maps each entry in `styled_lines` to the source line offset within the table (0 = header, 1 = separator, 2+ = body rows).
+    /// The renderer uses this to produce correct `line_source_map` entries instead of the naive `table_start + line_idx`.
+    /// The naive form overshoots when the rendered table has more lines than the source (borders, separators, wrapped cells).
     pub line_source_offsets: Vec<usize>,
     /// Hyperlinks for `[label](url)` / autolinks inside table cells.
     ///
-    /// The paragraph link path (`LinkTarget` -> `chunk_link_offsets`)
-    /// cannot project links onto a rendered table because the table
-    /// replace consumes the entire source range — no text chunk's
-    /// rendering walks over the link text.  The parser instead emits
-    /// `TableHyperlink`s during table formatting with positions in
-    /// table-local coordinates; the renderer translates them to absolute
-    /// `HyperlinkTarget`s.
+    /// The paragraph link path (`LinkTarget` then `chunk_link_offsets`) cannot project links onto a rendered table.
+    /// The table replace consumes the entire source range, so no text chunk's rendering walks over the link text.
+    /// The parser instead emits `TableHyperlink`s during table formatting, with positions in table-local coordinates.
+    /// The renderer translates them to absolute `HyperlinkTarget`s.
     pub hyperlinks: Vec<TableHyperlink>,
+    pub cell_copies: Vec<TableCellCopy>,
+    pub n_cols: usize,
 }
 
 /// Rendered Mermaid diagram replacement for pretty mode rendering.
@@ -253,9 +255,9 @@ pub fn unicode_display_width(s: &str) -> usize {
 
 /// Polyfill for `str::floor_char_boundary` (stable in Rust 1.91+).
 ///
-/// Snaps `index` down to the nearest UTF-8 char boundary in `s`.  Indices
-/// past the end of `s` are clamped to `s.len()`.  Replace with the std
-/// method once the workspace toolchain is bumped to 1.91+.
+/// Snaps `index` down to the nearest UTF-8 char boundary in `s`.
+/// Indices past the end of `s` are clamped to `s.len()`.
+/// Replace with the std method once the workspace toolchain is bumped to 1.91+.
 pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
     let mut i = index.min(s.len());
     while i > 0 && !s.is_char_boundary(i) {
@@ -266,9 +268,9 @@ pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
 
 /// Polyfill for `str::ceil_char_boundary` (stable in Rust 1.91+).
 ///
-/// Snaps `index` up to the nearest UTF-8 char boundary in `s`.  Indices
-/// past the end of `s` are clamped to `s.len()`.  Replace with the std
-/// method once the workspace toolchain is bumped to 1.91+.
+/// Snaps `index` up to the nearest UTF-8 char boundary in `s`.
+/// Indices past the end of `s` are clamped to `s.len()`.
+/// Replace with the std method once the workspace toolchain is bumped to 1.91+.
 pub(crate) fn ceil_char_boundary(s: &str, index: usize) -> usize {
     let mut i = index.min(s.len());
     while i < s.len() && !s.is_char_boundary(i) {
@@ -299,22 +301,7 @@ pub struct RenderEvent {
 
 /// Reusable buffers for markdown highlighting and rendering.
 ///
-/// All vectors are cleared (keeping capacity) between renders, eliminating
-/// allocation overhead in the streaming hot path.
-///
-/// # Buffer Categories
-///
-/// **Parse output buffers** - populated during `run()`, read-only during `render()`:
-/// - `highlights`: Style ranges for inline formatting
-/// - `replaces`: Syntax-highlighted code blocks
-/// - `transforms`: Character substitutions (e.g., bullets)
-/// - `untagged_code_ranges`: Code blocks without language tags
-/// - `table_replaces`: Formatted table replacements
-///
-/// **Render scratch buffers** - temporary storage during `render()`:
-/// - `render_events`: Sorted event queue for the render loop
-/// - `current_spans`: Building current line's spans
-/// - `active_highlights`: Stack of active highlight indices
+/// All vectors are cleared (keeping capacity) between renders, eliminating allocation overhead in the streaming hot path.
 pub struct MarkdownBuffers {
     // Parse output buffers (written by run(), read by render())
     pub highlights: Vec<Highlight>,

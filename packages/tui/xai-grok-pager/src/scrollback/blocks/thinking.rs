@@ -1,5 +1,3 @@
-//! ThinkingBlock - displays agent thinking/reasoning content with markdown support.
-
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use unicode_width::UnicodeWidthStr;
@@ -15,19 +13,17 @@ use super::markdown_content::MarkdownContent;
 use super::quote_bar::QuoteBarStrip;
 use crate::appearance::AppearanceConfig;
 
-/// TODO: hard-coded because `AppView::minimal_key_intercept` matches this chord
-/// literally instead of going through the keybinding registry. Resolve the
-/// label from the registry once it does, so a remap is advertised correctly.
+/// TODO: hard-coded because `AppView::minimal_key_intercept` matches this chord literally instead of going through the keybinding registry.
+/// Resolve the label from the registry once it does, so a remap is advertised correctly.
 const EXPAND_HINT: &str = "ctrl+e to expand";
 
 const EXPAND_HINT_GAP: &str = "  ";
 
-/// Append the dim `(ctrl+e to expand)` affordance to a collapsed header line.
+/// Append the dim `(ctrl+e to expand)` hint to a collapsed header line.
 ///
-/// The `Collapsed` guard matters because `render_empty_placeholder` reuses the
-/// collapsed renderer for an empty body in other modes, where the hint would be
-/// a lie. Skipping the hint when it does not fit keeps the header out of
-/// truncation and off a second row (K5).
+/// The `Collapsed` guard matters because `render_empty_placeholder` reuses the collapsed renderer for an empty body in other modes.
+/// There the hint would be a lie.
+/// Skipping the hint when it does not fit keeps the header out of truncation and off a second row.
 fn append_expand_hint(line: Line<'static>, ctx: &BlockContext) -> Line<'static> {
     if !ctx
         .appearance
@@ -49,16 +45,13 @@ fn append_expand_hint(line: Line<'static>, ctx: &BlockContext) -> Line<'static> 
     line
 }
 
-/// The de-emphasis patch applied to every reasoning body span when
-/// [`crate::appearance::ThinkingConfig::body_dim_italic`] is on.
+/// The de-emphasis patch applied to every reasoning body span when [`crate::appearance::ThinkingConfig::body_dim_italic`] is on.
 ///
-/// Attributes only, no foreground: the flag exists because minimal's
-/// terminal-native palette makes color-based de-emphasis a no-op (design doc
-/// §6.16), and SGR dim/italic survive `NO_COLOR` and either polarity.
+/// Attributes only, no foreground: minimal's terminal-native palette makes color-based de-emphasis a no-op.
+/// SGR dim/italic survive `NO_COLOR` and either polarity.
 ///
-/// Legacy Windows ConHost has no italic SGR and renders the request as palette
-/// noise. Terminals that merely *ignore* SGR 3 (tmux without `sitm`) are not
-/// gated — there is no reliable probe, and they keep the other two cues.
+/// Legacy Windows ConHost has no italic SGR and renders the request as palette noise.
+/// Terminals that merely *ignore* SGR 3 (tmux without `sitm`) are not gated: there is no reliable probe, and they keep the other two cues.
 fn body_emphasis_patch(ctx: &BlockContext) -> Option<Style> {
     if !ctx.appearance.scrollback.blocks.thinking.body_dim_italic {
         return None;
@@ -72,10 +65,9 @@ fn body_emphasis_patch(ctx: &BlockContext) -> Option<Style> {
 
 /// Block displaying agent thinking content with markdown rendering.
 ///
-/// Uses [`MarkdownContent`] for incremental markdown rendering with cached
-/// word-wrapping, plus special display modes:
+/// Uses [`MarkdownContent`] for incremental markdown rendering with cached word-wrapping, plus special display modes:
 /// - **Collapsed**: Shows "Thought" or "Thought for Xs" if time is set
-/// - **Truncated** (default): Shows "…" + last N lines
+/// - **Truncated** (default): Shows "…" then the last N lines
 /// - **Expanded**: Full content
 #[derive(Debug, Clone)]
 pub struct ThinkingBlock {
@@ -108,14 +100,12 @@ impl ThinkingBlock {
 
     /// Create an empty streaming block for **historical replay**.
     ///
-    /// Unlike [`streaming`], this does NOT arm the local `started_at` timer.
-    /// Replay re-applies a whole session's persisted chunks back-to-back in
-    /// microseconds, so a local wall-clock timer would freeze to ~0ms in
-    /// [`finish`] and render a bogus "Thought for 0.0s". With no local timer
-    /// `finish` leaves `elapsed_time_ms` unset, so
-    /// [`ScrollbackState::finish_running_with_time`] falls back to the
-    /// server-reported elapsed (derived from `agentTimestampMs - streamStartMs`),
-    /// which is the real duration the user originally experienced.
+    /// Unlike [`streaming`], this does NOT start the local `started_at` timer.
+    /// Replay re-applies a whole session's persisted chunks back-to-back in microseconds.
+    /// A local wall-clock timer would then freeze to ~0ms in [`finish`] and render a bogus "Thought for 0.0s".
+    /// With no local timer, `finish` leaves `elapsed_time_ms` unset.
+    /// [`ScrollbackState::finish_running_with_time`] then falls back to the server elapsed.
+    /// That server elapsed (`agentTimestampMs - streamStartMs`) is the real duration the user originally experienced.
     pub fn streaming_replay() -> Self {
         Self {
             content: MarkdownContent::streaming(),
@@ -136,14 +126,12 @@ impl ThinkingBlock {
 
     /// Finish streaming and do a full re-render for safety.
     ///
-    /// Freezes the local elapsed time from `started_at` so the collapsed
-    /// view shows the actual wall-clock duration the user experienced,
-    /// not the server-reported delta.
+    /// Freezes the local elapsed time from `started_at`.
+    /// The collapsed view then shows the actual wall-clock duration the user experienced, not the server-reported delta.
     pub fn finish(&mut self) {
         self.content.finish();
         // Freeze local elapsed if no server time has been set.
-        // The local timer (started_at → now) captures the full duration
-        // from block creation to finish, which is what the user perceives.
+        // The local timer (started_at to now) captures the full duration from block creation to finish, which is what the user perceives
         if self.elapsed_time_ms.is_none()
             && let Some(start) = self.started_at
         {
@@ -158,8 +146,7 @@ impl ThinkingBlock {
 
     /// Get the elapsed thinking time in milliseconds.
     ///
-    /// Returns server-reported time if available, otherwise live elapsed
-    /// from `started_at` (for running thinking blocks).
+    /// Returns server-reported time if available, otherwise live elapsed from `started_at` (for running thinking blocks).
     pub fn elapsed_time_ms(&self) -> Option<i64> {
         match self.elapsed_time_ms {
             Some(ms) => Some(ms),
@@ -220,9 +207,8 @@ impl ThinkingBlock {
     /// Build the header line: "Thinking..." (running) or "Thought for Xs" (done).
     ///
     /// Respects muted_collapsed: when collapsed and muting is on, uses muted style.
-    /// When the entry is selected, the muted treatment is suppressed and
-    /// the label is forced to the bright/primary style so the selected
-    /// header reads as undimmed — same rule as the tool-call variants.
+    /// When the entry is selected, the muted treatment is suppressed and the label is forced to the bright/primary style.
+    /// The selected header then reads as undimmed, the same rule as the tool-call variants.
     fn header_line(&self, ctx: &BlockContext) -> Line<'static> {
         let theme = Theme::current();
         let tool_cfg = &ctx.appearance.scrollback.blocks.tool;
@@ -230,8 +216,7 @@ impl ThinkingBlock {
         let is_collapsed = ctx.mode == DisplayMode::Collapsed;
         let is_muted = is_collapsed && ctx.mute_when_collapsed(tool_cfg.muted_collapsed);
 
-        // Bright on selection or config opt-in, but never while muted
-        // — keeps legacy-ConHost collapse uniformly muted.
+        // Bright on selection or config opt-in, but never while muted; keeps legacy-ConHost collapse uniformly muted
         let use_bright = !is_muted && (ctx.is_selected || thinking_cfg.header_bright);
 
         let label_style = if use_bright {
@@ -264,7 +249,7 @@ impl ThinkingBlock {
         }
     }
 
-    /// Prepend header + blank line to output, if header config is enabled.
+    /// Prepend header and blank line to output, if header config is enabled.
     fn maybe_prepend_header(&self, mut output: BlockOutput, ctx: &BlockContext) -> BlockOutput {
         if ctx.appearance.scrollback.blocks.thinking.header {
             output.lines.insert(0, BlockLine::separator(Line::from("")));
@@ -275,14 +260,12 @@ impl ThinkingBlock {
         output
     }
 
-    /// One wrapped markdown line → selectable, blended [`BlockLine`].
+    /// One wrapped markdown line rendered as a selectable, blended [`BlockLine`].
     ///
-    /// Quote-bar exclusion must run before blending: blending rewrites span
-    /// fg colors, which would defeat the bar-style detection (it preserves
-    /// span structure, so the computed span indices stay valid after it).
+    /// Quote-bar exclusion must run before blending: blending rewrites span fg colors, which would defeat the bar-style detection.
+    /// Blending preserves span structure, so the computed span indices stay valid after it.
     ///
-    /// `emphasis` ([`body_emphasis_patch`]) is applied AFTER the blend for the
-    /// same reason: patching styles preserves span structure.
+    /// `emphasis` ([`body_emphasis_patch`]) is applied AFTER the blend for the same reason: patching styles preserves span structure.
     fn thinking_body_line(
         line: &Line<'static>,
         joiner: &Option<String>,
@@ -307,7 +290,7 @@ impl ThinkingBlock {
         block_line
     }
 
-    /// Render truncated view: optional header + "…" + last N lines.
+    /// Render truncated view: optional header, then "…", then the last N lines.
     fn render_truncated(&self, ctx: &BlockContext) -> BlockOutput {
         let config = &ctx.appearance.scrollback.blocks.thinking;
         let n = config.truncated_lines as usize;
@@ -349,7 +332,7 @@ impl ThinkingBlock {
                 return self.maybe_prepend_header(output, ctx);
             }
 
-            // Build truncated output: "…" + last N lines
+            // Build truncated output: "…" then the last N lines
             let theme = Theme::current();
             let mut output_lines = Vec::with_capacity(n + 1);
 
@@ -418,8 +401,7 @@ impl ThinkingBlock {
         })
     }
 
-    /// Placeholder for empty thinking block — shows the same header
-    /// as collapsed mode ("Thinking…" or "Thought for Xs").
+    /// Placeholder for empty thinking block; shows the same header as collapsed mode ("Thinking…" or "Thought for Xs").
     fn render_empty_placeholder(&self, ctx: &BlockContext) -> BlockOutput {
         self.render_collapsed(ctx)
     }
@@ -439,7 +421,7 @@ impl BlockContent for ThinkingBlock {
         if !cfg.accent_enabled {
             return None;
         }
-        // No accent when collapsed — accent is only for expanded/truncated content.
+        // No accent when collapsed; accent is only for expanded/truncated content
         // TODO: revisit if we want accent in collapsed state with header enabled.
         if ctx.mode == DisplayMode::Collapsed {
             return None;
@@ -530,7 +512,7 @@ impl BlockContent for ThinkingBlock {
     }
 
     fn preamble(&self, ctx: &BlockContext) -> Option<Text<'static>> {
-        // Use expanded (bright) styling — not muted collapsed
+        // Use expanded (bright) styling, not muted collapsed
         let bright_ctx = BlockContext {
             mode: DisplayMode::Expanded,
             ..ctx.clone()
@@ -643,8 +625,7 @@ mod tests {
         }
     }
 
-    /// The `NO_COLOR` hole: under the terminal-native palette the `bg_blend`
-    /// fade is a no-op, so the distinction has to live in SGR attributes.
+    /// Under the terminal-native (`NO_COLOR`) palette the `bg_blend` fade is a no-op, so the distinction has to live in SGR attributes.
     #[test]
     fn thinking_body_dim_italic_survives_the_terminal_native_palette() {
         let _guard = crate::theme::cache::test_lock()
@@ -709,8 +690,7 @@ mod tests {
         assert_eq!(out.lines.len(), 1, "the hint must not add a row");
         assert!(text_of(&out).contains(EXPAND_HINT), "{:?}", text_of(&out));
 
-        // Too narrow for header + hint: the header must not be pushed into
-        // truncation by a hint that then gets dropped anyway.
+        // Too narrow for header and hint: the header must not be pushed into truncation by a hint that then gets dropped anyway
         let narrow = block.output(&hinted(DisplayMode::Collapsed, 12));
         assert_eq!(narrow.lines.len(), 1);
         let narrow_text = text_of(&narrow);
@@ -727,8 +707,7 @@ mod tests {
             assert!(!text_of(&out).contains(EXPAND_HINT), "{mode:?}");
         }
 
-        // An empty body reuses the collapsed renderer as its placeholder in
-        // every mode; nothing to open there either.
+        // An empty body reuses the collapsed renderer as its placeholder in every mode; nothing to open there either
         let empty = ThinkingBlock::new("");
         for mode in [DisplayMode::Expanded, DisplayMode::Truncated] {
             let out = empty.output(&hinted(mode, 60));

@@ -1,21 +1,16 @@
-//! Claude session import dispatchers.
-
 use crate::app::actions::Effect;
 use crate::app::app_view::AppView;
 
 /// Open the interactive Claude-import modal on the welcome screen.
 ///
-/// Scans for importable items. If empty, shows a brief startup warning and
-/// marks dismissed. Otherwise stores modal state on AppView so welcome
-/// rendering shows the modal.
+/// When the scan finds nothing importable, records the dismissal and shows an info warning instead of the modal.
 pub(super) fn dispatch_import_claude(app: &mut AppView) -> Vec<Effect> {
     let cwd = app.cwd.clone();
     let plan = xai_grok_shell::claude_import::scan_importable_settings(&cwd);
 
     if plan.is_empty() {
         xai_grok_shell::claude_import_state::mark_dismissed(&cwd);
-        // Always write the [claude_compat] imported = true marker so the user's
-        // opt-in is recorded even on an empty plan.
+        // Always write the [claude_compat] imported = true marker so the user's opt-in is recorded even on an empty plan
         if let Err(e) = xai_grok_shell::claude_import::mark_claude_imported() {
             tracing::warn!(error = %e, "Failed to write Claude import marker");
         }
@@ -75,9 +70,8 @@ pub(super) fn dispatch_import_claude_confirm(app: &mut AppView) -> Vec<Effect> {
         }
     }
 
-    // Mark current Claude state as seen so the startup warning won't re-fire
-    // for the same content. Skipped items remain importable via re-running
-    // the slash command.
+    // Mark the current Claude state as seen so the startup warning won't re-fire for the same content
+    // Skipped items remain importable via re-running the slash command
     xai_grok_shell::claude_import_state::mark_imported(&cwd);
     if let Err(e) = xai_grok_shell::claude_import::mark_claude_imported() {
         tracing::warn!(error = %e, "Failed to write Claude import marker");
@@ -93,31 +87,24 @@ pub(super) fn dispatch_import_claude_confirm(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// Cancel the import modal without applying anything.
 pub(super) fn dispatch_import_claude_cancel(app: &mut AppView) -> Vec<Effect> {
     app.import_claude_modal = None;
     vec![]
 }
 
-/// Hide the Claude-import menu row by recording the current `.claude/`
-/// content hash. The startup detection compares the saved hash on next
-/// launch — if it matches (no new Claude content), the menu stays hidden.
+/// Hide the Claude-import menu row by recording the current `.claude/` content hash.
+/// The startup detection compares the saved hash on the next launch; if it matches (no new Claude content), the menu stays hidden.
 pub(super) fn dispatch_dismiss_claude_import(app: &mut AppView) -> Vec<Effect> {
     let cwd = app.cwd.clone();
-    // Record the current `.claude/` content hash so the welcome menu row
-    // doesn't reappear next session unless the content actually changes.
     xai_grok_shell::claude_import_state::mark_dismissed(&cwd);
-    // Also set the [claude_compat] imported = true marker so runtime
-    // fallback paths (perms, env, MCP servers, hooks, plugins) stop
-    // reading .claude/ and ~/.claude.json. Dismiss = "I've decided I want
-    // nothing from .claude/", so don't keep silently reading it at runtime.
+    // The imported = true marker also stops the runtime fallbacks (perms, env, MCP servers, hooks, plugins) reading .claude/ and ~/.claude.json
+    // Dismiss means "I've decided I want nothing from .claude/", so don't keep silently reading it at runtime
     if let Err(e) = xai_grok_shell::claude_import::mark_claude_imported() {
         tracing::warn!(error = %e, "Failed to write Claude import marker on dismiss");
     }
     app.has_claude_import = false;
-    // Reset the welcome menu selection: removing a row shifts indices, so a
-    // stale selection (e.g. user had `Worktree mode` highlighted at index 1)
-    // would now point to a different row.
+    // Reset the welcome menu selection: removing a row shifts indices
+    // A stale selection (e.g. `Worktree mode` highlighted at index 1) would now point to a different row.
     app.welcome_menu_index = None;
     app.startup_warnings
         .retain(|w| !w.message.contains("Claude settings"));

@@ -1,17 +1,15 @@
 // Per-test-case module for the `pty_e2e` integration test crate.
 //
-// Wire-format coverage for keyboard selection: raw escape sequences are
-// injected exactly as terminals emit them, proving the crossterm-parse →
-// key-routing → textarea chain per ENCODING — the thing that actually varies
-// across terminals. Tiers:
-// - `CSI 1;{m}{ABCDHF}` modified arrows and Home/End (m = 1 + shift1/alt2/
-//   ctrl4/super8): Terminal.app, iTerm2, VTE, Windows Terminal, tmux passthrough.
-// - `CSI {code};{m}u` kitty CSI-u letters: KKP terminals only (Ghostty,
-//   Kitty, WezTerm) — the only tier that can carry SUPER, so all Cmd chords
-//   live here; non-KKP emulators never produce these bytes (inert, not broken).
+// Wire-format coverage for keyboard selection: raw escape sequences are injected exactly as terminals emit them
+// That proves the chain from crossterm parse through key routing to the textarea per ENCODING, the thing that actually varies across terminals
+// Tiers:
+// - `CSI 1;{m}{ABCDHF}` modified arrows and Home/End (m = 1 + shift1/alt2/ctrl4/super8):
+//   Terminal.app, iTerm2, VTE, Windows Terminal, tmux passthrough
+// - `CSI {code};{m}u` kitty CSI-u letters: KKP terminals only (Ghostty, Kitty, WezTerm)
+//   This is the only tier that can carry SUPER, so all Cmd chords live here; non-KKP emulators never produce these bytes (inert, not broken)
 // - `ESC [ Z` BackTab and `\t`: everywhere.
-// Selections aren't visible in `screen_contents()`, so cases assert through
-// selection SEMANTICS: typing over a highlight replaces; after a drop, inserts.
+// Selections aren't visible in `screen_contents()`, so cases assert through behavior
+// Typing over a highlight replaces it; typing after a drop inserts
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -40,10 +38,9 @@ async fn idle_session() -> (ContentController, PtyHarness) {
 
 /// Type text, apply a selection sequence, type over it, and wait for the result.
 ///
-/// `wiped` is the substring that must disappear — without this, `wait_for_text`
-/// can false-pass when the chord only moved the caret and the replacement
-/// string is a substring of the unreplaced draft (e.g. "hello X" inside
-/// "hello Xworld").
+/// `wiped` is the substring that must disappear.
+/// `wait_for_text` alone can false-pass when the chord only moved the caret and the replacement string is a substring of the unreplaced draft.
+/// Example: "hello X" inside "hello Xworld".
 fn select_and_type_over(
     harness: &mut PtyHarness,
     typed: &str,
@@ -77,7 +74,7 @@ fn select_and_type_over(
     );
 }
 
-/// `CSI 1;2D` (Shift+Left) — the universal tier; five presses select "world".
+/// `CSI 1;2D` (Shift+Left), the universal tier; five presses select "world".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn legacy_shift_arrow_selects_and_type_replaces() {
@@ -122,8 +119,7 @@ async fn legacy_word_extend_selects_alt_and_ctrl_variants() {
     harness.quit().expect("clean quit");
 }
 
-/// `CSI 1;2H` / `CSI 1;2F` (Shift+Home / Shift+End) — row-edge extends that
-/// work WITHOUT the Kitty protocol, unlike Cmd+Shift+arrows.
+/// `CSI 1;2H` / `CSI 1;2F` (Shift+Home / Shift+End): row-edge extends that work WITHOUT the Kitty protocol, unlike Cmd+Shift+arrows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn legacy_shift_home_end_select_to_row_edges() {
@@ -166,7 +162,7 @@ async fn legacy_shift_home_end_select_to_row_edges() {
     harness.quit().expect("clean quit");
 }
 
-/// `CSI 1;2A` (Shift+Up) across a multiline draft (Alt+Enter = ESC + CR).
+/// `CSI 1;2A` (Shift+Up) across a multiline draft (Alt+Enter arrives as ESC then CR).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn legacy_shift_up_selects_across_lines() {
@@ -177,7 +173,7 @@ async fn legacy_shift_up_selects_across_lines() {
     harness
         .wait_for_text("two", Duration::from_secs(5))
         .expect("second line echoed");
-    // Shift+Up: head moves from end of "two" to end of "one" — selects "\ntwo".
+    // Shift+Up: head moves from end of "two" to end of "one", selecting "\ntwo"
     harness.inject_keys(b"\x1b[1;2A").expect("Shift+Up");
     harness.inject_keys(b"X").expect("type over");
     harness
@@ -186,8 +182,7 @@ async fn legacy_shift_up_selects_across_lines() {
     harness.quit().expect("clean quit");
 }
 
-/// KKP tier: `CSI 1;10D` (Cmd+Shift+Left) row-extend, then CSI-u `CSI 120;9u`
-/// (Cmd+X) cut and `CSI 99;9u` (Cmd+C) copy-keeping-highlight.
+/// KKP tier: `CSI 1;10D` (Cmd+Shift+Left) row-extend, then CSI-u `CSI 120;9u` (Cmd+X) cut and `CSI 99;9u` (Cmd+C) copy that keeps the highlight.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn kitty_super_chords_row_extend_cut_and_copy() {
@@ -212,7 +207,7 @@ async fn kitty_super_chords_row_extend_cut_and_copy() {
 
     harness.inject_keys(b"\x03").expect("clear draft");
 
-    // Cmd+C keeps the highlight (browser semantics): the next char replaces.
+    // Cmd+C keeps the highlight (as in a browser): the next char replaces it
     harness.inject_keys(b"COPYME8Y").expect("type draft");
     harness
         .wait_for_text("COPYME8Y", Duration::from_secs(5))
@@ -233,8 +228,7 @@ async fn kitty_super_chords_row_extend_cut_and_copy() {
     harness.quit().expect("clean quit");
 }
 
-/// `ESC [ Z` (BackTab): one press must BOTH cycle the mode AND drop the
-/// highlight — e2e pin for the registry-bypass fix (Bugbot finding).
+/// `ESC [ Z` (BackTab): one press must BOTH cycle the mode AND drop the highlight (pins the regression where BackTab bypassed the key registry).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn backtab_with_selection_cycles_mode_and_drops_highlight() {
@@ -249,9 +243,8 @@ async fn backtab_with_selection_cycles_mode_and_drops_highlight() {
         .wait_for_text("Switched to mode: Plan", Duration::from_secs(10))
         .expect("mode cycled on the same press");
     harness.inject_keys(b"X").expect("type after BackTab");
-    // The highlight was dropped, so "X" INSERTS at the former head (start of
-    // "beta" after a leftward extension) instead of replacing the word — a
-    // surviving highlight would produce "alpha X" with "beta" gone.
+    // The highlight was dropped, so "X" INSERTS at the former head (start of "beta" after a leftward extension) instead of replacing the word
+    // A surviving highlight would produce "alpha X" with "beta" gone
     harness
         .wait_for_text("alpha Xbeta", Duration::from_secs(5))
         .expect("char inserted at the head, not replaced — highlight was dropped");

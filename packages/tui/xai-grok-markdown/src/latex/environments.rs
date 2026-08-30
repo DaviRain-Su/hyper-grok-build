@@ -19,8 +19,8 @@ pub(super) fn render_environment(
     };
     let env_name = env_name.trim().trim_end_matches('*');
 
-    // Capture body source until the matching `\end{name}`, tracking nesting
-    // of same-named environments. Scans raw source from the cursor.
+    // Capture body source until the matching `\end{name}`, tracking nesting of same-named environments
+    // The scan reads raw source from the cursor
     let body_start = cursor.pos;
     let mut body_end = cursor.src.len();
     let mut resume = cursor.src.len();
@@ -38,8 +38,7 @@ pub(super) fn render_environment(
         } else if command_at(after_bs, "end") {
             "end".len()
         } else {
-            // Not begin/end: skip the backslash and the char after it (so
-            // `\\` and `\{` never confuse the scan).
+            // Not begin/end: skip the backslash and the char after it (so `\\` and `\{` never confuse the scan)
             let skip = after_bs.chars().next().map_or(0, char::len_utf8);
             search = bs_pos + 1 + skip.max(1);
             continue;
@@ -80,8 +79,7 @@ pub(super) fn render_environment(
     out.hcat_rows(rows);
 }
 
-/// `true` if `rest` starts with command word `word` NOT followed by another
-/// ASCII letter (so `\endx` is not mistaken for `\end`).
+/// `true` if `rest` starts with command word `word` NOT followed by another ASCII letter (so `\endx` is not mistaken for `\end`).
 fn command_at(rest: &str, word: &str) -> bool {
     rest.starts_with(word)
         && !rest[word.len()..]
@@ -90,11 +88,10 @@ fn command_at(rest: &str, word: &str) -> bool {
             .is_some_and(|c| c.is_ascii_alphabetic())
 }
 
-/// Split an environment body into rows (`\\`) and cells (`&`) at brace and
-/// environment depth 0, render each cell, then lay the rows out according to
-/// the environment. Returns one string per visual row; the caller attaches
-/// them as a box. In `flat` mode, matrix/cases environments render as a
-/// single row with `; ` between matrix rows.
+/// Split an environment body into rows (`\\`) and cells (`&`) at brace and environment depth 0.
+/// Render each cell, then lay the rows out according to the environment.
+/// Returns one string per visual row; the caller attaches them as a box.
+/// In `flat` mode, matrix/cases environments render as a single row with `; ` between matrix rows.
 fn env_rows_to_strings(
     body: &str,
     env_name: &str,
@@ -129,8 +126,7 @@ fn env_rows_to_strings(
                 } else if command_at(rest, "end") {
                     env_depth = env_depth.saturating_sub(1);
                 }
-                // Skip the backslash plus the char after it so escaped
-                // delimiters (`\&`, `\{`, `\}`) never affect depth/splits.
+                // Skip the backslash plus the char after it so escaped delimiters (`\&`, `\{`, `\}`) never affect depth/splits
                 let skip = rest.chars().next().map_or(0, char::len_utf8);
                 i += 1 + skip.max(1);
                 continue;
@@ -177,8 +173,7 @@ fn env_rows_to_strings(
     let n_rows = rendered_rows.len();
 
     if is_matrix {
-        // Flat (inline) mode: one row, single delimiter pair, rows joined
-        // with `; ` — `(1  2; 3  4)`.
+        // Flat (inline) mode: one row, single delimiter pair, rows joined with `; `, as in `(1  2; 3  4)`
         if flat {
             let inner = rendered_rows
                 .iter()
@@ -242,10 +237,8 @@ fn env_rows_to_strings(
             })
             .collect()
     } else {
-        // aligned/align/gather/split/equation/…: `&` is an invisible
-        // alignment marker; rejoin cells with a single space. One string per
-        // row; the caller's box attachment (or flat `; ` join) handles the
-        // rest.
+        // aligned/align/gather/split/equation/…: `&` is an invisible alignment marker; rejoin cells with a single space
+        // Each row becomes one string; the caller's box attachment (or flat `; ` join) handles the rest
         rendered_rows
             .iter()
             .map(|cells| {

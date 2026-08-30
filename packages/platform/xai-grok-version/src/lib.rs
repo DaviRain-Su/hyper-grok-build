@@ -1,4 +1,4 @@
-//! Installed grok CLI version, lockstepped with shipping binaries.
+//! Installed grok CLI version, kept in sync with the shipping binaries.
 
 use std::sync::OnceLock;
 
@@ -14,9 +14,8 @@ pub const VERSION: &str = match option_env!("GROK_VERSION") {
 /// The release pipeline always injects `GROK_VERSION`; without it the build is from source.
 pub const IS_DEV_BUILD: bool = option_env!("GROK_VERSION").is_none();
 
-/// Runtime-injected `"<version> (<shortcommit>)"` string. Only the release
-/// binary stamps the commit hash in its own build.rs and injects it here at
-/// startup, so the big lib crates don't recompile on every commit.
+/// Runtime-injected `"<version> (<shortcommit>)"` string.
+/// Only the release binary stamps the commit in its own build.rs and injects it here at startup, so the lib crates don't recompile on every commit.
 static FULL_VERSION: OnceLock<&'static str> = OnceLock::new();
 
 /// Inject the binary's stamped `"<version> (<shortcommit>)"` string.
@@ -25,14 +24,13 @@ pub fn set_full_version(v: &'static str) {
     let _ = FULL_VERSION.set(v);
 }
 
-/// The injected version-with-commit string, or plain [`VERSION`] when no
-/// binary has called [`set_full_version`] (e.g. lib tests, dev harnesses).
+/// The injected version-with-commit string, or plain [`VERSION`] when no binary has called [`set_full_version`] (e.g. lib tests, dev harnesses).
 pub fn full_version() -> &'static str {
     FULL_VERSION.get().copied().unwrap_or(VERSION)
 }
 
-/// [`TEST_VERSION_ENV`] override first, then [`VERSION`]. Trimmed so
-/// non-semver-aware callers can pass the result straight into parsing.
+/// Returns the [`TEST_VERSION_ENV`] override when set, otherwise [`VERSION`].
+/// The env value is trimmed so non-semver-aware callers can pass the result straight into parsing.
 pub fn installed() -> String {
     std::env::var(TEST_VERSION_ENV)
         .map(|v| v.trim().to_string())
@@ -43,21 +41,13 @@ pub fn installed_semver() -> Result<Version, semver::Error> {
     Version::parse(&installed())
 }
 
-/// Format the compiled version with a channel label for user-facing display.
-///
-/// `channel_label` is a pre-formatted suffix such as `" [alpha]"`, `" [stable]"`,
-/// or `""` (empty when no cached pointer is available). Obtain it from
-/// `xai_grok_update::channel_label()`.
-///
-/// Example: `"0.2.5 [stable]"` or `"0.2.5 [alpha]"`.
+/// Formats the compiled version with a channel label for user-facing display, e.g. `"0.2.5 [stable]"`.
+/// `channel_label` is pre-formatted by `xai_grok_update::channel_label()`: `" [alpha]"`, `" [stable]"`, or `""` when no pointer is cached.
 pub fn display_version(channel_label: &str) -> String {
     format!("{}{}", VERSION, channel_label)
 }
 
-/// Format a version-with-commit string with a channel label.
-///
-/// Same semantics as [`display_version`] but for the full
-/// `"0.2.5 (abc1234)"` string.
+/// Like [`display_version`], but for the full `"0.2.5 (abc1234)"` string.
 pub fn display_version_with_commit(version_with_commit: &str, channel_label: &str) -> String {
     format!("{}{}", version_with_commit, channel_label)
 }
@@ -66,8 +56,7 @@ pub fn display_version_with_commit(version_with_commit: &str, channel_label: &st
 mod tests {
     use super::*;
 
-    /// Display formatting invariant matrix — verifies label appending
-    /// works correctly across all label states (alpha, stable, empty).
+    /// Checks that the channel label is appended for alpha, stable, and empty labels.
     #[test]
     fn test_display_version_formatting_matrix() {
         let cases: &[(&str, &str, &str)] = &[
@@ -90,7 +79,7 @@ mod tests {
                 label,
             );
         }
-        // display_version uses compiled VERSION — just verify the label appends
+        // display_version uses compiled VERSION, so verify only that the label appends
         assert_eq!(display_version(""), VERSION);
         assert!(display_version(" [stable]").ends_with("[stable]"));
     }

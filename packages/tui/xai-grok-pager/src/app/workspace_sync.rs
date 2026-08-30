@@ -1,4 +1,4 @@
-//! Dashboard v2 workspace adoption and metadata synchronization.
+//! Adopts local build agents into the dashboard v2 workspace and keeps their stored metadata in sync.
 use super::actions::Effect;
 use super::agent_view::AgentView;
 use super::app_view::AppView;
@@ -7,7 +7,7 @@ use xai_grok_dashboard_store::{
     MAX_CWD_BYTES, MAX_MODEL_BYTES, MAX_SUMMARY_BYTES, MAX_TITLE_BYTES, Member, MemberKind,
     MemberMetadata, MemberOrigin, NewMember, SessionId, WORKSPACE_CAPACITY,
 };
-/// Note that agent state may need mirroring into the initialized workspace.
+/// Record that agent state may need mirroring into the initialized workspace.
 pub(crate) fn request(app: &mut AppView) {
     if app.workspace_dashboard_enabled
         && (app.workspace_snapshot.is_some()
@@ -17,8 +17,7 @@ pub(crate) fn request(app: &mut AppView) {
         app.workspace_sync_requested = true;
     }
 }
-/// Build and start one serialized workspace write, if current agent metadata
-/// differs from the cached snapshot.
+/// Build and start one serialized workspace write, if current agent metadata differs from the cached snapshot.
 pub(crate) fn drain(app: &mut AppView) -> Vec<Effect> {
     if !app.workspace_sync_requested {
         return vec![];

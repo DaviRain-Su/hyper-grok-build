@@ -37,8 +37,8 @@ pub fn candidate_data_dirs() -> Vec<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         push(PathBuf::from(xdg).join("grove"));
     }
-    if let Ok(home) = std::env::var("HOME") {
-        push(PathBuf::from(&home).join(".local/share/grove"));
+    if let Some(home) = xai_dirs::home_dir() {
+        push(home.join(".local/share/grove"));
     }
     if let Some(grok_home) = xai_dirs::resolve_grok_home() {
         push(grok_home.join("grove"));

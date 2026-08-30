@@ -1,27 +1,23 @@
-//! Settings modal — opens via F2, `/settings`, command palette, and
-//! shortcuts-help.
+//! Settings modal: opens via F2, `/settings`, command palette, and shortcuts-help.
 //!
 //! ## State machine
 //!
 //! `SettingsModalState` carries a `UiConfig` snapshot plus a mode machine:
 //!
-//! - `Browse` — j/k navigates rows; Space toggles Bool; Enter opens
-//!   a chooser/editor for Enum/String/Int.
-//! - `FilterFocused` — `/` enters filter mode; `invalidate_filter`
-//!   recomputes `filtered_cache` on every mutation.
-//! - `PickingEnum { ... }` — enum chooser sub-pane.
-//! - `EditingValue { ... }` — inline string/int editor.
+//! - `Browse`: j/k navigates rows; Space toggles Bool; Enter opens a chooser/editor for Enum/String/Int.
+//! - `FilterFocused`: `/` enters filter mode; `invalidate_filter` recomputes `filtered_cache` on every mutation.
+//! - `PickingEnum { ... }`: enum chooser sub-pane.
+//! - `EditingValue { ... }`: inline string/int editor.
 //!
-//! ## Keyboard ↔ mouse parity
+//! ## Keyboard and mouse parity
 //!
 //! Every keyboard interaction has a mouse equivalent via `handle_mouse`.
 //!
 //! ## Close-key interception
 //!
 //! F2/Ctrl+,/Cmd+, are intercepted before mode-specific routing.
-//! Esc-in-Browse is handled by the `ModalWindow` chrome (so
-//! `is_close_key` does NOT match Esc); Esc-in-FilterFocused exits
-//! filter mode without closing.
+//! Esc-in-Browse is handled by the `ModalWindow` chrome (so `is_close_key` does NOT match Esc).
+//! Esc-in-FilterFocused exits filter mode without closing.
 
 mod input;
 mod render;

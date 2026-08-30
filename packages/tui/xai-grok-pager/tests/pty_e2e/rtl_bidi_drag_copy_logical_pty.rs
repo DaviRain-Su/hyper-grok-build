@@ -5,20 +5,16 @@ use super::common::*;
 /// ASCII sentinel that anchors the mixed RTL row and settles the turn.
 const RTL_SENTINEL: &str = "RTLSENT";
 const RTL_OUTRO: &str = "RTL_OUTRO_DONE";
-/// Persian "khoob" (good). Chosen with no lam-alef ligature so every letter
-/// occupies exactly one display column (1:1 logical↔visual column mapping).
+/// Persian "khoob" (good), chosen with no lam-alef ligature so every letter occupies one display column (1:1 logical-to-visual column mapping).
 const FA_LOGICAL: &str = "خوب";
-/// Its visual (reversed) form — what an app-reordered row paints.
+/// Its visual (reversed) form: what an app-reordered row paints.
 const FA_VISUAL: &str = "بوخ";
 
-/// PTY: with `[scrollback.display] rtl_bidi = true`, a mixed LTR+Persian row
-/// paints the Persian in visual (reversed) order, but a drag-copy over those
-/// painted cells puts the *logical* order on the clipboard. This is the
-/// end-to-end guard for the selection↔paint contract: cells are visual, the
-/// clipboard is logical.
+/// PTY: with `[scrollback.display] rtl_bidi = true`, a mixed LTR and Persian row paints the Persian in visual (reversed) order.
+/// A drag-copy over those painted cells puts the *logical* order on the clipboard.
+/// This is the end-to-end guard for the selection/paint contract: cells are visual, the clipboard is logical.
 ///
-/// `SSH_CONNECTION` is set so the macOS clipboard route emits OSC 52 for
-/// readback — same pattern as `quote_block_drag_copy_excludes_bars_pty`.
+/// `SSH_CONNECTION` is set so the macOS clipboard route emits OSC 52 for readback (same pattern as `quote_block_drag_copy_excludes_bars_pty`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn rtl_bidi_drag_copy_logical_pty() {

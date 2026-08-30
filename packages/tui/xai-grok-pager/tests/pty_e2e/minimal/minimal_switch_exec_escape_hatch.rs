@@ -2,8 +2,7 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// `GROK_SCREEN_MODE_SWITCH=exec` forces the legacy quit → exec → resume
-/// switch, keeping the fallback path covered end to end.
+/// `GROK_SCREEN_MODE_SWITCH=exec` forces the legacy switch that quits, execs, and resumes, keeping that fallback covered end to end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_switch_exec_escape_hatch() {
@@ -15,7 +14,7 @@ async fn minimal_switch_exec_escape_hatch() {
     std::fs::create_dir_all(project.path().join(".git")).expect("create .git");
 
     let binary = pager_binary().expect("resolve pager binary");
-    // Answer CPR or the post-exec minimal probe silently downgrades to inline.
+    // Answer the CPR query, or the minimal-mode probe that runs after exec silently downgrades to inline
     let mut harness = PtyHarness::spawn_with_content_env_in_dir(
         &binary,
         DEFAULT_ROWS,
@@ -66,7 +65,7 @@ async fn minimal_switch_exec_escape_hatch() {
             )
         });
 
-    // The relaunch clear must wipe the pre-exec "Reopening session…" line.
+    // The relaunch clear must wipe the "Reopening session…" line printed before the exec
     let screen = harness.screen_contents();
     assert!(
         !screen.contains("Reopening session"),

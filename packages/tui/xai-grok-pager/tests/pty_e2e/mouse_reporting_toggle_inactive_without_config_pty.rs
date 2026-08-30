@@ -2,7 +2,7 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Without config/env enablement, scrollback Ctrl+R must not toggle mouse reporting.
+/// With neither the config nor the env var enabling it, scrollback Ctrl+R must not toggle mouse reporting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn mouse_reporting_toggle_inactive_without_config_pty() {

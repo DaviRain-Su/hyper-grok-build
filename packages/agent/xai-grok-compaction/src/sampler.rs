@@ -58,6 +58,12 @@ pub enum CompactionSampleError {
     Other(anyhow::Error),
 }
 
+/// Prefix [`CompactionSampleError::Build`]'s Display stamps; user-facing
+/// normalizers strip it.
+pub const SAMPLER_BUILD_FAILED_PREFIX: &str = "Compaction sampler build failed: ";
+/// Prefix [`CompactionSampleError::Start`]'s Display stamps; see above.
+pub const SAMPLER_START_FAILED_PREFIX: &str = "Compaction sampler start failed: ";
+
 impl std::fmt::Display for CompactionSampleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -69,8 +75,8 @@ impl std::fmt::Display for CompactionSampleError {
                 "Compaction sampling timed out after {}s (collected {} bytes so far)",
                 timeout_secs, collected_bytes
             ),
-            Self::Build(msg) => write!(f, "Compaction sampler build failed: {}", msg),
-            Self::Start(msg) => write!(f, "Compaction sampler start failed: {}", msg),
+            Self::Build(msg) => write!(f, "{SAMPLER_BUILD_FAILED_PREFIX}{msg}"),
+            Self::Start(msg) => write!(f, "{SAMPLER_START_FAILED_PREFIX}{msg}"),
             // Keep the "no response channel content" literal — the intra
             // orchestrator's `Other(_)` fallback string-matches it.
             Self::EmptyResponse => {

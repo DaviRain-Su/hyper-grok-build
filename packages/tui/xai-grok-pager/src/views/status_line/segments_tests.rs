@@ -59,7 +59,7 @@ fn name_past_its_budget_is_cut_by_painted_columns() {
         width <= SESSION_NAME_COLS,
         "{width} columns overruns the {SESSION_NAME_COLS} the segment was given"
     );
-    // Within one cluster of the budget, which a byte or character cut is not.
+    // The cut fills the budget to within one cluster; a byte or character cut would leave more unused
     assert!(
         width + 2 > SESSION_NAME_COLS,
         "{width} columns leaves more than a cluster of the budget unused"

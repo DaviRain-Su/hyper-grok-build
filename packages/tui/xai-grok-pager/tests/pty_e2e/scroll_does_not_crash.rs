@@ -2,9 +2,7 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 4. **Scroll.**
-/// After receiving a long agent response, scrolling keeps the pager
-/// running and doesn't render a `panicked` string anywhere on screen.
+/// After receiving a long agent response, scrolling keeps the pager running and doesn't render a `panicked` string anywhere on screen.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn scroll_does_not_crash() {

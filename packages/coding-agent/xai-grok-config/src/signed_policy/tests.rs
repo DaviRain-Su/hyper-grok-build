@@ -575,6 +575,37 @@ fn cloud_cache_signature_invalid_is_false_when_no_policy() {
     ));
 }
 
+/// Empty/whitespace placeholders (write-deny first-run slots) are not policy.
+#[test]
+fn cloud_cache_signature_invalid_is_false_when_policy_files_are_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let (_, pubkey) = test_keypair();
+    let keys = keyset("v1", &pubkey);
+    for (name, body) in [
+        ("requirements.toml", ""),
+        ("requirements.toml", "  \n\t"),
+        ("managed_config.toml", ""),
+        ("managed_config.toml", " \n "),
+    ] {
+        std::fs::write(home.join(name), body).unwrap();
+        assert!(
+            !cloud_cache_signature_invalid_with_keys(home, &keys, Some("team-007"), 1_000),
+            "{name:?} {body:?} must not count as policy"
+        );
+        std::fs::remove_file(home.join(name)).unwrap();
+    }
+    // First-run ensure creates both slots empty.
+    std::fs::write(home.join("requirements.toml"), "").unwrap();
+    std::fs::write(home.join("managed_config.toml"), "").unwrap();
+    assert!(!cloud_cache_signature_invalid_with_keys(
+        home,
+        &keys,
+        Some("team-007"),
+        1_000
+    ));
+}
+
 /// Keyed: a policy with no/edited signature is invalid; a fully covered one is not.
 #[test]
 fn cloud_cache_signature_invalid_detects_missing_and_edited() {

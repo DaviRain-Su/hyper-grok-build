@@ -21,9 +21,8 @@
 
     #[test]
     fn handle_routes_tokens_to_root_when_session_id_not_yet_set() {
-        // Regression: a notification racing ahead of TaskResult::SessionCreated
-        // (session_id still None) must update the active agent, not be dropped
-        // into the empty subagent_views path.
+        // Regression: a notification racing ahead of TaskResult::SessionCreated (session_id still None) must update the active agent,
+        // not be dropped into the empty subagent_views path
         let mut app = make_app_with_agent("sess-1");
         app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
 
@@ -42,16 +41,15 @@
 
     #[test]
     fn duplicate_event_id_is_dropped_and_highwater_advances() {
-        // Each session/update carries a monotonic eventId; live + replay of the
-        // same event share it. A client that receives an event twice must render
-        // it once (this is what eliminates the driver-side duplication when a
-        // second client opens the same session). Per-session events arrive in
-        // increasing order, so the pager keeps a highwater and drops anything
-        // `<=` it. Updates without an eventId still apply (back-compat).
+        // Each session/update carries a monotonic eventId; live and replay of the same event share it
+        // A client that receives an event twice must render it once
+        // That is what eliminates the driver-side duplication when a second client opens the same session
+        // Per-session events arrive in increasing order, so the pager keeps a highwater and drops anything at or below it
+        // Updates without an eventId still apply (back-compat)
         let mut app = make_app_with_agent("sess-dedup");
         let id = AgentId(0);
 
-        // First event applies (active agent → affected==true) and sets highwater.
+        // First event applies (active agent, so affected is true) and sets the highwater
         let a1 = handle(
             make_agent_chunk_with_event("sess-dedup", "hello", "p1", Some("sess-dedup-5")),
             &mut app,
@@ -59,7 +57,7 @@
         assert!(a1, "first event must apply");
         assert_eq!(app.agents[&id].last_applied_event_seq, Some(5));
 
-        // Exact duplicate eventId → dropped (not affected), highwater unchanged.
+        // An exact duplicate eventId is dropped (not affected); highwater unchanged
         let a2 = handle(
             make_agent_chunk_with_event("sess-dedup", "hello", "p1", Some("sess-dedup-5")),
             &mut app,
@@ -67,7 +65,7 @@
         assert!(!a2, "a duplicate eventId must be dropped");
         assert_eq!(app.agents[&id].last_applied_event_seq, Some(5));
 
-        // Stale lower eventId → dropped.
+        // A stale lower eventId is dropped
         let a3 = handle(
             make_agent_chunk_with_event("sess-dedup", "hello", "p1", Some("sess-dedup-3")),
             &mut app,
@@ -75,7 +73,7 @@
         assert!(!a3, "a lower (already-passed) eventId must be dropped");
         assert_eq!(app.agents[&id].last_applied_event_seq, Some(5));
 
-        // New higher eventId → applies, highwater advances.
+        // A new higher eventId applies and the highwater advances
         let a4 = handle(
             make_agent_chunk_with_event("sess-dedup", "world", "p1", Some("sess-dedup-9")),
             &mut app,
@@ -83,7 +81,7 @@
         assert!(a4, "a new (higher) eventId must apply");
         assert_eq!(app.agents[&id].last_applied_event_seq, Some(9));
 
-        // No eventId (older shell) → always applies; highwater untouched.
+        // No eventId (older shell) always applies; highwater untouched
         let a5 = handle(
             make_agent_chunk_with_event("sess-dedup", "again", "p1", None),
             &mut app,
@@ -95,8 +93,8 @@
         assert_eq!(app.agents[&id].last_applied_event_seq, Some(9));
     }
 
-    /// Regression: the per-process `eventId` counter resets each resume,
-    /// so replayed history isn't monotonic — replay must bypass the dedup highwater.
+    /// Regression: the per-process `eventId` counter resets each resume, so replayed history isn't monotonic.
+    /// Replay must bypass the dedup highwater.
     #[test]
     fn replayed_history_with_event_id_resets_does_not_break_resume() {
         let mut app = make_app_with_agent("sess-resume");
@@ -146,9 +144,7 @@
         );
     }
 
-    /// Full-replay reconnect: the pre-outage transcript stays stashed during
-    /// the window and the replayed transcript replaces it wholesale on
-    /// success.
+    /// Full-replay reconnect: the pre-outage transcript stays stashed during the window and the replayed transcript replaces it wholesale on success.
     #[test]
     fn reconnect_reload_full_replay_replaces_transcript_on_success() {
         let mut app = make_app_with_agent("sess-rc");
@@ -205,14 +201,12 @@
         assert!(matches!(agent.session.state, AgentState::Idle));
     }
 
-    /// Failed reconnect reload: the partial replay is discarded and the
-    /// pre-outage transcript (plus cursor/highwaters) is restored — the view
-    /// must never end up permanently blank.
+    /// Failed reconnect reload: the partial replay is discarded and the pre-outage transcript (plus cursor/highwaters) is restored.
+    /// The view must never end up permanently blank.
     ///
-    /// Both highwaters are advanced IN-WINDOW (live lines land in staging)
-    /// before the failure: a seed-only check would pass even with the restore
-    /// deleted, and a stale post-discard highwater silently dedup-drops the
-    /// next reload's cursor-tail re-deliveries of the discarded blocks.
+    /// Both highwaters are advanced IN-WINDOW (live lines land in staging) before the failure.
+    /// A seed-only check would pass even with the restore deleted.
+    /// A stale post-discard highwater silently dedup-drops the next reload's cursor-tail re-deliveries of the discarded blocks.
     #[test]
     fn reconnect_reload_failure_restores_pre_outage_transcript() {
         let mut app = make_app_with_agent("sess-rc");
@@ -233,8 +227,7 @@
             replay_chunk("sess-rc", "h1", "sess-rc-1"),
             &mut app
         ));
-        // ...along with live post-cursor traffic on BOTH streams, advancing
-        // both highwaters inside the doomed staging.
+        // ...along with live post-cursor traffic on BOTH streams, advancing both highwaters inside the doomed staging
         let _ = handle(
             make_agent_chunk_with_event("sess-rc", "live tail", "p9", Some("sess-rc-40")),
             &mut app,
@@ -284,9 +277,8 @@
         );
     }
 
-    /// Cursor-resolved reconnect: the agent replays nothing (only a live
-    /// post-cursor tail). The pre-outage transcript is kept and the tail is
-    /// appended below it.
+    /// Cursor-resolved reconnect: the agent replays nothing (only a live post-cursor tail).
+    /// The pre-outage transcript is kept and the tail is appended below it.
     #[test]
     fn reconnect_reload_cursor_tail_appends_to_kept_transcript() {
         let mut app = make_app_with_agent("sess-rc");
@@ -331,10 +323,9 @@
             "running entries from the pre-outage turn are finished on merge"
         );
 
-        // Live streaming continues against the merged transcript: finalize
-        // force-idled the turn (open streams are deliberately closed — "tools
-        // were lost"), so the next delta opens exactly one new entry below
-        // the tail and keeps advancing the dedup highwater.
+        // Live streaming continues against the merged transcript
+        // Finalize force-idled the turn (open streams are deliberately closed, "tools were lost")
+        // The next delta opens exactly one new entry below the tail and keeps advancing the dedup highwater
         let len_before = app.agents[&id].scrollback.len();
         assert!(handle(
             make_agent_chunk_with_event("sess-rc", "next turn", "p2", Some("sess-rc-5")),
@@ -345,9 +336,8 @@
         assert_eq!(agent.last_applied_event_seq, Some(5));
     }
 
-    /// A reconnect superseding an unfinished reload window keeps exactly one
-    /// pre-outage stash: the first window's partial replay is discarded, not
-    /// stacked, and batch state cannot leak across windows.
+    /// A reconnect superseding an unfinished reload window keeps exactly one pre-outage stash.
+    /// The first window's partial replay is discarded, not stacked, and batch state cannot leak across windows.
     #[test]
     fn superseded_reload_keeps_original_transcript() {
         let mut app = make_app_with_agent("sess-rc");
@@ -366,9 +356,8 @@
 
         {
             let agent = app.agents.get_mut(&id).unwrap();
-            // Second reconnect before the first window finalized (the event
-            // loop normally finalizes first; this exercises the defensive
-            // path in begin_session_reload).
+            // Second reconnect before the first window finalized
+            // The event loop normally finalizes first; this exercises the defensive path in begin_session_reload
             agent.begin_session_reload(2);
             assert_eq!(
                 agent.scrollback.len(),
@@ -380,7 +369,7 @@
             assert!(agent.session.loading_replay);
         }
 
-        // Gen-2 load fails → the ORIGINAL transcript comes back.
+        // Gen-2 load fails; the ORIGINAL transcript comes back
         let agent = app.agents.get_mut(&id).unwrap();
         assert!(agent.finish_session_reload(2, false));
         assert!(scrollback_has_system_text(agent, "pre-outage content"));
@@ -388,10 +377,9 @@
         assert!(!agent.scrollback.in_batch());
     }
 
-    /// A reconnect that interrupts an in-flight fresh-view load closes out
-    /// the load's batch and placeholder before stashing — neither may leak
-    /// into the stash (an unbalanced batch would defer rebuilds forever; the
-    /// placeholder would linger mid-transcript on a failure restore).
+    /// A reconnect that interrupts an in-flight fresh-view load closes out the load's batch and placeholder before stashing.
+    /// Neither may leak into the stash.
+    /// An unbalanced batch would defer rebuilds forever; the placeholder would linger mid-transcript on a failure restore.
     #[test]
     fn reload_window_supersedes_interrupted_fresh_view_load() {
         let mut app = make_app_with_agent("sess-rc");
@@ -401,7 +389,7 @@
             agent
                 .scrollback
                 .push_block(RenderBlock::system("pre-outage content"));
-            // In-flight fresh-view load: open batch + placeholder + replay flag.
+            // In-flight fresh-view load: open batch, placeholder, and replay flag
             agent.scrollback.begin_batch();
             let pid = agent
                 .scrollback
@@ -512,8 +500,7 @@
         );
     }
 
-    /// An applied Plan update advances the reconnect cursor like any other
-    /// applied arm — leaving it behind would make the tail re-send it.
+    /// An applied Plan update advances the reconnect cursor like any other applied arm; leaving it behind would make the tail re-send it.
     #[test]
     fn applied_plan_update_advances_reconnect_cursor() {
         let mut app = make_app_with_agent("sess-plan");
@@ -538,7 +525,7 @@
         assert_eq!(app.agents[&id].last_applied_event_seq, Some(6));
     }
 
-    /// Todo-pane stash semantics across the three reload outcomes.
+    /// Todo-pane stash behavior across the three reload outcomes.
     #[test]
     fn reload_todo_stash_restores_on_failure() {
         let mut app = make_app_with_agent("sess-todo");
@@ -609,10 +596,9 @@
         );
     }
 
-    /// xAI updates dedup on their OWN per-session `eventId` highwater: a
-    /// re-delivered live copy (cursor-tail overlap when stamp order and file
-    /// order diverge, leader fan-out) is dropped instead of re-applied — the
-    /// xAI arms have no other dedup. Replay stays exempt.
+    /// xAI updates dedup on their OWN per-session `eventId` highwater.
+    /// A re-delivered live copy (cursor-tail overlap when stamp order and file order diverge, leader fan-out) is dropped instead of re-applied.
+    /// The xAI arms have no other dedup. Replay stays exempt.
     #[test]
     fn xai_session_update_dedup_drops_already_applied_event() {
         let mut app = make_app_with_agent("sess-xdup");
@@ -648,9 +634,8 @@
         assert_eq!(app.agents[&id].scrollback.len(), 2);
         assert_eq!(app.agents[&id].last_applied_xai_event_seq, Some(11));
 
-        // Lower-stale re-delivery (an already-applied lower id re-sent by
-        // the cursor tail, e.g. goal mode) is dropped too — `<=`, not just
-        // equality.
+        // Lower-stale re-delivery (an already-applied lower id re-sent by the cursor tail, e.g. goal mode) is dropped too.
+        // The check is `<=`, not just equality
         assert!(!handle_ext_notification(
             &xai_model_switch_notif("sess-xdup", "sess-xdup-9"),
             &mut app
@@ -663,9 +648,8 @@
         assert_eq!(app.agents[&id].last_applied_xai_event_seq, Some(11));
     }
 
-    /// An unhandled xAI kind (the default `_` arm) leaves no trace, so it must
-    /// NOT advance the reconnect cursor or the dedup highwater — a cursor
-    /// reconnect must still re-deliver it. An applied kind advances both.
+    /// An unhandled xAI kind (the default `_` arm) leaves no trace, so it must NOT advance the reconnect cursor or the dedup highwater.
+    /// A cursor reconnect must still re-deliver it. An applied kind advances both.
     #[test]
     fn unhandled_xai_update_does_not_advance_cursor_or_highwater() {
         let mut app = make_app_with_agent("sess-ig");
@@ -696,11 +680,9 @@
         assert_eq!(app.agents[&id].last_applied_xai_event_seq, Some(8));
     }
 
-    /// Split-highwater regression: a fresh direct-emitted xAI id must NOT
-    /// make a queued lower-id ACP chunk look stale. xAI lines bypass the
-    /// agent's FIFO pipeline, so this ordering happens routinely (goal mode,
-    /// subagent progress while the parent streams) — a shared highwater
-    /// would silently drop the late chunk (live-text loss).
+    /// Split-highwater regression: a fresh direct-emitted xAI id must NOT make a queued lower-id ACP chunk look stale.
+    /// xAI lines bypass the agent's FIFO pipeline, so this ordering happens routinely (goal mode, subagent progress while the parent streams).
+    /// A shared highwater would silently drop the late chunk (live-text loss).
     #[test]
     fn direct_xai_event_does_not_shoot_down_delayed_acp_chunk() {
         let mut app = make_app_with_agent("sess-split");
@@ -713,7 +695,7 @@
         ));
         assert_eq!(app.agents[&id].last_applied_xai_event_seq, Some(21));
 
-        // The delayed ACP chunk stamped N arrives after — it must render.
+        // The delayed ACP chunk stamped N arrives after; it must render
         let len_before = app.agents[&id].scrollback.len();
         assert!(
             handle(
@@ -744,10 +726,8 @@
         );
     }
 
-    /// The bg-task stdout arm advances the reconnect cursor like the other
-    /// applied arms — a lagging cursor re-delivers the chunk, and after a
-    /// full-replay swap the highwater (deliberately unseeded by replay)
-    /// cannot absorb it.
+    /// The bg-task stdout arm advances the reconnect cursor like the other applied arms.
+    /// A lagging cursor re-delivers the chunk, and after a full-replay swap the highwater (deliberately unseeded by replay) cannot absorb it.
     #[test]
     fn applied_bg_stdout_update_advances_reconnect_cursor() {
         let mut app = make_app_with_agent("sess-bg");
@@ -790,9 +770,8 @@
         );
     }
 
-    /// Symptom-2 guard: a replay update with no `session/load` in flight
-    /// (leader broadcast fallthrough, or a replay landing after its reload
-    /// already timed out) must be dropped, never appended.
+    /// A replay update with no `session/load` in flight must be dropped, never appended.
+    /// That covers leader broadcast fallthrough and a replay landing after its reload already timed out.
     #[test]
     fn unexpected_replay_update_is_dropped() {
         let mut app = make_app_with_agent("sess-rc");
@@ -824,8 +803,7 @@
         );
     }
 
-    /// The reconnect cursor only follows APPLIED updates: a deduped duplicate
-    /// or a stale-turn drop must not advance it.
+    /// The reconnect cursor only follows APPLIED updates: a deduped duplicate or a stale-turn drop must not advance it.
     #[test]
     fn dropped_updates_do_not_advance_reconnect_cursor() {
         let mut app = make_app_with_agent("sess-cur");
@@ -840,7 +818,7 @@
             Some("sess-cur-5")
         );
 
-        // Duplicate (deduped) — cursor unchanged.
+        // Duplicate (deduped); cursor unchanged
         assert!(!handle(
             make_agent_chunk_with_event("sess-cur", "a", "p1", Some("sess-cur-5")),
             &mut app,
@@ -850,8 +828,7 @@
             Some("sess-cur-5")
         );
 
-        // Stale-turn drop: a non-viewer's self-originated, non-current prompt
-        // id is dropped by the promptId gate — cursor unchanged.
+        // Stale-turn drop: a non-viewer's self-originated, non-current prompt id is dropped by the promptId gate; cursor unchanged
         {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.note_self_originated_prompt("p-stale");
@@ -868,8 +845,7 @@
         );
     }
 
-    /// xAI extension session updates: replay-stamped ones are gated like ACP
-    /// updates, and applied ones advance the reconnect cursor.
+    /// xAI extension session updates: replay-stamped ones are gated like ACP updates, and applied ones advance the reconnect cursor.
     #[test]
     fn xai_session_update_replay_gating_and_cursor() {
         fn model_switch_notif(meta: Option<serde_json::Value>) -> acp::ExtNotification {
@@ -891,7 +867,7 @@
         let mut app = make_app_with_agent("sess-xai");
         let id = AgentId(0);
 
-        // Replay-stamped with no load in flight → dropped, nothing pushed.
+        // Replay-stamped with no load in flight is dropped, nothing pushed
         let replay_meta = serde_json::json!({ "isReplay": true, "eventId": "sess-xai-7" });
         assert!(!handle_ext_notification(
             &model_switch_notif(Some(replay_meta.clone())),
@@ -903,8 +879,7 @@
             assert!(agent.last_seen_event_id.is_none());
         }
 
-        // Same update inside a reload window → applied and marks the window
-        // as full-replay (finishing keeps the staged state, drops the stash).
+        // Same update inside a reload window applies and marks the window as full-replay (finishing keeps the staged state, drops the stash)
         {
             let agent = app.agents.get_mut(&id).unwrap();
             agent
@@ -934,16 +909,13 @@
         );
     }
 
-    /// Characterization (leader-relaunch orphan rows): a reconnect reload whose
-    /// replay contains `SubagentSpawned` with NO `SubagentFinished` (the
-    /// subagent died with the old leader, or is still running on the surviving
-    /// one) leaves the row `finished == false` after the success swap — the
-    /// window finalize force-idles only the ROOT transcript, nothing resolves
-    /// or expires subagent rows. Pager-side child tracking itself stays
-    /// functional: a live child update delivered after the swap still renders
-    /// into the child view, so a post-reconnect freeze would be leader route
-    /// loss (see the `leader::server` child-route backfill tests), not pager
-    /// state.
+    /// Characterization (leader-relaunch orphan rows).
+    /// A reconnect reload whose replay contains `SubagentSpawned` with NO `SubagentFinished` leaves the row `finished == false` after the success
+    /// swap.
+    /// The replay looks like that when the subagent died with the old leader, or is still running on the surviving one.
+    /// The window finalize force-idles only the ROOT transcript; nothing resolves or expires subagent rows.
+    /// Pager-side child tracking itself stays functional: a live child update delivered after the swap still renders into the child view.
+    /// So a post-reconnect freeze would be leader route loss (see the `leader::server` child-route backfill tests), not pager state.
     #[test]
     fn reload_replayed_spawn_without_finished_keeps_unresolved_running_row() {
         let mut app = make_app_with_agent("sess-sub");
@@ -986,8 +958,7 @@
             "the child view exists and is tracked"
         );
 
-        // A live child delta after the swap still renders into the child view:
-        // pager-side routing is intact when the leader delivers it.
+        // A live child delta after the swap still renders into the child view: pager-side routing is intact when the leader delivers it
         let child_len_before = app.agents[&id].subagent_views["child-sub"].scrollback.len();
         let _ = handle(
             make_agent_chunk_with_event("child-sub", "child live text", "p-child", None),
@@ -1001,12 +972,10 @@
 
     #[test]
     fn deduped_stale_event_does_not_regress_context_used() {
-        // Regression: the context bar must not drop when a stale, already-passed
-        // replay delta arrives after a fresher live one. In leader / reconnect /
-        // replay-live-overlap, a historical delta (LOWER eventId, LOWER
-        // totalTokens) is deduped for rendering — but `refresh_context_used`
-        // must respect the dedup too, otherwise the bar regresses below the real
-        // usage (the reported "resume shows lower context" bug).
+        // Regression: the context bar must not drop when a stale, already-passed replay delta arrives after a fresher live one
+        // In leader / reconnect / replay-live-overlap, a historical delta (LOWER eventId, LOWER totalTokens) is deduped for rendering
+        // `refresh_context_used` must respect the dedup too, otherwise the bar regresses below the real usage
+        // That was the reported "resume shows lower context" bug
         let mut app = make_app_with_agent("sess-ctx");
         let id = AgentId(0);
 
@@ -1035,9 +1004,8 @@
         assert_eq!(app.agents[&id].last_applied_event_seq, Some(20));
     }
 
-    /// The reconnect adoption path (`finalize_reload_and_maybe_adopt`) must skip a
-    /// running prompt whose terminal arrived in the reconnect replay — mirrors the
-    /// `SessionLoaded` terminal-in-replay test for the other adoption site.
+    /// The reconnect adoption path (`finalize_reload_and_maybe_adopt`) must skip a running prompt whose terminal arrived in the reconnect replay.
+    /// Mirrors the `SessionLoaded` terminal-in-replay test for the other adoption site.
     #[test]
     fn reconnect_finalize_reload_skips_adoption_when_terminal_in_replay() {
         let mut app = make_app_with_agent("sess-1");
@@ -1045,7 +1013,7 @@
         // Open a reconnect reload window (enters the replay window, clean set).
         app.agents.get_mut(&id).unwrap().begin_session_reload(1);
 
-        // The running turn's terminal arrives in the reconnect replay → recorded.
+        // The running turn's terminal arrives in the reconnect replay and is recorded
         let _ = handle_ext_notification(
             &xai_turn_completed_notif("sess-1", "p-run", "end_turn", true),
             &mut app,
@@ -1066,11 +1034,9 @@
         assert!(agent.session.state.is_idle());
     }
 
-    /// Apply-only cursor rule (xAI path): a `ModelChanged` the catalog can't
-    /// resolve is ignored, so it must NOT advance the reconnect cursor or the
-    /// dedup highwater — a later reconnect (catalog now has the model) must
-    /// still replay it. An applied follower switch advances both. Mirrors the
-    /// ACP path's `advance_reconnect_cursor`.
+    /// Apply-only cursor rule (xAI path): a `ModelChanged` the catalog can't resolve is ignored.
+    /// It must NOT advance the reconnect cursor or the dedup highwater; a later reconnect (catalog now has the model) must still replay it.
+    /// An applied follower switch advances both. Mirrors the ACP path's `advance_reconnect_cursor`.
     #[test]
     fn ignored_model_changed_does_not_advance_cursor_applied_one_does() {
         let mut app = make_app_with_agent("sess-1");
@@ -1080,7 +1046,7 @@
             seed_models(agent, "grok-3", &["grok-3", "grok-4"]);
         }
 
-        // Unknown model → ignored → both markers untouched.
+        // An unknown model is ignored; both markers stay untouched
         assert!(!handle_ext_notification(
             &model_changed_ext_with_event("sess-1", "grok-99-unknown", "sess-1-7"),
             &mut app
@@ -1094,7 +1060,7 @@
             "an ignored ModelChanged must not advance the dedup highwater"
         );
 
-        // Known model → applied → both markers advance.
+        // A known model applies; both markers advance
         assert!(handle_ext_notification(
             &model_changed_ext_with_event("sess-1", "grok-4", "sess-1-8"),
             &mut app
@@ -1109,8 +1075,7 @@
 
     #[test]
     fn fresh_higher_event_still_updates_context_used() {
-        // Counterpart: a genuinely newer delta (higher eventId) must still
-        // advance the context bar — the dedup gate only blocks stale events.
+        // Counterpart: a genuinely newer delta (higher eventId) must still advance the context bar; the dedup gate only blocks stale events
         let mut app = make_app_with_agent("sess-ctx2");
         let id = AgentId(0);
 

@@ -187,9 +187,11 @@ async fn response_without_usage_keeps_model_output_as_estimated_growth() {
                     .any(|item| matches!(item, ConversationItem::Reasoning(_))),
                 "reasoning must still be persisted",
             );
+            // Reasoning: encrypted-only, base64-corrected: 4000*3/4/4 = 750.
+            // Assistant: 4000/4 = 1000.
             assert_eq!(
                 actor.chat_state_handle.get_estimated_total_tokens().await,
-                102_000,
+                101_750,
                 "without provider usage, reasoning and assistant text remain estimated growth",
             );
         })

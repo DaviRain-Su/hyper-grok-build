@@ -1,38 +1,32 @@
 //! GrokBuildEnvironment configuration for the shell crate family.
 //!
-//! The environment presets (per-environment endpoint URLs, the staging
-//! trust check, `EnvVarGuard`) live in the [`xai_grok_env`] leaf crate so
-//! sibling crates (telemetry, tools, workspace) can share them without
-//! depending on this crate. This module re-exports them and hosts the
-//! shell-specific gateway-bridge env vars.
+//! The environment presets (per-environment endpoint URLs, the staging trust check, `EnvVarGuard`) live in the [`xai_grok_env`] leaf crate.
+//! Sibling crates (telemetry, tools, workspace) share them without depending on this crate.
+//! This module re-exports them and hosts the shell-specific gateway-bridge env vars.
 //!
 //! # Gateway-bridge mode (env-only)
 //! - `GROK_GATEWAY_URL` — when set to a valid URL, `MvpAgent` spawns a
-//!   per-session gateway bridge actor and routes prompts through
-//!   it. Unset → falls back to [`GrokBuildEnvironment::gateway_ws_url`] for
-//!   sessions created in gateway mode; otherwise local-mode (unchanged).
+//!   per-session gateway bridge actor and routes prompts through it.
+//!   When unset, sessions created in gateway mode fall back to [`GrokBuildEnvironment::gateway_ws_url`] and everything else stays in local mode.
 pub use xai_grok_env::{
     GrokBuildEnvironment, PROD_ASSET_SERVER_URL, PROD_CLI_CHAT_PROXY_BASE_URL, PROD_GATEWAY_WS_URL,
     PROD_RELAY_WS_URL, PROD_WS_ORIGIN,
 };
-/// Public Computer Hub WebSocket URL used by the local-workspace supervisor
-/// (`workspace_server --hub-url`) when `agent_config.hub.url` is unset.
-/// Extracted from the former private leader const (same literal).
+/// Public Computer Hub WebSocket URL used by the local-workspace supervisor (`workspace_server --hub-url`) when `agent_config.hub.url` is unset.
 pub const PROD_COMPUTER_HUB_WS_URL: &str = "wss://computer-hub.grok.com/v1/tools";
 #[cfg(any(test, feature = "test-support"))]
 pub use xai_grok_env::EnvVarGuard;
-/// Env var that opts a process into gateway-bridge mode. When set to
-/// a parseable URL, `session/new` / `session/load` spawns a per-session
-/// `gateway_bridge` actor in the shell; unset → local-mode (unchanged).
+/// Env var that opts a process into gateway-bridge mode.
+/// When set to a parseable URL, `session/new` / `session/load` spawns a per-session `gateway_bridge` actor in the shell.
+/// When unset the process stays in local mode.
 pub const GROK_GATEWAY_URL_ENV: &str = "GROK_GATEWAY_URL";
 /// Client kill switch for the gateway-bridge custom-method passthrough.
-/// Set to `1` / `true` to force every `custom_method` call back onto
-/// agent-local dispatch regardless of the routing table or negotiated
-/// capability — an instant revert without a redeploy if the channel
-/// misbehaves. Unset/`0`/`false` → normal routing.
+/// Set to `1` / `true` to force every `custom_method` call back onto agent-local dispatch regardless of the routing table or negotiated capability.
+/// That gives an instant revert without a redeploy if the channel misbehaves.
+/// Unset, `0`, or `false` keeps normal routing.
 pub const GROK_DISABLE_CUSTOM_BRIDGE_ENV: &str = "GROK_DISABLE_CUSTOM_BRIDGE";
-/// `true` when the custom-method bridge passthrough is force-disabled via
-/// [`GROK_DISABLE_CUSTOM_BRIDGE_ENV`]. Accepts `1`/`true` (case-insensitive).
+/// `true` when the custom-method bridge passthrough is force-disabled via [`GROK_DISABLE_CUSTOM_BRIDGE_ENV`].
+/// Accepts `1`/`true` (case-insensitive).
 pub fn custom_bridge_disabled() -> bool {
     std::env::var(GROK_DISABLE_CUSTOM_BRIDGE_ENV)
         .map(|v| {

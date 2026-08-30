@@ -341,6 +341,8 @@ pub(crate) struct SubagentSpawnContext {
         Option<tokio::sync::mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
     /// Resolved name of the `BackgroundTaskAction` tool in the parent's toolset.
     pub task_output_tool_name: String,
+    /// Resolved name of the scheduled-task deletion tool in the parent's toolset.
+    pub scheduler_delete_tool_name: Option<String>,
     /// Whether auto-wake is enabled. When `false`, subagent completions
     /// are not injected as synthetic prompts.
     pub auto_wake_enabled: bool,
@@ -517,6 +519,7 @@ pub(crate) struct ShellCompletionData {
         Option<xai_grok_tools::reminders::task_completion::TaskCompletionReservations>,
     parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
     task_output_tool_name: String,
+    scheduler_delete_tool_name: Option<String>,
     synthetic_trace_tx:
         Option<mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
     goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
@@ -531,6 +534,7 @@ impl ShellCompletionData {
             task_completion_reservations: ctx.task_completion_reservations.clone(),
             parent_cmd_tx: ctx.parent_cmd_tx.clone(),
             task_output_tool_name: ctx.task_output_tool_name.clone(),
+            scheduler_delete_tool_name: ctx.scheduler_delete_tool_name.clone(),
             synthetic_trace_tx: ctx.synthetic_trace_tx.clone(),
             goal_loop_active: Arc::clone(&ctx.goal_loop_active),
             telemetry_tokens: 0,
@@ -1251,6 +1255,7 @@ fn stamp_live_fork_session_metadata(
         return;
     };
     summary.session_kind = Some("subagent_fork".to_string());
+    summary.source_workspace_dir = None;
     summary.fork_context_source = Some(fork_context_source.to_string());
     summary.parent_session_id = Some(parent_session_id.to_string());
     summary.fork_parent_prompt_id = parent_prompt_id;

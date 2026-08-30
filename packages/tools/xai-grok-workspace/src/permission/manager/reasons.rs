@@ -1,7 +1,3 @@
-/// Canonical `decision_reason` values for the uploaded artifact. This module is
-/// the single owner of the decision-reason vocabulary; downstream telemetry
-/// enums assert coverage against [`reasons::ALL`] so a new reason here fails the
-/// cross-crate drift test rather than being silently dropped.
 pub const YOLO: &str = "yolo";
 pub const POLICY_ALLOW: &str = "policy_allow";
 pub const POLICY_DENY: &str = "policy_deny";
@@ -25,11 +21,9 @@ pub const PROMPT_ALLOW: &str = "prompt_allow";
 pub const NEEDS_USER: &str = "needs_user";
 pub const BASH_REQUEST_FLOOR: &str = "bash_request_floor";
 pub const OPAQUE_SHELL: &str = "opaque_shell";
+pub const HOOK_ASK: &str = "hook_ask";
 pub const REQUESTER_GONE: &str = "requester_gone";
 
-/// Every canonical reason, in declaration order. A new reason constant must be
-/// added here; the telemetry `PermissionDecisionReason` drift test then fails
-/// until the enum gains a matching variant.
 pub const ALL: &[&str] = &[
     YOLO,
     POLICY_ALLOW,
@@ -54,5 +48,6 @@ pub const ALL: &[&str] = &[
     NEEDS_USER,
     BASH_REQUEST_FLOOR,
     OPAQUE_SHELL,
+    HOOK_ASK,
     REQUESTER_GONE,
 ];

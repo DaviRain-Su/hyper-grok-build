@@ -1,4 +1,3 @@
-// A panic on a teardown path leaks whatever it was about to free; tests panic freely.
 #![cfg_attr(
     not(test),
     deny(
@@ -19,23 +18,19 @@ use tokio::io::AsyncWriteExt;
 use xai_grok_tools::util::ProcessGroup;
 
 use crate::config::{HookSpec, RUNNER_ALWAYS_SET_ENV};
-use crate::event::HookEventEnvelope;
-use crate::result::{HookDecision, StopHookOutcome};
+use crate::event::{HookEventEnvelope, clip_reason};
+use crate::result::StopHookOutcome;
 
 use super::{
-    GateHookJson, GateKind, HookRunnerResult, PromptHookJson, RunContext, StopHookJson,
-    gate_json_to_decision, prompt_json_to_block, stop_json_to_outcome,
+    GateHookJson, GateKind, GateOutcome, HookHealth, HookRunnerResult, PromptHookJson, RunContext,
+    StopHookJson, extract_system_message, gate_outcome, prompt_json_to_block, stop_json_to_outcome,
 };
 
-/// Maximum bytes to capture from hook stdout or stderr (64 KB).
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
-/// Exit code that a blocking hook uses to signal an explicit deny (PreToolUse)
-/// or block (Stop/SubagentStop, with stderr as the feedback).
 const GATE_EXIT_CODE: i32 = 2;
 
-/// `None` when the group cannot be built, which only costs session reaping, so
-/// the hook still runs.
+// SECURITY: a process group lets session close killpg the whole tree; kill_on_drop would leak detached grandchildren.
 fn hook_process_group(child: &tokio::process::Child) -> Option<Arc<ProcessGroup>> {
     let mut group = ProcessGroup::new()
         .inspect_err(
@@ -51,34 +46,31 @@ fn hook_process_group(child: &tokio::process::Child) -> Option<Arc<ProcessGroup>
     Some(Arc::new(group))
 }
 
-/// Run a single hook command.
-///
-/// Spawns the command as a child process, writes the envelope JSON on stdin,
-/// reads stdout/stderr with buffer limits, enforces the timeout, and parses
-/// the result.
 pub async fn run_command_hook(
     spec: &HookSpec,
     envelope: &HookEventEnvelope,
     ctx: &RunContext<'_>,
     mode: GateKind,
-) -> (HookRunnerResult, Duration) {
+) -> (HookRunnerResult, Duration, Option<String>) {
     let start = Instant::now();
 
     let Some(ref command) = spec.command else {
         return (
             HookRunnerResult::Failed("command hook has no 'command' field".into()),
             start.elapsed(),
+            None,
         );
     };
     let command_str = command.to_string_lossy();
 
-    let stdin_json = match serde_json::to_string(envelope) {
+    let stdin_json = match serde_json::to_string(&envelope.to_hook_json()) {
         Ok(j) => j,
         Err(e) => {
             let elapsed = start.elapsed();
             return (
                 HookRunnerResult::Failed(format!("failed to serialize envelope: {e}")),
                 elapsed,
+                None,
             );
         }
     };
@@ -92,10 +84,6 @@ pub async fn run_command_hook(
         );
     }
 
-    // Commands with shell metacharacters (spaces, pipes, &&, ||, redirects,
-    // semicolons, env-var refs) or a leading `~` run through `sh -c` so shell
-    // command strings from compatible configs work; everything else is a
-    // direct executable path resolved from the hook file's directory.
     let is_shell_command = command_str.contains(' ')
         || command_str.contains('|')
         || command_str.contains('&')
@@ -106,10 +94,6 @@ pub async fn run_command_hook(
         || command_str.starts_with('~');
 
     let mut cmd = if is_shell_command {
-        // Fail fast on env vars we can't resolve (runner vars, per-hook
-        // extra_env, or process env). Letting sh expand them to empty yields a
-        // broken command that exits 127 with an opaque reason; surface a clear
-        // error instead.
         let unresolved = find_unresolved_env_vars(&command_str, &spec.extra_env);
         if !unresolved.is_empty() {
             let elapsed = start.elapsed();
@@ -123,6 +107,7 @@ pub async fn run_command_hook(
                     "hook not executed: required env var(s) not set: {list}"
                 )),
                 elapsed,
+                None,
             );
         }
         #[cfg(unix)]
@@ -133,7 +118,6 @@ pub async fn run_command_hook(
         }
         #[cfg(not(unix))]
         {
-            // PowerShell `$VAR` is not `$env:VAR`.
             let command_str = rewrite_hook_command_for_windows_shell(&command_str, &spec.extra_env);
             let inv = xai_grok_config::shell::shell_command_argv(command_str.as_ref());
             let mut c = tokio::process::Command::new(&inv.program);
@@ -151,29 +135,15 @@ pub async fn run_command_hook(
             return (
                 HookRunnerResult::Failed(format!("command not found: {}", command_path.display())),
                 elapsed,
+                None,
             );
         }
         tokio::process::Command::new(command_path)
     };
 
-    // Detach from the controlling terminal so children (e.g. GPG pinentry)
-    // can't open /dev/tty and corrupt the TUI display.
     xai_grok_tools::util::detach_command(&mut cmd);
     xai_grok_sandbox::child_net::restrict_child_network(&mut cmd);
 
-    // Spawn the child process.
-    //
-    // SECURITY: env-var precedence at spawn time. `Command::envs(&map)` runs
-    // AFTER any preceding `.env(...)` calls and silently overrides them, so
-    // the order matters: we MUST apply user/plugin `extra_env` FIRST and
-    // the runner-injected vars LAST. Otherwise a user JSON hook (or a
-    // plugin) can spoof `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`,
-    // `GROK_WORKSPACE_ROOT`, or `CLAUDE_PROJECT_DIR`, which are the
-    // identity/event signals a hook script consumes for policy and audit.
-    // See the `runner_injected_vars_override_extra_env_at_spawn`
-    // regression test in `tests/integration.rs` and the rustdoc on
-    // `HookSpec::extra_env`.
-    // Git Bash: `C:/...` so unquoted `$VAR` does not treat `\` as an escape.
     #[cfg(not(unix))]
     let env_root = {
         use xai_grok_config::shell::{WindowsShell, detect_windows_shell};
@@ -186,22 +156,18 @@ pub async fn run_command_hook(
     #[cfg(unix)]
     let env_root = Cow::Borrowed(ctx.workspace_root);
 
-    #[allow(clippy::disallowed_methods)] // enrolled in the session scope below
+    #[allow(clippy::disallowed_methods)]
     let mut child = match cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .current_dir(ctx.workspace_root)
-        // 1. user/plugin extra_env first (lowest precedence).
+        // SECURITY: extra_env is applied before the GROK_* identity vars so a hook cannot spoof them.
         .envs(&spec.extra_env)
-        // 2. runner-injected vars last (highest precedence, always win).
         .env("GROK_HOOK_EVENT", envelope.hook_event_name.to_string())
         .env("GROK_HOOK_NAME", &spec.name)
         .env("GROK_SESSION_ID", ctx.session_id)
         .env("GROK_WORKSPACE_ROOT", env_root.as_ref())
-        // Compatibility alias for external hooks that read this env name.
-        // Same value as `GROK_WORKSPACE_ROOT`; native `.grok` hooks should use
-        // `GROK_WORKSPACE_ROOT`.
         .env("CLAUDE_PROJECT_DIR", env_root.as_ref())
         .kill_on_drop(true)
         .spawn()
@@ -212,6 +178,7 @@ pub async fn run_command_hook(
             return (
                 HookRunnerResult::Failed(format!("failed to spawn command: {e}")),
                 elapsed,
+                None,
             );
         }
     };
@@ -220,20 +187,16 @@ pub async fn run_command_hook(
     if let Some(scope) = ctx.process_scope.as_ref()
         && let Some(group) = hook_process_group(&child)
     {
-        // A closed scope means the session is gone and `register` already killed
-        // the child, so stop rather than write stdin to a corpse.
         if !scope.register(&group) {
             return (
                 HookRunnerResult::Failed("session closed before the hook ran".to_string()),
                 start.elapsed(),
+                None,
             );
         }
         hook_group = Some(group);
     }
 
-    // Write stdin concurrently with draining output, under the timeout: a hook
-    // that never reads stdin would otherwise block `write_all` on a full pipe
-    // buffer, outside the deadline.
     let stdin = child.stdin.take();
     let timeout = Duration::from_millis(spec.timeout_ms);
     let result = tokio::time::timeout(timeout, async move {
@@ -249,7 +212,6 @@ pub async fn run_command_hook(
 
     let elapsed = start.elapsed();
 
-    // killpg takes grandchildren that kill_on_drop would miss.
     if !matches!(result, Ok(Ok(_)))
         && let Some(group) = &hook_group
     {
@@ -260,10 +222,12 @@ pub async fn run_command_hook(
         Err(_) => (
             HookRunnerResult::Failed(format!("timed out after {}ms", spec.timeout_ms)),
             elapsed,
+            None,
         ),
         Ok(Err(e)) => (
             HookRunnerResult::Failed(format!("command execution failed: {e}")),
             elapsed,
+            None,
         ),
         Ok(Ok(output)) => {
             let exit_code = output.status.code().unwrap_or(-1);
@@ -272,14 +236,11 @@ pub async fn run_command_hook(
             let stderr = truncate_output(&output.stderr);
 
             if !stderr.is_empty() {
-                // Byte counts always; the actual first line only for failing
-                // runs (diagnosable from the log record alone) so successful
-                // hooks don't write hook-authored text on every run.
                 if exit_code != 0 {
                     tracing::debug!(
                         hook_name = %spec.name,
                         stderr_bytes = stderr.len(),
-                        stderr_first_line = stderr_first_line(&stderr).unwrap_or_default(),
+                        stderr_first_line = stderr_first_line(&stderr).map(clip_reason).unwrap_or_default(),
                         "hook stderr output captured"
                     );
                 } else {
@@ -308,18 +269,20 @@ pub async fn run_command_hook(
                 "hook command completed"
             );
 
-            match mode {
+            let system_message = extract_system_message(&stdout);
+            let (result, elapsed) = match mode {
                 GateKind::Observe => {
                     if exit_code == 0 {
-                        return (HookRunnerResult::Success, elapsed);
+                        (HookRunnerResult::Success, elapsed)
+                    } else {
+                        (
+                            HookRunnerResult::Failed(append_stderr_line(
+                                &format!("exit code {exit_code}"),
+                                &stderr,
+                            )),
+                            elapsed,
+                        )
                     }
-                    (
-                        HookRunnerResult::Failed(append_stderr_line(
-                            &format!("exit code {exit_code}"),
-                            &stderr,
-                        )),
-                        elapsed,
-                    )
                 }
                 GateKind::Tool => {
                     parse_blocking_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
@@ -330,7 +293,8 @@ pub async fn run_command_hook(
                 GateKind::Prompt => {
                     parse_prompt_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
                 }
-            }
+            };
+            (result, elapsed, system_message)
         }
     }
 }
@@ -501,26 +465,6 @@ fn rewrite_hook_command_for_windows_shell<'a>(
     }
 }
 
-/// Parse `command_str` for `${VAR}` and `$VAR` references and return the
-/// names that aren't resolvable from any of:
-///
-/// * the runner's always-set env vars (see [`RUNNER_ALWAYS_SET_ENV`]),
-/// * the per-hook `extra_env` map (set by the plugin adapter for plugin
-///   hooks),
-/// * the Grok process's own environment (which is inherited by the child),
-/// * local shell assignments inside the command itself (e.g. an
-///   `INPUT=$(cat)` earlier in the string defines `INPUT` for the rest of
-///   the command).
-///
-/// Names that appear inside a parameter-expansion form with a default,
-/// fallback, or substitution modifier (`${VAR:-x}`, `${VAR-x}`, `${VAR:=x}`,
-/// `${VAR:?msg}`, `${VAR:+x}`, `${VAR%pat}`, `${VAR#pat}`, `${VAR/pat/repl}`,
-/// `${VAR:offset}`) are deliberately NOT flagged: the user has explicitly
-/// handled the unset case in the shell expression, so the runner shouldn't
-/// second-guess them.
-///
-/// The returned list is sorted and de-duplicated. Names are bare (no `$` or
-/// `{}`).
 fn find_unresolved_env_vars(
     command_str: &str,
     extra_env: &std::collections::HashMap<String, String>,
@@ -550,24 +494,6 @@ fn find_unresolved_env_vars(
     out
 }
 
-/// Find shell variable assignments within `command_str` so that subsequent
-/// `${VAR}` references to those names aren't flagged as undefined.
-///
-/// Detects two patterns common in inline hook commands:
-///
-/// * Plain assignments at the start of a command position: `VAR=value`,
-///   `VAR=$(cmd)`, `VAR="..."`. The identifier must follow either the
-///   start of the string, whitespace, or a statement separator (`;`, `&`,
-///   `|`, `\n`).
-/// * `read VAR1 VAR2 ...` statements (very common pattern for consuming
-///   stdin in hooks).
-///
-/// This is a deliberately small heuristic, not a full shell parser. It
-/// errs on the side of treating an identifier as locally set; the
-/// consequence of a false negative here is a false positive in
-/// [`find_unresolved_env_vars`] (which is precisely what we're trying to
-/// avoid). Callers who need to be sure can always use the parameter-
-/// expansion default form (`${VAR:-}`).
 fn find_local_shell_assignments(command_str: &str) -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();
     let bytes = command_str.as_bytes();
@@ -619,7 +545,6 @@ fn find_local_shell_assignments(command_str: &str) -> std::collections::HashSet<
                     continue;
                 }
                 if c2 == b'-' {
-                    // `read -r VAR` etc.: skip the option flag.
                     while i < bytes.len() && bytes[i] != b' ' && bytes[i] != b'\t' {
                         i += 1;
                     }
@@ -642,45 +567,24 @@ fn find_local_shell_assignments(command_str: &str) -> std::collections::HashSet<
     names
 }
 
-/// Cap for the stderr excerpt reused as deny reasons and failure detail:
-/// long enough for a real policy message, short enough that one huge line
-/// (capture allows up to 64 KB with no newline) cannot flood the model
-/// message, scrollback, or exported logs. Cut on a char boundary with an
-/// ellipsis, like the HTTP runner's response preview.
-const MAX_STDERR_LINE_CHARS: usize = 256;
-
-/// First non-empty stderr line, trimmed and capped at
-/// [`MAX_STDERR_LINE_CHARS`]. A hook's stderr is its human feedback channel,
-/// so failure results and exit-2 deny reasons surface this line instead of
-/// only an exit code.
-///
-/// Deliberate shape difference vs `Stop` gates: deny reasons and failure
-/// detail are one-line audit/UI strings, while a stop block's feedback is
-/// model-facing instruction text and keeps the FULL trimmed stderr (see
-/// [`parse_stop_result`]).
-fn stderr_first_line(stderr: &str) -> Option<String> {
-    let line = stderr.lines().map(str::trim).find(|l| !l.is_empty())?;
-    if line.chars().count() <= MAX_STDERR_LINE_CHARS {
-        return Some(line.to_string());
-    }
-    let mut capped: String = line.chars().take(MAX_STDERR_LINE_CHARS).collect();
-    capped.push('\u{2026}');
-    Some(capped)
+fn stderr_first_line(stderr: &str) -> Option<&str> {
+    stderr.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
-/// Append the first (capped) stderr line to a failure message
-/// (`"exit code 1: <line>"`), or return the message unchanged when stderr
-/// is empty.
 fn append_stderr_line(message: &str, stderr: &str) -> String {
     match stderr_first_line(stderr) {
-        Some(line) => format!("{message}: {line}"),
+        Some(line) => format!("{message}: {}", clip_reason(line)),
         None => message.to_string(),
     }
 }
 
-/// Parse the result of a blocking hook from stdout, stderr, and exit code.
-/// On exit 2 with no JSON reason, the first stderr line is the deny feedback;
-/// non-gate exit codes carry it in the failure detail.
+fn failed_with_exit_code(hook_name: &str, exit_code: i32, stderr: &str) -> HookRunnerResult {
+    HookRunnerResult::Failed(append_stderr_line(
+        &format!("hook '{hook_name}' failed with exit code {exit_code}"),
+        stderr,
+    ))
+}
+
 fn parse_blocking_result(
     stdout: &str,
     stderr: &str,
@@ -688,7 +592,7 @@ fn parse_blocking_result(
     hook_name: &str,
     elapsed: Duration,
 ) -> (HookRunnerResult, Duration) {
-    let json_decision = if !stdout.trim().is_empty() {
+    let gate_document = if !stdout.trim().is_empty() {
         serde_json::from_str::<GateHookJson>(stdout.trim())
             .ok()
             .filter(GateHookJson::is_gate_document)
@@ -696,10 +600,10 @@ fn parse_blocking_result(
         None
     };
 
-    if let Some(output) = json_decision {
-        match gate_json_to_decision(&output, hook_name, stderr_first_line(stderr).as_deref()) {
-            Ok(HookDecision::Deny { reason, hook_name }) => {
-                // A JSON deny is honored on any exit code (fail-safe).
+    if let Some(json) = gate_document {
+        let health = HookHealth::from_success(exit_code == 0);
+        match gate_outcome(json, hook_name, stderr_first_line(stderr), health) {
+            GateOutcome::Deny(reason) => {
                 if exit_code != GATE_EXIT_CODE && exit_code != 0 {
                     tracing::warn!(
                         hook_name,
@@ -707,31 +611,69 @@ fn parse_blocking_result(
                         "JSON decision is 'deny' but exit code is not 0 or 2 — using JSON decision"
                     );
                 }
-                return (HookRunnerResult::Deny { reason, hook_name }, elapsed);
+                return (
+                    HookRunnerResult::Deny {
+                        reason,
+                        hook_name: hook_name.to_string(),
+                    },
+                    elapsed,
+                );
             }
-            Ok(HookDecision::Allow) => {
-                if exit_code == GATE_EXIT_CODE {
-                    // Exit 2 wins over a JSON allow (stdout is not
-                    // processed on exit 2); the exit-code ladder below
-                    // denies.
-                    tracing::warn!(
-                        hook_name,
-                        "JSON decision is 'allow' but exit code is 2 — denying (stdout is ignored on exit 2)"
-                    );
-                } else {
-                    return (
-                        HookRunnerResult::Allow {
-                            updated_input: output.updated_input(hook_name),
-                        },
-                        elapsed,
-                    );
-                }
+            GateOutcome::Allow { .. } | GateOutcome::Ask { .. } if exit_code == GATE_EXIT_CODE => {
+                tracing::warn!(
+                    hook_name,
+                    "JSON decision is 'allow' or 'ask' but exit code is 2 — denying (stdout is ignored on exit 2)"
+                );
             }
-            // Unknown decision value: failure so typos surface, carrying the
-            // stderr line like every other failure on this path.
-            Err(err) => {
+            GateOutcome::Defer if exit_code == GATE_EXIT_CODE => {
+                tracing::warn!(
+                    hook_name,
+                    "JSON decision is 'defer' but exit code is 2 — denying (stdout is ignored on exit 2)"
+                );
+            }
+            GateOutcome::Allow {
+                updated_input,
+                additional_context,
+            } => {
+                return (
+                    HookRunnerResult::Allow {
+                        updated_input,
+                        additional_context,
+                    },
+                    elapsed,
+                );
+            }
+            GateOutcome::Ask {
+                reason,
+                updated_input,
+                additional_context,
+            } => {
+                return (
+                    HookRunnerResult::Ask {
+                        reason,
+                        updated_input,
+                        additional_context,
+                    },
+                    elapsed,
+                );
+            }
+            GateOutcome::Defer => return (HookRunnerResult::Defer, elapsed),
+            GateOutcome::Failed(err) if exit_code != GATE_EXIT_CODE => {
                 return (
                     HookRunnerResult::Failed(append_stderr_line(&err, stderr)),
+                    elapsed,
+                );
+            }
+            GateOutcome::Failed(err) => {
+                let reason = clip_reason(&match stderr_first_line(stderr) {
+                    Some(line) => format!("{err}: {line}"),
+                    None => err,
+                });
+                return (
+                    HookRunnerResult::Deny {
+                        reason,
+                        hook_name: hook_name.to_string(),
+                    },
                     elapsed,
                 );
             }
@@ -742,44 +684,25 @@ fn parse_blocking_result(
         0 => (
             HookRunnerResult::Allow {
                 updated_input: None,
+                additional_context: None,
             },
             elapsed,
         ),
         GATE_EXIT_CODE => (
             HookRunnerResult::Deny {
-                // On exit 2 stderr is the deny feedback channel. First line
-                // only: a deny reason is a one-line audit/UI string (stop
-                // blocks keep full stderr — see `parse_stop_result`).
-                reason: stderr_first_line(stderr).unwrap_or_else(|| {
-                    format!("denied by hook '{hook_name}' (exit code {GATE_EXIT_CODE})")
-                }),
+                reason: stderr_first_line(stderr)
+                    .map(clip_reason)
+                    .unwrap_or_else(|| {
+                        format!("denied by hook '{hook_name}' (exit code {GATE_EXIT_CODE})")
+                    }),
                 hook_name: hook_name.to_string(),
             },
             elapsed,
         ),
-        _ => (
-            HookRunnerResult::Failed(append_stderr_line(
-                &format!("hook '{hook_name}' failed with exit code {exit_code}"),
-                stderr,
-            )),
-            elapsed,
-        ),
+        _ => (failed_with_exit_code(hook_name, exit_code, stderr), elapsed),
     }
 }
 
-/// Parse the result of a `Stop`/`SubagentStop` gate hook from stdout, stderr,
-/// and exit code:
-///
-/// A valid decision JSON on stdout wins over the exit code. The exit code
-/// decides only when stdout carries no usable JSON.
-///
-/// * **JSON stdout (any exit code)**: parsed as [`StopHookJson`]:
-///   `decision: "block"` (+ `reason`), `continue: false` (+ `stopReason`), and
-///   `hookSpecificOutput.additionalContext`.
-/// * **no JSON + exit 0**: plain allow-stop.
-/// * **no JSON + exit 2**: block, with stderr as the feedback fed to the model.
-/// * **no JSON + any other exit code**: failure (callers fail open: the agent
-///   stops normally).
 fn parse_stop_result(
     stdout: &str,
     stderr: &str,
@@ -797,8 +720,6 @@ fn parse_stop_result(
                 };
             }
             Err(err) => {
-                // JSON-looking output that fails to parse is likely a broken
-                // decision; warn and fall back to the exit code.
                 if trimmed.starts_with('{') {
                     tracing::warn!(
                         hook_name,
@@ -812,9 +733,6 @@ fn parse_stop_result(
     match exit_code {
         0 => (HookRunnerResult::Stop(StopHookOutcome::default()), elapsed),
         GATE_EXIT_CODE => {
-            // Full trimmed stderr on purpose: a stop block's feedback is
-            // model-facing instruction text, often multi-line (deny reasons
-            // keep one capped line — see `stderr_first_line`).
             let feedback = stderr.trim();
             let block_reason = if feedback.is_empty() {
                 format!("Blocked by stop hook '{hook_name}' (exit code {GATE_EXIT_CODE})")
@@ -829,30 +747,10 @@ fn parse_stop_result(
                 elapsed,
             )
         }
-        _ => (
-            HookRunnerResult::Failed(append_stderr_line(
-                &format!("hook '{hook_name}' failed with exit code {exit_code}"),
-                stderr,
-            )),
-            elapsed,
-        ),
+        _ => (failed_with_exit_code(hook_name, exit_code, stderr), elapsed),
     }
 }
 
-/// Parse the result of a `UserPromptSubmit` gate hook from stdout, stderr,
-/// and exit code. A prompt block is [`HookRunnerResult::Block`]; the reason
-/// is user-facing, never model context.
-///
-/// * **JSON `decision: "block"` (any exit code)**: block, with `reason` (or
-///   stderr, then a generic message) as the block message.
-/// * **no JSON verdict + exit 2**: block, with full trimmed stderr as the
-///   message. Exit 2 wins over JSON that renders no verdict AND over JSON
-///   with an invalid `decision` value (tool denies keep one stderr line, but
-///   a prompt block message is the user's only feedback and may be
-///   multi-line).
-/// * **no JSON verdict + exit 0**: allow; stdout is discarded.
-/// * **invalid `decision` value without exit 2**: failure, so typos surface.
-/// * **no JSON verdict + any other exit code**: failure (callers fail open).
 fn parse_prompt_result(
     stdout: &str,
     stderr: &str,
@@ -868,7 +766,6 @@ fn parse_prompt_result(
     if !trimmed.is_empty() {
         match serde_json::from_str::<PromptHookJson>(trimmed) {
             Ok(json) => match prompt_json_to_block(&json, hook_name, stderr_message.as_deref()) {
-                // A JSON block is honored on any exit code (fail-safe).
                 Ok(Some(reason)) => {
                     return (
                         HookRunnerResult::Block {
@@ -878,12 +775,8 @@ fn parse_prompt_result(
                         elapsed,
                     );
                 }
-                // No verdict: the exit code decides below (exit 2 still blocks).
                 Ok(None) => {}
                 Err(err) => {
-                    // Exit 2 wins over invalid JSON: a gate must not fail open
-                    // when the hook signalled a block, so the hook still
-                    // blocks and the validation failure is logged.
                     if exit_code == GATE_EXIT_CODE {
                         tracing::warn!(
                             hook_name,
@@ -930,7 +823,6 @@ fn parse_prompt_result(
     }
 }
 
-/// Truncate output bytes to MAX_OUTPUT_BYTES and convert to a lossy UTF-8 string.
 fn truncate_output(bytes: &[u8]) -> String {
     if bytes.len() <= MAX_OUTPUT_BYTES {
         String::from_utf8_lossy(bytes).into_owned()
@@ -946,9 +838,6 @@ fn truncate_output(bytes: &[u8]) -> String {
     }
 }
 
-/// Resolve the absolute command path for a hook spec.
-///
-/// Returns `None` for non-command handler types.
 pub fn resolve_command_path(spec: &HookSpec) -> Option<std::path::PathBuf> {
     let command = spec.command.as_ref()?;
     if command.is_absolute() {
@@ -961,117 +850,474 @@ pub fn resolve_command_path(spec: &HookSpec) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{MAX_HOOK_FEEDBACK_CHARS, MAX_REASON_CHARS};
 
-    #[test]
-    fn parse_json_decision() {
-        let (allow, _) =
-            parse_blocking_result(r#"{"decision":"allow"}"#, "", 0, "test", Duration::ZERO);
-        assert!(matches!(allow, HookRunnerResult::Allow { .. }));
-
-        let (deny, _) = parse_blocking_result(
-            r#"{"decision":"deny","reason":"bad command"}"#,
-            "",
-            2,
-            "test",
-            Duration::ZERO,
-        );
-        match deny {
-            HookRunnerResult::Deny { reason, .. } => {
-                assert_eq!(reason, "bad command");
-            }
-            other => panic!("expected Deny, got {other:?}"),
-        }
-
-        let (deny_no_reason, _) =
-            parse_blocking_result(r#"{"decision":"deny"}"#, "", 2, "my-hook", Duration::ZERO);
-        match deny_no_reason {
-            HookRunnerResult::Deny { reason, .. } => {
-                assert!(reason.contains("my-hook"));
-            }
-            other => panic!("expected Deny, got {other:?}"),
-        }
-
-        let (unknown, _) =
-            parse_blocking_result(r#"{"decision":"maybe"}"#, "", 0, "test", Duration::ZERO);
-        assert!(matches!(unknown, HookRunnerResult::Failed(_)));
+    fn parse(json: &str) -> HookRunnerResult {
+        parse_blocking_result(json, "", 0, "test", Duration::ZERO).0
     }
 
     #[test]
-    fn parse_updated_input() {
-        let (allow, _) = parse_blocking_result(
-            r#"{"hookSpecificOutput":{"updatedInput":{"command":"echo hi"}}}"#,
-            "",
-            0,
-            "test",
-            Duration::ZERO,
-        );
-        match allow {
+    fn parse_rewrite_shapes() {
+        let rewrite = |r: HookRunnerResult| match r {
             HookRunnerResult::Allow {
-                updated_input: Some(input),
-            } => assert_eq!(input["command"], "echo hi"),
-            other => panic!("expected Allow with updatedInput, got {other:?}"),
+                updated_input: Some(rw),
+                ..
+            } => rw,
+            other => panic!("expected Allow with rewrite, got {other:?}"),
+        };
+        for json in [
+            r#"{"hookSpecificOutput":{"updatedInput":{"command":"xb build"}}}"#,
+            r#"{"decision":"allow","hookSpecificOutput":{"updatedInput":{"command":"xb build"}}}"#,
+        ] {
+            assert_eq!(rewrite(parse(json))["command"], "xb build");
         }
-
-        let (deny, _) = parse_blocking_result(
-            r#"{"decision":"deny","hookSpecificOutput":{"updatedInput":{"command":"x"}}}"#,
+        assert!(matches!(
+            parse(r#"{"decision":"deny","hookSpecificOutput":{"updatedInput":{"command":"x"}}}"#),
+            HookRunnerResult::Deny { .. }
+        ));
+        let (failed_hook, _) = parse_blocking_result(
+            r#"{"hookSpecificOutput":{"updatedInput":{"command":"xb build"}}}"#,
             "",
-            0,
-            "test",
-            Duration::ZERO,
-        );
-        assert!(matches!(deny, HookRunnerResult::Deny { .. }));
-
-        let (allow_no_rewrite, _) = parse_blocking_result(
-            r#"{"hookSpecificOutput":{"updatedInput":"nope"}}"#,
-            "",
-            0,
+            1,
             "test",
             Duration::ZERO,
         );
         assert!(matches!(
-            allow_no_rewrite,
+            failed_hook,
             HookRunnerResult::Allow {
-                updated_input: None
+                updated_input: None,
+                ..
             }
         ));
     }
 
     #[test]
-    fn fallback_to_exit_code() {
-        for (stdout, code, expect_allow) in
-            [("", 0, true), ("not json at all", 0, true), ("", 2, false)]
-        {
-            let (result, _) = parse_blocking_result(stdout, "", code, "test", Duration::ZERO);
-            if expect_allow {
-                assert!(matches!(result, HookRunnerResult::Allow { .. }));
-            } else {
-                assert!(matches!(result, HookRunnerResult::Deny { .. }));
+    fn unknown_decision_with_exit_2_still_denies() {
+        let (result, _) = parse_blocking_result(
+            r#"{"hookSpecificOutput":{"permissionDecision":"denied"}}"#,
+            "writes outside the repo\n",
+            2,
+            "typo",
+            Duration::ZERO,
+        );
+        match result {
+            HookRunnerResult::Deny { reason, .. } => assert_eq!(
+                reason,
+                "unknown decision value 'denied' in 'hookSpecificOutput.permissionDecision' from hook 'typo': writes outside the repo"
+            ),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+
+        let (result, _) = parse_blocking_result(
+            r#"{"hookSpecificOutput":{"permissionDecision":"denied"}}"#,
+            &"x".repeat(MAX_REASON_CHARS),
+            2,
+            "typo",
+            Duration::ZERO,
+        );
+        match result {
+            HookRunnerResult::Deny { reason, .. } => assert!(
+                reason.starts_with(
+                    "unknown decision value 'denied' in 'hookSpecificOutput.permissionDecision' from hook 'typo'"
+                ),
+                "the error must survive a full-length stderr line, got: {reason}"
+            ),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_decisions() {
+        fn summarize(result: HookRunnerResult) -> String {
+            match result {
+                HookRunnerResult::Allow {
+                    updated_input: Some(_),
+                    ..
+                } => "allow + rewrite".to_string(),
+                HookRunnerResult::Allow { .. } => "allow".to_string(),
+                HookRunnerResult::Ask {
+                    reason,
+                    updated_input,
+                    ..
+                } => {
+                    let label = if updated_input.is_some() {
+                        "ask + rewrite"
+                    } else {
+                        "ask"
+                    };
+                    match reason {
+                        Some(reason) => format!("{label}: {reason}"),
+                        None => label.to_string(),
+                    }
+                }
+                HookRunnerResult::Defer => "defer".to_string(),
+                HookRunnerResult::Deny { reason, .. } => format!("deny: {reason}"),
+                HookRunnerResult::Failed(error) => format!("failed: {error}"),
+                other => panic!("expected a gate result, got {other:?}"),
             }
         }
-        let (fail, _) = parse_blocking_result("", "", 1, "test", Duration::ZERO);
-        assert!(matches!(fail, HookRunnerResult::Failed(_)));
+        for (json, expected) in [
+            (r#"{"decision":"allow"}"#, "allow"),
+            (r#"{"decision":"approve"}"#, "allow"),
+            (r#"{"decision":"block","reason":"nope"}"#, "deny: nope"),
+            (r#"{"decision":"deny"}"#, "deny: denied by hook 'test'"),
+            (
+                r#"{"decision":"maybe"}"#,
+                "failed: unknown decision value 'maybe' in 'decision' from hook 'test'",
+            ),
+            (
+                r#"{"decision":"allow","continue":false,"systemMessage":"hi"}"#,
+                "allow",
+            ),
+            (r#"{"continue":false,"stopReason":"enough"}"#, "allow"),
+            (
+                r#"{"decision":"allow","hookSpecificOutput":{"updateInput":{"command":"x"}}}"#,
+                "allow",
+            ),
+            (r#"{"updatedInput":{"command":"x"}}"#, "allow"),
+            (r#"{"permissionDecision":"deny"}"#, "allow"),
+            (
+                r#"{"hookSpecificOutput":{"permissionDecision":"allow","updatedInput":"nope"}}"#,
+                "allow",
+            ),
+            (
+                r#"{"hookSpecificOutput":{"permissionDecision":"ask","updatedInput":"nope"}}"#,
+                "ask",
+            ),
+            (
+                r#"{"hookSpecificOutput":{"permissionDecision":"ask"}}"#,
+                "ask",
+            ),
+            (
+                r#"{"hookSpecificOutput":{"permissionDecision":"ask","updatedInput":{"command":"x"}}}"#,
+                "ask + rewrite",
+            ),
+            (
+                r#"{"decision":"allow","reason":"allow-reason","hookSpecificOutput":{"permissionDecision":"ask","permissionDecisionReason":"ask-reason"}}"#,
+                "ask: ask-reason",
+            ),
+            (
+                r#"{"decision":"ask","hookSpecificOutput":{"permissionDecision":"allow","permissionDecisionReason":"allow-reason"}}"#,
+                "allow",
+            ),
+            (
+                r#"{"decision":"deny","reason":"nope","hookSpecificOutput":{"permissionDecision":"ask"}}"#,
+                "ask: nope",
+            ),
+            (
+                r#"{"decision":"allow","reason":"allow-reason","hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"block-reason"}}"#,
+                "deny: block-reason",
+            ),
+            (
+                r#"{"decision":"deny","hookSpecificOutput":{"permissionDecision":"allow","permissionDecisionReason":"allow side"}}"#,
+                "allow",
+            ),
+            (
+                r#"{"reason":"blocked: writes outside repo","hookSpecificOutput":{"permissionDecision":"deny"}}"#,
+                "deny: blocked: writes outside repo",
+            ),
+            (
+                r#"{"decision":"deny","hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"same call, one reason"}}"#,
+                "deny: same call, one reason",
+            ),
+            (
+                r#"{"hookSpecificOutput":{"permissionDecision":"maybe"}}"#,
+                "failed: unknown decision value 'maybe' in 'hookSpecificOutput.permissionDecision' from hook 'test'",
+            ),
+            (
+                r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"defer","permissionDecisionReason":"because"}}"#,
+                "defer",
+            ),
+            (r#"{"decision":"defer"}"#, "defer"),
+            (
+                r#"{"decision":"defer","hookSpecificOutput":{"permissionDecision":"ask"}}"#,
+                "ask",
+            ),
+            (
+                r#"{"decision":"defer","hookSpecificOutput":{"permissionDecision":"maybe"}}"#,
+                "failed: unknown decision value 'maybe' in 'hookSpecificOutput.permissionDecision' from hook 'test'",
+            ),
+        ] {
+            assert_eq!(summarize(parse(json)), expected, "for {json}");
+        }
     }
 
     #[test]
-    fn non_gate_json_falls_through_to_exit_code() {
-        let (fail, _) =
-            parse_blocking_result(r#"{"detail":"not found"}"#, "", 1, "test", Duration::ZERO);
-        assert!(matches!(fail, HookRunnerResult::Failed(_)));
-
-        let (allow, _) = parse_blocking_result(r#"{"detail":"ok"}"#, "", 0, "test", Duration::ZERO);
-        assert!(matches!(allow, HookRunnerResult::Allow { .. }));
-    }
-
-    /// Failure results and exit-2 deny reasons carry the hook's first stderr
-    /// line (stderr is the hook's feedback channel), instead of only an
-    /// exit code.
-    #[test]
-    fn blocking_result_surfaces_stderr() {
-        let deny_reason = |result: HookRunnerResult| match result {
-            HookRunnerResult::Deny { reason, .. } => reason,
+    fn json_reason_is_capped() {
+        let long = "é".repeat(MAX_REASON_CHARS + 50);
+        let json = serde_json::json!({ "decision": "deny", "reason": long }).to_string();
+        match parse(&json) {
+            HookRunnerResult::Deny { reason, .. } => {
+                assert_eq!(
+                    reason,
+                    format!("{}… [+50 chars]", "é".repeat(MAX_REASON_CHARS))
+                );
+            }
             other => panic!("expected Deny, got {other:?}"),
-        };
+        }
 
+        let ask = serde_json::json!({ "decision": "ask", "reason": long }).to_string();
+        match parse(&ask) {
+            HookRunnerResult::Ask { reason, .. } => {
+                assert_eq!(
+                    reason,
+                    Some(format!("{}… [+50 chars]", "é".repeat(MAX_REASON_CHARS)))
+                );
+            }
+            other => panic!("expected Ask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn allow_and_ask_carry_additional_context_and_drop_a_blank() {
+        let context = |result: HookRunnerResult| match result {
+            HookRunnerResult::Allow {
+                additional_context, ..
+            }
+            | HookRunnerResult::Ask {
+                additional_context, ..
+            } => additional_context,
+            other => panic!("expected Allow or Ask, got {other:?}"),
+        };
+        for decision in ["allow", "ask"] {
+            assert_eq!(
+                context(parse(&format!(
+                    r#"{{"hookSpecificOutput":{{"permissionDecision":"{decision}","additionalContext":"note"}}}}"#
+                )))
+                .as_deref(),
+                Some("note"),
+                "for {decision}"
+            );
+            assert_eq!(
+                context(parse(&format!(
+                    r#"{{"hookSpecificOutput":{{"permissionDecision":"{decision}","additionalContext":"  "}}}}"#
+                ))),
+                None,
+                "a blank additionalContext is not context, for {decision}"
+            );
+        }
+    }
+
+    #[test]
+    fn additional_context_is_capped_in_characters_not_bytes() {
+        let long = "é".repeat(MAX_HOOK_FEEDBACK_CHARS + 50);
+        let json = serde_json::json!({
+            "hookSpecificOutput": { "permissionDecision": "allow", "additionalContext": long }
+        })
+        .to_string();
+        match parse(&json) {
+            HookRunnerResult::Allow {
+                additional_context, ..
+            } => assert_eq!(
+                additional_context,
+                Some(format!(
+                    "{}… [+50 chars]",
+                    "é".repeat(MAX_HOOK_FEEDBACK_CHARS)
+                ))
+            ),
+            other => panic!("expected Allow, got {other:?}"),
+        }
+
+        let stop = serde_json::json!({ "hookSpecificOutput": { "additionalContext": long } });
+        let (result, _) = parse_stop_result(&stop.to_string(), "", 0, "s", Duration::ZERO);
+        assert_eq!(
+            stop_outcome(result).additional_context,
+            Some(format!(
+                "{}… [+50 chars]",
+                "é".repeat(MAX_HOOK_FEEDBACK_CHARS)
+            ))
+        );
+    }
+
+    #[test]
+    fn broken_hook_loses_its_additional_context() {
+        let (result, _) = parse_blocking_result(
+            r#"{"hookSpecificOutput":{"permissionDecision":"allow","additionalContext":"note"}}"#,
+            "",
+            1,
+            "test",
+            Duration::ZERO,
+        );
+        assert!(matches!(
+            result,
+            HookRunnerResult::Allow {
+                additional_context: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn deny_drops_updated_input() {
+        assert!(matches!(
+            parse(r#"{"decision":"deny","hookSpecificOutput":{"updatedInput":{"command":"x"}}}"#),
+            HookRunnerResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn failure_keeps_allow_but_drops_updated_input() {
+        let (result, _) = parse_blocking_result(
+            r#"{"hookSpecificOutput":{"updatedInput":{"command":"xb build"}}}"#,
+            "",
+            1,
+            "test",
+            Duration::ZERO,
+        );
+        assert!(matches!(
+            result,
+            HookRunnerResult::Allow {
+                updated_input: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn non_object_updated_input_drops_the_rewrite() {
+        assert!(matches!(
+            parse(r#"{"hookSpecificOutput":{"permissionDecision":"allow","updatedInput":"nope"}}"#),
+            HookRunnerResult::Allow {
+                updated_input: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn unknown_decision_is_failed_naming_the_field() {
+        let cases = [
+            (
+                r#"{"decision":"maybe"}"#,
+                "unknown decision value 'maybe' in 'decision' from hook 'test'",
+            ),
+            (
+                r#"{"hookSpecificOutput":{"permissionDecision":"maybe"}}"#,
+                "unknown decision value 'maybe' in 'hookSpecificOutput.permissionDecision' from hook 'test'",
+            ),
+        ];
+        for (json, expected) in cases {
+            match parse(json) {
+                HookRunnerResult::Failed(error) => assert_eq!(error, expected, "for {json}"),
+                other => panic!("expected Failed, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn ask_forces_the_prompt_with_its_reason() {
+        assert!(matches!(
+            parse(r#"{"hookSpecificOutput":{"permissionDecision":"ask"}}"#),
+            HookRunnerResult::Ask { reason: None, .. }
+        ));
+        match parse(
+            r#"{"hookSpecificOutput":{"permissionDecision":"ask","permissionDecisionReason":"ask-reason"}}"#,
+        ) {
+            HookRunnerResult::Ask { reason, .. } => {
+                assert_eq!(reason.as_deref(), Some("ask-reason"))
+            }
+            other => panic!("expected Ask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_decision_applies_when_permission_decision_absent() {
+        let cases = [
+            (r#"{"decision":"approve"}"#, None),
+            (r#"{"decision":"allow"}"#, None),
+            (r#"{"decision":"block","reason":"nope"}"#, Some("nope")),
+            (r#"{"decision":"deny"}"#, Some("denied by hook 'test'")),
+        ];
+        for (json, deny_reason) in cases {
+            match (parse(json), deny_reason) {
+                (HookRunnerResult::Allow { .. }, None) => {}
+                (HookRunnerResult::Deny { reason, .. }, Some(expected)) => {
+                    assert_eq!(reason, expected, "for {json}")
+                }
+                (other, _) => panic!("unexpected result for {json}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_permission_decision_overrides_legacy_decision() {
+        for json in [
+            r#"{"decision":"block","hookSpecificOutput":{"permissionDecision":"allow"}}"#,
+            r#"{"decision":"deny","hookSpecificOutput":{"permissionDecision":"allow"}}"#,
+        ] {
+            assert!(
+                matches!(parse(json), HookRunnerResult::Allow { .. }),
+                "canonical allow must override legacy block/deny, for {json}"
+            );
+        }
+        match parse(
+            r#"{"decision":"approve","hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"nope"}}"#,
+        ) {
+            HookRunnerResult::Deny { reason, .. } => assert_eq!(reason, "nope"),
+            other => panic!("canonical deny must override legacy approve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deny_reason_and_stderr_excerpt_are_capped() {
+        let long = "é".repeat(MAX_REASON_CHARS + 50);
+        let capped = format!("{}… [+50 chars]", "é".repeat(MAX_REASON_CHARS));
+
+        let json = serde_json::json!({ "decision": "deny", "reason": long }).to_string();
+        match parse(&json) {
+            HookRunnerResult::Deny { reason, .. } => assert_eq!(reason, capped),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+
+        let ask = serde_json::json!({ "decision": "ask", "reason": long }).to_string();
+        match parse(&ask) {
+            HookRunnerResult::Ask { reason, .. } => {
+                assert_eq!(reason.as_deref(), Some(capped.as_str()));
+            }
+            other => panic!("expected Ask, got {other:?}"),
+        }
+
+        let (deny, _) = parse_blocking_result("", &long, 2, "test", Duration::ZERO);
+        match deny {
+            HookRunnerResult::Deny { reason, .. } => assert_eq!(reason, capped),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exit_code_decides_when_no_gate_json() {
+        for (stdout, code, expect_allow) in [
+            ("", 0, true),
+            ("not json at all", 0, true),
+            (r#"{"detail":"ok"}"#, 0, true),
+            ("", 2, false),
+        ] {
+            let (result, _) = parse_blocking_result(stdout, "", code, "test", Duration::ZERO);
+            if expect_allow {
+                assert!(
+                    matches!(result, HookRunnerResult::Allow { .. }),
+                    "for {stdout}"
+                );
+            } else {
+                assert!(
+                    matches!(result, HookRunnerResult::Deny { .. }),
+                    "for {stdout}"
+                );
+            }
+        }
+        let (fail, _) = parse_blocking_result(r#"{"detail":"x"}"#, "", 1, "test", Duration::ZERO);
+        assert!(matches!(fail, HookRunnerResult::Failed(_)));
+    }
+
+    #[test]
+    fn exit_2_denies_over_json_allow() {
+        let (deny, _) =
+            parse_blocking_result(r#"{"decision":"allow"}"#, "", 2, "test", Duration::ZERO);
+        assert!(matches!(deny, HookRunnerResult::Deny { .. }));
+    }
+
+    #[test]
+    fn deny_and_failure_carry_first_stderr_line() {
         let (deny, _) = parse_blocking_result(
             "",
             "  \nrejected by policy\nmore\n",
@@ -1079,7 +1325,10 @@ mod tests {
             "test",
             Duration::ZERO,
         );
-        assert_eq!(deny_reason(deny), "rejected by policy");
+        match deny {
+            HookRunnerResult::Deny { reason, .. } => assert_eq!(reason, "rejected by policy"),
+            other => panic!("expected Deny, got {other:?}"),
+        }
 
         let (fail, _) = parse_blocking_result("", "config missing\n", 1, "test", Duration::ZERO);
         match fail {
@@ -1089,65 +1338,42 @@ mod tests {
             ),
             other => panic!("expected Failed, got {other:?}"),
         }
-
-        // A JSON deny without a usable reason also falls back to stderr.
-        let (json_deny, _) = parse_blocking_result(
-            r#"{"decision":"deny","reason":"  "}"#,
-            "quota exceeded\n",
-            0,
-            "test",
-            Duration::ZERO,
-        );
-        assert_eq!(deny_reason(json_deny), "quota exceeded");
     }
 
-    /// One huge stderr line (capture allows 64 KB with no newline) must not
-    /// become the whole deny reason: the excerpt is capped on a char boundary
-    /// with an ellipsis, and multibyte chars survive the cut.
     #[test]
     fn stderr_line_is_capped() {
-        let long = "é".repeat(MAX_STDERR_LINE_CHARS + 50);
-        let capped = stderr_first_line(&long).expect("non-empty line");
-        assert_eq!(capped.chars().count(), MAX_STDERR_LINE_CHARS + 1);
-        assert!(capped.ends_with('\u{2026}'));
-
+        let long = "é".repeat(MAX_REASON_CHARS + 50);
         let (deny, _) = parse_blocking_result("", &long, 2, "test", Duration::ZERO);
         match deny {
-            HookRunnerResult::Deny { reason, .. } => {
-                assert!(reason.chars().count() <= MAX_STDERR_LINE_CHARS + 1);
-            }
+            HookRunnerResult::Deny { reason, .. } => assert_eq!(
+                reason,
+                format!("{}… [+50 chars]", "é".repeat(MAX_REASON_CHARS))
+            ),
             other => panic!("expected Deny, got {other:?}"),
         }
 
-        // At the cap: no ellipsis, nothing lost.
-        let exact = "x".repeat(MAX_STDERR_LINE_CHARS);
-        assert_eq!(stderr_first_line(&exact).as_deref(), Some(exact.as_str()));
+        let exact = "x".repeat(MAX_REASON_CHARS);
+        let (deny, _) = parse_blocking_result("", &exact, 2, "test", Duration::ZERO);
+        match deny {
+            HookRunnerResult::Deny { reason, .. } => assert_eq!(reason, exact),
+            other => panic!("expected Deny, got {other:?}"),
+        }
     }
 
-    /// A blank JSON `reason` is not a reason: command hooks fall back to the
-    /// stderr line, and with no fallback (the HTTP handler has no stderr
-    /// channel) the generic deny message is used — never the blank string.
     #[test]
     fn blank_json_reason_falls_back() {
-        let blank = || GateHookJson {
-            decision: Some("deny".to_string()),
-            reason: Some("  ".to_string()),
-            hook_specific_output: None,
+        let blank = || {
+            serde_json::from_str::<GateHookJson>(r#"{"decision":"deny","reason":"  "}"#)
+                .expect("valid gate JSON")
         };
-        let with_fallback =
-            gate_json_to_decision(&blank(), "h", Some("quota exceeded")).expect("valid decision");
         assert!(
-            matches!(with_fallback, HookDecision::Deny { ref reason, .. } if reason == "quota exceeded")
+            matches!(gate_outcome(blank(), "h", Some("quota exceeded"), HookHealth::Healthy), GateOutcome::Deny(ref reason) if reason == "quota exceeded")
         );
-
-        let without_fallback = gate_json_to_decision(&blank(), "h", None).expect("valid decision");
         assert!(
-            matches!(without_fallback, HookDecision::Deny { ref reason, .. } if reason == "denied by hook 'h'")
+            matches!(gate_outcome(blank(), "h", None, HookHealth::Healthy), GateOutcome::Deny(ref reason) if reason == "denied by hook 'h'")
         );
     }
 
-    /// Unknown JSON decision values fail with the stderr line attached, like
-    /// every other failure on the gate path.
     #[test]
     fn unknown_decision_failure_carries_stderr() {
         let (result, _) = parse_blocking_result(
@@ -1166,15 +1392,27 @@ mod tests {
         }
     }
 
-    /// The observe path reports `exit code N: <first stderr line>` so the
-    /// scrollback and log record are diagnosable without hunting for output.
-    /// Unix-only like the sibling real-process tests: the script relies on
-    /// POSIX `sh` semantics (`>&2`).
+    #[test]
+    fn blank_deny_reason_falls_back_to_stderr_then_generic() {
+        let blank = || {
+            serde_json::from_str::<GateHookJson>(r#"{"decision":"deny","reason":"  "}"#)
+                .expect("valid gate JSON")
+        };
+        assert!(matches!(
+            gate_outcome(blank(), "h", Some("quota exceeded"), HookHealth::Healthy),
+            GateOutcome::Deny(ref reason) if reason == "quota exceeded"
+        ));
+        assert!(matches!(
+            gate_outcome(blank(), "h", None, HookHealth::Healthy),
+            GateOutcome::Deny(ref reason) if reason == "denied by hook 'h'"
+        ));
+    }
+
     #[tokio::test]
     #[cfg(unix)]
-    async fn observe_failure_carries_stderr_line() {
+    async fn observe_failure_reports_exit_code_and_stderr_line() {
         let spec = make_shell_spec("echo 'disk full' >&2; exit 1");
-        let (result, _) =
+        let (result, _, _) =
             run_command_hook(&spec, &make_envelope(), &make_ctx(), GateKind::Observe).await;
         match result {
             HookRunnerResult::Failed(error) => assert_eq!(error, "exit code 1: disk full"),
@@ -1196,6 +1434,24 @@ mod tests {
         let (blocked, _) =
             parse_blocking_result(r#"{"decision":"allow"}"#, "", 2, "test", Duration::ZERO);
         assert!(matches!(blocked, HookRunnerResult::Deny { .. }));
+
+        let (ask_blocked, _) = parse_blocking_result(
+            r#"{"hookSpecificOutput":{"permissionDecision":"ask","permissionDecisionReason":"confirm"}}"#,
+            "",
+            2,
+            "test",
+            Duration::ZERO,
+        );
+        assert!(matches!(ask_blocked, HookRunnerResult::Deny { .. }));
+
+        let (defer_blocked, _) = parse_blocking_result(
+            r#"{"hookSpecificOutput":{"permissionDecision":"defer"}}"#,
+            "",
+            2,
+            "test",
+            Duration::ZERO,
+        );
+        assert!(matches!(defer_blocked, HookRunnerResult::Deny { .. }));
     }
 
     fn stop_outcome(result: HookRunnerResult) -> StopHookOutcome {
@@ -1297,25 +1553,6 @@ mod tests {
     }
 
     #[test]
-    fn stop_additional_context_captured() {
-        let (result, _) = parse_stop_result(
-            r#"{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"run the test suite before finishing"}}"#,
-            "",
-            0,
-            "s",
-            Duration::ZERO,
-        );
-        let outcome = stop_outcome(result);
-        assert_eq!(
-            outcome,
-            StopHookOutcome {
-                additional_context: Some("run the test suite before finishing".into()),
-                ..Default::default()
-            }
-        );
-    }
-
-    #[test]
     fn stop_allow_failure_and_unknown_decision() {
         let (result, _) = parse_stop_result("", "", 0, "s", Duration::ZERO);
         assert!(stop_outcome(result).is_empty());
@@ -1335,32 +1572,9 @@ mod tests {
         let (result, _) = parse_stop_result(r#"{"decision":"deny"}"#, "", 0, "s", Duration::ZERO);
         assert!(matches!(result, HookRunnerResult::Failed(_)));
 
-        // `approve` is accepted as a no-op (shared approve/block vocabulary).
         let (result, _) =
             parse_stop_result(r#"{"decision":"approve"}"#, "", 0, "s", Duration::ZERO);
         assert!(stop_outcome(result).is_empty());
-    }
-
-    #[test]
-    fn stop_output_captures_all_combined_signals() {
-        let (result, _) = parse_stop_result(
-            r#"{"decision":"block","reason":"keep going","continue":false,"stopReason":"user said stop","hookSpecificOutput":{"additionalContext":"ctx"}}"#,
-            "",
-            0,
-            "s",
-            Duration::ZERO,
-        );
-        let outcome = stop_outcome(result);
-        assert_eq!(
-            outcome,
-            StopHookOutcome {
-                block_reason: Some("keep going".into()),
-                additional_context: Some("ctx".into()),
-                force_stop: Some(crate::result::StopOverride {
-                    reason: Some("user said stop".into()),
-                }),
-            }
-        );
     }
 
     fn prompt_block_reason(result: HookRunnerResult) -> String {
@@ -1426,20 +1640,6 @@ mod tests {
     }
 
     #[test]
-    fn prompt_exit_2_wins_over_json_without_verdict() {
-        // Exit 2 blocks even when stdout JSON renders no verdict
-        // (`decision` absent).
-        let (result, _) = parse_prompt_result(
-            r#"{"hookSpecificOutput":{"additionalContext":"ctx"}}"#,
-            "blocked anyway",
-            2,
-            "p",
-            Duration::ZERO,
-        );
-        assert_eq!(prompt_block_reason(result), "blocked anyway");
-    }
-
-    #[test]
     fn prompt_allow_on_exit_0_discards_stdout() {
         for stdout in [
             "",
@@ -1457,7 +1657,6 @@ mod tests {
 
     #[test]
     fn prompt_unknown_decision_is_failure() {
-        // `deny` is tool-gate vocabulary; the prompt gate accepts only `block`.
         for stdout in [r#"{"decision":"deny"}"#, r#"{"decision":"allow"}"#] {
             let (result, _) = parse_prompt_result(stdout, "", 0, "p", Duration::ZERO);
             assert!(
@@ -1468,9 +1667,19 @@ mod tests {
     }
 
     #[test]
+    fn prompt_invalid_decision_json_with_exit_2_blocks() {
+        let (result, _) = parse_prompt_result(
+            r#"{"decision":"allow"}"#,
+            "still blocked",
+            2,
+            "p",
+            Duration::ZERO,
+        );
+        assert_eq!(prompt_block_reason(result), "still blocked");
+    }
+
+    #[test]
     fn prompt_approve_decision_renders_no_verdict() {
-        // An allow vocabulary accepted from ported hooks: same as omitting
-        // `decision` — exit 0 allows, and exit 2 still blocks.
         let (result, _) =
             parse_prompt_result(r#"{"decision":"approve"}"#, "", 0, "p", Duration::ZERO);
         assert!(matches!(result, HookRunnerResult::Success));
@@ -1482,22 +1691,6 @@ mod tests {
             Duration::ZERO,
         );
         assert_eq!(prompt_block_reason(result), "blocked anyway");
-    }
-
-    #[test]
-    fn prompt_exit_2_wins_over_invalid_decision_json() {
-        // Exit 2 blocks even when the JSON fails validation, so a hook that
-        // emits `allow` while exiting 2 still blocks (and counts as Blocked,
-        // not Failed, in telemetry).
-        for stdout in [r#"{"decision":"allow"}"#, r#"{"decision":"deny"}"#] {
-            let (result, _) =
-                parse_prompt_result(stdout, "still blocked\n", 2, "p", Duration::ZERO);
-            assert_eq!(
-                prompt_block_reason(result),
-                "still blocked",
-                "stdout {stdout:?}"
-            );
-        }
     }
 
     #[test]
@@ -1564,7 +1757,6 @@ mod tests {
         );
     }
 
-    /// Helper to build a HookSpec that runs a shell command.
     fn make_shell_spec(command: &str) -> HookSpec {
         HookSpec {
             name: "test-hook".into(),
@@ -1628,15 +1820,13 @@ mod tests {
         spec.timeout_ms = 100;
         let envelope = make_envelope();
         let ctx = make_ctx();
-        let (result, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
+        let (result, _, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
         assert!(
             matches!(&result, HookRunnerResult::Failed(msg) if msg.contains("timed out")),
             "expected a timeout failure, got {result:?}"
         );
     }
 
-    /// Regression: a hook that never reads stdin while writing large stdout must
-    /// not deadlock, since stdin is written concurrently with draining output.
     #[tokio::test]
     #[cfg(unix)]
     async fn large_envelope_with_unreading_hook_does_not_deadlock() {
@@ -1646,32 +1836,21 @@ mod tests {
         envelope.payload = HookPayload::Stop {
             reason: "test".into(),
             stop_hook_active: false,
-            // Larger than the OS pipe buffer (~64 KB) so the stdin write blocks
-            // without concurrent draining.
             last_assistant_message: Some("x".repeat(256 * 1024)),
             background_tasks: None,
             session_crons: None,
         };
         let ctx = make_ctx();
         let run = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe);
-        let (result, _) = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        let (result, _, _) = tokio::time::timeout(std::time::Duration::from_secs(10), run)
             .await
             .expect("hook must not deadlock on a large envelope");
         assert!(matches!(result, HookRunnerResult::Success));
     }
 
-    /// Verify that setsid() prevents hook child processes from opening
-    /// `/dev/tty`. This is the core fix for GPG pinentry corruption.
-    ///
-    /// The hook tries `exec 3>/dev/tty` — if detached, this fails and the
-    /// shell exits 1 (caught by `||`), making the overall command exit 0.
-    /// If NOT detached, the open succeeds and the command exits 1.
     #[tokio::test]
     #[cfg(unix)]
-    async fn test_hook_child_cannot_open_dev_tty() {
-        // Skip in CI / environments without a controlling terminal —
-        // setsid() gets EPERM when already a session leader and the
-        // setpgid fallback doesn't detach /dev/tty.
+    async fn hook_child_cannot_open_dev_tty() {
         if std::fs::OpenOptions::new()
             .write(true)
             .open("/dev/tty")
@@ -1681,12 +1860,12 @@ mod tests {
             return;
         }
 
-        // exit 0 if /dev/tty is inaccessible (DETACHED), exit 1 if accessible
         let spec = make_shell_spec("exec 3>/dev/tty 2>/dev/null && exit 1 || exit 0");
         let envelope = make_envelope();
         let ctx = make_ctx();
 
-        let (result, _duration) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
+        let (result, _duration, _) =
+            run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
 
         assert!(
             matches!(result, HookRunnerResult::Success),
@@ -1696,87 +1875,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hook_blocking_allow() {
-        let spec = make_shell_spec(r#"echo '{"decision":"allow"}'"#);
-        let envelope = make_envelope();
-        let ctx = make_ctx();
-
-        let (result, _duration) = run_command_hook(&spec, &envelope, &ctx, GateKind::Tool).await;
-
-        assert!(
-            matches!(result, HookRunnerResult::Allow { .. }),
-            "blocking hook should return Allow, got {:?}",
-            result
-        );
-    }
-
-    /// Regression: a hook command that uses `${VAR}` interpolation
-    /// without any other shell metacharacters must still be invoked via
-    /// `sh -c` so that the env var supplied via `extra_env` is expanded.
-    /// Previously the runner treated `${...}` as part of a literal path
-    /// and `command_path.exists()` failed; the hook silently never ran.
-    /// Now the env-var pre-spawn check refuses with a clear reason when
-    /// the var is unset (and the dispatcher fail-opens, so the tool call
-    /// itself is not blocked).
-    #[tokio::test]
-    async fn test_env_var_interpolation_runs_via_shell() {
+    async fn project_dir_env_is_exported_to_the_child() {
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("hook.sh");
-        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).unwrap();
-        }
-
-        let mut extra_env = std::collections::HashMap::new();
-        extra_env.insert(
-            "GB1183_PLUGIN_ROOT".to_string(),
-            tmp.path().to_string_lossy().into_owned(),
-        );
-
-        let spec = HookSpec {
-            name: "test-env-interp".into(),
-            event: crate::event::HookEventName::Stop,
-            handler_type: crate::config::HandlerType::Command,
-            configured_matcher: None,
-            matcher: None,
-            enabled: true,
-            command: Some(std::path::PathBuf::from("${GB1183_PLUGIN_ROOT}/hook.sh")),
-            command_raw: Some("${GB1183_PLUGIN_ROOT}/hook.sh".to_string()),
-            url: None,
-            url_raw: None,
-            timeout_ms: 5000,
-            source_dir: tmp.path().to_path_buf(),
-            extra_env,
-            layer: crate::config::HookProvenance::File,
-        };
-
-        let envelope = make_envelope();
-        let ctx = make_ctx();
-        let (result, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
-
-        assert!(
-            matches!(result, HookRunnerResult::Success),
-            "hook with ${{VAR}} interpolation should be expanded via sh -c, got {:?}",
-            result
-        );
-    }
-
-    /// `CLAUDE_PROJECT_DIR` is part of the external hook contract: it points
-    /// to the workspace/project root and is set for ALL hooks (not just
-    /// plugin-scoped ones). Plugin hooks frequently reference it as
-    /// `"$CLAUDE_PROJECT_DIR/.claude/hooks/foo.sh"`. The runner must export
-    /// it on the spawned child so shell expansion via the `sh -c` branch
-    /// resolves correctly; otherwise such hooks fail to find the
-    /// command.
-    #[tokio::test]
-    async fn test_claude_project_dir_is_exported() {
-        let tmp = tempfile::tempdir().unwrap();
-        let script = tmp.path().join("hook.sh");
-        // Exit 0 only if CLAUDE_PROJECT_DIR matches the workspace root.
         let workspace = tmp.path().to_string_lossy().into_owned();
         std::fs::write(
             &script,
@@ -1794,24 +1895,8 @@ mod tests {
             std::fs::set_permissions(&script, perms).unwrap();
         }
 
-        let spec = HookSpec {
-            name: "test-claude-project-dir".into(),
-            event: crate::event::HookEventName::Stop,
-            handler_type: crate::config::HandlerType::Command,
-            configured_matcher: None,
-            matcher: None,
-            enabled: true,
-            // Use ${CLAUDE_PROJECT_DIR} in the path itself so this also exercises
-            // the `$` -> sh -c routing.
-            command: Some(std::path::PathBuf::from("${CLAUDE_PROJECT_DIR}/hook.sh")),
-            command_raw: Some("${CLAUDE_PROJECT_DIR}/hook.sh".to_string()),
-            url: None,
-            url_raw: None,
-            timeout_ms: 5000,
-            source_dir: tmp.path().to_path_buf(),
-            extra_env: std::collections::HashMap::new(),
-            layer: crate::config::HookProvenance::File,
-        };
+        let mut spec = make_shell_spec("${CLAUDE_PROJECT_DIR}/hook.sh");
+        spec.source_dir = tmp.path().to_path_buf();
 
         let envelope = make_envelope();
         let ctx = RunContext {
@@ -1819,7 +1904,7 @@ mod tests {
             workspace_root: &workspace,
             process_scope: None,
         };
-        let (result, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
+        let (result, _, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
 
         assert!(
             matches!(result, HookRunnerResult::Success),
@@ -1879,8 +1964,6 @@ mod tests {
         }
     }
 
-    /// `extra_env` seeds what's "set" so the test does not depend on the
-    /// process environment.
     #[test]
     fn find_unresolved_detects_and_dedups() {
         let mut env = std::collections::HashMap::new();
@@ -1919,7 +2002,6 @@ mod tests {
     #[test]
     fn find_unresolved_skips_non_var_dollars() {
         let env = std::collections::HashMap::new();
-        // $1 (positional), $$ (pid), $(...) (cmd subst), $? (exit code), $#.
         let v = find_unresolved_env_vars("echo $1 $$ $? $# $(date)", &env);
         assert!(
             v.is_empty(),
@@ -1943,9 +2025,6 @@ mod tests {
     #[test]
     fn find_unresolved_skips_parameter_expansion_modifiers() {
         let env = std::collections::HashMap::new();
-        // All of these explicitly handle the unset case; the runner must
-        // not flag them, otherwise we reject hooks that the user wrote
-        // correctly.
         let cases = [
             "${MISSING_GB1183_MOD:-/default/path.sh}",
             "${MISSING_GB1183_MOD-/default/path.sh}",
@@ -1966,14 +2045,9 @@ mod tests {
         }
     }
 
-    /// Regression follow-up: when a hook command references
-    /// an env var that isn't set anywhere we know about, the runner must
-    /// refuse to spawn entirely (no fork+exec, no opaque "exit code 127")
-    /// and surface a clear failure reason naming the missing var(s).
     #[tokio::test]
-    async fn test_undefined_env_var_refuses_to_spawn() {
+    async fn undefined_env_var_refuses_to_spawn() {
         let mut extra_env = std::collections::HashMap::new();
-        // Intentionally do NOT set NEVER_SET_GB1183 anywhere.
         extra_env.insert("UNRELATED_GB1183".to_string(), "/tmp".to_string());
 
         let spec = HookSpec {
@@ -1997,7 +2071,7 @@ mod tests {
 
         let envelope = make_envelope();
         let ctx = make_ctx();
-        let (result, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
+        let (result, _, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
 
         match result {
             HookRunnerResult::Failed(reason) => {
@@ -2018,18 +2092,10 @@ mod tests {
         }
     }
 
-    /// Regression: a hook command starting with `~` must be
-    /// routed through `sh -c` so the shell expands `~` to `$HOME`.
-    /// Previously `~/.claude/hook.sh` was treated as a relative path and
-    /// joined to `source_dir`, producing a broken path.
-    ///
-    /// The test injects `HOME` via `extra_env` so it works in sandboxed
-    /// CI environments where `HOME` is not set (e.g. hermetic remote exec).
     #[tokio::test]
     #[cfg(unix)]
-    async fn test_tilde_expansion_runs_via_shell() {
+    async fn tilde_expansion_runs_via_shell() {
         let tmp = tempfile::tempdir().unwrap();
-        // Create the script at <tmp>/.grok-test-hooks-gb856/tilde-test.sh
         let hook_dir = tmp.path().join(".grok-test-hooks-gb856");
         std::fs::create_dir_all(&hook_dir).unwrap();
         let script = hook_dir.join("tilde-test.sh");
@@ -2041,43 +2107,18 @@ mod tests {
             std::fs::set_permissions(&script, perms).unwrap();
         }
 
-        // Inject HOME via extra_env so `sh -c "~/.grok-test-hooks-gb856/..."`
-        // expands `~` to the temp dir. This avoids depending on the system
-        // HOME, which is absent in hermetic sandboxed test runners.
         let mut extra_env = std::collections::HashMap::new();
         extra_env.insert(
             "HOME".to_string(),
             tmp.path().to_string_lossy().into_owned(),
         );
 
-        let spec = HookSpec {
-            name: "test-tilde".into(),
-            event: crate::event::HookEventName::Stop,
-            handler_type: crate::config::HandlerType::Command,
-            configured_matcher: None,
-            matcher: None,
-            enabled: true,
-            command: Some(std::path::PathBuf::from(
-                "~/.grok-test-hooks-gb856/tilde-test.sh",
-            )),
-            command_raw: Some("~/.grok-test-hooks-gb856/tilde-test.sh".to_string()),
-            url: None,
-            url_raw: None,
-            timeout_ms: 5000,
-            source_dir: std::env::temp_dir(),
-            extra_env,
-            layer: crate::config::HookProvenance::File,
-        };
+        let mut spec = make_shell_spec("~/.grok-test-hooks-gb856/tilde-test.sh");
+        spec.extra_env = extra_env;
 
         let envelope = make_envelope();
         let ctx = make_ctx();
 
-        // Freshly writing the script and exec'ing it via `sh -c` can transiently
-        // fail with ETXTBSY ("Text file busy" -> exit 126) when a sibling test in
-        // this multi-threaded binary forks while our write fd is still open and
-        // its child inherits it. Retry ONLY that exact transient; a real tilde-
-        // routing break surfaces as a different result (127/spawn error), so the
-        // assertion below keeps its diagnostic power.
         let mut result = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe)
             .await
             .0;
@@ -2098,11 +2139,8 @@ mod tests {
         );
     }
 
-    /// Hooks that explicitly handle the unset case via parameter expansion
-    /// (e.g. `${VAR:-/some/default}`) must NOT be refused: the user has
-    /// expressed intent for what should happen when the var is unset.
     #[tokio::test]
-    async fn test_parameter_expansion_default_is_not_refused() {
+    async fn parameter_expansion_default_is_not_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("default.sh");
         std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
@@ -2114,31 +2152,15 @@ mod tests {
             std::fs::set_permissions(&script, perms).unwrap();
         }
 
-        let spec = HookSpec {
-            name: "test-default".into(),
-            event: crate::event::HookEventName::Stop,
-            handler_type: crate::config::HandlerType::Command,
-            configured_matcher: None,
-            matcher: None,
-            enabled: true,
-            // `MISSING_GB1183_DEFAULT` is intentionally unset; the `:-`
-            // modifier supplies a fallback that points at the real script.
-            command: Some(std::path::PathBuf::from(format!(
-                "${{MISSING_GB1183_DEFAULT:-{}}}",
-                script.display()
-            ))),
-            command_raw: Some(format!("${{MISSING_GB1183_DEFAULT:-{}}}", script.display())),
-            url: None,
-            url_raw: None,
-            timeout_ms: 5000,
-            source_dir: tmp.path().to_path_buf(),
-            extra_env: std::collections::HashMap::new(),
-            layer: crate::config::HookProvenance::File,
-        };
+        let mut spec = make_shell_spec(&format!(
+            "${{MISSING_GB1183_DEFAULT:-{}}}",
+            script.display()
+        ));
+        spec.source_dir = tmp.path().to_path_buf();
 
         let envelope = make_envelope();
         let ctx = make_ctx();
-        let (result, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
+        let (result, _, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
 
         assert!(
             matches!(result, HookRunnerResult::Success),
@@ -2152,8 +2174,6 @@ mod tests {
     async fn command_hook_session_close_reaps_whole_group() {
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("grandchild_alive");
-        // `& wait` keeps the leader alive while the grandchild outlives it, so
-        // only a group kill stops the marker being written.
         let mut spec = make_shell_spec(&format!(
             "sh -c 'sleep 2 && echo alive > {}' & wait",
             marker.display()
@@ -2195,7 +2215,7 @@ mod tests {
         let mut spec = make_shell_spec("sleep 600");
         spec.timeout_ms = 60_000;
 
-        let (result, _) = tokio::time::timeout(
+        let (result, _, _) = tokio::time::timeout(
             Duration::from_secs(15),
             run_command_hook(
                 &spec,

@@ -14,6 +14,9 @@ use xai_grok_sampling_types::doom_loop::{
     peek_doom_loop,
 };
 
+pub(crate) const MAX_COLLECTED_DOOM_LOOP_SIGNALS: usize = 64;
+pub(crate) const MAX_DOOM_LOOP_SIGNAL_BYTES: usize = 256;
+
 /// Cheap-to-clone accumulator shared between the SSE decode closure and the
 /// stream transform of one request attempt. Created fresh per attempt so
 /// signals from a failed attempt can never leak into the next one. Carries
@@ -103,9 +106,15 @@ impl DoomLoopSignalCollector {
             return;
         };
         // Cumulative sets are re-sent as they grow; the raw label is the
-        // stable identity. Linear scan is fine for these tiny sets.
+        // stable identity. Bound at the wire collector so no downstream event
+        // or response can carry an oversized detector payload.
         for signal in signals {
-            if !state.signals.iter().any(|s| s.raw == signal.raw) {
+            if state.signals.len() >= MAX_COLLECTED_DOOM_LOOP_SIGNALS {
+                break;
+            }
+            if signal.raw.len() <= MAX_DOOM_LOOP_SIGNAL_BYTES
+                && !state.signals.iter().any(|s| s.raw == signal.raw)
+            {
                 state.signals.push(signal);
             }
         }
@@ -201,6 +210,28 @@ mod tests {
         collector.absorb(DOOM_LOOP_CHECK_EVENT_TYPE, SAMPLE_CHECK_EVENT_DATA);
         assert!(!collector.take().is_empty());
         assert!(collector.take().is_empty());
+    }
+
+    #[test]
+    fn wire_collector_bounds_signal_count_and_bytes() {
+        let collector = DoomLoopSignalCollector::default();
+        let signals = std::iter::once(DoomLoopSignal::parse(
+            &"x".repeat(MAX_DOOM_LOOP_SIGNAL_BYTES + 1),
+        ))
+        .chain(
+            (0..MAX_COLLECTED_DOOM_LOOP_SIGNALS + 20)
+                .map(|index| DoomLoopSignal::parse(&format!("unknown_{index}@thinking"))),
+        )
+        .collect();
+        collector.record(signals);
+
+        let retained = collector.take();
+        assert_eq!(MAX_COLLECTED_DOOM_LOOP_SIGNALS, retained.len());
+        assert!(
+            retained
+                .iter()
+                .all(|signal| signal.raw.len() <= MAX_DOOM_LOOP_SIGNAL_BYTES)
+        );
     }
 
     /// `abort_triggers` fires only on confident signals, does not drain, and

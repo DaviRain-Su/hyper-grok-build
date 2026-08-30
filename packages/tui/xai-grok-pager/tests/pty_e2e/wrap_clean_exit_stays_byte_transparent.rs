@@ -2,11 +2,9 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Transparency e2e: when the wrapped child balances every mode it enables and
-/// exits cleanly, `grok wrap` must add zero reset bytes of its own. Blindly
-/// blasting resets on exit would be visible here (duplicate disables, and a
-/// kitty pop that could corrupt an enclosing context's keyboard stack); the
-/// mode tracker keeps clean exits byte-for-byte transparent.
+/// Transparency e2e: when the wrapped child balances every mode it enables and exits cleanly, `grok wrap` must add zero reset bytes of its own.
+/// Blindly blasting resets on exit would be visible here (duplicate disables, and a kitty pop corrupting an enclosing context's keyboard stack).
+/// The mode tracker keeps clean exits byte-for-byte transparent.
 #[test]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 #[cfg(unix)]
@@ -28,8 +26,8 @@ fn wrap_clean_exit_stays_byte_transparent() {
         "clean child exit must propagate\nraw:\n{raw:?}"
     );
 
-    // Exactly the child's own disables — one occurrence each. A second copy
-    // means wrap injected resets on a clean exit.
+    // Exactly the child's own disables, one occurrence each
+    // A second copy means wrap injected resets on a clean exit
     for needle in [
         "\x1b[?1003l",
         "\x1b[?1006l",

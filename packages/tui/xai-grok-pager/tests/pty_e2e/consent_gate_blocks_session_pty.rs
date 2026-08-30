@@ -45,8 +45,8 @@ fn spawn_serving(
     .expect("spawn pager against the served settings")
 }
 
-/// `Ctrl+N` is the case worth pinning: it bypasses the welcome input interceptor entirely, so only
-/// the `session_startup_allowed()` chokepoint stops it.
+/// `Ctrl+N` is the case worth pinning: it bypasses the welcome input interceptor entirely.
+/// Only the `session_startup_allowed()` chokepoint stops it.
 /// The sibling folder-trust test guards the same leak for its own gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
@@ -78,8 +78,7 @@ async fn consent_gate_renders_and_blocks_new_session() {
     harness.quit().expect("clean quit");
 }
 
-/// No served notice means no gate, which is the fail-open path every launch without settings takes:
-/// the client must stay fully usable.
+/// No served notice means no gate, which is the fail-open path every launch without settings takes: the client must stay fully usable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn absent_consent_gate_shows_no_notice() {

@@ -5,6 +5,11 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::loader::{
+    MANAGED_CONFIG_FILENAME, REQUIREMENTS_FILENAME, SANDBOX_CONFIG_FILENAME,
+    TRUSTED_FOLDERS_FILENAME, USER_CONFIG_FILENAME,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlobalHookSourceKind {
     /// `$GROK_HOME/hooks/` (discovered + protected).
@@ -13,6 +18,8 @@ pub enum GlobalHookSourceKind {
     RegistryFile,
     /// Absolute registry target (must exist before sandbox apply).
     ConfiguredSource,
+    /// `$GROK_HOME` trust-boundary file (protected; never hook JSON / discovery).
+    TrustBoundaryFile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +32,7 @@ impl GlobalHookSource {
     pub fn is_dir(&self) -> bool {
         match self.kind {
             GlobalHookSourceKind::HookDirectory => true,
-            GlobalHookSourceKind::RegistryFile => false,
+            GlobalHookSourceKind::RegistryFile | GlobalHookSourceKind::TrustBoundaryFile => false,
             GlobalHookSourceKind::ConfiguredSource => {
                 if self.path.exists() {
                     self.path.is_dir()
@@ -36,9 +43,12 @@ impl GlobalHookSource {
         }
     }
 
-    /// False for the registry file itself (not hook JSON / not a hook dir).
+    /// False for the registry file and trust-boundary files.
     pub fn is_discovery_source(&self) -> bool {
-        !matches!(self.kind, GlobalHookSourceKind::RegistryFile)
+        !matches!(
+            self.kind,
+            GlobalHookSourceKind::RegistryFile | GlobalHookSourceKind::TrustBoundaryFile
+        )
     }
 }
 
@@ -271,6 +281,28 @@ fn require_real_file(path: &Path) -> Result<(), GlobalHookSourceError> {
     Ok(())
 }
 
+fn ensure_real_file_slot(path: &Path) -> Result<(), GlobalHookSourceError> {
+    match open_registry_create_new(path) {
+        Ok(f) => drop(f),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            require_real_file(path)?;
+        }
+        Err(source) => {
+            return Err(GlobalHookSourceError::CreateRegistryFile {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
+    require_real_file(path)?;
+    if path_has_symlink_component(path) {
+        return Err(GlobalHookSourceError::SymlinkedSource {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
 /// Ensure real `$GROK_HOME/hooks` dir + `hooks-paths` file (create if missing).
 /// Race-resistant create (`create_dir` / `create_new`+`O_NOFOLLOW`); never
 /// truncates an existing registry; rejects symlinks/wrong types.
@@ -334,25 +366,58 @@ pub fn ensure_grok_hook_slots(grok_home: &Path) -> Result<(), GlobalHookSourceEr
         return Err(GlobalHookSourceError::SymlinkedSource { path: hooks });
     }
 
-    let registry = grok_home.join("hooks-paths");
-    match open_registry_create_new(&registry) {
-        Ok(f) => drop(f),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            require_real_file(&registry)?;
-        }
-        Err(source) => {
-            return Err(GlobalHookSourceError::CreateRegistryFile {
-                path: registry,
-                source,
-            });
-        }
-    }
-    require_real_file(&registry)?;
-    if path_has_symlink_component(&registry) {
-        return Err(GlobalHookSourceError::SymlinkedSource { path: registry });
-    }
+    ensure_real_file_slot(&grok_home.join("hooks-paths"))?;
 
+    ensure_grok_trust_boundary_slots(grok_home)?;
     Ok(())
+}
+
+/// `$GROK_HOME` files that are always-trusted or trust-granting if writable.
+pub const TRUST_BOUNDARY_FILENAMES: &[&str] = &[
+    USER_CONFIG_FILENAME,
+    TRUSTED_FOLDERS_FILENAME,
+    MANAGED_CONFIG_FILENAME,
+    REQUIREMENTS_FILENAME,
+    SANDBOX_CONFIG_FILENAME,
+];
+
+/// Ensure real regular files for [`TRUST_BOUNDARY_FILENAMES`] (create if missing).
+/// Same create-if-absent / never-truncate contract as `hooks-paths`.
+pub(crate) fn ensure_grok_trust_boundary_slots(
+    grok_home: &Path,
+) -> Result<(), GlobalHookSourceError> {
+    if path_has_symlink_component(grok_home) {
+        return Err(GlobalHookSourceError::SymlinkedGrokHome {
+            path: grok_home.to_path_buf(),
+        });
+    }
+    for name in TRUST_BOUNDARY_FILENAMES {
+        ensure_real_file_slot(&grok_home.join(name))?;
+    }
+    Ok(())
+}
+
+/// Resolve `$GROK_HOME` trust-boundary files (symlink-rejected for sandbox).
+pub fn resolve_trust_boundary_sources(
+    grok_home: &Path,
+) -> Result<Vec<GlobalHookSource>, GlobalHookSourceError> {
+    if path_has_symlink_component(grok_home) {
+        return Err(GlobalHookSourceError::SymlinkedGrokHome {
+            path: grok_home.to_path_buf(),
+        });
+    }
+    let mut out = Vec::with_capacity(TRUST_BOUNDARY_FILENAMES.len());
+    for name in TRUST_BOUNDARY_FILENAMES {
+        let path = grok_home.join(name);
+        if path_has_symlink_component(&path) {
+            return Err(GlobalHookSourceError::SymlinkedSource { path });
+        }
+        out.push(GlobalHookSource {
+            path,
+            kind: GlobalHookSourceKind::TrustBoundaryFile,
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

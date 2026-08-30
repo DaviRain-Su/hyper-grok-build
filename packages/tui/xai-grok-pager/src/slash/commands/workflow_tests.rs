@@ -88,8 +88,7 @@ fn hidden_until_shell_advertises_workflow_support() {
 #[test]
 fn runs_form_toggles_dashboard_in_fullscreen_and_inline() {
     let models = ModelState::default();
-    // Inline (--no-alt-screen) renders the pane too — it counts as
-    // fullscreen for mode gating.
+    // Inline (--no-alt-screen) renders the pane too; it counts as fullscreen for mode gating
     for screen_mode in [ScreenMode::Fullscreen, ScreenMode::Inline] {
         let mut ctx = exec_ctx(&models, screen_mode);
         for args in ["runs", "RUNS", "  runs  "] {

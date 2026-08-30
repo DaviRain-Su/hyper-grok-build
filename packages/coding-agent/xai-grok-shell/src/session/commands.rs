@@ -510,6 +510,15 @@ pub enum SessionCommand {
     ReconcileRewindTracker {
         target_prompt_index: usize,
     },
+    /// Acquire the image-strip rewrite boundary before a bridge rewind.
+    AcquireImageStripRewrite {
+        respond_to: oneshot::Sender<tokio::sync::OwnedRwLockWriteGuard<()>>,
+    },
+    /// Invalidate pending image-strip work after a server-side conversation
+    /// rewind commits. Acknowledged for ordering.
+    InvalidateImageStripsForRewind {
+        respond_to: oneshot::Sender<()>,
+    },
     /// xAI extension session notification - client-side events to store in persistence
     XaiSessionNotification {
         notification: SessionNotification,

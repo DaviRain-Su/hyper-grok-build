@@ -2,9 +2,8 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// Minimal `Ctrl+G` hands the draft to a local non-interactive editor script,
-/// restores the native-scrollback live region, and leaves the edited text in
-/// the composer until the user explicitly submits it.
+/// In minimal mode, `Ctrl+G` hands the draft to a local non-interactive editor script.
+/// The pager restores the native-scrollback live region and keeps the edited text in the composer until the user explicitly submits it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_external_editor_round_trip() {

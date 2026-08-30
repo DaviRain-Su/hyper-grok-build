@@ -1,10 +1,9 @@
 //! Decode `x.ai/leader/version_mismatch` into toast/log text.
 //!
-//! Versions are scrubbed before the usability check so control-only values are
-//! rejected instead of toasted. The full banner then goes through
-//! `sanitize_toast_message` so chrome glyphs (`⚠`) get ConHost fallback, not
-//! just the interpolated versions. Wire `message` is ignored; the restart hint
-//! is client-owned.
+//! Versions are sanitized before the whitespace check, so a value made only of control characters is rejected instead of toasted.
+//! The full banner then goes through `sanitize_toast_message` too, so the `⚠` chrome glyph gets its ConHost fallback.
+//! Sanitizing only the interpolated versions would leave that glyph raw.
+//! The wire `message` field is ignored; the client writes its own restart hint.
 
 use std::borrow::Cow;
 
@@ -19,8 +18,7 @@ struct VersionMismatchParams<'a> {
     leader_version: Option<Cow<'a, str>>,
 }
 
-/// ASCII marker that survives `sanitize_toast_message` glyph fallback
-/// (`⚠` → `!` on legacy ConHost).
+/// ASCII marker that survives `sanitize_toast_message` glyph fallback (legacy ConHost turns `⚠` into `!`).
 const VERSION_MISMATCH_MARKER: &str = "Version mismatch:";
 
 pub(crate) fn version_mismatch_banner(params: &str) -> Option<String> {

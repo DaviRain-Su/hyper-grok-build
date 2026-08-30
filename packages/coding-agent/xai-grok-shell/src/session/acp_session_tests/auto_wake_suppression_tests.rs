@@ -1568,6 +1568,7 @@ async fn between_turn_drain_suppresses_reserved_subagents() {
                             subagent_id: id.into(),
                             subagent_type: "general-purpose".into(),
                             description: format!("desc {id}"),
+                            loop_task_id: None,
                             success: true,
                             duration_ms: 1000,
                             tool_calls: 3,

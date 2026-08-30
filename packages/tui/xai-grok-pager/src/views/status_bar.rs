@@ -1,5 +1,3 @@
-//! StatusBar widget - displays context info at the top.
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -8,9 +6,6 @@ use ratatui::widgets::Widget;
 
 use crate::theme::Theme;
 
-/// Status bar showing context information.
-///
-/// Displays: token count, current turn, view mode, etc.
 /// Respects layout: first 3 cols and last 2 cols are empty.
 pub struct StatusBar<'a> {
     /// Left-aligned content (e.g., "Context: 5.2k tokens")
@@ -22,7 +17,6 @@ pub struct StatusBar<'a> {
 }
 
 impl<'a> StatusBar<'a> {
-    /// Create a new status bar with left content.
     pub fn new(left: &'a str) -> Self {
         Self {
             left,
@@ -31,13 +25,11 @@ impl<'a> StatusBar<'a> {
         }
     }
 
-    /// Add center content.
     pub fn center(mut self, text: &'a str) -> Self {
         self.center = Some(text);
         self
     }
 
-    /// Add right content.
     pub fn right(mut self, text: &'a str) -> Self {
         self.right = Some(text);
         self
@@ -52,8 +44,7 @@ impl Widget for StatusBar<'_> {
 
         let theme = Theme::current();
 
-        // Layout: outer block already has 2-char horizontal padding
-        // No additional margins needed
+        // The outer block already has 2-char horizontal padding, so no extra margins here
         let left_margin = 0u16;
         let right_margin = 0u16;
         let content_x = area.x + left_margin;
@@ -65,7 +56,6 @@ impl Widget for StatusBar<'_> {
 
         let style = Style::default().fg(theme.gray).bg(theme.bg_base);
 
-        // Fill background (the whole row)
         buf.set_style(area, Style::default().bg(theme.bg_base));
 
         // Left content

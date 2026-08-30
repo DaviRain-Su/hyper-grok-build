@@ -1,9 +1,5 @@
-//! Tool-permission emit: when the rules engine returns "ask" for a guarded
-//! tool, request the decision from chat over the server instead of prompting a
-//! local ACP client, then map chat's reply back onto a [`PromptOutcome`] so the
-//! manager's existing decision + `ALWAYS_*` persistence applies unchanged.
 use crate::permission::prompter::{PromptOutcome, tool_name_for_access};
-use crate::permission::types::AccessKind;
+use crate::permission::types::{AccessKind, HookAsk};
 use async_trait::async_trait;
 use prometheus::{HistogramVec, IntCounter, register_histogram_vec, register_int_counter};
 use serde_json::Value;
@@ -11,9 +7,6 @@ use std::sync::LazyLock;
 use xai_computer_hub_sdk::harness::PERMISSION_REQUEST_KIND;
 use xai_computer_hub_sdk::{ToolServer, WeakToolServer};
 use xai_tool_protocol::SessionId;
-/// Wall-clock time the workspace awaits chat's decision on a `permission_request`
-/// hook. `outcome` is `ok` (chat replied) or `error` (transport failure /
-/// backstop deadline).
 static PERMISSION_REPLY_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!(
         "grok_workspace_permission_reply_seconds",
@@ -23,9 +16,6 @@ static PERMISSION_REPLY_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
     )
     .expect("grok_workspace_permission_reply_seconds must register once")
 });
-/// Permission requests whose reply timed out (the server backstop deadline fired).
-/// A subset of the histogram's `error` outcome, promoted to its own counter so a
-/// stuck/lost reply is distinguishable from other transport failures.
 static PERMISSION_TIMEOUT_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     register_int_counter!(
         "grok_workspace_permission_timeout_total",
@@ -33,32 +23,16 @@ static PERMISSION_TIMEOUT_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     )
     .expect("grok_workspace_permission_timeout_total must register once")
 });
-/// Zero-init this module's metric families. See [`crate::init_metrics`].
 pub(crate) fn init_metrics() {
     for outcome in ["ok", "error"] {
         let _ = PERMISSION_REPLY_DURATION.with_label_values(&[outcome]);
     }
     PERMISSION_TIMEOUT_TOTAL.inc_by(0);
 }
-/// Identifies the reply backstop-deadline timeout by its rendered message; the
-/// server SDK exposes no typed timeout variant to match on. If that message text
-/// changes, such a reply is recorded under the histogram's `error` outcome but
-/// not counted in `permission_timeout_total`.
 fn is_timeout_err(msg: &str) -> bool {
     msg.contains("timed out")
 }
-/// Env var that enables the HITL-live **tool-permission** emit (workspace →
-/// chat over the server) for local e2e and gradual rollout. Prefer server capability
-/// negotiation long-term; this is the interim gate so tool-permission can be
-/// exercised without waiting on that wire format.
 pub const HITL_PERMISSION_LIVE_ENV: &str = "GROK_HITL_PERMISSION_LIVE";
-/// Whether the HITL-live permission path is enabled.
-///
-/// Intended long-term gate: the chat flag `grok_chat_enable_hitl_live_path`,
-/// propagated by the server at session-bind (capability negotiation). Until that
-/// lands, honor [`HITL_PERMISSION_LIVE_ENV`] (`1` / `true` / `yes`) so local
-/// stacks and e2e can turn the emit on explicitly. Default remains **off**
-/// (fail closed to the local ACP prompt).
 pub fn hitl_permission_live_enabled() -> bool {
     match std::env::var(HITL_PERMISSION_LIVE_ENV) {
         Ok(v) => {
@@ -70,13 +44,10 @@ pub fn hitl_permission_live_enabled() -> bool {
         Err(_) => false,
     }
 }
-/// Sends a `permission_request` hook to chat and awaits the decision reply.
 #[async_trait]
 pub trait PermissionHookTransport: Send + Sync {
-    /// Emit the permission-request `payload` and return chat's decision reply.
     async fn request_permission(&self, payload: Value) -> Result<Value, String>;
 }
-/// Hub-backed permission transport (weak server handle; upgrades per request).
 pub struct ToolServerPermissionTransport {
     server: WeakToolServer,
     session_id: SessionId,
@@ -88,8 +59,6 @@ impl ToolServerPermissionTransport {
             session_id,
         }
     }
-    /// Build from a session id held as a string; `None` if it is not a valid
-    /// [`SessionId`].
     pub fn from_session_id(server: ToolServer, session_id: &str) -> Option<Self> {
         SessionId::new(session_id)
             .ok()
@@ -106,14 +75,14 @@ impl PermissionHookTransport for ToolServerPermissionTransport {
                 .observe(start.elapsed().as_secs_f64());
             return Err("tool server gone (weak upgrade failed)".to_owned());
         };
-        let raw = server
+        let reply_result = server
             .request_hook(
                 self.session_id.clone(),
                 PERMISSION_REQUEST_KIND.to_owned(),
                 payload,
             )
             .await;
-        let outcome = match &raw {
+        let outcome = match &reply_result {
             Ok(_) => "ok",
             Err(e) => {
                 if is_timeout_err(&e.to_string()) {
@@ -125,7 +94,7 @@ impl PermissionHookTransport for ToolServerPermissionTransport {
         PERMISSION_REPLY_DURATION
             .with_label_values(&[outcome])
             .observe(start.elapsed().as_secs_f64());
-        raw.map_err(|e| e.to_string())
+        reply_result.map_err(|e| e.to_string())
     }
 }
 fn scope_for_access(access: &AccessKind) -> &'static str {
@@ -154,13 +123,19 @@ fn describe_access(access: &AccessKind) -> String {
         }
     }
 }
-/// Build the server → chat `permission_request` payload. The field set matches
-/// chat's `PermissionRequestPayload` parser, including access-specific context.
-pub(crate) fn build_permission_payload(access: &AccessKind, tool_call_id: &str) -> Value {
+pub(crate) fn build_permission_payload(
+    access: &AccessKind,
+    tool_call_id: &str,
+    hook_ask: Option<&HookAsk>,
+) -> Value {
+    let description = match hook_ask {
+        Some(ask) => ask.prompt_header(&describe_access(access)),
+        None => describe_access(access),
+    };
     let mut payload = serde_json::json!({
         "tool_call_id": tool_call_id,
         "tool_name": tool_name_for_access(access),
-        "description": describe_access(access),
+        "description": description,
         "scope": scope_for_access(access),
     });
     if let Some(map) = payload.as_object_mut() {
@@ -184,11 +159,8 @@ pub(crate) fn build_permission_payload(access: &AccessKind, tool_call_id: &str) 
 }
 #[cfg(test)]
 pub(crate) fn build_permission_payload_for_test(access: &AccessKind, tool_call_id: &str) -> Value {
-    build_permission_payload(access, tool_call_id)
+    build_permission_payload(access, tool_call_id, None)
 }
-/// Decode chat's decision reply onto a [`PromptOutcome`]. The reply is chat's
-/// `permission_answer_to_json` output: `{ "outcome", "scope"?, "followup_message"? }`.
-/// An unknown / `unspecified` outcome fails closed (reject).
 pub(crate) fn reply_to_outcome(reply: &Value) -> PromptOutcome {
     let outcome = match reply.get("outcome") {
         Some(Value::String(s)) => s.as_str(),
@@ -235,9 +207,6 @@ fn scope_kind_value(reply: &Value) -> Option<(&str, Option<String>)> {
         .map(str::to_owned);
     Some((kind, value))
 }
-/// Map a hub-served semantic kind/client name + JSON args onto an [`AccessKind`]
-/// for the permission gate in [`crate::hub::SessionRoutedToolHandler`]. Semantic
-/// kind wins; the name fallback preserves legacy/kindless behavior.
 pub fn access_kind_for_hub_tool(
     kind: Option<xai_grok_tools::types::tool::ToolKind>,
     tool_name: &str,
@@ -319,7 +288,6 @@ fn access_kind_for_hub_tool_name(tool_name: &str, args: &Value) -> Option<Access
         _ => None,
     }
 }
-/// Whether a [`PromptOutcome`] allows the tool call to proceed.
 pub fn prompt_outcome_allows(outcome: &PromptOutcome) -> bool {
     matches!(
         outcome,
@@ -333,16 +301,13 @@ pub fn prompt_outcome_allows(outcome: &PromptOutcome) -> bool {
             | PromptOutcome::AllowAlwaysMcpServer(_)
     )
 }
-/// Request a permission decision from chat over `transport` and map the reply
-/// to a [`PromptOutcome`]. A transport error fails closed (the manager turns an
-/// `Error` outcome into a reject) so a lost server connection never silently runs
-/// a guarded tool.
 pub async fn request_permission_via_hub(
     transport: &dyn PermissionHookTransport,
     access: &AccessKind,
     tool_call_id: &str,
+    hook_ask: Option<&HookAsk>,
 ) -> PromptOutcome {
-    let payload = build_permission_payload(access, tool_call_id);
+    let payload = build_permission_payload(access, tool_call_id, hook_ask);
     match transport.request_permission(payload).await {
         Ok(reply) => match reply_to_outcome(&reply) {
             PromptOutcome::AllowAlways if matches!(access, AccessKind::Edit(_)) => {
@@ -363,7 +328,6 @@ pub async fn request_permission_via_hub(
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    /// Pins the current SDK timeout wording the classifier matches on.
     #[test]
     fn is_timeout_err_matches_backstop_wording_only() {
         assert!(is_timeout_err("request timed out after 600s"));
@@ -373,7 +337,8 @@ mod tests {
     }
     #[test]
     fn payload_for_bash_carries_command_and_write_scope() {
-        let payload = build_permission_payload(&AccessKind::Bash("rm -rf /tmp/x".into()), "tc-1");
+        let payload =
+            build_permission_payload(&AccessKind::Bash("rm -rf /tmp/x".into()), "tc-1", None);
         assert_eq!(payload["tool_call_id"], "tc-1");
         assert_eq!(payload["tool_name"], "run_terminal_command");
         assert_eq!(payload["description"], "Run a terminal command");
@@ -382,12 +347,28 @@ mod tests {
         assert!(payload.get("edit_file_paths").is_none());
     }
     #[test]
+    fn payload_description_carries_the_hook_ask() {
+        let payload = build_permission_payload(
+            &AccessKind::Bash("deploy".into()),
+            "tc-ask",
+            Some(&HookAsk {
+                hook_name: "guard".to_owned(),
+                reason: Some("confirm this".to_owned()),
+            }),
+        );
+        assert_eq!(
+            payload["description"],
+            "Run a terminal command — hook 'guard' asks: confirm this"
+        );
+    }
+    #[test]
     fn payload_for_agent_message_has_dedicated_content_free_identity() {
         let payload = build_permission_payload(
             &AccessKind::AgentMessage {
                 subagent_id: "sub-1".into(),
             },
             "tc-message",
+            None,
         );
         assert_eq!(payload["tool_name"], "send_subagent_message");
         assert_eq!(payload["description"], "Send a message to subagent sub-1");
@@ -398,7 +379,8 @@ mod tests {
     }
     #[test]
     fn payload_for_edit_carries_file_paths() {
-        let payload = build_permission_payload(&AccessKind::Edit("src/main.rs".into()), "tc-2");
+        let payload =
+            build_permission_payload(&AccessKind::Edit("src/main.rs".into()), "tc-2", None);
         assert_eq!(payload["tool_name"], "search_replace");
         assert_eq!(payload["description"], "Edit src/main.rs");
         assert_eq!(payload["scope"], "write");
@@ -462,6 +444,7 @@ mod tests {
                 input: serde_json::Value::Null,
             },
             "tc-3",
+            None,
         );
         assert_eq!(payload["tool_name"], "mcp:linear__list");
         assert_eq!(payload["description"], "Run MCP tool linear__list");
@@ -552,9 +535,13 @@ mod tests {
             reply: Ok(serde_json::json!({ "outcome": "approve" })),
             seen: Mutex::new(None),
         };
-        let outcome =
-            request_permission_via_hub(&transport, &AccessKind::Bash("ls -la".into()), "tc-7")
-                .await;
+        let outcome = request_permission_via_hub(
+            &transport,
+            &AccessKind::Bash("ls -la".into()),
+            "tc-7",
+            None,
+        )
+        .await;
         assert!(matches!(outcome, PromptOutcome::AllowOnce));
         let seen = transport
             .seen
@@ -572,7 +559,8 @@ mod tests {
             seen: Mutex::new(None),
         };
         let outcome =
-            request_permission_via_hub(&transport, &AccessKind::Edit("a.rs".into()), "tc-8").await;
+            request_permission_via_hub(&transport, &AccessKind::Edit("a.rs".into()), "tc-8", None)
+                .await;
         assert!(matches!(outcome, PromptOutcome::Error(_)));
     }
     #[tokio::test]
@@ -582,7 +570,8 @@ mod tests {
             seen: Mutex::new(None),
         };
         let outcome =
-            request_permission_via_hub(&transport, &AccessKind::Edit("a.rs".into()), "tc-9").await;
+            request_permission_via_hub(&transport, &AccessKind::Edit("a.rs".into()), "tc-9", None)
+                .await;
         assert!(matches!(outcome, PromptOutcome::AllowEditsForSession));
         let transport = StubTransport {
             reply: Ok(serde_json::json!({ "outcome": "always_approve" })),
@@ -594,6 +583,7 @@ mod tests {
                 subagent_id: "sub-1".into(),
             },
             "tc-message",
+            None,
         )
         .await;
         assert!(matches!(outcome, PromptOutcome::AllowOnce));
@@ -608,6 +598,7 @@ mod tests {
                 input: serde_json::Value::Null,
             },
             "tc-10",
+            None,
         )
         .await;
         assert!(matches!(outcome, PromptOutcome::AllowAlways));

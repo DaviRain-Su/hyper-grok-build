@@ -3,10 +3,9 @@
 use super::common::*;
 
 /// 23. **Bash-mode strips redundant `cd $SESSION_CWD &&` from execute chrome.**
-/// User `!` command with a leading cd into the session cwd should show the
-/// short command in the Run header, not the long cd prefix. Start a real session
-/// first so session_cwd is set and bash-mode runs as an execute tool (Run chrome),
-/// not only as a welcome-history line (`#1 ! …` keeps the typed command).
+/// A `!` command with a leading cd into the session cwd shows the short command in the Run header, not the long cd prefix.
+/// The test starts a real session first so session_cwd is set and bash-mode runs as an execute tool with Run chrome.
+/// Without a session, `!` only writes a welcome-history line, and `#1 ! …` keeps the typed command.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 #[cfg(unix)]
@@ -66,8 +65,8 @@ async fn bash_mode_strips_redundant_session_cd_from_chrome() {
         screen.contains("STRIP_CD_OK"),
         "expected command output on screen:\n{screen}"
     );
-    // Line-oriented asserts avoid byte-slicing box-drawing UI (char boundary panics).
-    // History `#N ! cd …` keeps the typed command; only Run (user) chrome is peeled.
+    // Asserting per line avoids slicing bytes through box-drawing characters, which panics on a char boundary
+    // The history line `#N ! cd …` keeps the typed command; only the Run (user) chrome loses the cd prefix
     let run_lines: Vec<&str> = screen
         .lines()
         .filter(|line| line.contains("Run (user)"))

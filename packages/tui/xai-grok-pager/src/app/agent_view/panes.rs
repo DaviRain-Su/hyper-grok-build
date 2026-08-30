@@ -1,5 +1,4 @@
-//! Secondary pane input: scrollback keys and search, todo/tool-usage panes,
-//! background tasks, subagent catalog, and the pane-aware scroll router.
+//! Secondary pane input: scrollback keys and search, todo/tool-usage panes, background tasks, subagent catalog, and the pane-aware scroll router.
 use super::{ActivePane, AgentPane, AgentView, overlay_action_to_outcome, resolve_action};
 use crate::actions::{ActionId, ActionRegistry, When};
 use crate::app::actions::Action;
@@ -129,19 +128,9 @@ impl AgentView {
         InputOutcome::Unchanged
     }
     /// Focus the scrollback pane and open an incremental search over it.
-    ///
-    /// Shared by the vim `/` key and the `/find` slash command so both entry
-    /// points land in the same state, refocusing scrollback when `/find` is run
-    /// from the prompt in simple mode.
-    ///
-    /// Only opens the search if the pane switch succeeds: a dirty queued-prompt
-    /// edit blocks the switch (showing the confirm modal) and returns false, so
-    /// opening search then would strand an invisible session on the prompt — the
-    /// search bar and key handling are gated on scrollback being focused.
-    ///
-    /// `initial_query` (the `/find <word>` argument) is fed through the same
-    /// keystroke path so a pre-filled search behaves identically to typing the
-    /// word into the bar: a composing regex query with immediate highlights.
+    /// Both the vim `/` key and the `/find` slash command call this, refocusing scrollback when `/find` runs from the prompt.
+    /// Opens only if the pane switch succeeds: a dirty queued-prompt edit blocks the switch, and the search bar only works with scrollback focused.
+    /// `initial_query` (the `/find <word>` argument) is fed through the keystroke path, so a pre-filled search behaves like typing into the bar.
     pub(crate) fn open_scrollback_search(&mut self, initial_query: Option<&str>) {
         if self.set_active_pane(AgentPane::Scrollback, false) {
             self.scrollback_search = Some(ScrollbackSearchState::open());
@@ -151,7 +140,7 @@ impl AgentView {
         }
     }
     /// Step to the next (`forward`) or previous match and scroll it into view.
-    /// Shared by the `n`/`N` keys and the `↓`/`↑` arrows.
+    /// Both the `n`/`N` keys and the Down/Up arrows land here.
     fn navigate_search(&mut self, forward: bool) -> Option<InputOutcome> {
         if let Some(search) = self.scrollback_search.as_mut() {
             if forward {
@@ -163,9 +152,8 @@ impl AgentView {
         self.reveal_current_search_match();
         Some(InputOutcome::Changed)
     }
-    /// Bottom scrollback rows to reserve for the search UI (divider + bar):
-    /// two when search is active, clamped to the rows that actually exist so a
-    /// very short region never pushes the bar below the scrollback rect.
+    /// Bottom scrollback rows to reserve for the search UI (divider and bar): two when search is active.
+    /// The count clamps to the rows that actually exist, so a very short region never pushes the bar below the scrollback rect.
     pub(super) fn search_reserved_rows(scrollback_height: u16, search_active: bool) -> u16 {
         if search_active {
             scrollback_height.min(2)
@@ -175,9 +163,8 @@ impl AgentView {
     }
     /// Handle a key while the scrollback search overlay is open.
     ///
-    /// Returns `None` when search isn't open (or, while browsing, for keys that
-    /// should fall through to normal scrollback handling). While composing the
-    /// query the bar is modal and swallows other keys.
+    /// Returns `None` when search isn't open (or, while browsing, for keys that should fall through to normal scrollback handling).
+    /// While composing the query the bar is modal and swallows other keys.
     fn handle_scrollback_search_key(&mut self, key: &KeyEvent) -> Option<InputOutcome> {
         let composing = self.scrollback_search.as_ref()?.is_composing();
         let non_text = KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER;
@@ -239,16 +226,16 @@ impl AgentView {
             crate::input::line_editor::LineEditOutcome::Unhandled => InputOutcome::Unchanged,
         })
     }
-    /// Enqueue `query` for the background scan. Results (and the reveal) arrive
-    /// later via [`poll_scrollback_search`](Self::poll_scrollback_search); the
-    /// highlight updates immediately because it reads the UI-side matcher.
+    /// Enqueue `query` for the background scan.
+    /// Results (and the reveal) arrive later via [`poll_scrollback_search`](Self::poll_scrollback_search).
+    /// The highlight updates immediately because it reads the UI-side matcher.
     fn set_scrollback_search_query(&mut self, query: &str) {
         if let Some(search) = self.scrollback_search.as_mut() {
             search.update_query(query, &self.scrollback);
         }
     }
-    /// Poll the background search daemon for new results, revealing the freshly
-    /// parked match when they change. Returns `true` if the UI should redraw.
+    /// Poll the background search daemon for new results, revealing the freshly parked match when they change.
+    /// Returns `true` if the UI should redraw.
     pub(crate) fn poll_scrollback_search(&mut self) -> bool {
         let changed = self.scrollback_search.as_mut().is_some_and(|s| s.poll());
         if changed {
@@ -271,8 +258,7 @@ impl AgentView {
     }
     /// Todo-pane-focused key handling.
     ///
-    /// Routes structural keys through the shared overlay handler, then
-    /// content keys through `TodoPane::handle_key`.
+    /// Routes structural keys through the shared overlay handler, then content keys through `TodoPane::handle_key`.
     pub(super) fn handle_todo_key(
         &mut self,
         key: &KeyEvent,
@@ -495,10 +481,10 @@ impl AgentView {
     /// Handle a normalized scroll event at a screen position.
     ///
     /// Hit-tests against pane areas to decide what to scroll:
-    /// - Scrollback area → scroll the scrollback (uses accelerated line count)
-    /// - Prompt area → forward to textarea (which has its own scroll logic)
+    /// - Scrollback area: scroll the scrollback (uses accelerated line count)
+    /// - Prompt area: forward to the textarea (which has its own scroll logic)
     ///
-    /// Positive `lines` = scroll down, negative = scroll up.
+    /// Positive `lines` scrolls down, negative scrolls up.
     pub fn handle_scroll(&mut self, lines: i32, col: u16, row: u16) {
         if self.show_workflows {
             let runs = self.workflow_runs_newest_first();
@@ -693,8 +679,7 @@ mod scroll_granularity_tests {
         CompletionDropdownState, CompletionItemParsed, SuggestionSource,
     };
     use ratatui::layout::Rect;
-    /// Selection dropdowns step exactly one item per wheel dispatch: a
-    /// 3-line notch (or accelerated trackpad flush) must not skip items.
+    /// Selection dropdowns step exactly one item per wheel dispatch: a 3-line notch (or accelerated trackpad flush) must not skip items.
     #[test]
     fn wheel_notch_over_slash_dropdown_moves_selection_one_step() {
         let mut agent = make_agent();

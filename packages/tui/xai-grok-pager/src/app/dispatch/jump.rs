@@ -12,9 +12,8 @@ pub(super) fn dispatch_jump_show_picker(app: &mut AppView) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    // Refuse if another prompt overlay owns the input slot (rewind, inline-edit,
-    // /btw, or a pending permission/question/cancel-turn/plan overlay) — an
-    // opened picker would be hidden but still eat input.
+    // Refuse if another prompt overlay owns the input slot (rewind, inline-edit, /btw, or a pending permission/question/cancel-turn/plan overlay)
+    // An opened picker would be hidden but still eat input
     if agent.jump_slot_taken() {
         return vec![];
     }
@@ -30,8 +29,7 @@ pub(super) fn dispatch_jump_show_picker(app: &mut AppView) -> Vec<Effect> {
         selected: agent.scrollback.selected(),
         follow_mode: agent.scrollback.is_follow_mode(),
     };
-    // Open on the turn currently at the viewport top (rows are oldest-first,
-    // so the row index is the turn index).
+    // Open on the turn currently at the viewport top (rows are oldest-first, so the row index is the turn index)
     let selected = agent
         .scrollback
         .active_turn_for_viewport()
@@ -44,7 +42,7 @@ pub(super) fn dispatch_jump_show_picker(app: &mut AppView) -> Vec<Effect> {
         selected,
         restore,
     });
-    // Same top anchor that cursor moves preview and Enter lands on.
+    // The same top anchor that cursor moves preview and that Enter lands on
     if let Some(idx) = agent.scrollback.index_of_id(preview_id) {
         agent.scrollback.scroll_to_entry_top(idx);
     }
@@ -61,10 +59,8 @@ pub(super) fn dispatch_jump_picker_select(app: &mut AppView, prompt_id: EntryId)
     let Some(js) = agent.jump_state.take() else {
         return vec![];
     };
-    // The stable id resolves at the boundary; it fails only if the prompt was
-    // removed (async clear/rewind) while the picker was open. Restore the
-    // captured viewport so a failed jump never strands the transcript at the
-    // last preview scroll.
+    // The stable id resolves at the boundary; it fails only if the prompt was removed (async clear/rewind) while the picker was open
+    // Restore the captured viewport so a failed jump never strands the transcript at the last preview scroll
     if !agent.scrollback.jump_to_entry(prompt_id) {
         agent.restore_jump_viewport(js.restore);
     }

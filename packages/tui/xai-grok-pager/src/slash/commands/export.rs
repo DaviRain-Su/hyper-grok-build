@@ -10,38 +10,22 @@
 use std::path::{Path, PathBuf};
 
 use crate::app::actions::Action;
-use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{
+    AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand, slash_meta,
+};
 
 /// Export the current conversation to a file or clipboard.
 pub struct ExportCommand;
 
 impl SlashCommand for ExportCommand {
-    fn name(&self) -> &str {
-        "export"
-    }
-
-    fn description(&self) -> &str {
-        "Export the current conversation to a file or clipboard"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    fn usage(&self) -> &str {
-        "/export [filename]"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn args_required(&self) -> bool {
-        false
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("[filename]")
+    slash_meta! {
+        name: "export",
+        description: "Export the current conversation to a file or clipboard",
+        usage: "/export [filename]",
+        takes_args: true,
+        args_required: false,
+        session_scoped: true,
+        arg_placeholder: "[filename]",
     }
 
     fn suggest_args(&self, ctx: &AppCtx, args_query: &str) -> Option<Vec<ArgItem>> {

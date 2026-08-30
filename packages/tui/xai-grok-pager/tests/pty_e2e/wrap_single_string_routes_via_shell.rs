@@ -2,10 +2,9 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Raw-string route e2e — the original field regression (`grok wrap "mycli ssh
-/// host"`): ONE argv element containing spaces must be handed to `$SHELL -i -c`
-/// for word-splitting instead of being spawned as a program literally named
-/// `echo wrap-e2e one two`. `SHELL` is pinned to `/bin/sh` for determinism.
+/// Reproduces the regression reported from the field: `grok wrap "mycli ssh host"` passes one argv element containing spaces.
+/// It must be handed to `$SHELL -i -c` to word-split; the broken path spawned a program literally named `echo wrap-e2e one two`.
+/// `SHELL` is pinned to `/bin/sh` for determinism.
 #[test]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 #[cfg(unix)]

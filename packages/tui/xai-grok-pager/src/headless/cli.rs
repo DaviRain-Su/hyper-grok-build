@@ -10,7 +10,7 @@ pub enum OutputFormat {
     #[default]
     Plain,
     Json,
-    /// NDJSON of the agent native ACP session updates.
+    /// NDJSON: one ACP session update per line, the agent's native format.
     #[value(name = "streaming-json")]
     StreamingJson,
     /// NDJSON in the Anthropic Messages API wire format.
@@ -34,7 +34,7 @@ pub enum HeadlessPrompt {
 }
 
 impl HeadlessPrompt {
-    /// Build from mutually-exclusive CLI prompt args. `None` = interactive mode.
+    /// Build from mutually-exclusive CLI prompt args. `None` means interactive mode.
     pub fn from_args(
         single: Option<&str>,
         prompt_json: Option<&str>,
@@ -168,7 +168,7 @@ pub fn parse_permission_rules_lenient(
     rules
 }
 
-// Deny before allow is cosmetic: the policy evaluator is order-independent (deny > ask > allow).
+// Deny before allow is cosmetic: the policy evaluator is order-independent (deny beats ask, ask beats allow)
 pub(crate) fn parse_permission_rules_inner(
     allow: &[String],
     deny: &[String],

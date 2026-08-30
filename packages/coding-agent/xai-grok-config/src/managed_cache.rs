@@ -274,8 +274,10 @@ pub fn confirmed_team_switch_at(home: &Path, new_team_id: &str) -> Option<String
 /// True when an artifact the marker recorded serving is now absent. Only served artifacts count, so a config-less
 /// principal (or legacy marker) isn't misread as stale. Detects deletion, not edits.
 fn cache_missing_required_artifact(cache: &ManagedConfigCache, home: &Path) -> bool {
-    (cache.had_requirements && !home.join(crate::loader::REQUIREMENTS_FILENAME).exists())
-        || (cache.had_managed_config && !home.join(crate::loader::MANAGED_CONFIG_FILENAME).exists())
+    use crate::signed_policy::policy_file_has_content;
+    (cache.had_requirements && !policy_file_has_content(home, crate::loader::REQUIREMENTS_FILENAME))
+        || (cache.had_managed_config
+            && !policy_file_has_content(home, crate::loader::MANAGED_CONFIG_FILENAME))
 }
 
 /// Whether the cached principal differs from the team serving now — the team dimension only.

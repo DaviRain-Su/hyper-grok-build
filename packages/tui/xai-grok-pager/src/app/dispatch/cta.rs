@@ -1,4 +1,4 @@
-//! Plugin install call-to-action phase tracking helpers and constants.
+//! Helpers and constants that track the phases of the plugin-install call-to-action.
 
 use super::transcript::extensions_modal_tab_fetches;
 use crate::app::actions::Effect;
@@ -7,22 +7,19 @@ use crate::app::app_view::AppView;
 use agent_client_protocol as acp;
 use xai_grok_telemetry::session_ctx::log_event;
 
-/// Max post-install MCP-list re-probes while waiting for a just-installed
-/// plugin's MCP servers to reach a terminal state. Probes are ~1s apart
-/// (`Effect::RetryPluginCtaMcps`), so the budget bounds the wait at ~15s before
-/// a final no-auth verdict is forced.
+/// Max times the MCP list is re-read after an install while waiting for the just-installed plugin's MCP servers to reach a terminal state.
+/// Probes are ~1s apart (`Effect::RetryPluginCtaMcps`), so the budget bounds the wait at ~15s before a final no-auth verdict is forced.
 pub(super) const CTA_MCP_POLL_MAX_ATTEMPTS: u32 = 15;
 
-/// Re-probes tolerated while the just-installed plugin shows *no* MCP servers
-/// at all. A plugin's servers are config-loaded during the awaited reload that
-/// precedes the first read, so an empty plugin section means it ships none
-/// (skills-only): settle quickly instead of polling the full budget (and paying
-/// the per-read managed-config fetch each time).
+/// Re-probes tolerated while the just-installed plugin shows *no* MCP servers at all.
+/// A plugin's servers are loaded from its config during the awaited reload that precedes the first read.
+/// An empty plugin section thus means it ships none (skills-only).
+/// Settle quickly instead of polling the full budget (and paying the managed-config fetch on every read).
 pub(super) const CTA_MCP_ABSENT_MAX_ATTEMPTS: u32 = 1;
 
-/// Settle the CTA into its brief "installed" confirmation: schedule the auto-
-/// dismiss timer and, when a session exists, refresh the not-installed candidate
-/// set so the just-installed plugin drops out of CTA matching.
+/// Settle the CTA into its brief "installed" confirmation.
+/// Schedule the auto-dismiss timer.
+/// When a session exists, refresh the not-installed candidate set so the just-installed plugin drops out of CTA matching.
 pub(super) fn cta_settle_installed(
     cta: &mut crate::app::agent_view::PluginCtaState,
     agent_id: AgentId,
@@ -43,17 +40,14 @@ pub(super) fn cta_settle_installed(
     effects
 }
 
-/// Not-installed CTA candidates from the catalog scan, plus the selected
-/// source's URL/path — the install target the shell resolves sources by;
-/// `None` means no CTA source was present. One source wins so the candidates
-/// and the install target always come from it. With `cta_marketplace` set
-/// (the `[marketplace].plugin_cta_marketplace` override), the first source
-/// whose name exactly equals it wins — the xAI Official source is excluded
-/// unless it is the named one. Unset (the default) is two-tier: a URL-verified
-/// official source beats any name-only "xAI Official" match regardless of
-/// order (anti-spoofing: the scanned URL is the install root), then a
-/// name-only match keeps mirrors registered under the official name working;
-/// first registered wins within a tier.
+/// Not-installed CTA candidates from the catalog scan, plus the selected source's URL/path (the install target the shell resolves sources by).
+/// `None` means no CTA source was present.
+/// One source wins so the candidates and the install target always come from it.
+/// With `cta_marketplace` set (the `[marketplace].plugin_cta_marketplace` override), the first source whose name exactly equals it wins.
+/// The xAI Official source is excluded unless it is the named one.
+/// Unset (the default) is two-tier: a URL-verified official source beats any name-only "xAI Official" match regardless of order.
+/// (The URL check stops a source from spoofing the official name: the scanned URL is the install root.)
+/// A name-only match then keeps mirrors registered under the official name working; first registered wins within a tier.
 pub(super) fn plugin_cta_candidates(
     response: xai_hooks_plugins_types::MarketplaceListResponse,
     cta_marketplace: Option<&str>,
@@ -87,10 +81,9 @@ pub(super) fn plugin_cta_candidates(
     (candidates, Some(source.source_url_or_path))
 }
 
-/// Resolve the marketplace-relative path for a CTA plugin by name, used to
-/// rebuild a retryable `CtaPhase::Error` after a post-install hop fails. Prefers
-/// the still-cached candidate entry; the `plugins/{name}` fallback assumes the
-/// conventional marketplace layout (a guess for a configured override source).
+/// Resolve the marketplace-relative path for a CTA plugin by name, used to rebuild a retryable `CtaPhase::Error` when a reload or MCP read after the install fails.
+/// Prefers the still-cached candidate entry.
+/// The `plugins/{name}` fallback assumes the conventional marketplace layout (a guess for a configured override source).
 pub(super) fn cta_install_relative_path(
     candidates: &[xai_hooks_plugins_types::MarketplacePluginEntry],
     name: &str,
@@ -121,10 +114,8 @@ pub(super) fn cta_install_error_category(
 
 /// Recompute the plugin-CTA phase from the current prompt draft.
 ///
-/// Gating order: feature flag + CTA source present (official, or the
-/// configured `plugin_cta_marketplace`), keyword match, then per-plugin
-/// dismissal (`is_dismissed` injects the config lookup so the matcher logic
-/// stays unit-testable).
+/// Gating order: feature flag and CTA source present (official, or the configured `plugin_cta_marketplace`), keyword match, then per-plugin dismissal.
+/// `is_dismissed` injects the config lookup so the matcher logic stays unit-testable.
 pub(super) fn plugin_cta_phase_for(
     enabled: bool,
     cta_source_present: bool,
@@ -237,13 +228,11 @@ pub(super) fn handle_cta_plugin_install_done(
                     plugin_name: name,
                 }]
             } else {
-                // Skills-only plugin: no MCP servers to wait on, so skip
-                // the fetch/"Setting up…" flash and settle immediately.
+                // Skills-only plugin: no MCP servers to wait on, so skip the fetch/"Setting up…" flash and settle immediately
                 cta_settle_installed(&mut agent.plugin_cta, agent_id, name, Some(session_id))
             }
         }
-        // Install succeeded but the session vanished; nothing left to
-        // chain, so show the brief installed confirmation.
+        // Install succeeded but the session vanished; nothing left to chain, so show the brief installed confirmation
         (Ok(_), None) => cta_settle_installed(&mut agent.plugin_cta, agent_id, name, None),
         (Err(message), _) => {
             agent.plugin_cta.phase = CtaPhase::Error {
@@ -266,8 +255,7 @@ pub(super) fn handle_cta_plugin_reload_done(
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };
-    // Stale guard: only act on the reload we are currently awaiting for
-    // this plugin.
+    // Stale guard: only act on the reload we are currently awaiting for this plugin
     let CtaPhase::AwaitingReload { name } = &agent.plugin_cta.phase else {
         return vec![];
     };
@@ -276,8 +264,7 @@ pub(super) fn handle_cta_plugin_reload_done(
     }
     let name = name.clone();
     let session_id = agent.session.session_id.clone();
-    // Mirror the install handler: a non-Success outcome is a failure, not
-    // a reason to advance into the post-install pipeline.
+    // Mirror the install handler: a non-Success outcome is a failure, not a reason to advance to the steps after install
     let reload_result = match result {
         Ok(outcome) if outcome.status == xai_hooks_plugins_types::OutcomeStatus::Success => Ok(()),
         Ok(outcome) => Err(crate::app::effects::sanitize_user_error(&outcome.message)),
@@ -294,8 +281,7 @@ pub(super) fn handle_cta_plugin_reload_done(
                     plugin_name: name,
                 }]
             }
-            // Skills-only plugin (or no session): settle immediately
-            // without an MCP fetch.
+            // Skills-only plugin (or no session): settle immediately without an MCP fetch
             session_id => cta_settle_installed(&mut agent.plugin_cta, agent_id, name, session_id),
         },
         Err(message) => {
@@ -325,8 +311,7 @@ pub(super) fn handle_plugin_cta_mcps_loaded(
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };
-    // Stale guard: only act on the read we are currently awaiting for
-    // this plugin.
+    // Stale guard: only act on the read we are currently awaiting for this plugin
     let CtaPhase::AwaitingMcps { name } = &agent.plugin_cta.phase else {
         return vec![];
     };
@@ -337,45 +322,37 @@ pub(super) fn handle_plugin_cta_mcps_loaded(
     let session_id = agent.session.session_id.clone();
     match result {
         Ok(servers) => {
-            // MCP servers re-initialize progressively after install, so a
-            // single early read can miss OAuth servers that only reach
-            // NeedsAuth seconds later. Decide now only on a terminal
-            // verdict; otherwise keep polling until the plugin's servers
-            // settle or the attempt budget runs out.
+            // MCP servers re-initialize progressively after install
+            // A single early read can miss OAuth servers that only reach NeedsAuth seconds later
+            // Decide now only on a terminal verdict; otherwise keep polling until the plugin's servers settle or the attempt budget runs out
             let section = McpSectionId::Plugin(name.clone());
             let needs_auth = servers.iter().any(|s| {
                 s.status == McpServerDisplayStatus::NeedsAuth && section_for(s) == section
             });
             let any_plugin_server = servers.iter().any(|s| section_for(s) == section);
-            // Settle (no auth) only on a clean verdict: every plugin
-            // server is Ready. While any is still Initializing or
-            // Unavailable the verdict isn't final -- an OAuth server can
-            // briefly surface as Unavailable before it flips to NeedsAuth
-            // -- so keep polling. needs_auth is handled above.
+            // Settle (no auth) only on a clean verdict: every plugin server is Ready
+            // While any is still Initializing or Unavailable the verdict isn't final, so keep polling
+            // An OAuth server can briefly show as Unavailable before it flips to NeedsAuth
+            // needs_auth is handled above
             let all_ready = servers
                 .iter()
                 .filter(|s| section_for(s) == section)
                 .all(|s| s.status == McpServerDisplayStatus::Ready);
             let settled = any_plugin_server && all_ready;
             let timed_out = agent.plugin_cta.mcp_attempt >= CTA_MCP_POLL_MAX_ATTEMPTS;
-            // Skills-only plugins show an empty plugin section even though
-            // the rest of the MCP list is populated (all plugin configs
-            // load together during the awaited reload that precedes this
-            // read). Requiring a non-empty list ensures a read-too-early
-            // result (no servers at all) keeps polling rather than being
-            // mistaken for skills-only and skipping a slow MCP-bearing
-            // plugin's auth handoff; an all-empty list falls through to the
-            // attempt-budget timeout.
+            // Skills-only plugins show an empty plugin section even though the rest of the MCP list is populated
+            // (All plugin configs load together during the awaited reload that precedes this read.)
+            // Requiring a non-empty list keeps a read-too-early result (no servers at all) polling
+            // Otherwise it would be mistaken for skills-only, skipping a slow MCP-bearing plugin's auth handoff
+            // An all-empty list falls through to the attempt-budget timeout
             let absent_settle = !any_plugin_server
                 && !servers.is_empty()
                 && agent.plugin_cta.mcp_attempt >= CTA_MCP_ABSENT_MAX_ATTEMPTS;
             let mut effects = Vec::new();
             if needs_auth {
-                // Hand off into the Extensions modal on the MCP Servers tab
-                // with only the new plugin's section expanded. Seed the MCP
-                // data from the read we already have (no flash) and emit the
-                // same tab fetch-set as a manual open so no other tab is left
-                // stuck Loading; the modal then owns the auth UX.
+                // Hand off into the Extensions modal on the MCP Servers tab with only the new plugin's section expanded
+                // Seed the MCP data from the read we already have (no flash)
+                // Emit the same tab fetches as a manual open so no other tab is left stuck Loading; the modal then owns the auth UX
                 let mut modal = ExtensionsModalState::new(ExtensionsTab::McpServers);
                 modal.session_team_id = app.team_id.clone();
                 seed_mcps_section_collapse_for_cta(
@@ -406,8 +383,7 @@ pub(super) fn handle_plugin_cta_mcps_loaded(
                     });
                 }
             } else if !agent.plugin_cta.expects_mcp || settled || timed_out || absent_settle {
-                // Skills-only plugin, all-Ready read, no servers at all, or
-                // budget exhausted: show the brief installed confirmation.
+                // Skills-only plugin, all-Ready read, no servers at all, or budget exhausted: show the brief installed confirmation
                 effects.extend(cta_settle_installed(
                     &mut agent.plugin_cta,
                     agent_id,
@@ -415,8 +391,7 @@ pub(super) fn handle_plugin_cta_mcps_loaded(
                     session_id,
                 ));
             } else if let Some(session_id) = session_id {
-                // MCP init hasn't settled and a verdict is still possible;
-                // re-probe after a short delay and stay in AwaitingMcps.
+                // MCP init hasn't settled and a verdict is still possible; re-probe after a short delay and stay in AwaitingMcps
                 agent.plugin_cta.mcp_attempt += 1;
                 effects.push(Effect::RetryPluginCtaMcps {
                     agent_id,
@@ -463,19 +438,15 @@ pub(super) fn handle_plugin_cta_catalog_loaded(
                     plugin_cta_candidates(response, cta_marketplace);
                 agent.plugin_cta.candidates = candidates;
                 agent.plugin_cta.source_url_or_path = source_url_or_path;
-                // Cache the dismissed set once here so the matched-debounce
-                // recompute never reads config.toml from the UI thread.
-                // Only needed when enabled (the matcher short-circuits to
-                // Hidden before consulting it otherwise).
+                // Cache the dismissed set once here so recomputing after the debounce never reads config.toml from the UI thread
+                // Only needed when enabled (the matcher short-circuits to Hidden before consulting it otherwise)
                 if enabled {
                     agent.plugin_cta.dismissed = xai_grok_shell::config::dismissed_plugin_ctas();
                 }
-                // Recompute the matcher-driven phase now that the catalog
-                // landed: a type-and-pause before the async catalog arrived
-                // (common at startup) should surface the CTA without another
-                // keystroke. This also subsumes the empty-candidate retract.
-                // Only touch matcher-driven phases; Installing/AwaitingReload/
-                // AwaitingMcps/Installed/Error own their own lifecycle.
+                // Recompute the matcher-driven phase now that the catalog landed
+                // Typing and pausing before the async catalog arrived (common at startup) should show the CTA without another keystroke
+                // This also hides a shown CTA when the refreshed catalog leaves no candidates
+                // Only touch matcher-driven phases; Installing/AwaitingReload/AwaitingMcps/Installed/Error own their own transitions
                 if matches!(
                     agent.plugin_cta.phase,
                     CtaPhase::Hidden | CtaPhase::Matched { .. }
@@ -523,12 +494,10 @@ pub(super) fn handle_plugin_cta_debounce_expired(
     if generation != agent.plugin_cta.debounce_generation {
         return vec![];
     }
-    // Preserve in-flight/actionable install states across keystrokes so
-    // the eventual install/reload/mcps result is never swallowed by the
-    // stale guard. `Installed` is included too: its ✓ confirmation is
-    // owned by the auto-dismiss timer, and recomputing during the window
-    // could re-offer the just-installed plugin off the stale candidate
-    // set before the catalog refresh lands.
+    // Preserve running or actionable install states across keystrokes
+    // The eventual install/reload/mcps result must never be swallowed by the stale guard
+    // `Installed` is included too: its `✓` confirmation is owned by the auto-dismiss timer
+    // Recomputing during the window could re-offer the just-installed plugin off the stale candidate set before the catalog refresh lands
     if matches!(
         agent.plugin_cta.phase,
         CtaPhase::Installing { .. }

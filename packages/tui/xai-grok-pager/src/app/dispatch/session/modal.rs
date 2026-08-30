@@ -1,15 +1,13 @@
 //! Session rename / close helpers (shared with the dashboard).
 //!
-//! The `/sessions` picker modal was removed; rename-via-slash and
-//! dashboard close still use these dispatchers.
+//! The `/sessions` picker modal was removed; `/rename` and the dashboard's close action still use these dispatchers.
 use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::app::dispatch::ctx::{SwitchCause, show_welcome, switch_to_agent};
 use crate::app::dispatch::task_result::unregister_session_effect;
 use crate::scrollback::block::RenderBlock;
-/// Remove an agent and clean up all references to it:
-/// `forked_from` pointers on surviving agents.
+/// Removes the agent and clears `forked_from` pointers to it on surviving agents.
 pub(in crate::app::dispatch) fn remove_agent_and_cleanup(app: &mut AppView, agent_id: AgentId) {
     let removed = app.agents.shift_remove(&agent_id);
     for agent in app.agents.values_mut() {
@@ -25,18 +23,13 @@ pub(in crate::app::dispatch) fn remove_agent_and_cleanup(app: &mut AppView, agen
 /// Close (drop from this pager's in-memory list) the given agent.
 ///
 /// Order matters:
-/// 1. Refuse to close the only alive agent (toast "Cannot close the
-///    only session -- use /home to exit"). The user has nothing to
-///    fall back to inside the agent shell.
-/// 2. If the closed agent is currently active, switch first to a
-///    surviving peer (parent via `forked_from` if alive, else the
-///    first surviving entry) using `SwitchCause::Picker`. If no peer
-///    survives, fall back to Welcome (already covered by case 1 --
-///    this is a defensive belt).
-/// 3. Drop the agent from `app.agents` (`shift_remove` to preserve
-///    insertion order on every other entry) and clear `forked_from`
-///    references on surviving agents so dangling parent pointers
-///    cannot resurface.
+/// 1. Refuse to close the only alive agent (toast "Cannot close the only session -- use /home to exit").
+///    The user has nothing to fall back to inside the agent shell.
+/// 2. If the closed agent is currently active, switch first to a surviving peer using `SwitchCause::Picker`.
+///    The peer is the parent via `forked_from` if alive, else the first surviving entry.
+///    If no peer survives, fall back to Welcome; case 1 already prevents that, so this is a safety net.
+/// 3. Drop the agent from `app.agents`; `shift_remove` preserves insertion order on every other entry.
+///    Clear `forked_from` references on surviving agents so dangling parent pointers cannot resurface.
 pub(in crate::app::dispatch) fn dispatch_sessions_confirm_close(
     app: &mut AppView,
     closed_id: AgentId,
@@ -102,10 +95,9 @@ pub(in crate::app::dispatch) fn dispatch_rename_session(
         kind: agent.rename_kind(),
     }]
 }
-/// Unpin the current session title via `x.ai/session/rename` + `resetToAuto`.
+/// Unpin the current session title via `x.ai/session/rename` with `resetToAuto`.
 ///
-/// Chat-kind sessions have no local `SummaryGenerator` to restore, so they
-/// are refused here (no optimistic clear, no ext request).
+/// Chat-kind sessions have no local `SummaryGenerator` to restore, so they are refused here (no optimistic clear, no ext request).
 pub(in crate::app::dispatch) fn dispatch_reset_session_title(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];

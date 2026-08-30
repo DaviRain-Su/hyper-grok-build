@@ -273,3 +273,25 @@ const val BOT_EVENT_ENVELOPE_V: Int = 1
 const val COMMAND_REJECTED_NOT_YET_ENABLED: String = "not_yet_enabled"
 /** `reason` on `command_rejected` when envelope `agentId` and `args.agentId` disagree. */
 const val COMMAND_REJECTED_AGENT_ID_MISMATCH: String = "agent_id_mismatch"
+/** `reason` on `command_rejected` when `uploadAttachment` args JSON exceeds 3 MiB. */
+const val COMMAND_REJECTED_ARGS_TOO_LARGE: String = "args_too_large"
+/** `reason` on `command_rejected` when required command args are missing or empty. */
+const val COMMAND_REJECTED_ARGS_INVALID: String = "args_invalid"
+/** `reason` on `command_rejected` when Live mode cannot accept attachments. */
+const val COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE: String = "attachments_not_supported_in_live"
+/** `reason` on `command_rejected` when Live mode cannot interrupt or look up */
+const val COMMAND_REJECTED_NOT_SUPPORTED_IN_LIVE: String = "not_supported_in_live"
+/** `reason` on `command_rejected` when attachUpload cannot see the file (missing or not the caller's). */
+const val COMMAND_REJECTED_ATTACHMENT_NOT_FOUND: String = "attachment_not_found"
+/** `reason` on `command_rejected` when the file exists but is not a BOT_CHAT upload. */
+const val COMMAND_REJECTED_ATTACHMENT_WRONG_SOURCE: String = "attachment_wrong_source"
+/** `reason` on `command_rejected` when the stored BotChat object exceeds 25 MiB. */
+const val COMMAND_REJECTED_ATTACHMENT_TOO_LARGE: String = "attachment_too_large"
+/** `reason` on `command_rejected` when the BotChat upload is not PostProcessDone. */
+const val COMMAND_REJECTED_ATTACHMENT_NOT_READY: String = "attachment_not_ready"
+/** `reason` on `command_rejected` when the box refused a well-formed */
+const val COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD: String = "gateway/unknown-method"
+
+fun isGatewayMethodUnsupported(error: BotRelayError): Boolean =
+    error.code == "command_rejected" &&
+        error.reason == COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD

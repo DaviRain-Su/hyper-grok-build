@@ -692,6 +692,9 @@ impl ToolNameMapping {
 /// message that left the model stuck.
 #[derive(Debug, Clone, Default)]
 pub struct EnabledNativeToolNames(pub std::collections::HashSet<String>);
+/// Enabled native tools keyed by canonical registry ID with client-facing names.
+#[derive(Debug, Clone, Default)]
+pub struct NativeToolClientNames(pub std::collections::HashMap<String, String>);
 impl EnabledNativeToolNames {
     /// Whether `name` is an enabled native (non-MCP) tool.
     pub fn contains(&self, name: &str) -> bool {
@@ -1532,20 +1535,24 @@ mod tests {
     }
     #[test]
     fn resolve_model_path_tilde_expands_to_home() {
-        let home = dirs::home_dir().expect("test requires home_dir");
+        let home = xai_dirs::home_dir().expect("test requires home_dir");
         let cwd = std::path::Path::new("/worktree/abc");
         let result = super::resolve_model_path(cwd, None, "~/foo/bar.rs");
         assert_eq!(result, home.join("foo/bar.rs"));
     }
     #[test]
     fn resolve_model_path_tilde_alone() {
-        let Some(home) = dirs::home_dir() else { return };
+        let Some(home) = xai_dirs::home_dir() else {
+            return;
+        };
         let cwd = std::path::Path::new("/worktree/abc");
         assert_eq!(super::resolve_model_path(cwd, None, "~"), home);
     }
     #[test]
     fn resolve_model_path_tilde_slash_only() {
-        let Some(home) = dirs::home_dir() else { return };
+        let Some(home) = xai_dirs::home_dir() else {
+            return;
+        };
         let cwd = std::path::Path::new("/worktree/abc");
         assert_eq!(super::resolve_model_path(cwd, None, "~/"), home);
     }
@@ -1572,7 +1579,9 @@ mod tests {
     }
     #[test]
     fn resolve_model_path_tilde_with_display_cwd() {
-        let Some(home) = dirs::home_dir() else { return };
+        let Some(home) = xai_dirs::home_dir() else {
+            return;
+        };
         let cwd = std::path::Path::new("/worktree/abc");
         let display = home.join("project");
         let result = super::resolve_model_path(cwd, Some(&display), "~/project/src/main.rs");

@@ -158,7 +158,7 @@ pub fn uninstall_plugin(
 
     if !keep_data {
         // Plugins under $HOME are user-scope; everything else is config-path scope.
-        let scope = match dirs::home_dir() {
+        let scope = match xai_dirs::home_dir() {
             Some(home) if repo.path.starts_with(&home) => PluginScope::User,
             _ => PluginScope::ConfigPath,
         };
@@ -506,7 +506,7 @@ pub fn classify_marketplace_add_input(input: &str, cwd: &Path) -> MarketplaceAdd
 /// marketplace loader applies to `path =` config entries.
 fn expand_tilde(input: &str) -> PathBuf {
     match input.strip_prefix('~') {
-        Some(rest) => dirs::home_dir()
+        Some(rest) => xai_dirs::home_dir()
             .map(|h| h.join(rest.strip_prefix('/').unwrap_or(rest)))
             .unwrap_or_else(|| PathBuf::from(input)),
         None => PathBuf::from(input),
@@ -1135,7 +1135,7 @@ pub fn uninstall_marketplace_source_plugins(source_identity: &str) -> Vec<String
         if let Err(e) = git_install::remove_repo_path(path) {
             tracing::warn!("failed to remove plugin dir for {key}: {e}");
         }
-        let scope = match dirs::home_dir() {
+        let scope = match xai_dirs::home_dir() {
             Some(home) if path.starts_with(&home) => PluginScope::User,
             _ => PluginScope::ConfigPath,
         };
@@ -1201,7 +1201,7 @@ pub fn try_remove_source_from_json_files(source_url_or_path: &str) -> bool {
     // Resolve user grok via user_grok_home() (None when no home resolves) and
     // home separately, so removal still runs from $GROK_HOME when no home dir
     // exists, and never touches a cwd-relative .grok.
-    let home = dirs::home_dir();
+    let home = xai_dirs::home_dir();
     let grok = xai_grok_config::user_grok_home();
 
     let mut settings_candidates: Vec<std::path::PathBuf> = Vec::new();
@@ -1388,7 +1388,7 @@ mod tests {
             MarketplaceAddInput::LocalPath(PathBuf::from("/work/../plugins"))
         );
         // Tilde expands to home.
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = xai_dirs::home_dir() {
             assert_eq!(
                 classify_marketplace_add_input("~/plugins", cwd),
                 MarketplaceAddInput::LocalPath(home.join("plugins"))
@@ -1513,7 +1513,7 @@ mod tests {
     fn remove_toml_matches_tilde_path_entry_by_expanded_identity() {
         // Loaded sources carry expanded paths, so removal by identity must
         // still find a hand-written `path = "~/x"` entry.
-        let Some(home) = dirs::home_dir() else {
+        let Some(home) = xai_dirs::home_dir() else {
             return;
         };
         let content = "[[marketplace.sources]]\nname = \"dev\"\npath = \"~/dev/plugins\"\n";

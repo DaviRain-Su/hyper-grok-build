@@ -11,33 +11,30 @@ use crate::theme::Theme;
 /// Credit balance state from the billing API.
 #[derive(Debug, Clone)]
 pub struct CreditBalance {
-    /// Usage as a percentage of the allowance (0.0–100.0).
+    /// Usage as a percentage of the allowance (0.0 to 100.0).
     pub usage_pct: f64,
-    /// Usage as a percentage of total budget (free + on-demand when enabled).
+    /// Usage as a percentage of total budget (free and on-demand when enabled).
     pub effective_usage_pct: f64,
-    /// Billing period end as a formatted local wall-clock string (no zone
-    /// label), e.g. "Mar 31, 12:00".
+    /// Billing period end as a formatted local wall-clock string (no zone label), e.g. "Mar 31, 12:00".
     pub period_end_display: Option<String>,
     /// Whether pay-as-you-go (on-demand) billing is enabled.
     pub pay_as_you_go: bool,
-    /// On-demand spending cap in USD cents (e.g. 500 = $5.00).
+    /// On-demand spending cap in USD cents (e.g. 500 is $5.00).
     pub on_demand_cap_cents: Option<i64>,
     /// On-demand usage this period in USD cents.
     pub on_demand_used_cents: Option<i64>,
     /// Remaining prepaid ("bought") credit balance in USD cents.
     pub prepaid_balance_cents: Option<i64>,
-    /// Usage period type from the billing response (the proto enum name, e.g.
-    /// `USAGE_PERIOD_TYPE_WEEKLY`). Drives the "Weekly/Monthly limit" label.
+    /// Usage period type from the billing response (the proto enum name, e.g. `USAGE_PERIOD_TYPE_WEEKLY`).
+    /// Drives the "Weekly/Monthly limit" label.
     pub period_type: Option<String>,
     /// From credits config `is_unified_billing_user` (`None` if absent).
-    /// `Some(true)` = unified pool / buy-credits UX; `Some(false)` = legacy
-    /// on-demand / PAYG UX.
+    /// `Some(true)` means the unified pool and buy-credits UX; `Some(false)` means the legacy on-demand (PAYG) UX.
     pub is_unified_billing_user: Option<bool>,
 }
 
 impl CreditBalance {
-    /// Label for the percentage allowance, chosen from the period type:
-    /// "Weekly limit" / "Monthly limit", falling back to "Usage" when unknown.
+    /// Label for the percentage allowance, chosen from the period type: "Weekly limit" / "Monthly limit", falling back to "Usage" when unknown.
     pub fn usage_label(&self) -> &'static str {
         match self.period_type.as_deref() {
             Some(t) if t.contains("WEEKLY") => "Weekly limit",
@@ -59,8 +56,7 @@ pub struct AutoTopupInfo {
 }
 
 impl AutoTopupInfo {
-    /// A known "no / disabled auto top-up" state — distinct from an unresolved
-    /// `None`, which means the rule hasn't been fetched yet.
+    /// A known "auto top-up disabled" state, distinct from an unresolved `None`, which means the rule hasn't been fetched yet.
     pub fn disabled() -> Self {
         Self {
             enabled: false,
@@ -70,18 +66,16 @@ impl AutoTopupInfo {
     }
 }
 
-/// Outcome of an auto top-up rule fetch, so a transient failure doesn't clear a
-/// previously cached rule.
+/// Outcome of an auto top-up rule fetch, so a transient failure doesn't clear a previously cached rule.
 #[derive(Debug, Clone)]
 pub enum AutoTopupFetch {
-    /// A definitive rule state (a real rule, or [`AutoTopupInfo::disabled`] when
-    /// the backend reports none). Stored as the *known* auto top-up state.
+    /// A definitive rule state (a real rule, or [`AutoTopupInfo::disabled`] when the backend reports none).
+    /// Stored as the *known* auto top-up state.
     Resolved(AutoTopupInfo),
-    /// Fetch failed — keep the cached value (last-known-good). A stored `None`
-    /// therefore means "not yet known", not "no auto top-up".
+    /// Fetch failed; keep the cached value.
+    /// A stored `None` therefore means "not yet known", not "no auto top-up".
     Unchanged,
-    /// The rule is not applicable (no prepaid credits) — reset the cache to
-    /// "unknown" so a later credits period doesn't read a stale rule.
+    /// The rule is not applicable (no prepaid credits); reset the cache to "unknown" so a later credits period doesn't read a stale rule.
     Cleared,
 }
 
@@ -97,15 +91,14 @@ fn fmt_dollars(cents: i64) -> String {
 
 /// Build the `/usage` summary block shown in scrollback.
 ///
-/// Always shows usage % and (when known) the next reset time. The credits
-/// block is rendered only when the user has a positive prepaid balance:
+/// Always shows usage % and (when known) the next reset time.
+/// The credits block is rendered only when the user has a positive prepaid balance:
 /// - no prepaid balance       → credits block omitted entirely
 /// - auto top-up off/unknown  → `Auto topup: disabled` (no max line)
 /// - auto top-up on, no max   → `Auto topup: $N`
 /// - auto top-up on, max set  → `Auto topup: $N` + `Max monthly topup: $M`
 pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopupInfo>) -> String {
-    // Floor to match the backend SpendingLimiter's `as u8` truncation
-    // (99.994% → 99%, never 100% until truly exhausted).
+    // Floor to match the backend SpendingLimiter's `as u8` truncation (99.994% renders as 99%, never 100% until truly exhausted)
     let mut lines = vec![format!(
         "{}: {}%",
         balance.usage_label(),
@@ -115,8 +108,7 @@ pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopu
         lines.push(format!("Next reset: {reset}"));
     }
 
-    // Billing stores credit / top-up amounts as negative cents (accounting
-    // convention); display the absolute USD value, matching the web clients.
+    // Billing stores credit / top-up amounts as negative cents (accounting convention); display the absolute USD value, matching the web clients
     if let Some(prepaid) = balance
         .prepaid_balance_cents
         .map(i64::abs)
@@ -138,9 +130,8 @@ pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopu
         }
     }
 
-    // Legacy on-demand (pay-as-you-go) billing — shown only when enabled, for
-    // users on the older monthly + on-demand model. Amounts always carry cents
-    // (e.g. `$50.00`), matching the web client.
+    // Legacy on-demand (pay-as-you-go) billing, shown only when enabled, for users on the older monthly and on-demand model
+    // Amounts always carry cents (e.g. `$50.00`), matching the web client.
     if balance.pay_as_you_go {
         let used = balance.on_demand_used_cents.unwrap_or(0).abs() as f64 / 100.0;
         let cap = balance.on_demand_cap_cents.unwrap_or(0).abs() as f64 / 100.0;
@@ -155,15 +146,13 @@ pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopu
 const LOW_BALANCE_CENTS: i64 = 1000;
 const PAY_AS_YOU_GO_CRITICAL_CENTS: i64 = 500;
 
-/// The prompt's usage/credits warning as `(text, critical)`, or `None`
-/// (`critical` = yellow, else grey; team users with `usage_visible = false`
-/// never warn). Behaviour splits by billing model — prepaid credits,
-/// pay-as-you-go on-demand, or the included-allowance percentage — with exact
-/// thresholds and copy pinned by the unit tests.
+/// The prompt's usage/credits warning as `(text, critical)`, or `None`.
+/// `critical` renders yellow, else grey; team users with `usage_visible = false` never warn.
+/// Behaviour splits by billing model: prepaid credits, pay-as-you-go on-demand, or the included-allowance percentage.
+/// The unit tests pin the exact thresholds and copy.
 ///
-/// Gateway light-frontend (`kind: "chat"`) sessions must not surface Build
-/// coding-credit warnings — use [`usage_warning_for_session`] with
-/// `gateway_chat = true` so the prompt shows no fake local sampler telemetry.
+/// Gateway light-frontend (`kind: "chat"`) sessions must not show Build coding-credit warnings.
+/// Use [`usage_warning_for_session`] with `gateway_chat = true` so the prompt shows no fake local sampler telemetry.
 pub fn usage_warning(
     balance: &CreditBalance,
     autotopup: Option<&AutoTopupInfo>,
@@ -190,8 +179,7 @@ pub fn usage_warning_for_session(
         .filter(|c| *c > 0);
 
     let Some(credits_cents) = credits else {
-        // Pay-as-you-go (legacy on-demand): warn on dollars left in the cap once
-        // the included allowance is spent.
+        // Pay-as-you-go (legacy on-demand): warn on dollars left in the cap once the included allowance is spent
         if balance.pay_as_you_go {
             if balance.usage_pct >= 100.0 {
                 let cap = balance.on_demand_cap_cents.unwrap_or(0).abs();
@@ -207,8 +195,7 @@ pub fn usage_warning_for_session(
 
         let pct = balance.effective_usage_pct;
         if pct > 90.0 {
-            // "Left" = complement of floored usage, so it agrees with the
-            // floored summary (99.994% → "1% left", not "0%").
+            // "Left" is the complement of floored usage, so it agrees with the floored summary: 99.994% shows "1% left", not "0%"
             let remaining = (100 - pct.floor() as i64).max(0);
             let label = balance.usage_label();
             return Some((format!("{label} left: {remaining}%"), pct > 95.0));
@@ -228,8 +215,8 @@ pub fn usage_warning_for_session(
         )
     };
 
-    // Auto top-up gates the warning: unknown → silent; disabled → warn when low;
-    // enabled w/o max → never; enabled w/ max → warn below one top-up amount.
+    // Auto top-up gates the warning: unknown stays silent; disabled warns when low
+    // Enabled without a max never warns; enabled with a max warns below one top-up amount
     match autotopup {
         None => None,
         Some(at) if !at.enabled => (credits_cents <= LOW_BALANCE_CENTS).then(credits_warning),
@@ -245,17 +232,15 @@ pub fn usage_warning_for_session(
 ///
 /// Shows `Credits used: XX%` in the status bar.
 ///
-/// Gateway light-frontend (`kind: "chat"`) sessions must not show Build coding
-/// credits — use [`credit_bar_line_for_session`] with `gateway_chat = true`
-/// (returns `None`). remote settings / managed opt-in for chat entry can share the
-/// same gate later; for now it only zeros/suppresses misleading local telemetry.
+/// Gateway light-frontend (`kind: "chat"`) sessions must not show Build coding credits.
+/// Use [`credit_bar_line_for_session`] with `gateway_chat = true`, which returns `None`.
+/// Remote settings or a managed opt-in for chat entry can share the same gate later; for now it only suppresses misleading local telemetry.
 pub fn credit_bar_line(balance: &CreditBalance, hovered: bool, theme: &Theme) -> Line<'static> {
     credit_bar_line_for_session(balance, hovered, theme, false)
         .expect("non-chat credit_bar_line always renders")
 }
 
-/// Like [`credit_bar_line`], but returns `None` for gateway/chat-kind sessions
-/// so the status bar never implies Build sampler / coding-credit usage.
+/// Like [`credit_bar_line`], but returns `None` for gateway/chat-kind sessions so the status bar never implies Build sampler / coding-credit usage.
 pub fn credit_bar_line_for_session(
     balance: &CreditBalance,
     _hovered: bool,
@@ -313,7 +298,7 @@ mod tests {
             prepaid_balance_cents: Some(0),
             ..bal(25.0)
         };
-        // Even with an auto-topup rule present, zero prepaid → no credits block.
+        // Even with an auto-topup rule present, zero prepaid omits the credits block
         let out = format_usage_summary(&b, Some(&topup(true, Some(2000), Some(10000))));
         assert_eq!(out, "Usage: 25%\nNext reset: June 14, 16:00");
     }
@@ -374,8 +359,7 @@ mod tests {
 
     #[test]
     fn summary_abs_negative_billing_amounts() {
-        // Billing returns credit / top-up amounts as negative cents; the
-        // summary must render them as positive USD (matching the web).
+        // Billing returns credit / top-up amounts as negative cents; the summary must render them as positive USD (matching the web)
         let b = CreditBalance {
             prepaid_balance_cents: Some(-500),
             ..bal(100.0)
@@ -435,7 +419,7 @@ mod tests {
             bal_period(0.0, "USAGE_PERIOD_TYPE_MONTHLY").usage_label(),
             "Monthly limit"
         );
-        // Unknown / unspecified / absent → falls back to "Usage".
+        // Unknown / unspecified / absent falls back to "Usage"
         assert_eq!(
             bal_period(0.0, "USAGE_PERIOD_TYPE_UNSPECIFIED").usage_label(),
             "Usage"
@@ -462,8 +446,7 @@ mod tests {
 
     #[test]
     fn summary_floors_usage_percent() {
-        // Match the backend SpendingLimiter (`as u8` truncation): 99.994% must
-        // render as 99%, not round up to 100%.
+        // Match the backend SpendingLimiter (`as u8` truncation): 99.994% must render as 99%, not round up to 100%
         let almost = bal_period(99.994, "USAGE_PERIOD_TYPE_WEEKLY");
         assert_eq!(format_usage_summary(&almost, None), "Weekly limit: 99%");
         // A true 100% still shows 100%.
@@ -473,14 +456,13 @@ mod tests {
 
     #[test]
     fn warning_percent_left_is_floor_complement() {
-        // 99.994% used → floored to 99% → "1% left" (not "0% left"), so the
-        // warning and the floored summary always sum to 100.
+        // 99.994% used floors to 99%, so it shows "1% left" (not "0% left"), and the warning and the floored summary always sum to 100
         let almost = bal_period(99.994, "USAGE_PERIOD_TYPE_WEEKLY");
         assert_eq!(
             usage_warning(&almost, None, true),
             Some(("Weekly limit left: 1%".to_string(), true))
         );
-        // A true 100% (no credits) → "0% left".
+        // A true 100% (no credits) shows "0% left"
         let full = bal_period(100.0, "USAGE_PERIOD_TYPE_WEEKLY");
         assert_eq!(
             usage_warning(&full, None, true),
@@ -515,8 +497,7 @@ mod tests {
 
     #[test]
     fn warning_credits_unknown_topup_is_suppressed() {
-        // At 100% usage with prepaid credits, but the rule isn't known yet
-        // (None) — never warn; it resolves on the next billing fetch.
+        // At 100% usage with prepaid credits but the rule not yet known (None), never warn; it resolves on the next billing fetch
         let b = CreditBalance {
             prepaid_balance_cents: Some(100),
             ..bal(100.0)
@@ -526,15 +507,14 @@ mod tests {
 
     #[test]
     fn warning_credits_suppressed_below_full_usage() {
-        // Low credits + no auto top-up, but the included allowance still has
-        // room (usage < 100%) → no warning (credits aren't being spent yet).
+        // Low credits and no auto top-up, but the included allowance still has room (usage < 100%), so no warning; credits aren't being spent yet
         let disabled = topup(false, None, None);
         let low = CreditBalance {
             prepaid_balance_cents: Some(453),
             ..bal(0.0)
         };
         assert_eq!(usage_warning(&low, Some(&disabled), true), None);
-        // Same balance once the allowance is exhausted → warn.
+        // The same balance warns once the allowance is exhausted
         let exhausted = CreditBalance {
             prepaid_balance_cents: Some(453),
             ..bal(100.0)
@@ -592,7 +572,7 @@ mod tests {
 
     #[test]
     fn warning_credits_topup_with_max_below_topup_amount() {
-        // $15 balance, $20 top-up amount, $100 max → below one top-up → warn.
+        // $15 balance, $20 top-up amount, $100 max: below one top-up, so it warns
         let b = CreditBalance {
             prepaid_balance_cents: Some(1500),
             ..bal(100.0)
@@ -625,9 +605,8 @@ mod tests {
 
     #[test]
     fn warning_credits_take_precedence_over_usage() {
-        // A credits user below 100% usage gets no warning at all (no usage-%
-        // warning, and credits aren't being spent yet) — unlike a non-credits
-        // user, who would see "Usage left: 1%" at 99%.
+        // A credits user below 100% usage gets no warning: no usage-% warning, and credits aren't being spent yet
+        // A non-credits user would see "Usage left: 1%" at 99%
         let b = CreditBalance {
             prepaid_balance_cents: Some(5000),
             ..bal(99.0)
@@ -661,13 +640,13 @@ mod tests {
 
     #[test]
     fn warning_pay_as_you_go_low_dollars_shows_remaining() {
-        // $50 cap, $42 used → $8 left → grey (above $5).
+        // $50 cap, $42 used leaves $8, shown grey (above $5)
         let grey = pay_as_you_go(100.0, 5000, 4200);
         assert_eq!(
             usage_warning(&grey, None, true),
             Some(("Pay-as-you-go limit left: $8".to_string(), false))
         );
-        // $50 cap, $46 used → $4 left → critical (yellow).
+        // $50 cap, $46 used leaves $4, critical (yellow)
         let yellow = pay_as_you_go(100.0, 5000, 4600);
         assert_eq!(
             usage_warning(&yellow, None, true),
@@ -677,13 +656,13 @@ mod tests {
 
     #[test]
     fn warning_pay_as_you_go_boundaries() {
-        // Exactly $10 left → show, grey.
+        // Exactly $10 left shows the warning, grey
         let at_ten = pay_as_you_go(100.0, 5000, 4000);
         assert_eq!(
             usage_warning(&at_ten, None, true),
             Some(("Pay-as-you-go limit left: $10".to_string(), false))
         );
-        // Exactly $5 left → critical (yellow).
+        // Exactly $5 left is critical (yellow)
         let at_five = pay_as_you_go(100.0, 5000, 4500);
         assert_eq!(
             usage_warning(&at_five, None, true),
@@ -693,22 +672,21 @@ mod tests {
 
     #[test]
     fn warning_pay_as_you_go_above_threshold_silent() {
-        // $20 left (> $10) → no warning.
+        // $20 left (above the $10 threshold) gets no warning
         let b = pay_as_you_go(100.0, 5000, 3000);
         assert_eq!(usage_warning(&b, None, true), None);
     }
 
     #[test]
     fn warning_pay_as_you_go_suppressed_below_full_usage() {
-        // Pay-as-you-go users get NO percentage warning before the included
-        // allowance is exhausted, even with low on-demand room remaining.
+        // Pay-as-you-go users get no percentage warning before the included allowance is exhausted, even with low on-demand room remaining
         let b = pay_as_you_go(95.0, 5000, 4800);
         assert_eq!(usage_warning(&b, None, true), None);
     }
 
     #[test]
     fn warning_pay_as_you_go_fractional_dollars() {
-        // $50 cap, $46.50 used → $3.50 left → critical, fractional formatting.
+        // $50 cap, $46.50 used leaves $3.50: critical, fractional formatting
         let b = pay_as_you_go(100.0, 5000, 4650);
         assert_eq!(
             usage_warning(&b, None, true),
@@ -750,11 +728,11 @@ mod tests {
     #[test]
     fn test_boundary_at_80_percent() {
         let theme = Theme::default();
-        // Exactly 80% should be warning (yellow).
+        // Exactly 80% renders yellow (warning)
         let at_80 = credit_bar_line(&bal(80.0), false, &theme);
         assert_eq!(at_80.spans[0].style.fg, Some(theme.warning));
 
-        // Just below 80% should be success (green).
+        // Just below 80% renders green (success)
         let below_80 = credit_bar_line(&bal(79.9), false, &theme);
         assert_eq!(below_80.spans[0].style.fg, Some(theme.accent_success));
     }
@@ -762,11 +740,11 @@ mod tests {
     #[test]
     fn test_boundary_at_100_percent() {
         let theme = Theme::default();
-        // Exactly 100% should be error (red).
+        // Exactly 100% renders red (error)
         let at_100 = credit_bar_line(&bal(100.0), false, &theme);
         assert_eq!(at_100.spans[0].style.fg, Some(theme.accent_error));
 
-        // Just below 100% should be warning (yellow).
+        // Just below 100% renders yellow (warning)
         let below_100 = credit_bar_line(&bal(99.9), false, &theme);
         assert_eq!(below_100.spans[0].style.fg, Some(theme.warning));
     }

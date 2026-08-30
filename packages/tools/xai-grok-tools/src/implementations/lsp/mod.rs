@@ -11,6 +11,7 @@ pub mod pull;
 pub mod refresh;
 pub mod restart;
 mod types;
+mod watched_files;
 pub mod workspace_open;
 
 #[cfg(test)]
@@ -20,8 +21,8 @@ pub use dispatch::LspBackendAdapter;
 pub use manager::{DiagnosticsSummary, LspManager, drain_lsp_diagnostics};
 pub use restart::restart_monitor;
 pub use types::{
-    DiagnosticEntry, DiagnosticSeverityLevel, FileDiagnosticEntry, LspBackend, LspConfig,
-    LspOperation, LspToolInput, LspToolResult,
+    DiagnosticEntry, DiagnosticSeverityLevel, DiskChangeKind, FileDiagnosticEntry, LspBackend,
+    LspConfig, LspOperation, LspToolInput, LspToolResult,
 };
 
 // ── Shared types used across submodules ─────────────────────────────────

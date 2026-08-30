@@ -37,10 +37,8 @@ pub struct NotificationService {
     progress_active: bool,
     /// Last time the progress bar escape was emitted (keep-alive clock).
     progress_last_sent: Option<Instant>,
-    /// Whether we have already fired an `ApprovalRequired` terminal
-    /// notification for the current batch of queued permissions. Set to
-    /// `true` after the first notification; cleared via
-    /// [`clear_permission_notification`] when the queue drains to empty.
+    /// Whether we have already fired an `ApprovalRequired` terminal notification for the current batch of queued permissions.
+    /// Set to `true` after the first notification; cleared via [`clear_permission_notification`] when the queue drains to empty.
     permission_notified: bool,
 }
 
@@ -89,18 +87,12 @@ impl NotificationService {
 
     /// Fire a one-shot terminal notification (bell/OSC popup).
     ///
-    /// These escape sequences intentionally bypass the frame pipeline and
-    /// write directly to stderr.  Unlike per-tick title/progress updates,
-    /// notifications are rare, one-shot events (turn complete, agent error)
-    /// that must reach the terminal immediately — deferring them to the
-    /// next draw frame would add up to 16ms latency for no user-visible
-    /// benefit, and the sequences are short enough that interleaving with
-    /// frame data does not produce visible artefacts.
+    /// These escape sequences deliberately bypass the frame pipeline and write directly to stderr.
+    /// Unlike per-tick title/progress updates, notifications are rare, one-shot events (turn complete, agent error) that must reach the terminal now.
+    /// Deferring them to the next draw frame would add up to 16ms latency, and the sequences are short enough not to garble interleaved frame data.
     ///
-    /// For `ApprovalRequired` events, the caller must check
-    /// [`should_suppress_permission_notification`] first and call
-    /// [`mark_permission_notified`] after a successful emit to avoid
-    /// repeated bells during concurrent permission requests.
+    /// For `ApprovalRequired` events, the caller must check [`should_suppress_permission_notification`] first.
+    /// Call [`mark_permission_notified`] after a successful emit to avoid repeated bells during concurrent permission requests.
     pub fn notify(&self, event: NotificationEvent) {
         if !self.is_event_enabled(&event.kind) {
             return;
@@ -122,10 +114,8 @@ impl NotificationService {
         }
     }
 
-    /// Flush the tab title and progress bar to the idle state, writing
-    /// directly to stderr.  Call before `notify()` so that Ghostty's
-    /// notification popup picks up the updated (non-spinning) title
-    /// instead of a stale "Responding" subtitle.
+    /// Flush the tab title and progress bar to the idle state, writing directly to stderr.
+    /// Call before `notify()` so Ghostty's notification popup picks up the updated (non-spinning) title instead of a stale "Responding" subtitle.
     pub fn flush_idle_state(&mut self, state: &title::TitleState<'_>) {
         let mut buf = String::new();
 
@@ -148,11 +138,9 @@ impl NotificationService {
         }
     }
 
-    /// Build escape sequences to set the title and progress bar to idle
-    /// without writing to stderr.  The caller can route these through the
-    /// frame pipeline (`pending_notification_escapes`) so they go through
-    /// the writer thread and are ordered correctly relative to previous
-    /// frames that may still carry the busy title.
+    /// Build escape sequences to set the title and progress bar to idle without writing to stderr.
+    /// The caller can route these through the frame pipeline (`pending_notification_escapes`) so they go through the writer thread.
+    /// They are then ordered correctly relative to previous frames that may still carry the busy title.
     pub fn build_idle_escapes(&mut self, state: &title::TitleState<'_>) -> Option<String> {
         let mut buf = String::new();
 
@@ -171,9 +159,8 @@ impl NotificationService {
 
     /// Advance the tab title and progress bar state.
     ///
-    /// Returns escape sequences to emit (title + progress) as a single
-    /// `String`, or `None` if nothing changed. The caller should route
-    /// these bytes through the frame pipeline's `post_flush_escapes`.
+    /// Returns escape sequences to emit (title and progress) as a single `String`, or `None` if nothing changed.
+    /// The caller should route these bytes through the frame pipeline's `post_flush_escapes`.
     pub fn on_tick(&mut self, state: &title::TitleState<'_>) -> Option<String> {
         let mut buf = String::new();
 
@@ -183,8 +170,8 @@ impl NotificationService {
             buf.push_str(&title_esc);
         }
 
-        // Drive OSC 9;4 tab progress bar.  Ghostty resets the indicator
-        // after ~15 s of silence, so we re-send it as a keep-alive.
+        // Drive OSC 9;4 tab progress bar
+        // Ghostty resets the indicator after ~15 s of silence, so we re-send it as a keep-alive
         if self.config.progress_bar {
             let should_be_active = state.is_busy;
             if should_be_active {
@@ -211,8 +198,7 @@ impl NotificationService {
     }
 
     pub fn shutdown(&mut self) {
-        // Reset the tab title back to "grok" so it doesn't linger on the
-        // last activity label after exit.
+        // Reset the tab title back to "grok" so it doesn't linger on the last activity label after exit
         let title_esc = self.title_manager.reset();
         xai_grok_shell::util::with_locked_stderr(|stderr| {
             use std::io::Write as _;
@@ -231,8 +217,7 @@ impl NotificationService {
         }
     }
 
-    /// Returns `true` if a terminal notification for `ApprovalRequired` has
-    /// already been emitted and should not be repeated.
+    /// Returns `true` if a terminal notification for `ApprovalRequired` has already been emitted and should not be repeated.
     pub fn should_suppress_permission_notification(&self) -> bool {
         self.permission_notified
     }
@@ -242,8 +227,8 @@ impl NotificationService {
         self.permission_notified = true;
     }
 
-    /// Reset the permission notification flag. Call this when the permission
-    /// queue drains to empty.
+    /// Reset the permission notification flag.
+    /// Call this when the permission queue drains to empty.
     pub fn clear_permission_notification(&mut self) {
         self.permission_notified = false;
     }
@@ -262,8 +247,7 @@ impl NotificationService {
     }
 
     /// Whether the OSC 9;4 progress indicator is currently considered active.
-    /// Test-only: production callers drive progress exclusively via
-    /// [`Self::on_tick`] / [`Self::build_idle_escapes`] / [`Self::flush_idle_state`].
+    /// Test-only: production callers drive progress exclusively via [`Self::on_tick`] / [`Self::build_idle_escapes`] / [`Self::flush_idle_state`].
     #[cfg(test)]
     pub(crate) fn is_progress_active(&self) -> bool {
         self.progress_active
@@ -308,8 +292,7 @@ fn resolve_protocol(
 
 /// Load `NotificationConfig` from a raw TOML config value.
 ///
-/// Looks for `[ui.notifications]`; falls back to defaults if absent or
-/// malformed.
+/// Looks for `[ui.notifications]`; falls back to defaults if absent or malformed.
 pub fn load_notification_config(raw_config: &toml::Value) -> NotificationConfig {
     raw_config
         .get("ui")
@@ -629,8 +612,7 @@ mod tests {
         let _result = svc.on_tick(&make_title_state(true));
         assert!(svc.is_progress_active());
         // First tick should produce output (the indeterminate sequence).
-        // (build_progress_escape returns None for unsupported brands, but
-        //  the flag still flips — the test verifies the timing logic.)
+        // (build_progress_escape returns None for unsupported brands, but the flag still flips; the test verifies the timing logic.)
         let first_sent = svc.progress_last_sent;
         assert!(first_sent.is_some());
 
@@ -642,7 +624,6 @@ mod tests {
         svc.progress_last_sent =
             Some(Instant::now() - PROGRESS_KEEPALIVE - std::time::Duration::from_millis(1));
         svc.on_tick(&make_title_state(true));
-        // After the interval, progress_last_sent should have been refreshed.
         assert!(svc.progress_last_sent.unwrap() > first_sent.unwrap());
     }
 
@@ -707,7 +688,7 @@ mod tests {
             progress_bar: true,
             ..Default::default()
         });
-        // Never activated — flush should not panic or change state.
+        // Never activated: flush should not panic or change state
         svc.flush_idle_state(&make_title_state(false));
         assert!(!svc.is_progress_active());
     }
@@ -718,7 +699,7 @@ mod tests {
     fn permission_suppression_lifecycle() {
         let mut svc = NotificationService::new_for_test(NotificationConfig::default());
 
-        // Initially not suppressed — first permission should fire.
+        // Initially not suppressed: first permission should fire
         assert!(!svc.should_suppress_permission_notification());
 
         // After marking, subsequent notifications are suppressed.
@@ -732,8 +713,7 @@ mod tests {
 
     #[test]
     fn notify_with_suppression_still_allows_non_permission_events() {
-        // Even when permission notifications are suppressed, other event
-        // kinds (e.g. TurnComplete) must still fire through notify().
+        // Even when permission notifications are suppressed, other event kinds (e.g. TurnComplete) must still fire through notify().
         let mut svc = NotificationService::new_for_test(NotificationConfig {
             events: vec![
                 NotificationEventKind::TurnComplete,
@@ -744,10 +724,8 @@ mod tests {
         });
         svc.mark_permission_notified();
 
-        // TurnComplete should not panic — suppression is only a flag the
-        // *caller* checks before calling notify(), not enforced inside
-        // notify() itself. This verifies the protocol=None path doesn't
-        // crash regardless of suppression state.
+        // TurnComplete should not panic: suppression is only a flag the *caller* checks before calling notify(), not enforced inside notify() itself
+        // This verifies the protocol=None path doesn't crash regardless of suppression state
         svc.notify(NotificationEvent {
             kind: NotificationEventKind::TurnComplete,
             title: "Grok".into(),

@@ -1,17 +1,17 @@
-//! `/workflow` -- pager-side wrapper over the shell's workflow command.
+//! `/workflow`: the pager-side wrapper over the shell's workflow command.
 //!
-//! Registered as a builtin so it shadows the ACP-advertised `/workflow`
-//! (`apply_acp_commands` drops colliding names): the exact `runs` form can
-//! then open the TUI run dashboard, while every other form passes through
-//! to the shell unchanged (launch, manage ops, bare-call text overview).
+//! Registered as a builtin so it shadows the ACP-advertised `/workflow` (`apply_acp_commands` drops colliding names).
+//! The exact `runs` form can then open the TUI run dashboard.
+//! Every other form passes through to the shell unchanged (launch, manage ops, bare-call text overview).
 //!
-//! Argument suggestions list advertised workflow names (from the ACP
-//! catalog) then the manage ops. Selecting a launch name fills
-//! `/workflow <name> ` without launching. Selecting pause/resume/stop/save
-//! lists this session's run handles so a bare verb cannot pick a run.
+//! Argument suggestions list advertised workflow names (from the ACP catalog) then the manage ops.
+//! Selecting a launch name fills `/workflow <name> ` without launching.
+//! Selecting pause/resume/stop/save lists this session's run handles so a bare verb cannot pick a run.
 
 use crate::app::actions::Action;
-use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{
+    AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand, slash_meta,
+};
 
 fn first_phase_items(ctx: &AppCtx) -> Vec<ArgItem> {
     let mut items: Vec<ArgItem> = ctx
@@ -321,8 +321,7 @@ fn manage_run_items(ctx: &AppCtx, op: &str) -> Vec<ArgItem> {
             _ => true,
         })
         .map(|run| {
-            // match_text must include the verb: the controller ranks the
-            // full args query (`resume rev`) against this string.
+            // match_text must include the verb: the controller ranks the full args query (`resume rev`) against this string
             let insert_text = format!("{op} {}", run.name);
             ArgItem::new(
                 run.name.clone(),
@@ -346,52 +345,33 @@ const WORKFLOW_OPS: [(&str, &str); 5] = [
     ("save", "Save a run's script as a named workflow"),
 ];
 
-/// `/workflow runs` toggles the run dashboard outside minimal mode; all
-/// other forms forward to the shell.
+/// `/workflow runs` toggles the run dashboard outside minimal mode; all other forms forward to the shell.
 pub struct WorkflowCommand;
 
 impl SlashCommand for WorkflowCommand {
-    fn name(&self) -> &str {
-        "workflow"
-    }
-
-    fn description(&self) -> &str {
+    slash_meta! {
+        name: "workflow",
         // Mirrors the shell builtin this command shadows.
-        "Launch a saved workflow, list runs, or manage a run (pause, resume, stop, save)"
+        description: "Launch a saved workflow, list runs, or manage a run (pause, resume, stop, save)",
+        usage: "/workflow",
+        // Shadows ACP `/workflow` (`has_args: true`); false drops the placeholder and highlighted op rows.
+        takes_args: true,
+        session_scoped: true,
+        arg_placeholder: "<name> [--agent-budget N] [--effort LEVEL] [args] | runs | pause|resume|stop|save [name]",
     }
 
-    fn usage(&self) -> &str {
-        "/workflow"
-    }
-
-    /// Offered only while the shell advertises workflow support, mirroring
-    /// the ACP entry this builtin shadows.
+    /// Offered only while the shell advertises workflow support, mirroring the ACP entry this builtin shadows.
     fn visible(&self, ctx: &AppCtx) -> bool {
         ctx.workflows_available
     }
 
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    // Shadows ACP `/workflow` (`has_args: true`); false drops the placeholder and highlighted op rows.
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some(
-            "<name> [--agent-budget N] [--effort LEVEL] [args] | runs | pause|resume|stop|save [name]",
-        )
-    }
-
     fn suggest_args(&self, ctx: &AppCtx, args_query: &str) -> Option<Vec<ArgItem>> {
         let trimmed = args_query.trim_start();
-        // First token is still being typed (`/workflow de`). Leave the
-        // name+op list up so the matcher can rank saved names.
+        // First token is still being typed (`/workflow de`)
+        // Leave the name and op list up so the matcher can rank saved names
         let Some((first, rest)) = trimmed.split_once(char::is_whitespace) else {
-            // Exact verb (`/workflow resume`) lists this session's runs —
-            // not saved launch names. A prefix stays first-phase.
+            // An exact verb (`/workflow resume`) lists this session's runs, not saved launch names
+            // A prefix of a verb stays in the first phase (the name and op list)
             if is_manage_op(trimmed) {
                 return Some(manage_run_items(ctx, trimmed));
             }
@@ -439,9 +419,9 @@ impl SlashCommand for WorkflowCommand {
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let trimmed = args.trim();
-        // Case-insensitive like the shell's `runs` op. Fullscreen and inline
-        // both render the pane (same non-minimal set FullscreenOnly gates
-        // on); minimal falls through to the shell's text overview.
+        // Case-insensitive like the shell's `runs` op
+        // Fullscreen and inline both render the pane (the same non-minimal set FullscreenOnly gates on)
+        // Minimal falls through to the shell's text overview
         if trimmed.eq_ignore_ascii_case("runs") && !ctx.screen_mode.is_minimal() {
             return CommandResult::Action(Action::ToggleWorkflows);
         }

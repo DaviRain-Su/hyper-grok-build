@@ -1,4 +1,4 @@
-//! Welcome Sandbox | Local picker under `--chat`. CLI/env stamp wins at startup.
+//! The welcome screen's Sandbox / Local picker, shown under `--chat`. The CLI/env stamp wins at startup.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
@@ -56,7 +56,7 @@ impl WelcomeWorkspaceMode {
         }
     }
 
-    /// Unified-list `kind`: Sandbox → `chat`, Local → `build`.
+    /// Unified-list `kind`: Sandbox maps to `chat`, Local to `build`.
     pub fn history_kind_filter(self) -> &'static str {
         match self {
             Self::Sandbox => "chat",
@@ -64,7 +64,7 @@ impl WelcomeWorkspaceMode {
         }
     }
 
-    /// Conversation/gateway → Sandbox; other sources → Local.
+    /// Conversation/gateway sources map to Sandbox; other sources to Local.
     pub fn from_history_source(source: &str) -> Self {
         if source == "conversation" {
             Self::Sandbox
@@ -153,7 +153,7 @@ pub fn log_cli_lock_wins(mode: WelcomeWorkspaceMode) {
     );
 }
 
-/// In-session indicator: history bypass / local intent → Local; else Sandbox.
+/// In-session indicator: history bypass or local intent means Local; otherwise Sandbox.
 pub fn indicator_for_opening_session(
     chat_kind: bool,
     history_load_as_build: bool,
@@ -199,7 +199,7 @@ pub struct WorkspaceModeHitRects {
     pub row: Option<Rect>,
 }
 
-/// Rows reserved above the welcome menu for the picker (content + gap).
+/// Rows reserved above the welcome menu for the picker (content and gap).
 pub const WORKSPACE_MODE_MENU_ROWS: u16 = 2;
 
 /// Paint the segmented workspace control into `area`.
@@ -355,7 +355,7 @@ pub fn hit_test_workspace_mode(
 #[cfg(feature = "local-workspace")]
 #[derive(Debug)]
 pub enum WelcomeWorkspacePrepare {
-    /// Continue. `session_override`: `Some(None)` sandbox, `Some(Some)` local, `None` keep stamp.
+    /// Continue. `session_override`: `Some(None)` means sandbox, `Some(Some)` local, `None` keeps the stamp.
     Continue {
         session_override: Option<Option<crate::app::session_startup::LocalWorkspaceConfig>>,
         warning: Option<String>,
@@ -420,7 +420,7 @@ pub fn prepare_welcome_workspace_for_new_session(
                         "local-workspace resolve returned no config after own-mode request"
                     )
                 })?;
-            // Live sessions still read the process stamp; oneshot-only then.
+            // Live sessions still read the process stamp, so with agents alive only the one-shot override applies
             if !agents_alive {
                 set_active_local_workspace(Some(cfg.clone()))?;
             }
@@ -458,7 +458,7 @@ pub fn confirm_welcome_local_workspace_ack(
     Ok(cfg)
 }
 
-/// Sync UI selection from a startup-locked stamp (Own/Attach → Local).
+/// Sync UI selection from a startup-locked stamp (Own/Attach select Local).
 #[cfg(feature = "local-workspace")]
 pub fn mode_from_active_stamp(
     stamp: Option<&crate::app::session_startup::LocalWorkspaceConfig>,
@@ -471,9 +471,8 @@ pub fn mode_from_active_stamp(
 
 /// Whether keyboard/mouse should mutate the welcome selection.
 ///
-/// Same surface as ACK + render: chat mode, access, auth Done, not ZDR,
-/// not CLI-startup-locked, and history picker closed (Ctrl+E/click would
-/// otherwise mutate with no on-screen control).
+/// Same gate as the ACK and render paths: chat mode, access, auth Done, not ZDR, not CLI-startup-locked, and history picker closed.
+/// With the history picker open, Ctrl+E/click would mutate the selection with no on-screen control.
 pub fn picker_interactive(
     chat_mode: bool,
     has_access: bool,
@@ -663,8 +662,8 @@ mod tests {
             indicator_for_opening_session(false, true, false, false),
             (WelcomeWorkspaceMode::LocalWorkspace, false)
         );
-        // Conversation / chat_kind without this-session local intent → Sandbox
-        // even when the process has a CLI lock (LoadSession strips stamp).
+        // Conversation / chat_kind without this-session local intent resolves to Sandbox
+        // That holds even when the process has a CLI lock (LoadSession strips the stamp)
         assert_eq!(
             indicator_for_opening_session(true, false, true, false),
             (WelcomeWorkspaceMode::Sandbox, false)
@@ -817,7 +816,7 @@ mod apply_tests {
     #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK)]
     fn local_without_ack_awaits_confirm() {
         let _ack = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV);
-        // Isolate ack file from developer machine.
+        // Isolate the ack file from the developer machine
         let home = tempfile::tempdir().unwrap();
         let _home =
             xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path().to_str().unwrap());

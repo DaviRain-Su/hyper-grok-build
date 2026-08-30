@@ -481,7 +481,7 @@ fn compute_normalized_blocking(
             });
         }
     };
-    if buf.len() >= original_bytes {
+    if !exceeded_dimensions && buf.len() >= original_bytes {
         return Ok(NormalizedEntry::Unchanged {
             bytes: Bytes::from(raw_bytes),
             mime: Cow::Borrowed(orig_mime),

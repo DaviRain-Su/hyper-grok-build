@@ -1,13 +1,9 @@
-//! Rendered blockquote-bar detection for selection/copy metadata.
-//!
-//! The markdown renderer rewrites each `>` quote marker to a `│` bar styled
-//! `blockquote_outer` (xai-grok-markdown parse.rs), so the decoration becomes
-//! ordinary span content and would otherwise leak into drag-select copies.
-//! The helpers here detect that prefix on a rendered row and exclude it from
-//! selection via [`Selectable::Spans`] — the same decoration-exclusion
-//! machinery tool headers and diff gutters use. Shared by
-//! [`MarkdownContent::output`](super::markdown_content::MarkdownContent::output)
-//! and [`ThinkingBlock`](super::ThinkingBlock)'s render paths.
+//! The markdown renderer rewrites each `>` quote marker to a `│` bar styled `blockquote_outer` (xai-grok-markdown parse.rs).
+//! The bar is then ordinary span content and would leak into drag-select copies.
+//! The helpers here detect that prefix on a rendered row and exclude it from selection via [`Selectable::Spans`].
+//! Tool headers and diff gutters exclude their decorations the same way.
+//! [`MarkdownContent::output`](super::markdown_content::MarkdownContent::output) renders through these helpers.
+//! So does [`ThinkingBlock`](super::ThinkingBlock)'s render path.
 
 use std::borrow::Cow;
 
@@ -17,12 +13,11 @@ use ratatui::text::{Line, Span};
 use crate::scrollback::types::Selectable;
 use crate::theme::Theme;
 
-/// Per-render quote-bar stripping context: the raw-mode gate plus the
-/// theme-derived bar style. Build once per output pass; raw mode skips the
-/// `Theme::current()` lookup entirely.
+/// Built once per output pass: whether to strip quote bars, and the bar style the theme paints them with.
+/// Raw mode skips the `Theme::current()` lookup entirely.
 #[derive(Clone, Copy)]
 pub(crate) struct QuoteBarStrip {
-    /// `None` = stripping disabled (raw mode shows source `>` markers).
+    /// `None` means stripping is disabled (raw mode shows source `>` markers).
     bar_style: Option<Style>,
 }
 
@@ -42,11 +37,10 @@ impl QuoteBarStrip {
     }
 }
 
-/// The exact ratatui style the renderer paints parser-generated blockquote
-/// bars with: `md_style` sets `blockquote_outer = fg(md_muted).dimmed()` and
-/// a `Reset` fg is dropped in the anstyle round-trip, leaving DIM alone.
-/// Mirrors pager-render theme/md_style.rs `blockquote_outer` (breadcrumbed
-/// there); the end-to-end tests below trip if either side drifts.
+/// The exact ratatui style the renderer paints parser-generated blockquote bars with.
+/// `md_style` sets `blockquote_outer = fg(md_muted).dimmed()`, and the anstyle round-trip drops a `Reset` fg, leaving DIM alone.
+/// This mirrors `blockquote_outer` in pager-render's theme/md_style.rs, and a comment there points back here.
+/// The end-to-end tests below trip if either side drifts.
 fn quote_bar_style() -> Style {
     let muted = Theme::current().md_muted;
     let style = Style::default().add_modifier(Modifier::DIM);
@@ -57,22 +51,17 @@ fn quote_bar_style() -> Style {
     }
 }
 
-/// Byte length of a rendered blockquote prefix at the start of `line`:
-/// `bar_style`-styled bars separated by exactly one space, through the space
-/// before content (`│ text` → 4, `│ │ deep` → 8), or the whole line for
-/// bar-only rows (blank line inside a quote: `│`, `│ │`, optional trailing
-/// space).
+/// Byte length of the rendered blockquote prefix at the start of `line`.
+/// The prefix is `bar_style`-styled bars separated by exactly one space, through the space before content: `│ text` gives 4, `│ │ deep` gives 8.
+/// A bar-only row (blank line inside a quote: `│`, `│ │`, optional trailing space) counts as all prefix.
 ///
-/// Every prefix bar must carry `bar_style` — a differently-styled bar is
-/// quote CONTENT (e.g. source `> │ box art`), which ends the prefix and then
-/// trips the interior-bar rule. Returns `None` for anything else: any `│`
-/// after the prefix marks table rows, literal box art, or literal-bar quote
-/// content (same interior-bar rule `is_table_line` uses in the wrap layer),
-/// so the row conservatively stays fully selectable.
+/// Every prefix bar must carry `bar_style`.
+/// A differently-styled bar is quote CONTENT (source `> │ box art`): it ends the prefix and then trips the interior-bar rule.
+/// Returns `None` for anything else: a `│` after the prefix marks a table row, box art, or a literal bar inside quote content.
+/// That is the interior-bar rule `is_table_line` uses in the wrap layer, and the row conservatively stays fully selectable.
 ///
-/// Shape must agree with the looser `blockquote_prefix_len` in pager-render's
-/// wrapping.rs (which re-injects this prefix on wrapped continuation rows,
-/// preserving the bar spans + style this scanner keys on).
+/// The shape must agree with the looser `blockquote_prefix_len` in pager-render's wrapping.rs.
+/// That function re-injects this prefix on wrapped continuation rows, preserving the bar spans and style this scanner keys on.
 fn rendered_quote_prefix_len(line: &Line<'_>, bar_style: Style) -> Option<usize> {
     const BAR: char = '\u{2502}';
     const BAR_LEN: usize = '\u{2502}'.len_utf8();
@@ -106,8 +95,7 @@ fn rendered_quote_prefix_len(line: &Line<'_>, bar_style: Style) -> Option<usize>
     Some(len)
 }
 
-/// Split `line`'s spans at `byte_offset` (splitting a straddling span in two)
-/// and return the number of spans covering `0..byte_offset`.
+/// Split `line`'s spans at `byte_offset` (splitting a straddling span in two) and return the number of spans covering `0..byte_offset`.
 fn split_spans_at(line: &mut Line<'static>, byte_offset: usize) -> usize {
     let mut acc = 0usize;
     for i in 0..line.spans.len() {
@@ -141,20 +129,17 @@ fn split_spans_at(line: &mut Line<'static>, byte_offset: usize) -> usize {
     line.spans.len()
 }
 
-/// Selection metadata for a pretty-mode markdown row: when the row is a
-/// parser-generated blockquote line, exclude the `│ ` prefix (all nesting
-/// levels) from copy by splitting the straddling span at the prefix boundary
-/// and returning a `Selectable::Spans` range past it. Bar-only rows (blank
-/// quote lines) return an empty end range so multi-line copies keep the
-/// blank line. Returns `Selectable::All` for every other row.
+/// Selection metadata for a pretty-mode markdown row.
+/// On a parser-generated blockquote line the `│ ` prefix (all nesting levels) is excluded from copy.
+/// The straddling span is split at the prefix boundary and the returned `Selectable::Spans` range starts past it.
+/// Bar-only rows (blank quote lines) return an empty end range so multi-line copies keep the blank line.
+/// Returns `Selectable::All` for every other row.
 ///
-/// The bar must be the FIRST span: quotes indented under other constructs
-/// (e.g. a list item's `- > quoted`, bullet span first) keep their prefix in
-/// copies — an accepted conservative false negative, like interior bars.
+/// The bar must be the FIRST span: a quote indented under a list item (`- > quoted`, bullet span first) keeps its prefix in copies.
+/// That is an accepted conservative false negative, like interior bars.
 fn quote_prefix_selectable(line: &mut Line<'static>, bar_style: Style) -> Selectable {
-    // Only parser-generated bars are a lone 1-char span carrying the
-    // blockquote_outer style; a literal "│ " in prose or code stays glued to
-    // its content span or carries a different style, so it is left intact.
+    // Only parser-generated bars are a lone 1-char span carrying the blockquote_outer style
+    // A literal "│ " in prose or code stays glued to its content span or carries a different style, so it is left intact
     let genuine = line
         .spans
         .first()
@@ -219,8 +204,7 @@ mod tests {
         assert_eq!(rendered_quote_prefix_len(&Line::raw("│ text"), bq), None);
         assert_eq!(rendered_quote_prefix_len(&Line::raw("│ "), bq), None);
 
-        // Interior bars mark table rows / box art — never a quote prefix,
-        // even when the leading border span carries the identical style.
+        // Interior bars mark table rows or box art, never a quote prefix, even when the leading border span carries the identical style
         let table_row = Line::from(vec![Span::styled("│", bq), Span::raw(" a │ b │")]);
         assert_eq!(rendered_quote_prefix_len(&table_row, bq), None);
         let blank_table_row = Line::from(vec![Span::styled("│", bq), Span::raw("   │   │")]);
@@ -233,8 +217,7 @@ mod tests {
     #[test]
     fn rendered_quote_prefix_len_rejects_content_bars_after_genuine_prefix() {
         let bq = quote_bar_style();
-        // Source `> │ box art`: genuine bar, then a literal (unstyled) bar as
-        // the first content char — must not be consumed as a nesting level.
+        // Source `> │ box art`: a genuine bar, then a literal (unstyled) bar as the first content char, which must not be consumed as a nesting level
         let literal_second = Line::from(vec![Span::styled("│", bq), Span::raw(" │ box art")]);
         assert_eq!(rendered_quote_prefix_len(&literal_second, bq), None);
 
@@ -254,8 +237,7 @@ mod tests {
 
     #[test]
     fn quote_prefix_selectable_requires_bar_style() {
-        // Same content, wrong style (no DIM): a literal bar span is not a
-        // parser-generated quote bar and must stay fully selectable.
+        // Same content, wrong style (no DIM): a literal bar span is not a parser-generated quote bar and must stay fully selectable
         let mut line = Line::from(vec![Span::raw("│"), Span::raw(" text")]);
         assert_eq!(
             quote_prefix_selectable(&mut line, quote_bar_style()),
@@ -281,13 +263,13 @@ mod tests {
         let out = md.output(80);
 
         let line = find_line(&out, "QUOTE");
-        // Pretty mode renders the bar on screen…
+        // Pretty mode renders the bar on screen
         assert!(
             line_plain_text(&line.content).starts_with("│ "),
             "expected rendered bar prefix, got {:?}",
             line_plain_text(&line.content)
         );
-        // …but the bar is excluded from selection/copy.
+        // The bar is excluded from selection and copy
         assert!(
             matches!(line.selectable, Selectable::Spans(_)),
             "quote line should exclude its prefix, got {:?}",
@@ -337,7 +319,7 @@ mod tests {
             );
         }
 
-        // Joiner-based reconstruction (the drag-copy join rule) is clean.
+        // Reconstructing via each line's joiner (the drag-copy join rule) yields the original text
         let mut joined = String::new();
         for (i, line) in out.lines.iter().enumerate() {
             if i > 0 {
@@ -357,8 +339,7 @@ mod tests {
         let out = md.output(80);
         assert_eq!(out.lines.len(), 3, "quote renders as three rows");
 
-        // The bar-only middle row keeps an (empty) selectable range so it
-        // stays in the selection model and contributes its newline.
+        // The bar-only middle row keeps an (empty) selectable range so it stays in the selection model and contributes its newline
         let mid = &out.lines[1];
         assert_eq!(line_plain_text(&mid.content), "│");
         assert!(
@@ -394,9 +375,8 @@ mod tests {
 
     #[test]
     fn literal_bar_at_quote_content_start_is_not_stripped() {
-        // Quoted box-drawing output: the content's own bar must never be
-        // consumed as a nesting level (that would DELETE user bytes from the
-        // copy). The row degrades to the conservative interior-bar class.
+        // Quoted box-drawing output: the content's own bar must never be consumed as a nesting level (that would DELETE user bytes from the copy)
+        // The row degrades to the conservative interior-bar class
         let md = MarkdownContent::new("> │ box art");
         let out = md.output(80);
         let line = find_line(&out, "box art");
@@ -406,8 +386,7 @@ mod tests {
 
     #[test]
     fn literal_bar_as_entire_quote_content_is_not_dropped() {
-        // Degenerate `> │`: without the style-aware scan this classified as a
-        // bar-only blank row and the content bar vanished from copies.
+        // Degenerate `> │`: without the style-aware scan this classified as a bar-only blank row and the content bar vanished from copies
         let md = MarkdownContent::new("> │");
         let out = md.output(80);
         let line = find_line(&out, "│");
@@ -417,8 +396,7 @@ mod tests {
 
     #[test]
     fn list_nested_quote_keeps_prefix() {
-        // Bullet span precedes the bar, so the first-span guard skips the row
-        // (documented conservative false negative on quote_prefix_selectable).
+        // Bullet span precedes the bar, so the first-span guard skips the row (documented conservative false negative on quote_prefix_selectable)
         let md = MarkdownContent::new("- > quoted text");
         let out = md.output(80);
         let line = find_line(&out, "quoted text");
@@ -428,8 +406,7 @@ mod tests {
 
     #[test]
     fn literal_bar_in_paragraph_is_not_stripped() {
-        // A plain paragraph starting with a literal bar (file-tree art) is a
-        // single glued span without the quote-bar style — left fully selectable.
+        // A paragraph starting with a literal bar (file-tree art) is a single glued span without the quote-bar style, so it stays fully selectable
         let md = MarkdownContent::new("│ literal tree line");
         let out = md.output(80);
         let line = find_line(&out, "literal");

@@ -1,23 +1,20 @@
 // Per-test-case module for the `pty_e2e` integration test crate.
 //
-// The ▲ jump-to-response-top indicator: an answer taller than the screen
-// leaves the reader at its tail, and the sticky header's gap row offers a
-// clickable ▲ that snaps the answer's first line to the top — the mouse
-// mirror of the K (previous response) key, and the discoverable fix for
-// "grok doesn't show you its answer from the top, so you have to scroll a
-// lot".
+// An answer taller than the screen leaves the reader at its tail
+// The sticky header's gap row offers a clickable ▲ that snaps the answer's first line to the top
+// The click does what the K (previous response) key does
+// It is the discoverable fix for "grok doesn't show you its answer from the top, so you have to scroll a lot"
 #[allow(unused_imports)]
 use super::common::*;
 
-/// First and last line of the streamed answer. 60 bullets over a 50-row
-/// terminal guarantees the answer overflows the viewport.
+/// First and last line of the streamed answer.
+/// 60 bullets over a 50-row terminal guarantees the answer overflows the viewport.
 const FIRST_LINE: &str = "ANSWERLINE001";
 const LAST_LINE: &str = "ANSWERLINE060";
 
 const UP_INDICATOR: &str = "▲";
 
-/// Unique prompt text so the sticky-header row is unambiguous on screen
-/// (the shared [`PROMPT`] "go" collides with hint/footer copy).
+/// Unique prompt text so the sticky-header row is unambiguous on screen (the shared [`PROMPT`] "go" collides with hint and footer text).
 const TOP_PROMPT: &str = "SHOWTOPPROMPT";
 
 fn long_answer() -> String {
@@ -32,8 +29,7 @@ fn row_of(screen: &str, needle: &str) -> Option<usize> {
     screen.lines().position(|line| line.contains(needle))
 }
 
-/// Artifact trace: the viewport's top rows, where the sticky header, the ▲,
-/// and (after the click) the answer's first line all live.
+/// Artifact trace: the viewport's top rows, where the sticky header, the ▲, and (after the click) the answer's first line all live.
 fn dump_top_rows(label: &str, screen: &str) {
     eprintln!("[{label}] top of viewport:");
     for line in screen.lines().take(10) {
@@ -41,9 +37,8 @@ fn dump_top_rows(label: &str, screen: &str) {
     }
 }
 
-/// PTY: stream an answer taller than the terminal, check the ▲ indicator
-/// appears under the sticky prompt header, click it, and check the viewport
-/// lands on the answer's first line.
+/// PTY: stream an answer taller than the terminal and check the ▲ indicator appears under the sticky prompt header.
+/// Click it and check the viewport lands on the answer's first line.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn response_top_indicator_jumps_to_answer_start() {
@@ -62,9 +57,8 @@ async fn response_top_indicator_jumps_to_answer_start() {
         .inject_keys(format!("{TOP_PROMPT}\r").as_bytes())
         .expect("submit prompt");
 
-    // Follow mode parks the finished turn at the answer's tail; the ▲
-    // renders in the sticky header's gap row as soon as the answer's first
-    // line scrolls off the top.
+    // Follow mode parks the finished turn at the answer's tail
+    // The ▲ renders in the sticky header's gap row as soon as the answer's first line scrolls off the top
     harness
         .wait_for_text(LAST_LINE, Duration::from_secs(60))
         .expect("answer tail visible (follow mode at the bottom)");
@@ -87,15 +81,14 @@ async fn response_top_indicator_jumps_to_answer_start() {
         row_of(&screen, LAST_LINE)
     );
     dump_top_rows("before click", &screen);
-    // "Under the last user prompt block": the sticky header pins the prompt
-    // above the gap row that hosts the ▲.
+    // "Under the last user prompt block": the sticky header pins the prompt above the gap row that hosts the ▲
     let prompt_row = prompt_row.expect("sticky header shows the prompt");
     assert!(
         prompt_row < arrow_row as usize && (arrow_row as usize) < prompt_row + 6,
         "▲ should sit in the gap row just below the pinned prompt\nscreen:\n{screen}"
     );
 
-    // Click the ▲ (SGR left press + release at its cell).
+    // Click the ▲ (SGR left press and release at its cell)
     let click = format!(
         "{}{}",
         sgr_mouse(0, arrow_row, arrow_col, 'M'),

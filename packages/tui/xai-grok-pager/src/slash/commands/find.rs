@@ -1,49 +1,29 @@
-//! `/find` -- open an incremental search over the conversation scrollback.
+//! `/find` opens an incremental search over the conversation scrollback.
 //!
-//! In simple mode a bare `/` goes to the prompt, so simple-mode users can't
-//! reach the vim `/` scrollback search. `/find` focuses the scrollback pane
-//! and opens the same search from either mode.
+//! In simple mode a bare `/` goes to the prompt, so simple-mode users can't reach the vim `/` scrollback search.
+//! `/find` focuses the scrollback pane and opens the same search from either mode.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 use crate::slash::{ModeSupport, Remedy};
 
-/// Open scrollback search via `/find`.
 pub struct FindCommand;
 
 impl SlashCommand for FindCommand {
-    fn name(&self) -> &str {
-        "find"
-    }
-
-    fn description(&self) -> &str {
-        "Search the conversation scrollback"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    fn usage(&self) -> &str {
-        "/find [text]"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("[text]")
-    }
-
-    fn mode_support(&self) -> ModeSupport {
-        ModeSupport::FullscreenOnly(Remedy::SwitchMode {
+    slash_meta! {
+        name: "find",
+        description: "Search the conversation scrollback",
+        usage: "/find [text]",
+        takes_args: true,
+        session_scoped: true,
+        mode_support: ModeSupport::FullscreenOnly(Remedy::SwitchMode {
             why: "minimal has no scrollback pane: use your terminal's own search",
-        })
+        }),
+        arg_placeholder: "[text]",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        // whitespace-only args open a blank search.
+        // Whitespace-only args open a blank search
         let initial = args.trim();
         let query = (!initial.is_empty()).then(|| initial.to_string());
         CommandResult::Action(Action::OpenScrollbackSearch(query))
@@ -118,9 +98,8 @@ mod tests {
 
     #[test]
     fn find_advertises_optional_text_arg() {
-        // Pins the slash-arg contract so completion-accept appends a trailing
-        // space and the `[text]` placeholder shows while typing; bare `/find`
-        // stays valid (args not required).
+        // Pins the slash-arg contract so completion-accept appends a trailing space and the `[text]` placeholder shows while typing
+        // Bare `/find` stays valid (args not required)
         let cmd = FindCommand;
         assert!(cmd.takes_args());
         assert!(!cmd.args_required());

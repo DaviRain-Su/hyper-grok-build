@@ -559,8 +559,7 @@ fn ask_user_question_replies_cancelled() {
     }
 }
 
-/// `x.ai/exit_plan_mode` is approved (no feedback) so the shell executes the
-/// exit and the model proceeds to implement.
+/// `x.ai/exit_plan_mode` is approved (no feedback) so the shell executes the exit and the model proceeds to implement.
 #[test]
 fn exit_plan_mode_replies_approved() {
     use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeExtResponse;
@@ -575,8 +574,7 @@ fn exit_plan_mode_replies_approved() {
     assert!(parsed.feedback.is_none());
 }
 
-/// Unknown methods (including lookalikes of the known ones) get a
-/// MethodNotFound error carrying the method name — never a dropped channel.
+/// Unknown methods (including lookalikes of the known ones) get a MethodNotFound error carrying the method name, never a dropped channel.
 #[test]
 fn unknown_ext_method_replies_method_not_found() {
     for method in [

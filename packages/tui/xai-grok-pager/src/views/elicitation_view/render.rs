@@ -1,6 +1,5 @@
-//! Rendering for the MCP elicitation card: header, a scrollable body
-//! viewport (form fields or the full URL), and action rows pinned at the
-//! bottom so Accept/Decline stay reachable however long the body is.
+//! Rendering for the MCP elicitation card: header, a scrollable body viewport (form fields or the full URL), and action rows pinned at the bottom.
+//! Pinning keeps Accept/Decline reachable however long the body is.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -61,8 +60,7 @@ fn url_rows(rows: &mut Vec<BodyRow>, display: &UrlDisplay, content_w: usize, the
             )])));
         }
     }
-    // The full URL, wrapped without a cap: consent must show everything the
-    // browser would be sent, not a trusted-looking prefix.
+    // The full URL, wrapped without a cap: consent must show everything the browser would be sent, not a trusted-looking prefix
     let raw = Line::from(vec![Span::styled(
         display.url.clone(),
         Style::default().fg(theme.accent_user),
@@ -72,8 +70,7 @@ fn url_rows(rows: &mut Vec<BodyRow>, display: &UrlDisplay, content_w: usize, the
     }
 }
 
-/// Detach a wrapped line from its source buffer so it can be stored as a
-/// body row.
+/// Detach a wrapped line from its source buffer so it can be stored as a body row.
 fn owned_line(line: &Line<'_>) -> Line<'static> {
     let spans: Vec<Span<'static>> = line
         .spans
@@ -124,10 +121,8 @@ fn build_body_rows(
                         rows.push(BodyRow::Option { field: i, option });
                     }
                 }
-                // Full-value review: a text draft longer than the in-row
-                // value column is wrapped in full beneath the focused field,
-                // so the complete submitted value is inspectable before
-                // Accept.
+                // A text draft longer than the value column is wrapped in full beneath the focused field
+                // The user can read the complete value they would submit before Accept
                 if is_cur && field.is_text() && field.draft().width() > MAX_VALUE_WIDTH {
                     let raw = Line::from(vec![Span::styled(
                         format!("      {}", field.draft()),
@@ -153,8 +148,7 @@ fn actions(state: &ElicitationViewState) -> Vec<(ElicitHit, char, &'static str)>
             (ElicitHit::Accept, 'y', "Open URL"),
             (ElicitHit::Decline, 'd', "Decline"),
         ],
-        // The response is already sent: the only local action left is
-        // dismissing the waiting chrome ('o' reopens via the shortcut bar).
+        // The response is already sent: the only local action left is dismissing the waiting chrome ('o' reopens via the shortcut bar)
         ElicitationStage::UrlWaiting(_) => vec![(ElicitHit::Accept, 'y', "Done")],
     }
 }
@@ -173,9 +167,8 @@ pub fn elicitation_view_height(
     let actions_h = actions(state).len() as u16;
     let chrome = 1 + title_h + 1 + msg_h + banner_h + 1 + 1 + actions_h + 1;
     let raw = chrome + body_total;
-    // Preferred cap is a third of the screen, but never so small that the
-    // pinned action rows squeeze the body out entirely: a clipped body keeps
-    // at least three visible rows (the viewport scrolls the rest).
+    // Preferred cap is a third of the screen, but never so small that the pinned action rows squeeze the body out entirely
+    // A clipped body keeps at least three visible rows (the viewport scrolls the rest)
     let min_viable = chrome + body_total.min(3);
     let soft_cap = (screen_h as u32 * 33 / 100).max(8) as u16;
     let hard_cap = (screen_h as u32 * 80 / 100) as u16;
@@ -254,7 +247,7 @@ pub fn render_elicitation_view(
     // Pin the action rows at the bottom; the body scrolls in between.
     let action_rows = actions(state);
     let actions_h = action_rows.len() as u16;
-    // Bottom padding row + action rows + separator row above them.
+    // One bottom padding row, the action rows, and a separator row above them
     let actions_y = bottom.saturating_sub(1).saturating_sub(actions_h).max(y);
     let body_h = actions_y.saturating_sub(1).saturating_sub(y) as usize;
 
@@ -265,8 +258,7 @@ pub fn render_elicitation_view(
     if body_h > 0
         && let Some(cur) = cursor_row
     {
-        // Keep the cursor row — and its error row, when it directly follows —
-        // inside the viewport; the cursor itself wins if both cannot fit.
+        // Keep the cursor row (and its error row, when it directly follows) inside the viewport; the cursor itself wins if both cannot fit
         let mut want_last = cur;
         if matches!(rows.get(cur + 1), Some(BodyRow::FieldError(_))) {
             want_last = cur + 1;
@@ -280,7 +272,7 @@ pub fn render_elicitation_view(
     }
     let scroll = state.scroll;
 
-    // Clipped-content cues live in the separator rows the layout already has.
+    // The "↑ more" and "↓ more" markers paint into the separator rows the layout already has
     if scroll > 0 {
         paint_more_marker(buf, content_x, above_body_y, content_width, "↑ more", theme);
     }
@@ -471,8 +463,7 @@ pub(super) fn form_value_column(fields: &[FormFieldUi], content_w: usize) -> usi
         })
         .max()
         .unwrap_or(0);
-    // The caps win over the label-derived width: long titles fall back to the
-    // per-row 1-space gap in `field_row` instead of blowing out the column.
+    // The caps win over the label-derived width: long titles fall back to the per-row 1-space gap in `field_row` instead of blowing out the column
     (max_left + MIN_LABEL_VALUE_GAP)
         .min(MAX_VALUE_COL)
         .min(content_w.saturating_sub(1))

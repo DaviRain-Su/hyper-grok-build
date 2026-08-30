@@ -377,13 +377,14 @@ pub fn find_claude_settings_paths(cwd: &Path) -> Vec<PathBuf> {
 /// out of [`find_claude_settings_paths`] so [`claude_settings_paths_for_trust`]
 /// can load ONLY the user tier when a folder is untrusted.
 ///
-/// Use `dirs::home_dir()` to match the home-resolution strategy used by
-/// `claude_import.rs::scan_importable_settings` and `claude_import_state.rs`,
-/// so a path returned here reliably tests as global in the import scanner's
+/// `xai_dirs::home_dir()` matches both the settings' authoring tool
+/// (Node `os.homedir()`: `USERPROFILE` on Windows) and the import scanner
+/// (`claude_import.rs::scan_importable_settings`, `claude_import_state.rs`),
+/// so a path returned here reliably tests as global in the scanner's
 /// `is_global` check.
 fn global_claude_settings_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = xai_dirs::home_dir() {
         let global = home.join(".claude");
         paths.push(global.join("settings.local.json"));
         paths.push(global.join("settings.json"));

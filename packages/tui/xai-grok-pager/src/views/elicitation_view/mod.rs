@@ -1,6 +1,6 @@
-//! MCP elicitation card (`x.ai/mcp/elicit`): form and URL elicitation with
-//! the same lifecycle as the other HITL cards (permission / question / plan
-//! approval). State transitions live in [`state`], painting in [`render`].
+//! MCP elicitation card (`x.ai/mcp/elicit`).
+//! Form and URL elicitation cards behave like the other cards that wait on the user (permission, question, plan approval).
+//! State transitions live in [`state`], painting in [`render`].
 
 mod render;
 mod state;

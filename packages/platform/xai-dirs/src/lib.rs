@@ -7,6 +7,8 @@
 //! - [`user_grok_home`]: `None` instead of a cwd fallback when no home resolves.
 //! - [`default_grok_home`]: the `<home>/.grok` default, ignoring `$GROK_HOME`, so callers can detect an override.
 //! - [`resolve_grok_home`]: a fresh, uncached resolve.
+//! - [`resolve_grok_home_with_source`]: [`resolve_grok_home`] plus where the path came from.
+//! - [`home_dir`]: the home directory itself, for sibling dot dirs (`~/.claude`, `~/.agents`, ...).
 //!
 //! TODO: collapse these getters by threading the path through config as an
 //! explicit value.
@@ -14,6 +16,30 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+/// Where a resolved grok home came from, so "why did grok pick this
+/// directory?" is answerable in diagnostics without re-reading the
+/// environment at the asking site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrokHomeSource {
+    /// A non-empty `$GROK_HOME` override.
+    EnvOverride,
+    /// `<home>/.grok` derived from the home directory.
+    HomeDefault,
+}
+
+/// The user's home directory via [`std::env::home_dir`]: `HOME` on Unix (with
+/// a passwd fallback), `USERPROFILE` on Windows.
+///
+/// Deliberately not `dirs::home_dir()`: on Windows `dirs` asks the
+/// known-folder API and ignores a redirected `USERPROFILE`, while this crate
+/// resolves `~/.grok` from the profile variable — mixing the two sources puts
+/// the grok directory and other home-anchored dot directories in different
+/// trees. Every home-anchored path must come from this one function.
+#[allow(deprecated, clippy::disallowed_methods)] // the one sanctioned std::env::home_dir call
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::home_dir()
+}
 
 /// `<home>/.grok`, canonicalized via `dunce` (not `std::fs::canonicalize`,
 /// which yields Windows `\\?\` verbatim paths).
@@ -30,24 +56,29 @@ fn grok_home_in(home: &Path) -> PathBuf {
 fn resolve_grok_home_from(
     grok_home_env: Option<&OsStr>,
     os_home: Option<&Path>,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, GrokHomeSource)> {
     if let Some(env) = grok_home_env.filter(|env| !env.is_empty()) {
-        return Some(PathBuf::from(env));
+        return Some((PathBuf::from(env), GrokHomeSource::EnvOverride));
     }
-    os_home.map(grok_home_in)
+    os_home.map(|home| (grok_home_in(home), GrokHomeSource::HomeDefault))
 }
 
 /// Resolve the grok home from the environment (fresh, no cache); `None` if neither resolves.
 pub fn resolve_grok_home() -> Option<PathBuf> {
+    resolve_grok_home_with_source().map(|(home, _)| home)
+}
+
+/// [`resolve_grok_home`] plus the [`GrokHomeSource`] the path came from.
+pub fn resolve_grok_home_with_source() -> Option<(PathBuf, GrokHomeSource)> {
     resolve_grok_home_from(
         std::env::var_os("GROK_HOME").as_deref(),
-        dirs::home_dir().as_deref(),
+        home_dir().as_deref(),
     )
 }
 
 /// The default `<home>/.grok`, used when `$GROK_HOME` is unset.
 pub fn default_grok_home() -> PathBuf {
-    grok_home_in(&dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
+    grok_home_in(&home_dir().unwrap_or_else(|| PathBuf::from(".")))
 }
 
 /// The grok home, created if missing and cached for the process; falls back to
@@ -80,7 +111,10 @@ mod tests {
     fn env_wins_over_os_home() {
         let resolved =
             resolve_grok_home_from(Some(OsStr::new("/custom/home")), Some(Path::new("/home/u")));
-        assert_eq!(resolved, Some(PathBuf::from("/custom/home")));
+        assert_eq!(
+            resolved,
+            Some((PathBuf::from("/custom/home"), GrokHomeSource::EnvOverride))
+        );
     }
 
     #[test]
@@ -89,7 +123,10 @@ mod tests {
         // `/var` -> `/private/var`): the env value must come back unchanged.
         let tmp = tempfile::tempdir().unwrap();
         let resolved = resolve_grok_home_from(Some(tmp.path().as_os_str()), None);
-        assert_eq!(resolved, Some(tmp.path().to_path_buf()));
+        assert_eq!(
+            resolved,
+            Some((tmp.path().to_path_buf(), GrokHomeSource::EnvOverride))
+        );
     }
 
     #[test]
@@ -98,7 +135,10 @@ mod tests {
         let resolved = resolve_grok_home_from(Some(&OsString::new()), Some(tmp.path()));
         assert_eq!(
             resolved,
-            Some(dunce::canonicalize(tmp.path()).unwrap().join(".grok"))
+            Some((
+                dunce::canonicalize(tmp.path()).unwrap().join(".grok"),
+                GrokHomeSource::HomeDefault
+            ))
         );
     }
 

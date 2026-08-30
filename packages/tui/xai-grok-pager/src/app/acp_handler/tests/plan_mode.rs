@@ -66,8 +66,7 @@
             agent.plan_approval_view.as_ref().map(|s| s.source),
             Some(crate::views::plan_approval_view::PlanReviewSource::FileBacked)
         );
-        // File-backed bodies still open via request plan_content even when
-        // plan.md is not on disk under the agent's cwd.
+        // A file-backed body still opens from the request's plan_content even when plan.md is not on disk under the agent's cwd
         assert_eq!(
             agent
                 .line_viewer
@@ -79,9 +78,8 @@
 
     #[test]
     fn exit_plan_mode_empty_opens_placeholder_preview() {
-        // Empty plan.md must still surface a decision UI — otherwise the user
-        // only sees "Waiting on plan approval" with a dead Tab:plan and thinks
-        // the session is stuck.
+        // An empty plan.md must still open the approval UI
+        // Otherwise the user only sees "Waiting on plan approval" with a dead Tab:plan and thinks the session is stuck
         let mut app = make_app_with_agent("sess-1");
         let (ext, _rx) = make_exit_plan_ext(None);
 
@@ -109,11 +107,8 @@
 
     #[test]
     fn exit_plan_mode_dismisses_open_modal() {
-        // Regression: if the user has Ctrl+P command palette open when the
-        // agent calls exit_plan_mode, the modal must be dismissed so the
-        // plan preview is visible and input routes correctly. Otherwise the
-        // modal hides the line viewer in draw order while input gets
-        // routed to the invisible line viewer, leaving the user stuck.
+        // Regression: if the Ctrl+P command palette is open when the agent calls exit_plan_mode, the modal must be dismissed
+        // Otherwise the modal hides the line viewer in draw order while input routes to the invisible line viewer, leaving the user stuck
         let mut app = make_app_with_agent("sess-1");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -143,10 +138,8 @@
 
     #[test]
     fn exit_plan_mode_dismisses_open_block_viewer() {
-        // Regression: if the user has an Edit/tool block_viewer open when
-        // exit_plan_mode opens, dismiss it so wheel scroll reaches the plan
-        // line_viewer. Draw returns on line_viewer (plan visible) but
-        // handle_scroll prefers block_viewer while it remains in state.
+        // Regression: if an Edit/tool block_viewer is open when exit_plan_mode opens, dismiss it so wheel scroll reaches the plan line_viewer
+        // Draw returns on line_viewer (the plan stays visible), but handle_scroll prefers block_viewer while it remains in state
         let mut app = make_app_with_agent("sess-1");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -192,8 +185,7 @@
         assert!(handle_exit_plan_mode(second, &mut app));
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         assert!(agent.latest_inline_plan_content.is_none());
-        // Empty approval still opens the placeholder decision surface (not a
-        // silent "no plan" toast) so the user always sees a way to proceed.
+        // An empty approval still opens the placeholder, not a silent "no plan" toast, so the user always sees a way to proceed
         assert_eq!(
             agent
                 .line_viewer
@@ -307,9 +299,8 @@
         assert!(rx.try_recv().is_err(), "response must NOT be sent yet");
     }
 
-    /// Regression: tool-call titles containing `"enter_plan_mode"` must not
-    /// flip plan mode (the substring matcher used to brick sessions on any
-    /// tool mentioning the phrase, e.g. a Grep with that pattern).
+    /// Regression: tool-call titles containing `"enter_plan_mode"` must not flip plan mode.
+    /// The substring matcher used to flip it on any tool mentioning the phrase, e.g. a Grep with that pattern, leaving the session stuck.
     #[test]
     fn tool_call_with_enter_plan_mode_substring_does_not_activate_plan_mode() {
         let mut agent = make_agent(Some("s1"));
@@ -336,8 +327,8 @@
         }
     }
 
-    /// Symmetric: tool-call titles containing `"exit_plan_mode"` must not
-    /// deactivate plan mode either. Exit is signaled by `CurrentModeUpdate`.
+    /// Symmetric: tool-call titles containing `"exit_plan_mode"` must not deactivate plan mode either.
+    /// Exit is signaled by `CurrentModeUpdate`.
     #[test]
     fn tool_call_with_exit_plan_mode_substring_does_not_deactivate_plan_mode() {
         let mut agent = make_agent(Some("s1"));
@@ -383,9 +374,7 @@
         assert!(agent.plan_mode_pending.is_none());
     }
 
-    /// Unknown mode ids (e.g. a custom agent definition name like
-    /// `"browser_use"`) parse to `SessionMode::Default` and deactivate
-    /// plan mode.
+    /// Unknown mode ids (e.g. a custom agent definition name like `"browser_use"`) parse to `SessionMode::Default` and deactivate plan mode.
     #[test]
     fn current_mode_update_unknown_id_treated_as_default() {
         let mut agent = make_agent(Some("s1"));
@@ -397,8 +386,7 @@
         assert!(!agent.plan_mode_active);
     }
 
-    /// Idempotent CurrentModeUpdate still signals refresh because
-    /// `plan_mode_pending` was cleared (affects effective state).
+    /// A CurrentModeUpdate that repeats the current mode still signals refresh: it cleared `plan_mode_pending`, which affects the effective state.
     #[test]
     fn current_mode_update_signals_refresh_even_on_no_op_active_change() {
         let mut agent = make_agent(Some("s1"));

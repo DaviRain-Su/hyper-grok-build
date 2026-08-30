@@ -2,8 +2,7 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// `/minimal` from a fullscreen session switches in process: no re-exec, no
-/// resume replay; history commits into native scrollback plus a seam marker.
+/// `/minimal` from a fullscreen session switches in process: no re-exec, no resume replay; history commits into native scrollback plus a seam marker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_slash_switches_from_fullscreen() {

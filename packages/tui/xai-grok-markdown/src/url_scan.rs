@@ -6,12 +6,9 @@ use ratatui::text::Line;
 use crate::buffers::unicode_display_width;
 use crate::output::HyperlinkTarget;
 
-/// Scan `lines` for plain URLs and return new `HyperlinkTarget` entries
-/// that don't overlap any existing target in `existing`.
+/// Scan `lines` for plain URLs and return new `HyperlinkTarget` entries that don't overlap any existing target in `existing`.
 ///
-/// `next_id` is the first id to assign; the returned `u32` is the
-/// post-scan counter, suitable for stuffing back into
-/// `FrozenState::next_link_id`.
+/// `next_id` is the first id to assign; the returned `u32` is the post-scan counter, suitable for stuffing back into `FrozenState::next_link_id`.
 pub(crate) fn detect_plain_urls(
     lines: &[Line<'_>],
     existing: &[HyperlinkTarget],
@@ -20,15 +17,12 @@ pub(crate) fn detect_plain_urls(
     detect_plain_urls_with_offset(lines, 0, existing, next_id)
 }
 
-/// Like [`detect_plain_urls`] but scans `lines` whose first element
-/// represents document line `line_index_offset` (caller passes a tail
-/// slice of `self.output.lines` and the index of its first element).
+/// Like [`detect_plain_urls`] but scans `lines` whose first element represents document line `line_index_offset`.
+/// The caller passes a tail slice of `self.output.lines` and the index of its first element.
 ///
-/// Lines fully inside `0..line_index_offset` are assumed to be in
-/// `existing` already and are not re-scanned.  The dedup overlap check
-/// still works correctly because emitted targets use document-absolute
-/// `line_index = line_index_offset + i`, matching the indices already
-/// present in `existing`.
+/// Lines fully inside `0..line_index_offset` are assumed to be in `existing` already and are not re-scanned.
+/// The dedup overlap check still works because emitted targets use document-absolute `line_index = line_index_offset + i`.
+/// Those match the indices already present in `existing`.
 pub(crate) fn detect_plain_urls_with_offset(
     lines: &[Line<'_>],
     line_index_offset: usize,
@@ -73,8 +67,7 @@ pub(crate) fn detect_plain_urls_with_offset(
                     _ => link.as_str().to_string(),
                 };
 
-                // Dedup: skip if any existing or already-added target overlaps
-                // on the same line. Overlap: cand.start < ex.end && ex.start < cand.end.
+                // Dedup: skip if any existing or already-added target overlaps on the same line
                 let overlaps = existing.iter().chain(result.iter()).any(|h| {
                     h.line_index == line_index
                         && col_start < h.column_range.end
@@ -105,8 +98,7 @@ mod tests {
     use crate::StreamingMarkdownRenderer;
     use crate::style::test_style;
 
-    /// Helper: render markdown via StreamingMarkdownRenderer::finish() and
-    /// return the hyperlinks from the finalized output.
+    /// Render markdown via StreamingMarkdownRenderer::finish() and return the hyperlinks from the finalized output.
     fn finish_and_get_hyperlinks(text: &str) -> Vec<HyperlinkTarget> {
         let mut renderer = StreamingMarkdownRenderer::new(test_style::STYLE, true);
         renderer.push_and_render(text, None);
@@ -149,7 +141,6 @@ mod tests {
         assert_ne!(hyperlinks[0].id, hyperlinks[1].id, "ids must differ");
         assert_eq!(hyperlinks[0].url, "https://a.example");
         assert_eq!(hyperlinks[1].url, "https://b.example");
-        // Column ranges must be disjoint
         assert!(
             hyperlinks[0].column_range.end <= hyperlinks[1].column_range.start,
             "column ranges must be disjoint, got {:?} vs {:?}",
@@ -163,22 +154,16 @@ mod tests {
         let text = "Visit [https://example.com](https://example.com).\n";
         let hyperlinks = finish_and_get_hyperlinks(text);
 
-        // NOTE: one might expect 1 target, but in pretty mode
-        // `[url](url)` renders as `url (url)`, showing the URL in two
-        // distinct positions: once as the link text (covered by the parser's
-        // HyperlinkTarget) and once in the `(url)` suffix at a disjoint
-        // column range. Dedup prevents a *third* entry at the same column
-        // range as the parser-produced target; the second entry (at the
-        // suffix position) is correctly detected as a separate target.
+        // Pretty mode renders `[url](url)` as `url (url)`, so the URL shows at two disjoint column ranges
+        // The parser's HyperlinkTarget covers the link text; the plain-URL scan adds a second target for the `(url)` suffix
+        // Dedup only prevents a third entry at the same column range as the parser's target
         assert_eq!(
             hyperlinks.len(),
             2,
             "expected 2 hyperlinks (parser link text + URL in pretty-mode suffix), got {}",
             hyperlinks.len()
         );
-        // Both should reference the same URL.
         assert!(hyperlinks.iter().all(|h| h.url == "https://example.com"));
-        // Column ranges must be disjoint (dedup working correctly).
         assert!(
             hyperlinks[0].column_range.end <= hyperlinks[1].column_range.start
                 || hyperlinks[1].column_range.end <= hyperlinks[0].column_range.start,
@@ -193,15 +178,12 @@ mod tests {
         let text = "Visit <https://example.com>.\n";
         let hyperlinks = finish_and_get_hyperlinks(text);
 
-        // All entries should share the same URL — autolinks may produce
-        // multiple HyperlinkTarget fragments sharing the same id.
+        // All entries should share the same URL; autolinks may produce multiple HyperlinkTarget fragments sharing the same id
         let autolink_count = hyperlinks
             .iter()
             .filter(|h| h.url == "https://example.com")
             .count();
         assert!(autolink_count >= 1, "expected at least one autolink target");
-        // The total count should match the autolink fragments only — no
-        // extra plain-URL duplicates.
         assert_eq!(
             hyperlinks.len(),
             autolink_count,
@@ -268,7 +250,7 @@ mod tests {
         let h = &hyperlinks[0];
         assert_eq!(h.url, "https://example.com");
 
-        // "日本語 " has 3 CJK chars (2 cells each) + 1 space = 7 display cells
+        // "日本語 " has 3 CJK chars (2 cells each) plus 1 space, 7 display cells
         let prefix = "日本語 ";
         let expected_start = unicode_display_width(prefix);
         assert_eq!(expected_start, 7, "prefix should be 7 display cells");
@@ -287,19 +269,13 @@ mod tests {
         );
     }
 
-    /// Behavior pin: URL inside inline code.
-    ///
-    /// This test pins the *current* behavior — if linkify matches inside
-    /// the code-styled span, the URL becomes a HyperlinkTarget. If we
-    /// later decide to skip code-styled spans, this test will fail loudly
-    /// and force the change to be intentional.
+    /// Pins the current behavior for a URL inside inline code: linkify matches inside the code-styled span and produces a HyperlinkTarget.
+    /// If we later skip code-styled spans, this test fails and forces the change to be intentional.
     #[test]
     fn url_inside_inline_code_documented_behavior() {
         let text = "Use `https://example.com` carefully.\n";
         let hyperlinks = finish_and_get_hyperlinks(text);
 
-        // Pin observed behavior: linkify finds the URL inside the
-        // code-styled span, producing a HyperlinkTarget.
         assert!(
             !hyperlinks.is_empty(),
             "behavior pin: URL inside inline code currently produces a HyperlinkTarget"
@@ -307,18 +283,12 @@ mod tests {
         assert_eq!(hyperlinks[0].url, "https://example.com");
     }
 
-    /// Behavior pin: URL inside a fenced code block.
-    ///
-    /// Same rationale as `url_inside_inline_code_documented_behavior` —
-    /// this pins current behavior, not product spec.
+    /// Pins the current behavior for a URL inside a fenced code block; same rationale as `url_inside_inline_code_documented_behavior`.
     #[test]
     fn url_inside_code_fence_documented_behavior() {
         let text = "```\nsee https://example.com\n```\n";
         let hyperlinks = finish_and_get_hyperlinks(text);
 
-        // Pin observed behavior: linkify finds the URL in the code block's
-        // rendered text. Whether this is desirable is a product decision;
-        // this test ensures any change is intentional.
         let has_url = hyperlinks.iter().any(|h| h.url == "https://example.com");
         assert!(
             has_url,
@@ -327,22 +297,16 @@ mod tests {
     }
 
     /// URL detection must run from `render()` too, not only `finish()`.
-    /// Otherwise width changes or other state resets (e.g. via
-    /// `set_max_table_width`) drop the URL hyperlinks that pretty-mode
-    /// rendering adds for the `(url)` suffix of markdown links.
+    /// Otherwise a state reset like `set_max_table_width` drops the URL hyperlinks pretty mode adds for the `(url)` suffix of markdown links.
     ///
-    /// Also pins the OSC 8 grouping invariant: the link-text and URL
-    /// hyperlinks must have DISTINCT ids and DISJOINT column ranges, so
-    /// terminals group them as two separate hyperlinks (not one merged
-    /// underline across the brackets).
+    /// Also pins the OSC 8 grouping invariant: the link-text and URL hyperlinks must have distinct ids and disjoint column ranges.
+    /// Terminals then group them as two separate hyperlinks instead of one merged underline across the brackets.
     #[test]
     fn render_detects_pretty_mode_url_suffix() {
         let text = "[link](https://example.com/some/long/path)\n";
         let mut renderer = StreamingMarkdownRenderer::new(test_style::STYLE, true);
         renderer.push_and_render(text, None);
-        // No finish() call: after render() alone, both the parser-produced
-        // (link text) and the url_scan-produced (URL in `(url)` suffix)
-        // hyperlinks must be present.
+        // No finish() call: render() alone must produce both the parser (link text) and url_scan (`(url)` suffix) hyperlinks
         let view = renderer.view();
         assert_eq!(
             view.hyperlinks.len(),
@@ -400,14 +364,10 @@ mod tests {
         );
     }
 
-    /// After `finish()`, re-rendering (e.g. triggered by a width change
-    /// via `set_max_table_width`) must NOT drop the URL hyperlinks that
-    /// pretty-mode adds for the `(url)` suffix.
+    /// Re-rendering after `finish()` (e.g. a width change) must not drop the URL hyperlinks pretty mode adds for the `(url)` suffix.
     ///
-    /// Snapshots the full hyperlink list before/after the reset and
-    /// asserts that the URL-suffix entry survives with its column range
-    /// intact (the OSC 8 id may be re-assigned by the post-reset
-    /// re-render — that's expected — but the location must not move).
+    /// Snapshots the hyperlink list before and after the reset and asserts the URL-suffix entry keeps its column range.
+    /// The post-reset re-render may re-assign the OSC 8 id; the location must not move.
     #[test]
     fn url_hyperlinks_survive_re_render_after_finish() {
         let url = "https://example.com/some/long/path";
@@ -430,9 +390,8 @@ mod tests {
         assert_url_suffix_preserved(&before, &after, url);
     }
 
-    /// Identical contract to `url_hyperlinks_survive_re_render_after_finish`
-    /// but exercising the `set_pretty` reset path (production:
-    /// `MarkdownContent::set_raw_mode` toggle).
+    /// Same contract as `url_hyperlinks_survive_re_render_after_finish`, but through the `set_pretty` reset path.
+    /// In production that path is the `MarkdownContent::set_raw_mode` toggle.
     #[test]
     fn url_hyperlinks_survive_re_render_after_set_pretty_toggle() {
         let url = "https://example.com/some/long/path";
@@ -442,7 +401,7 @@ mod tests {
         renderer.finish(None);
         let before = snapshot(&renderer.view());
 
-        // Toggle pretty off then back on — both transitions reset state.
+        // Toggle pretty off then back on; both transitions reset state
         renderer.set_pretty(false);
         renderer.set_pretty(true);
         renderer.render(None);
@@ -456,9 +415,8 @@ mod tests {
         assert_url_suffix_preserved(&before, &after, url);
     }
 
-    /// Identical contract to `url_hyperlinks_survive_re_render_after_finish`
-    /// but exercising the `set_style` reset path (production: theme change
-    /// via `MarkdownContent::ensure_wrapped` when theme cache kind shifts).
+    /// Same contract as `url_hyperlinks_survive_re_render_after_finish`, but through the `set_style` reset path.
+    /// In production that path is a theme change via `MarkdownContent::ensure_wrapped` when the theme cache kind shifts.
     #[test]
     fn url_hyperlinks_survive_re_render_after_set_style() {
         let url = "https://example.com/some/long/path";

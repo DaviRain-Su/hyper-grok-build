@@ -1,8 +1,7 @@
 // Per-test-case module for the `pty_e2e` integration test crate.
 //
-// Plugins-tab footer shows contextual Space enable/disable (not "toggle")
-// and freeform `a install` (not `a add`). Run with `--nocapture` to dump
-// screen contents when debugging failures.
+// The Plugins-tab footer shows contextual Space enable/disable (not "toggle") and freeform `a install` (not `a add`)
+// Run with `--nocapture` to dump screen contents when debugging failures
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -39,10 +38,7 @@ fn dump_screen(label: &str, harness: &PtyHarness) {
 }
 
 /// True when the screen shows the Space footer verb we asked for.
-///
-/// Important: `space enable` is a substring of the fallback
-/// `space enable/disable`, so a naive `contains("space enable")` would
-/// pass while the contextual hint is still the combined form.
+/// `space enable` is a substring of the fallback `space enable/disable`, so a naive contains check passes while the hint is still the combined form.
 fn screen_has_space_verb(screen: &str, verb: &str) -> bool {
     match verb {
         "enable/disable" => screen.contains("space enable/disable"),

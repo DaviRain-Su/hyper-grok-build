@@ -70,8 +70,8 @@ pub fn render_consent(
         Vec::new()
     };
 
-    // Accept is refused while the body is unread, so the row is withheld rather than offered and
-    // ignored. Quit stays, or the screen would show no way out at all.
+    // Accept is refused while the body is unread, so the row is withheld rather than offered and ignored
+    // Quit stays, or the screen would show no way out at all
     let menu_items: &[(&str, &str)] = if legibility.can_accept() {
         &[("a", notice.accept_label.as_str()), ("q", "Quit")]
     } else {
@@ -105,15 +105,15 @@ pub fn render_consent(
     }
 }
 
-/// Drops the logo rather than declaring the body unreadable, because the logo grows with the
-/// window and would make a notice that fits at 80x24 illegible at 80x25.
+/// Drops the logo rather than declaring the body unreadable.
+/// The logo grows with the window and would make a notice that fits at 80x24 illegible at 80x25.
 fn fit_body(
     content_area: Rect,
     compact: bool,
     rows: &[BodyRow],
 ) -> (WelcomeLayout, ConsentLegibility) {
-    // No prompt is painted here, so the rows compute_stacked reserves go to the body. A compact
-    // layout gives the logo no rows at all, which is what dropping it means.
+    // No prompt is painted here, so the rows compute_stacked reserves go to the body
+    // A compact layout gives the logo no rows at all, which is what dropping it means
     let stacked = |message_height: u16, hide_logo: bool| {
         WelcomeLayout::compute_stacked(WelcomeLayoutInput {
             content_area,
@@ -170,8 +170,8 @@ fn paint_body(
             let text: String = run.iter().map(|cell| cell.text.as_str()).collect();
             let cols = row_cols(run);
             let style = match link {
-                // Hover keys on the link, not the rect, so every run brightens together. Bold as
-                // well as brighter, because a 16-colour palette maps both colours to the same one.
+                // Hover keys on the link, not the rect, so every run brightens together
+                // Bold as well as brighter, because a 16-colour palette maps both colours to the same one
                 Some(index) if hovered_link == Some(index) => theme
                     .link_style()
                     .fg(theme.text_primary)
@@ -205,8 +205,7 @@ fn runs(row: &[BodyCell]) -> impl Iterator<Item = (Option<usize>, &[BodyCell])> 
         .map(|run| (run[0].link, run))
 }
 
-/// Centred within the message block rather than the full width, and ellipsized, so an oversized
-/// title cannot run edge to edge.
+/// Centred within the message block rather than the full width, and ellipsized, so an oversized title cannot run edge to edge.
 fn paint_centered(area: Rect, buf: &mut Buffer, style: Style, text: &str) {
     if area.height == 0 || area.width == 0 {
         return;

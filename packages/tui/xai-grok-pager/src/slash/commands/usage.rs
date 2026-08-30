@@ -1,11 +1,12 @@
-//! `/usage` — session token/cost; consumer accounts can also manage billing.
+//! `/usage` shows session token and cost totals; consumer accounts can also manage billing.
 //!
-//! External-auth deployments (`auth_provider_command`) never reach grok.com
-//! billing, so the command is hidden and refused via
-//! [`AppCtx::usage_command_visible`].
+//! External-auth deployments (`auth_provider_command`) never reach grok.com billing.
+//! [`AppCtx::usage_command_visible`] hides and refuses the command there.
 
 use crate::app::actions::Action;
-use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{
+    AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand, slash_meta,
+};
 use agent_client_protocol as acp;
 
 pub struct UsageCommand;
@@ -46,24 +47,12 @@ fn auth_provider_config_set() -> bool {
 }
 
 impl SlashCommand for UsageCommand {
-    fn name(&self) -> &str {
-        "usage"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["cost"]
-    }
-
-    fn description(&self) -> &str {
-        "View usage"
-    }
-
-    fn usage(&self) -> &str {
-        "/usage [show|manage]"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
+    slash_meta! {
+        name: "usage",
+        aliases: ["cost"],
+        description: "View usage",
+        usage: "/usage [show|manage]",
+        takes_args: true,
     }
 
     fn visible(&self, ctx: &AppCtx) -> bool {
@@ -71,7 +60,7 @@ impl SlashCommand for UsageCommand {
     }
 
     fn takes_args_now(&self, ctx: &AppCtx) -> bool {
-        // Non-consumer: bare `/usage` only — Enter should send, not chain for args.
+        // Non-consumer accounts get bare `/usage` only; Enter should send, not chain for args
         ctx.usage_command_visible && ctx.billing_surface_visible
     }
 

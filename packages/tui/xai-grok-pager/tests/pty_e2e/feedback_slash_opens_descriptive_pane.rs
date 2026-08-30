@@ -4,8 +4,7 @@ use super::common::*;
 
 const FEEDBACK_PLACEHOLDER_SENTINEL: &str = "Please provide as much detail as possible.";
 const FEEDBACK_LABEL_SENTINEL: &str = "How can we improve Grok Build?";
-// Fragment of `FEEDBACK_TRACE_QUESTION_LABEL` short enough to survive
-// terminal wrapping at any tested width.
+// Fragment of `FEEDBACK_TRACE_QUESTION_LABEL` short enough to survive terminal wrapping at any tested width
 const TRACE_QUESTION_SENTINEL: &str = "Opt-in to provide your trace";
 const THANKS_SENTINEL: &str = "Thanks for the feedback";
 const INLINE_FEEDBACK: &str = "pty-inline-feedback-report-xyz";
@@ -15,9 +14,8 @@ fn thanks_count(harness: &PtyHarness) -> usize {
     harness.screen_contents().matches(THANKS_SENTINEL).count()
 }
 
-/// Trace eligibility depends on the environment's auth, so the consent
-/// question may or may not follow Enter. When it does, Esc skips the upload
-/// and still sends the report.
+/// Trace eligibility depends on the environment's auth, so the consent question may or may not follow Enter.
+/// When it does, Esc skips the upload and still sends the report.
 fn skip_trace_question_if_offered(harness: &mut PtyHarness) {
     harness.update(Duration::from_millis(400));
     if harness.contains_text(TRACE_QUESTION_SENTINEL) {

@@ -231,7 +231,7 @@ fn escapes_and_reordering_characters_are_stripped_from_the_body() {
     assert_eq!(painted, "before[31mafter");
 }
 
-/// Not conditional on the server ack, or a missing backend would re-ask someone who answered.
+/// Suppression is not conditional on the server ack, or a missing backend would re-ask someone who answered.
 #[test]
 fn an_unacked_answer_at_or_above_the_version_suppresses() {
     let gate = gate();
@@ -273,8 +273,8 @@ fn answer_from_another_user_does_not_suppress() {
     assert!(matches!(verdict, ConsentState::Pending { .. }));
 }
 
-/// An api key carries no email. An answer filed under no account belongs to nobody in particular,
-/// so it must not answer for the next key-authenticated user on the machine.
+/// An api key carries no email.
+/// An answer filed under no account belongs to nobody in particular, so it must not answer for the next key-authenticated user on the machine.
 #[test]
 fn an_accountless_answer_does_not_suppress() {
     let gate = gate();
@@ -321,8 +321,8 @@ fn an_unusable_id_refuses() {
     }
 }
 
-/// Markup the parser cannot pair off would have to be painted or dropped. Painting shows a url,
-/// dropping serves a legal notice with a sentence missing, so neither is on offer.
+/// Markup the parser cannot pair off would have to be painted or dropped.
+/// Painting shows a url, dropping serves a legal notice with a sentence missing, so neither is on offer.
 #[test]
 fn unpairable_markup_refuses() {
     for body in [
@@ -346,8 +346,7 @@ fn unpairable_markup_refuses() {
     }
 }
 
-/// Terminals linkify a bare url on sight, so one outside a link would open without ever passing
-/// the checks a link's url goes through.
+/// Terminals linkify a bare url on sight, so one outside a link would open without ever passing the checks a link's url goes through.
 #[test]
 fn a_url_outside_a_link_refuses() {
     let mut gate = gate();
@@ -359,8 +358,8 @@ fn a_url_outside_a_link_refuses() {
     );
 }
 
-/// A body that reduces to nothing readable must refuse, not arm a notice with no text: the screen
-/// withholds accept for a body it did not paint, so the user could only ever quit.
+/// A body that reduces to nothing readable must refuse, not arm a notice with no text.
+/// The screen withholds accept for a body it did not paint, so the user could only ever quit.
 #[test]
 fn a_body_that_paints_nothing_refuses() {
     for body in [
@@ -381,8 +380,7 @@ fn a_body_that_paints_nothing_refuses() {
     }
 }
 
-/// Whatever the body does, no url and no raw markup may reach the screen, and no link may point
-/// somewhere the label does not say.
+/// Whatever the body does, no url and no raw markup may reach the screen, and no link may point somewhere the label does not say.
 #[test]
 fn no_body_shape_leaks_a_url_or_raw_markup() {
     let bodies = [

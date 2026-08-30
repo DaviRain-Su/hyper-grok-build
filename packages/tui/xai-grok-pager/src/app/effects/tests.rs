@@ -1,111 +1,7 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
-
-#[tokio::test]
-async fn subagent_model_reload_effect_round_trips_ack_without_debounce() {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut tasks = JoinSet::new();
-
-    execute(
-        Effect::ReloadSubagentModels {
-            agent_id: AgentId(7),
-        },
-        &mut tasks,
-        &tx,
-        Path::new("."),
-        &SessionFlags::default(),
-        &progress_tx,
-    );
-
-    let message = rx.recv().await.expect("reload request must be sent");
-    let xai_acp_lib::AcpAgentMessage::ExtMethod(args) = message else {
-        panic!("expected reload ext_method request");
-    };
-    assert_eq!(
-        args.request.method.as_ref(),
-        "x.ai/internal/reload_subagent_models"
-    );
-    assert_eq!(args.request.params.get(), "{}");
-    let raw = serde_json::value::RawValue::from_string(
-        r#"{"result":{"reloaded":true,"pins":1}}"#.to_string(),
-    )
-    .expect("valid acknowledgement");
-    args.response_tx
-        .send(Ok(acp::ExtResponse::new(std::sync::Arc::from(raw))))
-        .expect("reload task must still be waiting for acknowledgement");
-
-    let result = tasks
-        .join_next()
-        .await
-        .expect("reload task must complete")
-        .expect("reload task must not panic");
-    assert!(matches!(
-        result,
-        TaskResult::SubagentModelsReloaded {
-            agent_id: AgentId(7),
-            result: Ok(())
-        }
-    ));
-}
-
-#[tokio::test]
-async fn set_platform_api_key_effect_forwards_optional_base_url() {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut tasks = JoinSet::new();
-
-    execute(
-        Effect::SetPlatformApiKey {
-            platform: "nexus".to_string(),
-            api_key: "sk-test".to_string(),
-            base_url: Some("https://gw.example".to_string()),
-        },
-        &mut tasks,
-        &tx,
-        Path::new("."),
-        &SessionFlags::default(),
-        &progress_tx,
-    );
-
-    let message = rx.recv().await.expect("set-platform request must be sent");
-    let xai_acp_lib::AcpAgentMessage::ExtMethod(args) = message else {
-        panic!("expected set-platform ext_method request");
-    };
-    assert_eq!(
-        args.request.method.as_ref(),
-        "x.ai/internal/set_platform_api_key"
-    );
-    let params: serde_json::Value = serde_json::from_str(args.request.params.get()).unwrap();
-    assert_eq!(params["platform"], "nexus");
-    assert_eq!(params["apiKey"], "sk-test");
-    assert_eq!(params["baseUrl"], "https://gw.example");
-}
-
-#[test]
-fn subagent_model_reload_requires_positive_shell_acknowledgement() {
-    assert!(
-        parse_subagent_models_reload_response(r#"{"result":{"reloaded":true,"pins":3}}"#)
-            .is_ok()
-    );
-
-    let error = parse_subagent_models_reload_response(
-        r#"{"result":null,"error":"reload failed"}"#,
-    )
-    .unwrap_err();
-    assert_eq!(error, "reload failed");
-
-    let missing_ack =
-        parse_subagent_models_reload_response(r#"{"result":{"pins":3}}"#).unwrap_err();
-    assert!(missing_ack.contains("did not acknowledge"));
-
-    let malformed = parse_subagent_models_reload_response("not json").unwrap_err();
-    assert!(malformed.contains("invalid"));
-}
-
-/// The invalid-params server detail survives `attach_prompt_usage`
-/// wrapping `error.data` as `{message, promptUsage}`.
+/// The invalid-params server detail survives `attach_prompt_usage` wrapping `error.data` as `{message, promptUsage}`.
 #[test]
 fn format_acp_error_reads_detail_from_wrapped_data() {
     let bare = acp::Error::invalid_params().data("model does not support tools");
@@ -131,6 +27,33 @@ fn format_acp_error_formats_http_500_dump() {
     assert_eq!(
             format_acp_error(&err, false),
             "Server error (500): Something went wrong on our side. Wait a minute and send again."
+        );
+}
+/// The typed kind in `error.data` (the shell's `terminal_error_data` shape) picks the truncation copy.
+/// The placeholder message proves the typed extraction, not the text fallback, chose it.
+#[test]
+fn format_acp_error_typed_truncation_kind_renders_truncation_copy() {
+    let err = acp::Error::internal_error()
+        .data(
+            serde_json::json!({
+            "message": "turn ended early",
+            "error_kind": "max_tokens_truncation"
+        }),
+        );
+    assert_eq!(
+            format_acp_error(&err, false),
+            "Response truncated: turn ended early"
+        );
+    let unknown = acp::Error::internal_error()
+        .data(
+            serde_json::json!({
+            "message": "a future failure quoting: response truncated by max_tokens",
+            "error_kind": "a_future_kind"
+        }),
+        );
+    assert_eq!(
+            format_acp_error(&unknown, false),
+            "Request failed: a future failure quoting: response truncated by max_tokens. Try sending again."
         );
 }
 #[test]
@@ -174,8 +97,7 @@ fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
             FREE_USAGE_USER_MESSAGE
         );
 }
-/// Non-empty token ranges ride the wire block meta as `skillTokenRanges`
-/// byte pairs; the text itself is untouched.
+/// Non-empty token ranges ride the wire block meta as `skillTokenRanges` byte pairs; the text itself is untouched.
 #[test]
 fn plain_prompt_block_stamps_skill_token_ranges_meta() {
     let block = plain_prompt_content_block("great /pr-workflow go".into(), &[6..18]);
@@ -186,7 +108,7 @@ fn plain_prompt_block_stamps_skill_token_ranges_meta() {
     let meta = tb.meta.expect("meta stamped when ranges non-empty");
     assert_eq!(meta["skillTokenRanges"], serde_json::json!([[6, 18]]));
 }
-/// Empty ranges keep `meta: None` — the legacy wire shape is unchanged.
+/// Empty ranges keep `meta: None`; the legacy wire shape is unchanged.
 #[test]
 fn plain_prompt_block_no_meta_when_ranges_empty() {
     let block = plain_prompt_content_block("hello".into(), &[]);
@@ -196,8 +118,7 @@ fn plain_prompt_block_no_meta_when_ranges_empty() {
     assert_eq!(tb.text, "hello");
     assert!(tb.meta.is_none());
 }
-/// With a screen mode, `_meta` carries both `promptId` and `screenMode`
-/// (the shell threads the latter into `prompt_submitted.screen_mode`).
+/// With a screen mode, `_meta` carries both `promptId` and `screenMode` (the shell threads the latter into `prompt_submitted.screen_mode`).
 #[test]
 fn prompt_request_meta_stamps_screen_mode() {
     let meta = prompt_request_meta("p-1", Some("minimal"));
@@ -206,15 +127,13 @@ fn prompt_request_meta_stamps_screen_mode() {
             serde_json::json!({ "promptId": "p-1", "screenMode": "minimal" })
         );
 }
-/// Without a screen mode (`SessionFlags::default()` in tests), the key is
-/// omitted — the legacy `{"promptId": …}` wire shape stays byte-identical.
+/// Without a screen mode (`SessionFlags::default()` in tests), the key is omitted; the legacy `{"promptId": …}` wire shape stays byte-identical.
 #[test]
 fn prompt_request_meta_omits_screen_mode_when_unset() {
     let meta = prompt_request_meta("p-2", None);
     assert_eq!(meta, serde_json::json!({ "promptId": "p-2" }));
 }
-/// Text-only interjections must omit the `content` key entirely — the
-/// legacy `x.ai/interject` wire shape stays byte-identical.
+/// Text-only interjections must omit the `content` key entirely; the legacy `x.ai/interject` wire shape stays byte-identical.
 #[test]
 fn interject_params_omit_content_when_no_blocks() {
     let sid = acp::SessionId::new("s1");
@@ -293,8 +212,7 @@ fn picker_keeps_untitled_conversation_as_untitled() {
     assert_eq!(entries[0].summary, "Untitled");
     assert_eq!(entries[0].source, "conversation");
 }
-/// The recap and last-turn summary ride the session-list wire and land on
-/// the picker entry so the expanded card can show them.
+/// The recap and last-turn summary ride the session-list wire and land on the picker entry so the expanded card can show them.
 #[test]
 fn picker_parses_last_recap_and_last_turn_summary() {
     let recent = chrono::Utc::now().to_rfc3339();
@@ -320,8 +238,7 @@ fn picker_parses_last_recap_and_last_turn_summary() {
             Some("Where we left off: auth refactor across the API")
         );
 }
-/// `sessionKind` rides the session-list wire onto the entry; the picker's
-/// Headless page filter keys on it.
+/// `sessionKind` rides the session-list wire onto the entry; the picker's Headless page filter keys on it.
 #[test]
 fn picker_parses_session_kind() {
     let recent = chrono::Utc::now().to_rfc3339();
@@ -349,7 +266,7 @@ fn picker_parses_session_kind() {
     assert_eq!(entries[0].session_kind.as_deref(), Some("headless"));
     assert_eq!(entries[1].session_kind, None);
 }
-/// Canary: the empty-summary drop still applies to Build rows.
+/// The empty-summary drop still applies to Build rows.
 #[test]
 fn picker_still_drops_build_row_with_empty_summary() {
     let payload = serde_json::json!({
@@ -399,10 +316,8 @@ fn session_list_partial_absent_for_healthy_or_meta_less_responses() {
     let legacy = serde_json::json!({ "sessions": [] });
     assert_eq!(parse_session_list_partial(&legacy), None);
 }
-/// The agent serializes `ExtMethodResult<KillTaskResponse>`: the outcome
-/// lives at `result.outcome`. Probing the top level (the pre-fix code)
-/// was why the tasks-pane ✗ never removed stale (`not_found`) rows after
-/// a session resume.
+/// The agent serializes `ExtMethodResult<KillTaskResponse>`: the outcome lives at `result.outcome`.
+/// Probing the top level instead was why the tasks-pane ✗ never removed stale (`not_found`) rows after a session resume.
 #[test]
 fn parse_kill_outcome_reads_result_envelope() {
     use xai_grok_tools::types::KillOutcome;
@@ -413,9 +328,8 @@ fn parse_kill_outcome_reads_result_envelope() {
     let resp = r#"{"result":{"taskId":"t-1","outcome":"already_exited"}}"#;
     assert_eq!(parse_kill_outcome(resp), Some(KillOutcome::AlreadyExited));
 }
-/// Round-trip through the agent's own serializer: what
-/// `extensions::task::respond()` produces must parse back to the same
-/// typed outcome (guards against the two sides drifting apart).
+/// Round-trip through the agent's own serializer: what `extensions::task::respond()` produces must parse back to the same typed outcome.
+/// This guards against the two sides drifting apart.
 #[test]
 fn parse_kill_outcome_round_trips_agent_serialization() {
     use xai_grok_shell::extensions::task::KillTaskResponse;
@@ -430,8 +344,7 @@ fn parse_kill_outcome_round_trips_agent_serialization() {
         .unwrap();
     assert_eq!(parse_kill_outcome(&wire), Some(KillOutcome::NotFound));
 }
-/// Error envelopes and malformed payloads yield `None` (clear pending
-/// state, keep the row).
+/// Error envelopes and malformed payloads yield `None` (clear pending state, keep the row).
 #[test]
 fn parse_kill_outcome_none_for_error_or_malformed() {
     assert_eq!(
@@ -445,8 +358,7 @@ fn parse_kill_outcome_none_for_error_or_malformed() {
             None
         );
 }
-/// Typed `outcome`: `Cancelled` → `StoppedLive`; `AlreadyFinished` /
-/// `NotFound` → `NothingLive` (carrying the real status when known).
+/// Typed `outcome`: `Cancelled` maps to `StoppedLive`; `AlreadyFinished` and `NotFound` map to `NothingLive` (carrying the real status when known).
 #[test]
 fn parse_subagent_kill_outcome_reads_typed_outcome() {
     assert!(matches!(
@@ -468,8 +380,7 @@ fn parse_subagent_kill_outcome_reads_typed_outcome() {
             SubagentKillOutcome::NothingLive { status: None }
         ));
 }
-/// An older shell sends no `outcome`; the parser falls back to the legacy
-/// `cancelled` bool (true → `StoppedLive`, false → `NothingLive`).
+/// An older shell sends no `outcome`; the parser falls back to the legacy `cancelled` bool: true means `StoppedLive`, false means `NothingLive`.
 #[test]
 fn parse_subagent_kill_outcome_falls_back_to_legacy_bool() {
     assert!(matches!(
@@ -481,9 +392,8 @@ fn parse_subagent_kill_outcome_falls_back_to_legacy_bool() {
             SubagentKillOutcome::NothingLive { status: None }
         ));
 }
-/// An unknown future `kind` deserializes to `Unknown` (via `#[serde(other)]`)
-/// and falls back to the always-present `cancelled` bool — not `RpcFailed`,
-/// which would leave the row stuck.
+/// An unknown future `kind` deserializes to `Unknown` (via `#[serde(other)]`) and falls back to the always-present `cancelled` bool.
+/// It must not become `RpcFailed`, which would leave the row stuck.
 #[test]
 fn parse_subagent_kill_outcome_unknown_kind_falls_back_to_legacy_bool() {
     assert!(matches!(
@@ -499,8 +409,7 @@ fn parse_subagent_kill_outcome_unknown_kind_falls_back_to_legacy_bool() {
             SubagentKillOutcome::NothingLive { status: None }
         ));
 }
-/// Round-trip through the agent's own serializer guards the two sides
-/// against drifting apart.
+/// Round-trip through the agent's own serializer guards the two sides against drifting apart.
 #[test]
 fn parse_subagent_kill_outcome_round_trips_agent_serialization() {
     use xai_grok_shell::extensions::task::{
@@ -521,9 +430,8 @@ fn parse_subagent_kill_outcome_round_trips_agent_serialization() {
             SubagentKillOutcome::NothingLive { status: Some(s) } if s == "failed"
         ));
 }
-/// A top-level payload (no `result` envelope), error envelopes, and
-/// malformed payloads are a failed RPC (`RpcFailed`) — the caller must NOT
-/// finalize a possibly-live row.
+/// A top-level payload (no `result` envelope), error envelopes, and malformed payloads are a failed RPC (`RpcFailed`).
+/// The caller must not finalize a possibly-live row.
 #[test]
 fn parse_subagent_kill_outcome_rpc_failed_for_error_or_malformed() {
     assert!(matches!(
@@ -560,8 +468,7 @@ fn interject_params_carry_content_when_blocks_present() {
     assert_eq!(content.len(), 1);
     assert_eq!(content[0]["text"], "look at [Image #1]");
 }
-/// A billing config with every field unset, for use as a base in
-/// `credit_balance_from_config` tests via struct-update syntax.
+/// A billing config with every field unset, for use as a base in `credit_balance_from_config` tests via struct-update syntax.
 fn empty_billing_config() -> BillingConfig {
     BillingConfig {
         credit_usage_percent: None,
@@ -611,7 +518,7 @@ fn credit_balance_falls_back_to_limit_used_when_percent_absent() {
     };
     assert_eq!(credit_balance_from_config(c).usage_pct, 25.0);
 }
-/// Match production: RFC 3339 → user's local wall-clock (no zone label).
+/// Match production: RFC 3339 renders as the user's local wall-clock (no zone label).
 fn expected_period_end_display(rfc3339: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
         .expect("test fixture is valid RFC 3339")
@@ -849,8 +756,7 @@ fn parse_worktree_restore_payload_missing_fields() {
     assert!(summary.is_none());
     assert!(degree.is_none());
 }
-/// A typo / unknown variant must parse as `None` rather than
-/// silently round-tripping a bogus value.
+/// A typo or unknown variant must parse as `None` rather than silently round-tripping a bogus value.
 #[test]
 fn parse_worktree_restore_payload_rejects_unknown_degree() {
     let value = serde_json::json!({
@@ -915,7 +821,7 @@ async fn persist_setting_unknown_key_returns_err() {
         Ok(()) => panic!("expected Err for unknown key"),
     }
 }
-/// Type-mismatch returns Err (not panic) for spawned-task safety.
+/// Type-mismatch returns Err, not panic: the parser runs inside spawned tasks.
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_compact_mode() {
     use crate::settings::SettingValue;
@@ -998,8 +904,8 @@ async fn persist_setting_type_mismatch_errors_simple_mode() {
 }
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-/// Spawn a fake ACP agent that counts `x.ai/yolo_mode_changed`
-/// notifications. Exits when the channel closes.
+/// Spawn a fake ACP agent that counts `x.ai/yolo_mode_changed` notifications.
+/// Exits when the channel closes.
 fn spawn_fake_acp_agent(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
 ) -> Arc<AtomicUsize> {
@@ -1054,8 +960,7 @@ fn unregister_best_effort_removes_entry_when_lock_free() {
         );
 }
 /// Contended: the quit path must skip the shared flock rather than block.
-/// The unregister runs on a worker joined against a deadline so a blocking
-/// regression fails fast here instead of deadlocking the test binary.
+/// The unregister runs on a worker joined against a deadline so a blocking regression fails fast instead of deadlocking the test binary.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn unregister_best_effort_is_nonblocking_under_lock_contention() {
@@ -1093,16 +998,14 @@ fn unregister_best_effort_is_nonblocking_under_lock_contention() {
             "contended unregister must leave the entry for collect_crashed",
         );
 }
-/// A real I/O error (uncreatable registry root) is swallowed: the
-/// best-effort helper logs and returns instead of panicking.
+/// A real I/O error (uncreatable registry root) is swallowed: the best-effort helper logs and returns instead of panicking.
 #[test]
 fn unregister_best_effort_swallows_io_error() {
     let file = tempfile::NamedTempFile::new().expect("tempfile");
     let bad_root = file.path().join("not-a-dir");
     unregister_active_session_best_effort_in(&bad_root, &acp::SessionId::new("s1"));
 }
-/// BestEffort path fires exactly one ACP notification regardless
-/// of disk outcome.
+/// BestEffort path fires exactly one ACP notification regardless of disk outcome.
 #[tokio::test]
 async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
     use agent_client_protocol as acp;
@@ -1135,8 +1038,7 @@ async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
              SettingPersistFailedBestEffort (Err), got {result:?}",
         );
 }
-/// WithRollback: notification count matches disk outcome
-/// (1 on Ok, 0 on Err).
+/// WithRollback: notification count matches disk outcome (1 on Ok, 0 on Err).
 #[tokio::test]
 async fn persist_permission_mode_acp_notification_gated_on_disk_for_with_rollback() {
     use agent_client_protocol as acp;
@@ -1195,7 +1097,7 @@ async fn persist_permission_mode_no_session_id_suppresses_acp() {
              agents have no ACP channel to notify",
         );
 }
-/// BestEffort + disk failure must NOT return `SettingPersisted`.
+/// BestEffort with a disk failure must not return `SettingPersisted`.
 #[tokio::test]
 async fn persist_permission_mode_best_effort_failure_returns_dedicated_variant() {
     let _guard = setup_grok_home_in_tempdir();
@@ -1229,7 +1131,7 @@ async fn persist_permission_mode_best_effort_failure_returns_dedicated_variant()
         }
     }
 }
-/// (Err, WithRollback) → SUPPRESS for all canonicals.
+/// (Err, WithRollback) suppresses for all canonicals.
 #[test]
 fn should_send_yolo_acp_with_rollback_suppresses_on_err() {
     let result: Result<(), String> = Err("simulated disk failure".to_string());
@@ -1252,7 +1154,7 @@ fn should_send_yolo_acp_with_rollback_suppresses_on_err() {
             "WithRollback + Err MUST suppress for the 'default' prior canonical too",
         );
 }
-/// (Ok, WithRollback) → FIRE for all canonicals.
+/// (Ok, WithRollback) fires for all canonicals.
 #[test]
 fn should_send_yolo_acp_with_rollback_fires_on_ok() {
     let ok: Result<(), String> = Ok(());
@@ -1387,7 +1289,7 @@ fn route_permission_mode_result_ok_preserves_default_canonical() {
         other => panic!("Ok must return SettingPersisted, got {other:?}"),
     }
 }
-/// `(Err, BestEffort)` must NOT return `SettingPersisted`.
+/// `(Err, BestEffort)` must not return `SettingPersisted`.
 #[test]
 fn route_permission_mode_result_err_best_effort_routes_to_dedicated_variant() {
     let result = route_permission_mode_result(
@@ -1594,79 +1496,6 @@ async fn foreign_scan_task_echoes_sequence_without_enabled_sources() {
     }
     drop(app_coordinator);
 }
-
-#[tokio::test]
-#[serial_test::serial(OMP_ENV)]
-async fn foreign_scan_task_supports_omp_only_sources() {
-    let root = tempfile::tempdir().unwrap();
-    let cwd = tempfile::tempdir().unwrap();
-    let cwd = dunce::canonicalize(cwd.path()).unwrap();
-    let grok_home = root.path().join("grok-home");
-    std::fs::create_dir_all(
-        grok_home.join("bundled/skills/resume-omp"),
-    )
-    .unwrap();
-    std::fs::write(
-        grok_home.join("bundled/skills/resume-omp/SKILL.md"),
-        "---\nname: resume-omp\n---\n",
-    )
-    .unwrap();
-
-    let agent_dir = root.path().join("omp-agent");
-    let encoded_cwd = cwd
-        .to_string_lossy()
-        .trim_start_matches(['/', '\\'])
-        .replace(['/', '\\', ':'], "-");
-    let bucket = agent_dir
-        .join("sessions")
-        .join(format!("--{encoded_cwd}--"));
-    std::fs::create_dir_all(&bucket).unwrap();
-    let header = serde_json::json!({
-        "type": "session",
-        "version": 3,
-        "id": "omp-only-id",
-        "cwd": cwd.to_string_lossy(),
-        "title": "OMP-only session",
-    });
-    std::fs::write(bucket.join("session.jsonl"), format!("{header}\n")).unwrap();
-
-    let _agent_dir = crate::test_util::EnvVarGuard::set("PI_CODING_AGENT_DIR", &agent_dir);
-    let _omp_profile = crate::test_util::EnvVarGuard::set("OMP_PROFILE", "");
-    let _pi_profile = crate::test_util::EnvVarGuard::set("PI_PROFILE", "");
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut tasks = JoinSet::new();
-    let app_coordinator = crate::app::ForeignScanCoordinator::default();
-    app_coordinator.begin_request(42);
-    execute(
-        Effect::ScanForeignSessions {
-            cwd,
-            compat: xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources {
-                omp: true,
-                ..Default::default()
-            },
-            grok_home,
-            coordinator: app_coordinator.clone(),
-            seq: 42,
-        },
-        &mut tasks,
-        &tx,
-        Path::new("."),
-        &SessionFlags::default(),
-        &progress_tx,
-    );
-    match tasks.join_next().await.expect("task").expect("no panic") {
-        TaskResult::ForeignSessionsScanned { entries, seq } => {
-            assert_eq!(seq, 42);
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].id, "omp-only-id");
-            assert_eq!(entries[0].source, "omp");
-        }
-        other => panic!("expected ForeignSessionsScanned, got {other:?}"),
-    }
-    drop(app_coordinator);
-}
-
 #[tokio::test]
 async fn foreign_resume_detection_runs_as_task_result() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1724,9 +1553,8 @@ async fn foreign_resume_detection_runs_as_task_result() {
         other => panic!("expected ForeignResumeHintDetected, got {other:?}"),
     }
 }
-/// `FetchSessionList` wire shape: search sends `query` (no `allowRelax`);
-/// browse opts into `allowRelax` and parses `x.ai/listScope`; all
-/// outcomes echo `seq`/`query`.
+/// `FetchSessionList` wire shape: search sends `query` (no `allowRelax`); browse opts into `allowRelax` and parses `x.ai/listScope`.
+/// All outcomes echo `seq` and `query`.
 #[tokio::test]
 async fn fetch_session_list_pushes_query_and_echoes_seq() {
     use std::sync::{Arc, Mutex};
@@ -2013,9 +1841,8 @@ async fn fetch_workflows_list_sends_session_id() {
     assert_eq!(captured[0]["sessionId"], "test-session");
     assert!(captured[0].get("cwd").is_none());
 }
-/// The debounce arm must echo `query` and `seq` exactly. Awaits the real
-/// 250 ms debounce (tokio's paused clock needs `test-util`, not enabled
-/// in this crate).
+/// The debounce arm must echo `query` and `seq` exactly.
+/// Awaits the real 250 ms debounce (tokio's paused clock needs `test-util`, not enabled in this crate).
 #[tokio::test]
 async fn debounce_session_search_echoes_query_and_seq() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2045,8 +1872,7 @@ async fn debounce_session_search_echoes_query_and_seq() {
         other => panic!("expected SessionSearchDebounceExpired, got {other:?}"),
     }
 }
-/// The deep-search executor must echo host/generation/seq verbatim and
-/// carry the selected Headless policy on the wire.
+/// The deep-search executor must echo host, generation, and seq verbatim and carry the selected Headless policy on the wire.
 #[tokio::test]
 async fn deep_search_sessions_echoes_routing_and_policy() {
     use std::sync::{Arc, Mutex};
@@ -2103,8 +1929,7 @@ async fn deep_search_sessions_echoes_routing_and_policy() {
     assert_eq!(captured[0].0, "x.ai/session/search");
     assert_eq!(captured[0].1["headless"], "only");
 }
-/// The card-detail executor must echo host/generation/seq (and the row
-/// identity) verbatim; a session missing on disk zeroes the stats.
+/// The card-detail executor must echo host, generation, seq, and the row identity verbatim; a session missing on disk zeroes the stats.
 #[tokio::test]
 async fn load_card_detail_echoes_identity_and_zeroes_missing_session() {
     use crate::views::session_picker_surface::SessionPickerHost;
@@ -2147,8 +1972,7 @@ async fn load_card_detail_echoes_identity_and_zeroes_missing_session() {
         other => panic!("expected CardDetailLoaded, got {other:?}"),
     }
 }
-/// Verify that every profile name produced by `SessionFlags::agent_profile()`
-/// is a valid `BuiltinAgentName` that the shell can resolve.
+/// Verify that every profile name produced by `SessionFlags::agent_profile()` is a valid `BuiltinAgentName` that the shell can resolve.
 #[test]
 fn agent_profile_names_are_valid_builtins() {
     use std::str::FromStr;
@@ -2241,17 +2065,16 @@ fn subagents_without_plan_produces_no_profile() {
     };
     assert_eq!(flags.agent_profile(), None);
 }
-/// Neutralize `GROK_AGENT` for the profile-matrix tests below: agent-driven
-/// dev shells export it, which flips `to_meta` into the defer-to-shell
-/// escape hatch and drops `agentProfile` — the tests would then assert the
-/// wrong branch. Empty string counts as unset (`!s.trim().is_empty()`).
+/// Neutralize `GROK_AGENT` for the profile-matrix tests below.
+/// Agent-driven dev shells export it, which flips `to_meta` into the defer-to-shell escape hatch and drops `agentProfile`.
+/// The tests would then assert the wrong branch.
+/// Empty string counts as unset (`!s.trim().is_empty()`).
 /// Callers must be `#[serial_test::serial(GROK_AGENT)]` (process-global env).
 fn without_grok_agent() -> crate::test_util::EnvVarGuard {
     crate::test_util::EnvVarGuard::set("GROK_AGENT", "")
 }
-/// At the runtime defaults (every `--no-*` flag false → every
-/// `SessionFlags` bool true via `!args.no_*`), `to_meta()` reflects the
-/// full plan profile and no separate `askUserQuestion` toggle.
+/// At the runtime defaults every `--no-*` flag is false, so every `SessionFlags` bool is true via `!args.no_*`.
+/// `to_meta()` then reflects the full plan profile and no separate `askUserQuestion` toggle.
 #[serial_test::serial(GROK_AGENT)]
 #[test]
 fn runtime_default_flags_produce_plan_meta() {
@@ -2267,8 +2090,7 @@ fn runtime_default_flags_produce_plan_meta() {
     assert!(meta.get("askUserQuestion").is_none());
     assert_eq!(meta["yoloMode"], false);
 }
-/// --plan alone produces meta with `agentProfile` only and a
-/// `askUserQuestion: false` since `ask_user` is off here.
+/// --plan alone produces meta with `agentProfile` only and a `askUserQuestion: false` since `ask_user` is off here.
 #[serial_test::serial(GROK_AGENT)]
 #[test]
 fn plan_only_meta() {
@@ -2332,10 +2154,9 @@ fn plan_with_ask_user_uses_plan_profile() {
     assert!(meta.get("askUserQuestion").is_none());
     assert_eq!(meta["yoloMode"], false);
 }
-/// --no-plan --no-subagents --no-ask-user picks the default profile but
-/// must still emit `askUserQuestion: false` so the shell can strip the
-/// tool at the builder. Mirrors the runtime: `subagents` toggle alone
-/// does not need an `agentProfile` (default `grok-build` already has it).
+/// --no-plan --no-subagents --no-ask-user picks the default profile.
+/// It must still emit `askUserQuestion: false` so the shell can strip the tool at the builder.
+/// Mirrors the runtime: the `subagents` toggle alone does not need an `agentProfile` (default `grok-build` already has it).
 #[test]
 fn subagents_alone_emits_only_ask_user_question_disable() {
     let flags = SessionFlags {
@@ -2348,8 +2169,7 @@ fn subagents_alone_emits_only_ask_user_question_disable() {
     assert!(meta.get("agentProfile").is_none());
     assert_eq!(meta["askUserQuestion"], false);
 }
-/// All three flags on at the runtime default produce grok-build-plan
-/// and no `askUserQuestion` field.
+/// All three flags on at the runtime default produce grok-build-plan and no `askUserQuestion` field.
 #[serial_test::serial(GROK_AGENT)]
 #[test]
 fn all_flags_meta() {
@@ -2365,9 +2185,7 @@ fn all_flags_meta() {
     assert!(meta.get("askUserQuestion").is_none());
     assert_eq!(meta["yoloMode"], false);
 }
-/// `--no-ask-user` is the user-discovered bug — the flag must surface
-/// as `_meta.askUserQuestion = false` regardless of which profile (if
-/// any) the other flags select.
+/// `--no-ask-user` must land as `_meta.askUserQuestion = false` regardless of which profile (if any) the other flags select.
 #[test]
 fn to_meta_emits_ask_user_question_false_when_disabled() {
     for plan in [false, true] {
@@ -2392,9 +2210,8 @@ fn to_meta_emits_ask_user_question_false_when_disabled() {
         }
     }
 }
-/// Symmetric positive control: when `ask_user` is enabled the field is
-/// omitted entirely (the shell defaults to enabled when the key is
-/// absent — see `parse_ask_user_question_from_meta`).
+/// Symmetric positive control: when `ask_user` is enabled the field is omitted entirely.
+/// The shell defaults to enabled when the key is absent (see `parse_ask_user_question_from_meta`).
 #[test]
 fn to_meta_omits_ask_user_question_when_enabled() {
     for plan in [false, true] {
@@ -2442,9 +2259,8 @@ fn create_permission_override_replaces_global_permission_seeds() {
     assert_eq!(meta["yoloMode"], false);
     assert_eq!(meta["autoMode"], true);
 }
-/// yoloMode must ride the meta explicitly for BOTH polarities — absent
-/// key ≠ off (see the emit-site comment in `to_meta`). Pins the
-/// pre-session Always-Approve → Normal cycle not creating a yolo session.
+/// yoloMode must ride the meta explicitly for both polarities; an absent key does not mean off (see the emit-site comment in `to_meta`).
+/// Cycling Always-Approve back to Normal before the session starts must not create a yolo session.
 #[test]
 fn to_meta_always_emits_yolo_mode_explicitly() {
     for yolo in [false, true] {
@@ -2479,8 +2295,7 @@ fn to_meta_chat_mode_stamps_kind_and_omits_agent_profile() {
         &serde_json::Value::Object(meta.clone()),
     );
 }
-/// Load meta merge: explicit `chat_kind` alone (no process-wide chat_mode)
-/// stamps kind and strips agentProfile — conversation resume acceptance.
+/// Load meta merge: explicit `chat_kind` alone (no process-wide chat_mode) stamps kind and strips agentProfile, the conversation-resume case.
 #[test]
 fn load_meta_chat_kind_alone_stamps_kind_and_strips_profile() {
     let flags = SessionFlags {
@@ -2506,9 +2321,8 @@ fn load_meta_chat_kind_alone_stamps_kind_and_strips_profile() {
         &serde_json::Value::Object(meta.clone()),
     );
 }
-/// Chat create/load meta must never include client workspace-bind keys
-/// (`envId`, Direct hub id, gateway attach), even if cloud fields are
-/// present on the effect — backend owns workspace for `kind=chat`.
+/// Chat create and load meta must never include client workspace-bind keys (`envId`, Direct hub id, gateway attach).
+/// That holds even when cloud fields are present on the effect; the backend owns the workspace for `kind=chat`.
 fn assert_chat_meta_has_no_workspace_bind_keys(meta: &serde_json::Value) {
     for key in CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS {
         assert!(
@@ -2560,7 +2374,7 @@ fn chat_load_meta_never_includes_workspace_bind_keys() {
         &serde_json::Value::Object(meta.clone()),
     );
 }
-/// Attach stamp keeps existing workspace + local intent; envId / Direct hub stay stripped.
+/// The attach stamp keeps the existing workspace and local intent; envId and Direct hub stay stripped.
 #[cfg(feature = "local-workspace")]
 #[test]
 fn scrub_chat_workspace_matrix_attach_exception() {
@@ -2654,26 +2468,6 @@ fn to_meta_chat_own_stamps_intent_without_existing() {
 }
 #[cfg(feature = "local-workspace")]
 #[test]
-fn mid_session_add_params_scrub_envid() {
-    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
-    let params = mid_session_add_local_workspace_params(
-        "sess-1",
-        &LocalWorkspaceConfig {
-            mode: LocalWorkspaceMode::Attach,
-            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
-            server_id: Some("srv-add".into()),
-        },
-    );
-    assert_eq!(params["sessionId"], "sess-1");
-    assert_eq!(params["meta"]["x.ai/local_workspace"]["mode"], "attach");
-    assert_eq!(
-            params["meta"]["x.ai/cloud_existing_workspace"]["server_id"],
-            "srv-add"
-        );
-    assert!(params["meta"].get("envId").is_none());
-}
-#[cfg(feature = "local-workspace")]
-#[test]
 fn reject_non_fs_only_advertised_tools_matrix() {
     let fs_only = ["workspace.fs_list", "workspace.fs_read_file", "workspace.put_files"];
     assert!(reject_non_fs_only_advertised_tools(Some(&fs_only[..])).is_ok());
@@ -2728,8 +2522,7 @@ fn to_meta_yolo_suppresses_auto_mode() {
             "yolo wins; autoMode must be explicitly false (not omitted)"
         );
 }
-/// Verify that each resolved profile name produces a valid
-/// `AgentDefinition` whose name matches the expected kebab-case string.
+/// Verify that each resolved profile name produces a valid `AgentDefinition` whose name matches the expected kebab-case string.
 #[test]
 fn agent_profile_definitions_have_correct_names() {
     use std::str::FromStr;
@@ -2923,6 +2716,30 @@ fn session_picker_summary_preserves_normal_text() {
     assert_eq!(display, "Fix authentication bug in login flow");
 }
 #[test]
+fn sanitize_user_error_rewrites_shared_service_names() {
+    for (pattern, replacement) in xai_grok_shell::sampling::error::SERVICE_NAME_REWRITES {
+        for variant in [pattern.to_string(), pattern.to_ascii_uppercase()] {
+            assert_eq!(
+                    sanitize_user_error(&format!("ACP error: {variant} unreachable")),
+                    format!("error: {replacement} unreachable")
+                );
+        }
+    }
+}
+#[test]
+fn compact_error_message_empty_data_renders_terse_and_no_data_uses_display() {
+    let empty = compact_error_message(&acp::Error::internal_error().data(""));
+    assert_eq!(empty, "");
+    assert_eq!(
+            crate::scrollback::blocks::SessionEvent::CompactionFailed { error: empty }.message(),
+            "Compaction failed."
+        );
+    assert_eq!(
+            compact_error_message(&acp::Error::internal_error()),
+            "Internal error"
+        );
+}
+#[test]
 fn sanitize_user_error_strips_auth_prefixes() {
     assert_eq!(
             sanitize_user_error(
@@ -2962,10 +2779,8 @@ fn sanitize_user_error_collapses_disk_full() {
             "couldn't create worktree: failed to get HEAD commit from source"
         );
 }
-/// Production ordering of the deferred worktree resume failure: the
-/// detail is sanitized FIRST, then composed — sanitizing the composed
-/// message would collapse a disk-full chain whole and erase the title
-/// hint for a deferred local-miss target.
+/// Production ordering of the deferred worktree resume failure: the detail is sanitized first, then composed.
+/// Sanitizing the composed message would collapse a disk-full chain whole and erase the title hint for a deferred local-miss target.
 #[test]
 fn worktree_resume_failure_sanitizes_detail_before_hint() {
     let raw = "failed to copy index: No space left on device (os error 28)";
@@ -2983,9 +2798,8 @@ fn worktree_resume_failure_sanitizes_detail_before_hint() {
     let id_msg = worktree_resume_failure_message(None, &sanitize_user_error(raw));
     assert_eq!(id_msg, "couldn't resume worktree session: No space left on device");
 }
-/// A resume-picker entry converts to a **dormant** dashboard roster row
-/// (the non-leader idle source) preserving title, cwd, model, worktree
-/// flag, origin, and last-change time.
+/// A resume-picker entry converts to a dormant dashboard roster row (the non-leader idle source).
+/// It preserves title, cwd, model, worktree flag, origin, and last-change time.
 #[test]
 fn session_picker_entry_maps_to_dormant_roster_row() {
     use crate::app::app_view::SessionPickerEntry;

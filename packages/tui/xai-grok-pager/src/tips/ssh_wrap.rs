@@ -1,11 +1,9 @@
 //! SSH tip shown over an unwrapped remote session.
 //!
-//! Shown once per run, at the first stable agent-view draw — the welcome
-//! screen has no ephemeral-tip row, so the first agent render is the
-//! earliest surface that can paint it (see
-//! `AppView::maybe_trigger_ssh_wrap_tip`). Environment shape comes from
-//! `diagnostics::ssh_wrap_hint`; the per-tip config gate is
-//! `[ui.contextual_hints].ssh_wrap`.
+//! Shown once per run, at the first stable agent-view draw.
+//! The welcome screen has no ephemeral-tip row, so the first agent render is the earliest place that can paint it.
+//! See `AppView::maybe_trigger_ssh_wrap_tip`.
+//! Whether the environment warrants the tip comes from `diagnostics::ssh_wrap_hint`; the per-tip config gate is `[ui.contextual_hints].ssh_wrap`.
 
 use ratatui::style::{Modifier, Style};
 
@@ -21,16 +19,14 @@ pub(crate) const SSH_WRAP_TIP_SEEN_KEY: &str = "ssh_wrap_tip_shown_count";
 /// Stop showing after this many shows within a single session.
 const SSH_WRAP_TIP_SEEN_CAP: u32 = 1;
 
-/// Tip lifetime (~10 s at the 30 fps animation cadence). The default ~3 s
-/// window suits glanceable notices; this one carries a command the user is
-/// meant to read and act on, so it gets a longer window. Ambient bounds it:
-/// the TTL pauses while occluded instead of burning off-screen.
+/// Tip lifetime (~10 s at the 30 fps animation cadence).
+/// The default ~3 s window suits glanceable notices; this one carries a command the user is meant to read and act on, so it gets a longer window.
+/// The ambient flag bounds it: the TTL pauses while occluded instead of burning off-screen.
 pub(crate) const SSH_WRAP_TIP_TICKS: u16 = 300;
 
-/// Build the `/doctor` discovery notice, seen-gated to
-/// [`SSH_WRAP_TIP_SEEN_CAP`] show per session. It is about the transport, not
-/// the draft, so submitting a prompt right after session load must not
-/// retire it, and occlusion pauses (not burns) its TTL.
+/// Build the `/doctor` discovery notice, seen-gated to [`SSH_WRAP_TIP_SEEN_CAP`] show per session.
+/// It is about the transport, not the draft, so submitting a prompt right after session load must not retire it.
+/// Occlusion pauses (not burns) its TTL.
 pub fn ssh_wrap_tip() -> EphemeralTip {
     let theme = Theme::current();
     let dim = Style::default().fg(theme.gray);
@@ -83,9 +79,8 @@ mod tests {
 
     #[test]
     fn ssh_wrap_tip_is_ambient() {
-        // Must survive prompt submission and pause TTL under occlusion —
-        // a session-load tip would otherwise blink away under the first
-        // submit or permission ask.
+        // The tip must survive prompt submission and pause its TTL under occlusion
+        // A session-load tip would otherwise blink away under the first submit or permission ask
         assert!(ssh_wrap_tip().ambient);
     }
 }

@@ -35,7 +35,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 /// Filename of the folder-trust store under `~/.grok/`.
-pub const TRUST_FILE_NAME: &str = "trusted_folders.toml";
+pub const TRUST_FILE_NAME: &str = xai_grok_config::TRUSTED_FOLDERS_FILENAME;
 
 /// A single folder's trust record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,6 +292,7 @@ impl TrustStore {
 
     fn read_doc(path: &Path) -> TrustDocument {
         let contents = match std::fs::read_to_string(path) {
+            Ok(c) if c.trim().is_empty() => return TrustDocument::default(),
             Ok(c) => c,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return TrustDocument::default(),
             Err(e) => {
@@ -418,7 +419,7 @@ fn git_derived_workspace_key(cwd: &Path) -> PathBuf {
 
 /// Whether `path` resolves to the user's home directory.
 pub fn is_home_dir(path: &Path) -> bool {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = xai_dirs::home_dir() else {
         return false;
     };
     canonicalize_or_owned(path) == canonicalize_or_owned(&home)
@@ -1066,7 +1067,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join(TRUST_FILE_NAME);
-        let Some(home) = dirs::home_dir() else {
+        let Some(home) = xai_dirs::home_dir() else {
             return; // no home dir in this environment; nothing to assert
         };
 
@@ -1101,13 +1102,14 @@ mod tests {
     fn workspace_key_ignores_home_git_repo_for_subdir() {
         // Home-is-a-git-repo (dotfiles in $HOME): a subdir launched from under
         // home must key trust on the SUBDIR, not on $HOME — even though the git
-        // up-walk discovers home as the repo root. Serialize + guard $HOME
-        // (dirs::home_dir reads it) via the crate-shared env lock.
+        // up-walk discovers home as the repo root. Pin HOME and USERPROFILE:
+        // xai_dirs::home_dir reads USERPROFILE on Windows.
         let _lock = crate::ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home_guard = crate::TestEnvGuard::set("HOME", home.path());
+        let _userprofile_guard = crate::TestEnvGuard::set("USERPROFILE", home.path());
         git2::Repository::init(home.path()).unwrap();
         let civ = home.path().join("Documents").join("civ");
         std::fs::create_dir_all(&civ).unwrap();
@@ -1224,7 +1226,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         // A hand-edited / migrated `[folders."<home>"]` record must not trust
         // repos under $HOME — the read side ignores it, matching set_trusted.
-        let Some(home) = dirs::home_dir() else {
+        let Some(home) = xai_dirs::home_dir() else {
             return; // no home dir in this environment; nothing to assert
         };
         let canonical_home = canonicalize_or_owned(&home);

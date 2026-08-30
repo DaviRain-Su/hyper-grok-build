@@ -15,7 +15,6 @@ fn new_streaming(wrap: WrapMode, follow: bool) -> ListPaneState {
     )
 }
 
-/// A simple test item.
 #[derive(Debug, Clone)]
 struct TestItem {
     id: u64,
@@ -91,7 +90,7 @@ fn scroll_basics() {
 
     // Can't scroll past content
     state.scroll_down(100);
-    assert_eq!(state.scroll_offset(), 10); // 20 - 10
+    assert_eq!(state.scroll_offset(), 10); // content 20 minus viewport 10
 
     state.scroll_up(100);
     assert_eq!(state.scroll_offset(), 0);
@@ -130,13 +129,13 @@ fn follow_mode_auto_scrolls() {
     let mut items: Vec<TestItem> = (0..10).map(TestItem::new).collect();
     let mut state = new_streaming(WrapMode::NoWrap, true);
     state.prepare_layout(&items, 80, 5);
-    // follow mode → scroll to bottom
-    assert_eq!(state.scroll_offset(), 5); // 10 - 5
+    // Follow mode scrolls to the bottom
+    assert_eq!(state.scroll_offset(), 5); // content 10 minus viewport 5
 
     // Add more items
     items.extend((10..15).map(TestItem::new));
     state.prepare_layout(&items, 80, 5);
-    assert_eq!(state.scroll_offset(), 10); // 15 - 5
+    assert_eq!(state.scroll_offset(), 10); // content 15 minus viewport 5
 
     // Manual scroll breaks follow mode
     state.scroll_up(3);
@@ -162,7 +161,7 @@ fn scroll_content_fits_viewport() {
     let items: Vec<TestItem> = (0..5).map(TestItem::new).collect();
     let mut state = ListPaneState::new(WrapMode::NoWrap, false);
     state.prepare_layout(&items, 80, 10);
-    // Content (5) fits in viewport (10) → scroll is always 0
+    // Content (5) fits in viewport (10), so scroll is always 0
     state.scroll_down(5);
     assert_eq!(state.scroll_offset(), 0);
 }
@@ -205,11 +204,11 @@ fn select_skips_non_selectable() {
     assert_eq!(state.selected_index(), Some(0));
 
     state.select_next(&items);
-    // Skips item 1 (not selectable) → item 2
+    // Skips item 1 (not selectable), landing on item 2
     assert_eq!(state.selected_index(), Some(2));
 
     state.select_next(&items);
-    // Skips item 3 → item 4
+    // Skips item 3, landing on item 4
     assert_eq!(state.selected_index(), Some(4));
 
     state.select_prev(&items);
@@ -244,7 +243,7 @@ fn selection_survives_insert() {
     state.select_at(2, &items);
     assert_eq!(state.selected_id(), Some(2));
 
-    // Insert at front — item id=2 is now at physical index 3
+    // Insert at front: item id=2 is now at physical index 3
     items.insert(0, TestItem::new(99));
     state.prepare_layout(&items, 80, 10);
 
@@ -262,7 +261,7 @@ fn selection_survives_removal_of_other() {
     state.select_at(3, &items);
     assert_eq!(state.selected_id(), Some(3));
 
-    // Remove item at index 1 (id=1) — item id=3 moves to index 2
+    // Remove item at index 1 (id=1): item id=3 moves to index 2
     items.remove(1);
     state.prepare_layout(&items, 80, 10);
 
@@ -283,7 +282,7 @@ fn selection_clears_when_selected_removed() {
     items.remove(2);
     state.prepare_layout(&items, 80, 10);
 
-    // ID 2 is gone — auto-select picks the first item instead.
+    // ID 2 is gone, so auto-select picks the first item instead
     assert_ne!(state.selected_id(), Some(2));
     assert!(state.selected_index().is_some());
 }
@@ -300,7 +299,7 @@ fn select_with_filter() {
     ];
     let mut state = new_streaming(WrapMode::NoWrap, false);
 
-    // Filter "alph" → items 0 (alpha) and 2 (alphabet)
+    // Filter "alph" matches items 0 (alpha) and 2 (alphabet)
     state.set_filter(Some(FilterMatcher::substring("alph")));
     state.prepare_layout(&items, 80, 10);
 
@@ -310,28 +309,28 @@ fn select_with_filter() {
     assert_eq!(state.selected_index(), Some(0));
     assert_eq!(state.selected_id(), Some(0));
 
-    // select_next → visible item 1 (physical item 2, "alphabet")
+    // select_next moves to visible item 1 (physical item 2, "alphabet")
     state.select_next(&items);
     assert_eq!(state.selected_index(), Some(1));
     assert_eq!(state.selected_id(), Some(2));
 
-    // select_prev → back to visible item 0
+    // select_prev moves back to visible item 0
     state.select_prev(&items);
     assert_eq!(state.selected_index(), Some(0));
     assert_eq!(state.selected_id(), Some(0));
 
-    // select_last → engages follow (no cursor)
+    // select_last engages follow (no cursor)
     state.select_last(&items);
     assert!(state.follow_mode);
     assert_eq!(state.selected_index(), None);
 
-    // select_first → exits follow, selects visible item 0
+    // select_first exits follow and selects visible item 0
     state.select_first(&items);
     assert!(!state.follow_mode);
     assert_eq!(state.selected_index(), Some(0));
     assert_eq!(state.selected_id(), Some(0));
 
-    // select_at(1) → visible item 1
+    // select_at(1) selects visible item 1
     state.select_at(1, &items);
     assert_eq!(state.selected_index(), Some(1));
     assert_eq!(state.selected_id(), Some(2));
@@ -354,7 +353,7 @@ fn visible_range_fixed_height() {
 
 #[test]
 fn visible_range_variable_height() {
-    // Heights: 3, 1, 2, 4, 1  → prefix_sums: [0, 3, 4, 6, 10, 11]
+    // Heights 3, 1, 2, 4, 1 give prefix_sums [0, 3, 4, 6, 10, 11]
     let items = vec![
         TestItem::new(0).with_height(3),
         TestItem::new(1).with_height(1),
@@ -369,7 +368,7 @@ fn visible_range_variable_height() {
     // Items visible: 0 (y=0, h=3), 1 (y=3, h=1), 2 (y=4, h=2 but only 1 line visible)
     assert_eq!(state.visible_range(), 0..3);
 
-    // Scroll down by 1 — now y=1 is the top
+    // Scroll down by 1: now y=1 is the top
     state.scroll_down(1);
     // First visible item is still 0 (its y range is 0..3, and 1 is within it)
     assert_eq!(state.visible_range(), 0..3);
@@ -388,12 +387,12 @@ fn filter_reduces_visible_items() {
     ];
     let mut state = ListPaneState::new(WrapMode::NoWrap, false);
 
-    // No filter → all 4 visible
+    // No filter: all 4 visible
     state.prepare_layout(&items, 80, 10);
     assert_eq!(state.visible_count(), 4);
     assert_eq!(state.total_height(), 4);
 
-    // Filter "alph" → items 0 and 2
+    // Filter "alph" matches items 0 and 2
     state.set_filter(Some(FilterMatcher::substring("alph")));
     state.prepare_layout(&items, 80, 10);
     assert_eq!(state.visible_count(), 2);
@@ -418,7 +417,7 @@ fn wrap_mode_variable_heights() {
     let mut state = ListPaneState::new(WrapMode::Wrap, false);
     state.prepare_layout(&items, 80, 10);
 
-    assert_eq!(state.total_height(), 6); // 3 + 2 + 1
+    assert_eq!(state.total_height(), 6); // heights 3 + 2 + 1
 }
 
 #[test]
@@ -493,7 +492,7 @@ fn key_ctrl_d_u_half_page() {
     state.prepare_layout(&items, 80, 10);
 
     assert!(state.handle_key_event(&key!('d', CONTROL).to_key_event(), &items));
-    assert_eq!(state.scroll_offset(), 5); // half of 10
+    assert_eq!(state.scroll_offset(), 5); // half the 10-line viewport
 
     assert!(state.handle_key_event(&key!('u', CONTROL).to_key_event(), &items));
     assert_eq!(state.scroll_offset(), 0);
@@ -518,12 +517,12 @@ fn key_g_and_shift_g() {
     let mut state = new_streaming(WrapMode::NoWrap, false);
     state.prepare_layout(&items, 80, 5);
 
-    // G → engage follow (no cursor)
+    // G engages follow (no cursor)
     assert!(state.handle_key_event(&key!('G').to_key_event(), &items));
     assert_eq!(state.selected_index(), None);
     assert!(state.follow_mode);
 
-    // g → exit follow, select first
+    // g exits follow and selects first
     assert!(state.handle_key_event(&key!('g').to_key_event(), &items));
     assert_eq!(state.selected_index(), Some(0));
     assert!(!state.follow_mode);
@@ -535,12 +534,12 @@ fn key_home_end() {
     let mut state = new_streaming(WrapMode::NoWrap, false);
     state.prepare_layout(&items, 80, 5);
 
-    // End → engage follow (no cursor)
+    // End engages follow (no cursor)
     assert!(state.handle_key_event(&key!(End).to_key_event(), &items));
     assert_eq!(state.selected_index(), None);
     assert!(state.follow_mode);
 
-    // Home → exit follow, select first
+    // Home exits follow and selects first
     assert!(state.handle_key_event(&key!(Home).to_key_event(), &items));
     assert_eq!(state.selected_index(), Some(0));
     assert!(!state.follow_mode);
@@ -587,7 +586,7 @@ fn ctrl_d_selection_stays_at_same_screen_y() {
     // Selection should move from 3 to 8 (same screen-y = 3).
     assert!(state.handle_key_event(&key!('d', CONTROL).to_key_event(), &items));
     assert_eq!(state.scroll_offset(), 5);
-    assert_eq!(state.selected_index(), Some(8)); // 3 + 5
+    assert_eq!(state.selected_index(), Some(8));
 }
 
 #[test]
@@ -605,7 +604,7 @@ fn ctrl_u_selection_stays_at_same_screen_y() {
     // Selection should move from 13 to 8 (same screen-y = 3).
     assert!(state.handle_key_event(&key!('u', CONTROL).to_key_event(), &items));
     assert_eq!(state.scroll_offset(), 5);
-    assert_eq!(state.selected_index(), Some(8)); // 13 - 5
+    assert_eq!(state.selected_index(), Some(8));
 }
 
 #[test]
@@ -616,7 +615,7 @@ fn scroll_without_explicit_selection_uses_auto_selected() {
 
     // Auto-select picks the first item (follow_mode = false).
     assert_eq!(state.selected_index(), Some(0));
-    // Ctrl-d scrolls — selection moves with it.
+    // Ctrl-d scrolls; selection moves with it
     assert!(state.handle_key_event(&key!('d', CONTROL).to_key_event(), &items));
     assert_eq!(state.scroll_offset(), 5);
     assert_eq!(state.selected_index(), Some(5));
@@ -631,15 +630,15 @@ fn scroll_lines_from_mouse_wheel() {
     // Select item 5
     state.select_at(5, &items);
 
-    // Mouse wheel down 3 — selection follows at same screen-y.
+    // Mouse wheel down 3; selection follows at the same screen-y
     state.scroll_lines(3, &items);
     assert_eq!(state.scroll_offset(), 3);
-    assert_eq!(state.selected_index(), Some(8)); // 5 + 3
+    assert_eq!(state.selected_index(), Some(8));
 
     // Mouse wheel up 2
     state.scroll_lines(-2, &items);
     assert_eq!(state.scroll_offset(), 1);
-    assert_eq!(state.selected_index(), Some(6)); // 8 - 2
+    assert_eq!(state.selected_index(), Some(6));
 }
 
 #[test]
@@ -650,7 +649,7 @@ fn scroll_lines_small_list_stable() {
     state.prepare_layout(&items, 80, 5);
     assert_eq!(state.selected_index(), Some(0));
 
-    // Mouse wheel down 1 — selection follows from 0 to 1.
+    // Mouse wheel down 1; selection follows from 0 to 1
     state.scroll_lines(1, &items);
     assert_eq!(state.scroll_offset(), 1);
     assert_eq!(state.selected_index(), Some(1));
@@ -660,7 +659,7 @@ fn scroll_lines_small_list_stable() {
     assert_eq!(state.scroll_offset(), 1);
     assert_eq!(state.selected_index(), Some(1));
 
-    // Another scroll — to item 2.
+    // Another scroll, to item 2
     state.scroll_lines(1, &items);
     assert_eq!(state.scroll_offset(), 2);
     assert_eq!(state.selected_index(), Some(2));
@@ -678,7 +677,7 @@ fn scroll_lines_noop_at_top_edge() {
     state.prepare_layout(&items, 80, 10);
     assert_eq!(state.selected_index(), Some(0));
 
-    // Mouse wheel up at top — viewport can't scroll, selection stays.
+    // Mouse wheel up at the top: viewport can't scroll, selection stays
     state.scroll_lines(-3, &items);
     assert_eq!(state.scroll_offset(), 0);
     assert_eq!(state.selected_index(), Some(0));
@@ -694,7 +693,7 @@ fn scroll_lines_noop_at_bottom_edge() {
     state.scroll_down(10);
     state.select_at(15, &items);
 
-    // Mouse wheel down at bottom — viewport can't scroll, selection stays.
+    // Mouse wheel down at the bottom: viewport can't scroll, selection stays
     state.scroll_lines(3, &items);
     assert_eq!(state.scroll_offset(), 10);
     assert_eq!(state.selected_index(), Some(15));
@@ -702,8 +701,7 @@ fn scroll_lines_noop_at_bottom_edge() {
 
 #[test]
 fn scroll_does_not_panic_when_items_cleared_before_relayout() {
-    // Layout still has rows from the previous frame; the model was emptied
-    // before the next prepare_layout (viewer rebuild / rewind).
+    // Layout still has rows from the previous frame; the model was emptied before the next prepare_layout (viewer rebuild or rewind)
     let items: Vec<TestItem> = (0..10).map(TestItem::new).collect();
     let mut state = ListPaneState::new(WrapMode::NoWrap, false);
     state.prepare_layout(&items, 80, 5);
@@ -728,7 +726,7 @@ fn scroll_does_not_panic_when_items_cleared_before_relayout() {
 #[test]
 fn click_bottom_row_stable_after_append() {
     // Click the bottom visible row, then append items.
-    // Selection and scroll should NOT be yanked by ensure_selected_visible.
+    // Selection and scroll should NOT be pulled by ensure_selected_visible
     let mut items: Vec<TestItem> = (0..20).map(TestItem::new).collect();
     let mut state = ListPaneState::new(WrapMode::NoWrap, false);
     state.prepare_layout(&items, 80, 10);
@@ -742,7 +740,7 @@ fn click_bottom_row_stable_after_append() {
     items.extend((20..25).map(TestItem::new));
     state.prepare_layout(&items, 80, 10);
 
-    // Selection and scroll should be unchanged (no margin yank).
+    // Selection and scroll should be unchanged (not pulled to keep a margin)
     assert_eq!(state.selected_index(), Some(9));
     assert_eq!(state.scroll_offset(), scroll_before);
 }
@@ -759,7 +757,7 @@ fn ctrl_j_k_selection_follows_at_screen_y() {
     // Ctrl-j scrolls down 1 line
     assert!(state.handle_key_event(&key!('j', CONTROL).to_key_event(), &items));
     assert_eq!(state.scroll_offset(), 1);
-    assert_eq!(state.selected_index(), Some(5)); // 4 + 1, screen-y still 4
+    assert_eq!(state.selected_index(), Some(5)); // screen-y still 4
 
     // Ctrl-k scrolls up 1 line
     assert!(state.handle_key_event(&key!('k', CONTROL).to_key_event(), &items));
@@ -771,8 +769,7 @@ fn ctrl_j_k_selection_follows_at_screen_y() {
 
 #[test]
 fn prepare_layout_skips_rebuild_when_clean() {
-    // With Wrap mode + variable heights, calling prepare_layout with
-    // unchanged inputs should reuse the cache (same total_height).
+    // With Wrap mode and variable heights, calling prepare_layout with unchanged inputs should reuse the cache (same total_height)
     let items = vec![
         TestItem::new(0).with_height(3),
         TestItem::new(1).with_height(2),
@@ -781,7 +778,7 @@ fn prepare_layout_skips_rebuild_when_clean() {
     state.prepare_layout(&items, 80, 10);
     assert_eq!(state.total_height(), 5);
 
-    // Call again — same width, same count, same mode → should not rebuild.
+    // Call again with the same width, count, and mode: it should not rebuild
     // (We can't directly observe "no rebuild" but we verify cache is valid.)
     state.prepare_layout(&items, 80, 10);
     assert_eq!(state.total_height(), 5);
@@ -797,10 +794,10 @@ fn prepare_layout_incremental_append() {
     state.prepare_layout(&items, 80, 10);
     assert_eq!(state.total_height(), 5);
 
-    // Append an item → incremental path
+    // Appending an item takes the incremental path
     items.push(TestItem::new(2).with_height(4));
     state.prepare_layout(&items, 80, 10);
-    assert_eq!(state.total_height(), 9); // 3 + 2 + 4
+    assert_eq!(state.total_height(), 9); // heights 3 + 2 + 4
     assert_eq!(state.visible_count(), 3);
 }
 
@@ -814,7 +811,7 @@ fn prepare_layout_full_rebuild_on_width_change() {
     state.prepare_layout(&items, 80, 10);
     assert_eq!(state.total_height(), 5);
 
-    // Width change → full rebuild (heights depend on width)
+    // A width change forces a full rebuild (heights depend on width)
     state.prepare_layout(&items, 40, 10);
     assert_eq!(state.total_height(), 5);
 }
@@ -910,7 +907,7 @@ fn center_selected_places_item_mid_viewport() {
 
     state.select_at(15, &items);
     state.center_selected();
-    // Item 15 should be approximately centered: scroll_offset ≈ 15 - 5 = 10
+    // Item 15 should be approximately centered: scroll_offset is 15 - 5 = 10
     assert_eq!(state.scroll_offset(), 10);
 }
 
@@ -981,8 +978,8 @@ fn scroll_past_non_selectable_stays_in_viewport() {
     // Select item 1 (screen-y = 1, scroll_offset = 0)
     state.select_at(1, &items);
 
-    // Mouse wheel down 1 — selection follows at screen-y.
-    // Target virtual-y = 1+1 = 2 → item 2 (non-sel) → finds item 3.
+    // Mouse wheel down 1; selection follows at screen-y
+    // Target virtual-y = 1+1 = 2 is item 2 (non-sel), so it finds item 3
     state.scroll_lines(1, &items);
     assert_eq!(state.scroll_offset(), 1);
     let sel = state.selected_index().unwrap();
@@ -1011,7 +1008,7 @@ fn ctrl_d_at_bottom_moves_cursor_past_viewport_clamp() {
 
     // Ctrl-d: half-page = 5.  Viewport wants to go to 13, clamped to 10.
     // Actual scroll = 2.  Leftover = 3.
-    // Target virtual-y = (10 + 3) + 3 = 16 → item 16.
+    // Target virtual-y = (10 + 3) + 3 = 16, item 16
     state.half_page_down(&items);
     assert_eq!(state.scroll_offset(), 10); // clamped at max
     assert_eq!(state.selected_index(), Some(16)); // cursor kept going
@@ -1031,7 +1028,7 @@ fn ctrl_u_at_top_moves_cursor_past_viewport_clamp() {
 
     // Ctrl-u: half-page = 5.  Viewport wants to go to -2, clamped to 0.
     // Actual scroll = -3.  Leftover = -2.
-    // Target virtual-y = (0 + 3) - 2 = 1 → item 1.
+    // Target virtual-y = (0 + 3) - 2 = 1, item 1
     state.half_page_up(&items);
     assert_eq!(state.scroll_offset(), 0); // clamped at min
     assert_eq!(state.selected_index(), Some(1)); // cursor kept going
@@ -1039,7 +1036,7 @@ fn ctrl_u_at_top_moves_cursor_past_viewport_clamp() {
 
 #[test]
 fn ctrl_d_at_very_bottom_clamps_cursor_to_last_selectable() {
-    // Already at max scroll. Ctrl-d can't scroll at all.
+    // Already at max scroll. Ctrl-d can't scroll.
     // Cursor should jump toward the last selectable item.
     let items: Vec<TestItem> = (0..20).map(TestItem::new).collect();
     let mut state = ListPaneState::new(WrapMode::NoWrap, false);
@@ -1051,7 +1048,7 @@ fn ctrl_d_at_very_bottom_clamps_cursor_to_last_selectable() {
     assert_eq!(state.scroll_offset(), 10);
 
     // Ctrl-d: half-page = 5.  No scroll possible.  Leftover = 5.
-    // Target virtual-y = (10 + 5) + 5 = 20 → clamped to item 19.
+    // Target virtual-y = (10 + 5) + 5 = 20, clamped to item 19
     state.half_page_down(&items);
     assert_eq!(state.scroll_offset(), 10);
     assert_eq!(state.selected_index(), Some(19));
@@ -1059,7 +1056,7 @@ fn ctrl_d_at_very_bottom_clamps_cursor_to_last_selectable() {
 
 #[test]
 fn ctrl_u_at_very_top_clamps_cursor_to_first_selectable() {
-    // Already at offset 0.  Ctrl-u can't scroll at all.
+    // Already at offset 0.  Ctrl-u can't scroll.
     // Cursor should jump toward the first selectable item.
     let items: Vec<TestItem> = (0..20).map(TestItem::new).collect();
     let mut state = ListPaneState::new(WrapMode::NoWrap, false);
@@ -1070,7 +1067,7 @@ fn ctrl_u_at_very_top_clamps_cursor_to_first_selectable() {
     assert_eq!(state.scroll_offset(), 0);
 
     // Ctrl-u: half-page = 5.  No scroll possible.  Leftover = -5.
-    // Target virtual-y = (0 + 5) - 5 = 0 → item 0.
+    // Target virtual-y = (0 + 5) - 5 = 0, item 0
     state.half_page_up(&items);
     assert_eq!(state.scroll_offset(), 0);
     assert_eq!(state.selected_index(), Some(0));
@@ -1078,8 +1075,8 @@ fn ctrl_u_at_very_top_clamps_cursor_to_first_selectable() {
 
 #[test]
 fn ctrl_d_skips_non_selectable_at_end() {
-    // Last 3 items are non-selectable. Cursor should stop at the last
-    // selectable item, not get stuck on a separator.
+    // Last 3 items are non-selectable
+    // Cursor should stop at the last selectable item, not get stuck on a separator
     let mut items: Vec<TestItem> = (0..20).map(TestItem::new).collect();
     items[17] = TestItem::new(17).not_selectable();
     items[18] = TestItem::new(18).not_selectable();
@@ -1112,7 +1109,7 @@ fn ctrl_u_skips_non_selectable_at_start() {
     // Select item 5 at offset 0.
     state.select_at(5, &items);
 
-    // Ctrl-u: target goes to y=0 → items 0,1,2 non-selectable.
+    // Ctrl-u: target goes to y=0, where items 0,1,2 are non-selectable
     // Should find item 3 (first selectable).
     state.half_page_up(&items);
     assert_eq!(state.selected_index(), Some(3));
@@ -1152,7 +1149,7 @@ fn matcher_bad_regex_matches_nothing() {
     let mut m = ListMatcher::new("[invalid", QueryKind::Regex, MatchMode::Filter);
     assert!(m.is_error());
     m.rebuild_matches(&items);
-    assert!(m.match_indices.is_empty()); // bad regex matches nothing
+    assert!(m.match_indices.is_empty());
 }
 
 #[test]
@@ -1255,16 +1252,16 @@ fn next_match_selects_and_scrolls() {
     // Auto-selected item 0.
     assert_eq!(state.selected_index(), Some(0));
 
-    // n → next match = item 3 ("alpha-2").
+    // n goes to the next match, item 3 ("alpha-2")
     state.next_match(&items);
     assert_eq!(state.selected_index(), Some(3));
     assert_eq!(state.selected_id(), Some(3));
 
-    // n again → wraps to item 0 ("alpha").
+    // n again wraps to item 0 ("alpha")
     state.next_match(&items);
     assert_eq!(state.selected_index(), Some(0));
 
-    // N (prev) → wraps to item 3.
+    // N (prev) wraps to item 3
     state.prev_match(&items);
     assert_eq!(state.selected_index(), Some(3));
 }
@@ -1273,7 +1270,7 @@ fn next_match_selects_and_scrolls() {
 
 #[test]
 fn j_one_past_engages_follow() {
-    // j on last item twice → follow.
+    // j on the last item twice engages follow
     let items: Vec<TestItem> = (0..10).map(TestItem::new).collect();
     let mut state = new_streaming(WrapMode::NoWrap, false);
     state.prepare_layout(&items, 80, 5);
@@ -1285,12 +1282,12 @@ fn j_one_past_engages_follow() {
     assert_eq!(state.selected_index(), Some(9));
     assert!(!state.follow_mode); // at last item, but NOT follow yet
 
-    // First j at end → at_content_edge = true, no mode change.
+    // First j at the end sets at_content_edge = true, no mode change
     state.select_next(&items);
     assert!(!state.follow_mode);
     assert_eq!(state.selected_index(), Some(9)); // still there
 
-    // Second j at end → engage follow.
+    // Second j at the end engages follow
     state.select_next(&items);
     assert!(state.follow_mode);
     assert_eq!(state.selected_index(), None); // no cursor in follow
@@ -1309,7 +1306,7 @@ fn j_one_past_resets_when_new_items_arrive() {
     }
     assert_eq!(state.selected_index(), Some(4));
 
-    // First j at end → at_content_edge.
+    // First j at the end sets at_content_edge
     state.select_next(&items);
     assert!(!state.follow_mode);
 
@@ -1317,7 +1314,7 @@ fn j_one_past_resets_when_new_items_arrive() {
     items.push(TestItem::new(5));
     state.prepare_layout(&items, 80, 10);
 
-    // j → moves to new item 5 (resets edge state).
+    // j moves to new item 5 (resets edge state)
     state.select_next(&items);
     assert_eq!(state.selected_index(), Some(5));
     assert!(!state.follow_mode);
@@ -1325,22 +1322,22 @@ fn j_one_past_resets_when_new_items_arrive() {
 
 #[test]
 fn ctrl_d_one_past_engages_follow() {
-    // ctrl-d at bottom twice → follow.
+    // ctrl-d at the bottom twice engages follow
     let items: Vec<TestItem> = (0..20).map(TestItem::new).collect();
     let mut state = new_streaming(WrapMode::NoWrap, false);
     state.prepare_layout(&items, 80, 10);
 
-    // First ctrl-d → scroll to offset 5.
+    // First ctrl-d scrolls to offset 5
     state.half_page_down(&items);
     assert_eq!(state.scroll_offset(), 5);
     assert!(!state.follow_mode);
 
-    // Second ctrl-d → scroll to offset 10 (max). at_content_edge = true.
+    // Second ctrl-d scrolls to offset 10 (max) and sets at_content_edge = true
     state.half_page_down(&items);
     assert_eq!(state.scroll_offset(), 10);
     assert!(!state.follow_mode); // one-past: not yet
 
-    // Third ctrl-d → at bottom + at_content_edge → follow.
+    // Third ctrl-d, at the bottom with at_content_edge set, engages follow
     state.half_page_down(&items);
     assert!(state.follow_mode);
 }
@@ -1351,12 +1348,12 @@ fn page_down_one_past_engages_follow() {
     let mut state = new_streaming(WrapMode::NoWrap, false);
     state.prepare_layout(&items, 80, 10);
 
-    // First page-down → offset 10 (max). at_content_edge = true.
+    // First page-down scrolls to offset 10 (max) and sets at_content_edge = true
     state.page_down(&items);
     assert_eq!(state.scroll_offset(), 10);
     assert!(!state.follow_mode);
 
-    // Second page-down → follow.
+    // Second page-down engages follow
     state.page_down(&items);
     assert!(state.follow_mode);
 }
@@ -1373,7 +1370,7 @@ fn mouse_wheel_overscroll_engages_follow() {
     assert_eq!(state.scroll_offset(), 10);
     assert!(!state.follow_mode); // first hit: at_content_edge = true
 
-    // Another scroll at bottom → overscroll counter fires.
+    // Another scroll at the bottom fires the overscroll counter
     state.scroll_lines(3, &items);
     assert!(state.follow_mode);
 }
@@ -1384,19 +1381,19 @@ fn scroll_up_resets_edge_state() {
     let mut state = new_streaming(WrapMode::NoWrap, false);
     state.prepare_layout(&items, 80, 10);
 
-    // Scroll to bottom → at_content_edge.
+    // Scroll to the bottom sets at_content_edge
     state.scroll_lines(10, &items);
     assert!(!state.follow_mode);
 
-    // Scroll up → resets edge state.
+    // Scroll up resets the edge state
     state.scroll_lines(-1, &items);
     assert!(!state.follow_mode);
 
-    // Scroll back to bottom → at_content_edge again (not follow).
+    // Scroll back to the bottom sets at_content_edge again (not follow)
     state.scroll_lines(1, &items);
     assert!(!state.follow_mode);
 
-    // Once more → follow.
+    // Once more engages follow
     state.scroll_lines(1, &items);
     assert!(state.follow_mode);
 }
@@ -1441,7 +1438,7 @@ fn follow_mode_persists_through_prepare_layout() {
     assert!(state.follow_mode);
     assert_eq!(state.scroll_offset(), 10);
 
-    // Re-prepare layout — follow should persist.
+    // Re-prepare layout: follow should persist
     state.prepare_layout(&items, 80, 10);
     assert!(state.follow_mode);
     assert_eq!(state.scroll_offset(), 10);
@@ -1456,7 +1453,7 @@ fn follow_mode_auto_scrolls_on_new_items() {
 
     items.extend((20..25).map(TestItem::new));
     state.prepare_layout(&items, 80, 10);
-    assert_eq!(state.scroll_offset(), 15); // 25 - 10
+    assert_eq!(state.scroll_offset(), 15); // content 25 minus viewport 10
     assert!(state.follow_mode);
 }
 
@@ -1490,7 +1487,7 @@ fn follow_mode_clears_selection_on_prepare_layout() {
     assert_eq!(state.selected_index(), None);
 }
 
-// -- Follow → NAV transitions ---------------------------------------------
+// -- Follow to NAV transitions --------------------------------------------
 
 #[test]
 fn j_in_follow_is_noop() {
@@ -1499,7 +1496,7 @@ fn j_in_follow_is_noop() {
     state.prepare_layout(&items, 80, 5);
     assert!(state.follow_mode);
 
-    // j in follow → no-op (already at bottom).
+    // j in follow is a no-op (already at bottom)
     state.select_next(&items);
     assert!(state.follow_mode);
     assert_eq!(state.selected_index(), None);
@@ -1512,7 +1509,7 @@ fn k_in_follow_exits_to_nav_and_moves_up() {
     state.prepare_layout(&items, 80, 5);
     assert!(state.follow_mode);
 
-    // k → exit follow, cursor at last visible, then move up 1.
+    // k exits follow, puts the cursor at the last visible item, then moves up 1
     state.select_prev(&items);
     assert!(!state.follow_mode);
     // Should be one item above the last visible.
@@ -1528,7 +1525,7 @@ fn ctrl_u_in_follow_exits_and_scrolls_up() {
     assert!(state.follow_mode);
     assert_eq!(state.scroll_offset(), 10);
 
-    // ctrl-u → exit follow, scroll up half page.
+    // ctrl-u exits follow and scrolls up half a page
     state.half_page_up(&items);
     assert!(!state.follow_mode);
     assert_eq!(state.scroll_offset(), 5);
@@ -1547,12 +1544,11 @@ fn new_items_dont_reset_edge_state() {
     for _ in 0..9 {
         state.select_next(&items);
     }
-    // First j at end → at_content_edge.
+    // First j at the end sets at_content_edge
     state.select_next(&items);
     assert!(!state.follow_mode);
 
-    // New items arrive — at_content_edge should NOT be reset by
-    // prepare_layout.
+    // New items arrive: at_content_edge should NOT be reset by prepare_layout
     items.extend((10..15).map(TestItem::new));
     state.prepare_layout(&items, 80, 5);
 
@@ -1581,7 +1577,7 @@ fn g_in_follow_already_is_noop() {
     let mut state = new_streaming(WrapMode::NoWrap, true);
     state.prepare_layout(&items, 80, 10);
 
-    // G in follow → no-op.
+    // G in follow is a no-op
     state.select_last(&items);
     assert!(state.follow_mode);
     assert_eq!(state.scroll_offset(), 10);
@@ -1605,12 +1601,12 @@ fn next_match_with_filter_mode() {
     // Auto-selected vis 0 (physical 0).
     assert_eq!(state.selected_index(), Some(0));
 
-    // n → next match = physical 2 (vis 1).
+    // n goes to the next match, physical 2 (vis 1)
     state.next_match(&items);
     assert_eq!(state.selected_index(), Some(1)); // vis index 1
     assert_eq!(state.selected_id(), Some(2)); // physical id 2
 
-    // n → wraps to physical 0 (vis 0).
+    // n wraps to physical 0 (vis 0)
     state.next_match(&items);
     assert_eq!(state.selected_index(), Some(0));
 }
@@ -1659,12 +1655,12 @@ fn follow_disabled_j_at_bottom_no_one_past() {
     }
     assert_eq!(state.selected_index(), Some(4));
 
-    // j at end — should be a no-op, no follow.
+    // j at the end should be a no-op, no follow
     state.select_next(&items);
     assert!(!state.follow_mode);
     assert_eq!(state.selected_index(), Some(4));
 
-    // Again — still no follow.
+    // Again: still no follow
     state.select_next(&items);
     assert!(!state.follow_mode);
 }
@@ -1679,7 +1675,7 @@ fn follow_disabled_ctrl_d_at_bottom_no_follow() {
     let mut state = ListPaneState::new_with_config(WrapMode::NoWrap, false, config);
     state.prepare_layout(&items, 80, 10);
 
-    // Spam ctrl-d — should never engage follow.
+    // Spam ctrl-d: it should never engage follow
     for _ in 0..10 {
         state.half_page_down(&items);
     }
@@ -1697,7 +1693,7 @@ fn follow_disabled_mouse_wheel_at_bottom_no_follow() {
     let mut state = ListPaneState::new_with_config(WrapMode::NoWrap, false, config);
     state.prepare_layout(&items, 80, 10);
 
-    // Spam mouse wheel down — should never engage follow.
+    // Spam mouse wheel down: it should never engage follow
     for _ in 0..10 {
         state.scroll_lines(3, &items);
     }
@@ -1763,7 +1759,6 @@ fn toggle_follow_from_follow_exits() {
 
 // -- Copy tests -----------------------------------------------------------
 
-/// Helper: create a state with copy enabled.
 fn new_with_copy() -> ListPaneState {
     ListPaneState::new_with_config(
         WrapMode::NoWrap,
@@ -1840,7 +1835,7 @@ fn copy_noop_in_follow_mode() {
     assert!(state.follow_mode);
     assert_eq!(state.selected_index(), None);
 
-    // No selection in follow mode → copy is a no-op.
+    // No selection in follow mode, so copy is a no-op
     assert!(!state.copy_selected(&items));
 }
 
@@ -1926,14 +1921,14 @@ fn copy_noop_after_filter_hides_all() {
     )));
     state.prepare_layout(&items, 80, 10);
 
-    // No visible items → no selection → copy is a no-op.
+    // No visible items means no selection, so copy is a no-op
     assert_eq!(state.visible_count(), 0);
     assert!(!state.copy_selected(&items));
 }
 
 // -- Visual select tests --------------------------------------------------
 
-/// Helper: create a state with visual select + copy enabled.
+/// Helper: create a state with visual select and copy enabled.
 fn new_with_visual() -> ListPaneState {
     ListPaneState::new_with_config(
         WrapMode::NoWrap,
@@ -1982,8 +1977,8 @@ fn visual_mode_range_extends_with_j() {
     // Select item 3, enter visual, move down to 5.
     state.select_at(3, &items);
     state.enter_visual_mode(&items);
-    state.select_next(&items); // → 4
-    state.select_next(&items); // → 5
+    state.select_next(&items); // now at 4
+    state.select_next(&items); // now at 5
     state.prepare_layout(&items, 80, 10); // resolve range
 
     assert_eq!(state.multi_range(), Some(3..6)); // [3, 4, 5]
@@ -1999,8 +1994,8 @@ fn visual_mode_range_extends_with_k() {
     // Select item 5, enter visual, move up to 3.
     state.select_at(5, &items);
     state.enter_visual_mode(&items);
-    state.select_prev(&items); // → 4
-    state.select_prev(&items); // → 3
+    state.select_prev(&items); // now at 4
+    state.select_prev(&items); // now at 3
     state.prepare_layout(&items, 80, 10);
 
     assert_eq!(state.multi_range(), Some(3..6)); // [3, 4, 5]
@@ -2049,8 +2044,8 @@ fn y_copies_visual_range_then_clears() {
     // Select items 1..=3 visually.
     state.select_at(1, &items);
     state.enter_visual_mode(&items);
-    state.select_next(&items); // → 2
-    state.select_next(&items); // → 3
+    state.select_next(&items); // now at 2
+    state.select_next(&items); // now at 3
     state.prepare_layout(&items, 80, 10); // resolve range
 
     // y copies and clears visual mode.
@@ -2095,9 +2090,8 @@ fn search_clears_visual_mode() {
     assert!(!state.visual_mode);
 }
 
-/// Regression: select_next/select_prev must not panic when items is empty
-/// but the layout cache has a stale non-zero item count (e.g. items were
-/// rebuilt between prepare_layout and the next key event).
+/// Regression: select_next/select_prev must not panic when items is empty but the layout cache has a stale non-zero item count.
+/// That happens when items were rebuilt between prepare_layout and the next key event.
 #[test]
 fn select_next_prev_empty_items_no_panic() {
     let items: Vec<TestItem> = (0..5).map(TestItem::new).collect();
@@ -2106,15 +2100,13 @@ fn select_next_prev_empty_items_no_panic() {
     state.select_next(&items);
     assert!(state.selected_index.is_some());
 
-    // Now call select_next/select_prev with an EMPTY slice while the
-    // layout still thinks there are 5 items.  Must not panic.
+    // Now call select_next/select_prev with an EMPTY slice while the layout still thinks there are 5 items; the calls must not panic
     let empty: Vec<TestItem> = vec![];
     state.select_next(&empty);
     state.select_prev(&empty);
 }
 
-/// Regression: pressing 'j' through all items in a small viewport (4 lines,
-/// 12 items) must keep the selection visible at every step.
+/// Regression: pressing 'j' through all items in a small viewport (4 lines, 12 items) must keep the selection visible at every step.
 #[test]
 fn select_next_scrolls_in_small_viewport() {
     let items: Vec<TestItem> = (0..12).map(TestItem::new).collect();
@@ -2136,18 +2128,17 @@ fn select_next_scrolls_in_small_viewport() {
     }
 }
 
-/// Regression: 'j' must keep selection visible even when
-/// prepare_layout is called between each select_next (simulates the
-/// render → key → render cycle in the real app).
+/// Regression: 'j' must keep selection visible even when prepare_layout is called between each select_next.
+/// This simulates the render, then key, then render cycle in the real app.
 #[test]
 fn select_next_with_prepare_layout_between_steps() {
     let items: Vec<TestItem> = (0..12).map(TestItem::new).collect();
     let mut state = ListPaneState::new(WrapMode::NoWrap, false);
 
     for step in 0..12 {
-        // simulate render: prepare_layout first
+        // Simulate render: prepare_layout first
         state.prepare_layout(&items, 80, 4); // width=80, viewport_height=4
-        // simulate key: select_next
+        // Simulate key: select_next
         state.select_next(&items);
         let idx = state.selected_index.unwrap();
         let item_y = state.layout.virtual_y(idx);
@@ -2246,7 +2237,7 @@ fn content_down_clears_stale_scrollbar_drag_latch() {
         "press on the track must latch a thumb drag"
     );
 
-    // Lost Up, then a content press — latch must not stick.
+    // Lost Up, then a content press: the latch must not stick
     assert!(
         state.handle_mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 4, pane, &items,)
     );

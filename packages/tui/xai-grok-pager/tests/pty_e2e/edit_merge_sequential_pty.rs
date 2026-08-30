@@ -15,8 +15,7 @@ const EDIT_THREE_MARK: &str = "EDIT_THREE_MARK";
 
 const FIXTURE: &str = "merge_fix.py";
 
-/// One line of the fixture per word, so each edit is a 1:1 line replacement
-/// (`+1/-1`) and line numbers stay stable across the whole scripted turn.
+/// One line of the fixture per word, so each edit is a 1:1 line replacement (`+1/-1`) and line numbers stay stable across the scripted turn.
 fn fixture_text() -> String {
     let words = [
         "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
@@ -48,14 +47,12 @@ fn edit_header_rows(screen: &str) -> usize {
         .count()
 }
 
-/// PTY: with `collapsed_edit_blocks` enabled, three sequential same-file
-/// edits coalesce into ONE Edit row whose header sums the diffstat (`+3/-3`);
-/// expanding it shows every hunk with `… N unchanged lines` gap markers
-/// between them. A fourth edit arriving after intervening agent text stays a
-/// separate second Edit row — counted after wheeling back above the second
-/// submit's page-flip, which pins the new prompt to the pane top and scrolls
-/// turn 1 out of view by design. (Flag off, coalescing is disabled entirely —
-/// pinned by the tracker unit test.)
+/// PTY: with `collapsed_edit_blocks` enabled, three sequential same-file edits coalesce into ONE Edit row whose header sums the diffstat (`+3/-3`).
+/// Expanding it shows every hunk with `… N unchanged lines` gap markers between them.
+/// A fourth edit arriving after intervening agent text stays a separate second Edit row.
+/// It is counted after wheeling back above the second submit's page-flip.
+/// The page-flip pins the new prompt to the pane top and scrolls turn 1 out of view by design.
+/// (Flag off, coalescing is disabled entirely; pinned by the tracker unit test.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run with cargo test -p xai-grok-pager --test pty_e2e -- --ignored"]
 async fn edit_merge_sequential_pty() {
@@ -66,8 +63,7 @@ async fn edit_merge_sequential_pty() {
     std::fs::write(&target, fixture_text()).expect("write fixture");
     let abs = dunce::canonicalize(&target).unwrap_or(target.clone());
 
-    // Three 1:1 replacements at widely separated, increasing lines so every
-    // merged-hunk gap is computable (edits sit ~11 lines apart, context ±3).
+    // Three 1:1 replacements at widely separated, increasing lines so every merged-hunk gap is computable (~11 lines apart, 3 context lines)
     let _edit_turns: [AgentTurnExpectation; 3] = [
         expect_tool_turn(
             &content,
@@ -88,7 +84,7 @@ async fn edit_merge_sequential_pty() {
             edit_args(&abs, "v25", "yankee", EDIT_THREE_MARK),
         ),
     ];
-    // The first prompt's turn ends on agent text — the break for the run.
+    // The first prompt's turn ends on agent text, the break for the run
     let break_text = format!("{BREAK_TEXT_SENTINEL} first batch settled.");
     let _break_turn: AgentTurnExpectation =
         content.expect_agent_turn("first batch settled", &break_text);
@@ -193,8 +189,7 @@ async fn edit_merge_sequential_pty() {
         harness.update(Duration::from_millis(100));
     }
 
-    // BREAK case: a fourth same-file edit after the agent-text turn stays a
-    // separate row instead of merging across the visible text entry.
+    // BREAK case: a fourth same-file edit after the agent-text turn stays a separate row instead of merging across the visible text entry
     harness
         .wait_for_turn_idle(Duration::from_secs(15))
         .expect("turn idle after break-case edit");
@@ -223,11 +218,9 @@ async fn edit_merge_sequential_pty() {
                 harness.screen_contents()
             )
         });
-    // The second submit page-flipped the viewport (the new prompt pins to the
-    // pane top — dispatch/queue.rs `scroll_to_entry_top` +
-    // `enable_follow_with_preserve`), so turn 1 legitimately sits above the
-    // fold. Wheel back to the transcript top — the whole thing fits one
-    // screen — before counting rows across both turns.
+    // The second submit page-flipped the viewport, so turn 1 legitimately sits above the fold
+    // (The new prompt pins to the pane top: dispatch/queue.rs `scroll_to_entry_top` and `enable_follow_with_preserve`.)
+    // Wheel back to the transcript top (the whole thing fits one screen) before counting rows across both turns
     send_wheel_burst(
         &mut harness,
         SGR_SCROLL_UP,

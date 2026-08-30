@@ -273,8 +273,7 @@ fn db_file_and_journal_siblings_are_owner_only() {
     let dir = effective.parent().unwrap().to_path_buf();
     assert_eq!(mode_of(&dir), 0o700);
 
-    // The live connection has created the journal siblings, which must
-    // inherit the database's owner-only mode.
+    // The live connection has created the journal siblings, which must inherit the database's owner-only mode
     let files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().path())

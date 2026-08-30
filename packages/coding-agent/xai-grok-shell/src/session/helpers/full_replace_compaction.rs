@@ -38,11 +38,12 @@ use xai_chat_state::compaction_utils::{
 };
 
 use crate::sampling::Client as OaiCompatClient;
+use crate::sampling::error::acp_error_message;
 use crate::session::helpers::prepared_compaction_history::{
     PreparedCompactionHistory, build_compaction_chat_history,
 };
 use crate::session::helpers::session_compact::{
-    CompactFailure, CompactOutput, generate_session_compact,
+    COMPACT_FAILED_PREFIX, CompactFailure, CompactOutput, generate_session_compact,
 };
 
 #[derive(Default)]
@@ -213,16 +214,6 @@ fn compact_failure_to_sample_error(failure: CompactFailure) -> CompactionSampleE
 #[path = "full_replace_compaction_tests.rs"]
 mod tests;
 
-/// Render the human-readable detail an `acp::Error` carries in its `data`
-/// field (where `classify_*` stash `"compact failed: <upstream>"`).
-fn acp_error_message(err: &acp::Error) -> String {
-    err.data
-        .as_ref()
-        .and_then(|d| d.as_str())
-        .unwrap_or("<no data>")
-        .to_string()
-}
-
 /// Collected telemetry from a full-replace pass, drained by the L5 loop after
 /// the shared engine returns.
 pub(crate) struct FullReplaceTelemetry {
@@ -346,7 +337,7 @@ impl FullReplaceObserver for ShellFullReplaceObserver {
                 });
                 s.last_rejected_summary = Some((*summary).to_string());
                 s.last_error_msg = Some(format!(
-                    "compact failed: degenerate summary \
+                    "{COMPACT_FAILED_PREFIX}degenerate summary \
                      ({summary_chars} chars for ~{} input tokens)",
                     self.estimated_input_tokens
                 ));
@@ -385,7 +376,7 @@ impl FullReplaceObserver for ShellFullReplaceObserver {
                 // (`generate_session_compact` returns `Transient`), so it never
                 // reaches the shared `Ok("")` branch; handle defensively.
                 s.transient_rejections += 1;
-                let msg = "compact failed: model returned empty response".to_string();
+                let msg = format!("{COMPACT_FAILED_PREFIX}model returned empty response");
                 s.attempt_details.push(CompactionAttempt {
                     attempt,
                     outcome: "transient".to_string(),

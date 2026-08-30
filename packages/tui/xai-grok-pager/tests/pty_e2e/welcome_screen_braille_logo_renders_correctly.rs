@@ -2,23 +2,18 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 1b. **Welcome screen renders Unicode Braille logo correctly.**
+/// The logo uses Unicode Braille Pattern characters (U+2800-U+28FF).
+/// A writer-thread regression (`WriteFile` instead of `WriteConsoleW` on Windows, or a missing `SetConsoleOutputCP(65001)`) garbles the output.
+/// Such a writer misinterprets the multi-byte UTF-8 characters as individual legacy code-page bytes.
 ///
-/// The logo uses Unicode Braille Pattern characters (U+2800–U+28FF).
-/// A regression in the writer thread (using `WriteFile` instead of
-/// `WriteConsoleW` on Windows, or a missing `SetConsoleOutputCP(65001)`)
-/// causes these multi-byte UTF-8 characters to be misinterpreted as
-/// individual legacy code-page bytes, producing garbled output.
-///
-/// This test asserts that specific Braille characters from the logo
-/// appear intact in the PTY screen buffer.
+/// This test asserts that specific Braille characters from the logo appear intact in the PTY screen buffer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn welcome_screen_braille_logo_renders_correctly() {
     let content = ContentController::start().await.expect("start content");
 
     let binary = pager_binary().expect("resolve pager binary");
-    // Use a tall terminal so pick_logo() selects the 7-line logo (≥26 rows).
+    // Use a tall terminal so pick_logo() selects the 7-line logo (26 rows or more)
     let mut harness =
         PtyHarness::spawn_with_content(&binary, DEFAULT_ROWS, DEFAULT_COLS, &content, &[])
             .expect("spawn pager");
@@ -29,11 +24,9 @@ async fn welcome_screen_braille_logo_renders_correctly() {
 
     let screen = harness.screen_contents();
 
-    // The logo contains distinctive Braille characters. If the writer
-    // thread sends raw UTF-8 bytes through a code-page-dependent API,
-    // these 3-byte characters would be mangled into 3 separate single-
-    // byte characters each (e.g. Cyrillic). Check for a few that only
-    // appear in the logo — not in any ASCII menu label.
+    // The logo contains distinctive Braille characters
+    // A writer thread sending raw UTF-8 through a code-page-dependent API mangles each 3-byte character into 3 single-byte ones (e.g. Cyrillic).
+    // Check for a few that only appear in the logo, not in any ASCII menu label
     //
     // From logo07.txt line 2: ⣠⣾⠿⠛
     assert!(

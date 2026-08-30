@@ -1,5 +1,4 @@
-//! Line and block viewer popups plus the /btw panel: open/confirm/dismiss
-//! and their key/mouse handlers.
+//! Line and block viewer popups plus the /btw panel: open/confirm/dismiss and their key/mouse handlers.
 
 use super::{AgentView, render_char_buttons};
 use crate::app::app_view::InputOutcome;
@@ -49,7 +48,7 @@ impl AgentView {
             }
             self.line_viewer = Some(viewer);
         } else {
-            // File couldn't be read — cancel the undo group.
+            // The file couldn't be read, so cancel the undo group
             self.prompt.textarea.cancel_undo_group();
         }
     }
@@ -76,10 +75,8 @@ impl AgentView {
             .as_ref()
             .is_some_and(|v| v.list_state.input_mode().is_some());
 
-        // When the search/filter/goto input bar is active, let ListPane
-        // handle everything. Comment mode is special: Enter/Esc are not
-        // consumed by the list state (it returns false), so we handle
-        // save/cancel here.
+        // When the search/filter/goto input bar is active, let ListPane handle everything
+        // Comment mode is special: the list state does not consume Enter/Esc (it returns false), so save/cancel are handled here
         if input_bar_active {
             let is_comment_mode = self.line_viewer.as_ref().is_some_and(|v| {
                 v.list_state.input_mode() == Some(crate::views::list_pane::InputBarMode::Comment)
@@ -105,10 +102,9 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // Plan-approval `Esc` doesn't close the viewer (use `q` / `Ctrl+\`),
-        // but it still clears a transient visual selection or accepted search
-        // matcher first, so the graduated dashboard-overlay back-out (which
-        // declines to fire while a matcher is active) isn't left dead-ended.
+        // In plan approval, `Esc` doesn't close the viewer (use `q` / `Ctrl+\`)
+        // It still clears a transient visual selection or an accepted search matcher first
+        // Backing out of the dashboard overlay declines to fire while a matcher is active, so without this clearing Esc would be a dead key
         if in_plan_approval && key!(Esc).matches(key) {
             if let Some(ref mut viewer) = self.line_viewer {
                 if viewer.list_state.visual_mode {
@@ -135,8 +131,7 @@ impl AgentView {
             return self.enter_plan_commenting();
         }
 
-        // Casual mode: same `c` / `s` shortcuts as plan approval so the
-        // footer hints actually work.
+        // Casual mode: same `c` / `s` shortcuts as plan approval so the footer hints actually work
         if !in_plan_approval && self.is_plan_viewer() && key!('c').matches(key) {
             return self.enter_casual_plan_commenting();
         }
@@ -152,8 +147,8 @@ impl AgentView {
             return self.approve_plan();
         }
 
-        // s: switch to prompt so the user can type an overall revision
-        // message before submitting. Enter from Prompt does the actual send.
+        // s: switch to prompt so the user can type an overall revision message before submitting
+        // Enter from Prompt does the actual send
         if in_plan_approval && key!('s').matches(key) {
             if let Some(ref mut pav) = self.plan_approval_view {
                 pav.focus = PlanApprovalFocus::Prompt;
@@ -258,8 +253,8 @@ impl AgentView {
             if in_plan_approval {
                 return InputOutcome::Changed;
             }
-            // In the plan viewer, Esc first clears visual selection / search
-            // before closing. q and Ctrl-C always close immediately.
+            // In the plan viewer, Esc first clears visual selection / search before closing
+            // q and Ctrl-C always close immediately
             if key!(Esc).matches(key)
                 && let Some(ref mut viewer) = self.line_viewer
             {
@@ -333,11 +328,8 @@ impl AgentView {
         if let Some(ref mut pav) = self.plan_approval_view {
             pav.focus = PlanApprovalFocus::Preview;
         }
-        // If a casual plan comment was in progress when the modal
-        // closed (via [✗], click-outside, or any other path that
-        // doesn't route through `cancel_casual_plan_commenting`),
-        // restore the pre-comment prompt text so the user's original
-        // text isn't lost behind the in-progress comment draft.
+        // The modal can close mid-comment via [✗], click-outside, or any path that skips `cancel_casual_plan_commenting`
+        // Restore the pre-comment prompt text so the user's original text isn't lost behind the comment draft
         // Mirrors `cancel_casual_plan_commenting`.
         if let Some(stashed) = self.casual_stashed_prompt.take() {
             self.prompt.restore(stashed);
@@ -393,13 +385,10 @@ impl AgentView {
             return InputOutcome::Changed;
         };
 
-        // `popup_area` is the list-rendered area (excludes the divider
-        // + footer rows in plan modes); used for dispatching mouse
-        // events into `ListPaneState`. `modal_area` is the full inner
-        // rect of the modal frame (includes the footer); used by the
-        // click-outside-modal check so that clicks on the divider or
-        // the empty space between footer buttons don't accidentally
-        // close the modal.
+        // `popup_area` is the list-rendered area, excluding the divider and footer rows in plan modes
+        // Mouse events dispatch into `ListPaneState` against it
+        // `modal_area` is the full inner rect of the modal frame, footer included
+        // The click-outside check uses `modal_area` so clicks on the divider or the space between footer buttons don't close the modal
         let popup_area = viewer.last_popup_area;
         let modal_area = viewer.last_modal_area;
 
@@ -410,8 +399,7 @@ impl AgentView {
         let approve_area = viewer.plan_ref().and_then(|p| p.approve_button_area);
         let comment_btn_area = viewer.plan_ref().and_then(|p| p.comment_button_area);
         let copy_btn_area = viewer.plan_ref().and_then(|p| p.copy_button_area);
-        // Cached `is_plan_viewer()` so we don't need to call self while
-        // the line_viewer is mutably borrowed below.
+        // Cached `is_plan_viewer()` so we don't need to call self while the line_viewer is mutably borrowed below
         let is_plan_preview =
             viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
 
@@ -453,14 +441,14 @@ impl AgentView {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // Click on close button -> cancel.
+                // A click on the close button cancels
                 if close_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_none() {
                         self.cancel_line_viewer();
                     }
                     return InputOutcome::Changed;
                 }
-                // Click on fullscreen button -> toggle fullscreen.
+                // A click on the fullscreen button toggles fullscreen
                 if fs_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if let Some(ref mut v) = self.line_viewer {
                         v.fullscreen = !v.fullscreen;
@@ -474,8 +462,7 @@ impl AgentView {
                     if self.plan_approval_view.is_some() {
                         return self.approve_plan();
                     } else if is_plan_preview && !self.plan_comments.is_empty() {
-                        // Casual mode: the only action button shown is
-                        // `s send` (when there are comments to send).
+                        // Casual mode: the only action button shown is `s send` (when there are comments to send)
                         return self.send_casual_plan_comments();
                     }
                     return InputOutcome::Changed;
@@ -487,11 +474,8 @@ impl AgentView {
                     if is_plan_preview {
                         return self.enter_casual_plan_commenting();
                     }
-                    // The comment button is only set on plan viewers,
-                    // so the two arms above are exhaustive in practice.
-                    // Return here to make the dead fall-through
-                    // explicit and to match the abandon/approve hit
-                    // patterns just above.
+                    // The comment button is only set on plan viewers, so the two arms above are exhaustive in practice
+                    // Return here to make the dead fall-through explicit and to match the abandon/approve hit patterns just above
                     return InputOutcome::Changed;
                 }
                 if copy_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
@@ -506,9 +490,8 @@ impl AgentView {
                     }
                     return self.send_casual_plan_comments();
                 }
-                // Mermaid buttons before click-to-comment (early return ends
-                // the `viewer` borrow so `handle_inline_media_click` can take
-                // `&mut self`).
+                // Mermaid buttons are checked before click-to-comment
+                // The early return ends the `viewer` borrow so `handle_inline_media_click` can take `&mut self`
                 let mermaid_hit = self
                     .inline_media_hits
                     .mermaid_buttons
@@ -644,9 +627,7 @@ impl AgentView {
                 };
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                // Drag-to-extend works in both plan-approval and casual
-                // plan-preview modes (anywhere the PlanPreview viewer is
-                // showing).
+                // Drag-to-extend works in both plan-approval and casual plan-preview modes (anywhere the PlanPreview viewer is showing)
                 if is_plan_preview
                     && let Some(area) = popup_area
                     && let Some(ln) = viewer.source_line_at_screen_row(mouse.row, area)
@@ -685,8 +666,8 @@ impl AgentView {
                         let hi = start.max(end);
                         let range = lo..hi + 1;
                         if let Some(ref mut pav) = self.plan_approval_view {
-                            // First-entry-only stash (same as enter_plan_commenting): a second
-                            // gutter drag while Commenting must not replace frozen freeform.
+                            // Stash only on the first entry into commenting, same as enter_plan_commenting
+                            // A second gutter drag while Commenting must not replace the stashed prompt text
                             if pav.stashed_feedback_prompt.is_none() {
                                 pav.stashed_feedback_prompt = Some(self.prompt.stash());
                             }
@@ -695,7 +676,7 @@ impl AgentView {
                             pav.focus = PlanApprovalFocus::Commenting;
                             self.prompt.set_text("");
                         } else {
-                            // First-entry-only stash; see enter_casual_plan_commenting.
+                            // Stash only on the first entry; see enter_casual_plan_commenting
                             if self.casual_stashed_prompt.is_none() {
                                 self.casual_stashed_prompt = Some(self.prompt.stash());
                             }
@@ -739,9 +720,8 @@ impl AgentView {
 
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 let clicked_line = viewer.source_line_at_screen_row(mouse.row, area);
-                // Drag selection works in both modes whenever the
-                // plan preview is showing — but only on source rows
-                // (we need a 1-based line number as the drag anchor).
+                // Drag selection works in both modes whenever the plan preview is showing
+                // It only works on source rows: the drag anchor needs a 1-based line number
                 if is_plan_preview && let Some(ln) = clicked_line {
                     viewer.plan_mut().gutter_drag_start = Some(ln);
                     viewer.plan_mut().gutter_drag_end = Some(ln);
@@ -749,11 +729,8 @@ impl AgentView {
 
                 viewer.plan_mut().last_click_at = Some(std::time::Instant::now());
 
-                // A single click on any list row — source line OR
-                // existing comment annotation — enters commenting (or
-                // edit-comment) for that row. Same shortcut as
-                // selecting + pressing `c` / Enter. Works for both
-                // plan-approval and casual plan-preview modes.
+                // A single click on any list row (a source line or an existing comment row) enters commenting or comment editing for that row
+                // It is the same shortcut as selecting the row and pressing `c` / Enter, in both plan-approval and casual plan-preview modes
                 // Skip Mermaid affordance rows (button hits handled above).
                 let on_list_row = mouse.row >= area.y && {
                     let ry = (mouse.row - area.y) as usize;
@@ -770,13 +747,9 @@ impl AgentView {
                         })
                         .unwrap_or(false)
                 };
-                // Skip the click-to-comment trigger if the user is
-                // already composing a comment. Without this guard, any
-                // click on a list row would re-enter commenting and
-                // re-stash the (now-comment) prompt, clobbering the
-                // user's pre-comment text and preventing the mouse from
-                // being used to reposition the cursor without
-                // committing to a fresh comment.
+                // Skip the click-to-comment trigger if the user is already composing a comment
+                // Without this guard, any click on a list row would re-enter commenting and re-stash the prompt, now holding the comment draft
+                // That clobbers the user's pre-comment text and makes any mouse click commit to a fresh comment instead of just moving the cursor
                 let in_pav_commenting = self
                     .plan_approval_view
                     .as_ref()
@@ -812,8 +785,7 @@ impl AgentView {
     ///
     /// Two modes:
     /// - **Corner row** (expanded or ungrouped): buttons on the `╭...╮` row.
-    /// - **Inline** (collapsed + grouped): buttons on the selected entry's row,
-    ///   overlaying content at the right edge.
+    /// - **Inline** (collapsed and grouped): buttons on the selected entry's row, overlaying content at the right edge.
     pub(super) fn render_selection_buttons(
         &mut self,
         buf: &mut Buffer,
@@ -855,7 +827,7 @@ impl AgentView {
         }
 
         // Determine inline vs corner mode.
-        // Inline: entry is collapsed AND part of a group (group_range > 1).
+        // Inline: entry is collapsed and part of a group (group_range > 1)
         let split_mode = self
             .scrollback
             .appearance()
@@ -970,7 +942,7 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // Route to viewer — returns whether the key was consumed
+        // Route to viewer; returns whether the key was consumed
         if !viewer.handle_key(key) {
             return InputOutcome::Unchanged;
         }
@@ -978,10 +950,9 @@ impl AgentView {
         // Handle raw toggle: capture old source map, toggle, rebuild with stability
         if viewer.raw_toggle_pending {
             viewer.raw_toggle_pending = false;
-            // Record scroll anchor BEFORE toggle so the selected line stays
-            // at the same screen position after the rebuild.
+            // Record the scroll anchor before the toggle so the selected line stays at the same screen position after the rebuild
             viewer.list_state.set_scroll_anchor();
-            // Capture source map BEFORE toggle for cursor mapping
+            // Capture the source map before the toggle for cursor mapping
             let old_source_line = self
                 .scrollback
                 .get_by_id(viewer.entry_id)
@@ -1027,7 +998,7 @@ impl AgentView {
             return InputOutcome::Changed;
         };
 
-        // Route to modal chrome first (close button, click-outside).
+        // Route to the modal window controls first (close button, click-outside)
         let modal_outcome =
             handle_modal_mouse(&mut viewer.modal, mouse.kind, mouse.column, mouse.row);
         match modal_outcome {
@@ -1055,8 +1026,7 @@ impl AgentView {
             _ => {}
         }
 
-        // Collect any pending copy text: drag-release auto-copy (like
-        // scrollback finish_text_drag) or Y/y key handler copy.
+        // Collect any pending copy text: drag-release auto-copy (like scrollback finish_text_drag) or Y/y key handler copy
         let drag_text = viewer.drag_copy_text.take();
         let entry_id = viewer.entry_id;
         let key_text = if drag_text.is_none() {
@@ -1066,7 +1036,7 @@ impl AgentView {
         } else {
             None
         };
-        // viewer borrow ends here — clipboard + toast can use &mut self.
+        // The viewer borrow ends here, so clipboard and toast can use &mut self
         if let Some(text) = drag_text.or(key_text) {
             self.copy_to_clipboard(&text);
         }
@@ -1076,8 +1046,7 @@ impl AgentView {
 
     /// Dynamic fold label for the shortcuts bar hint.
     ///
-    /// Returns "expand" if the selected entry is collapsed/truncated,
-    /// "collapse" if expanded, or `None` if the selected entry isn't foldable.
+    /// Returns "expand" if the selected entry is collapsed/truncated, "collapse" if expanded, or `None` if the selected entry isn't foldable.
     pub(super) fn selected_fold_label(&self) -> Option<&'static str> {
         let idx = self.scrollback.selected()?;
         let entry = self.scrollback.get(idx)?;

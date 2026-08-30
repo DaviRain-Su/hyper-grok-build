@@ -1,8 +1,6 @@
 //! Nucleo-based fuzzy matcher for slash command and argument suggestions.
 //!
-//! Thin
-//! wrapper around nucleo's `MultiPattern` that provides ranked results
-//! and highlight index extraction.
+//! Thin wrapper around nucleo's `MultiPattern` that provides ranked results and highlight index extraction.
 
 use nucleo::{
     Config, Matcher, Utf32String,
@@ -11,8 +9,8 @@ use nucleo::{
 
 /// Fuzzy matcher backed by nucleo.
 ///
-/// Maintains internal state (pattern + matcher) between calls for efficiency.
-/// Not thread-safe -- intended for single-threaded use within `SlashController`.
+/// Maintains internal state (pattern and matcher) between calls for efficiency.
+/// Not thread-safe; intended for single-threaded use within `SlashController`.
 #[derive(Debug)]
 pub struct FuzzyMatcher {
     pattern: MultiPattern,
@@ -35,11 +33,10 @@ impl FuzzyMatcher {
 
     /// Rank items by fuzzy match score.
     ///
-    /// Returns `(index, score)` pairs sorted by descending score, then
-    /// ascending key text. At most `limit` results are returned.
+    /// Returns `(index, score)` pairs sorted by descending score, then ascending key text.
+    /// At most `limit` results are returned.
     ///
-    /// When `query` is empty, returns the first `limit` items with score 0
-    /// (insertion order).
+    /// When `query` is empty, returns the first `limit` items with score 0 (insertion order).
     pub fn rank<T, F>(
         &mut self,
         items: &[T],
@@ -164,8 +161,7 @@ mod tests {
         assert!(hits.is_empty());
     }
 
-    /// Single-letter `/p` ties many `p*` commands at the same nucleo score;
-    /// ordering is entirely secondary tiebreaks (display/builtin/MRU/etc.).
+    /// Single-letter `/p` ties many `p*` commands at the same nucleo score; ordering comes entirely from the secondary tiebreaks (display, builtin, MRU, etc.).
     #[test]
     fn query_p_ties_personas_and_pager_headless_at_same_score() {
         let mut matcher = FuzzyMatcher::new();
@@ -180,7 +176,7 @@ mod tests {
         let pager = score_of("pager-headless").expect("pager-headless matches p");
         assert_eq!(personas, pager, "expected equal fuzzy scores for /p case");
         assert!(personas > 0);
-        // Matcher limit=1 secondary sort is ascending key text → pager-headless wins.
+        // Matcher limit=1 secondary sort is ascending key text, so pager-headless wins
         let top1 = matcher.rank(&items, "p", 1, |item| item);
         assert_eq!(items[top1[0].0], "pager-headless");
     }

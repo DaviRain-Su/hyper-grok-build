@@ -2,8 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// The fail-closed gate refuses during bootstrap, after the TUI redirects fd 2 to `/dev/null`; its refusal must
-/// still reach the real terminal (a regression that doesn't restore fd 2 leaves a managed user a blank `exit 1`).
+/// The fail-closed gate refuses during bootstrap, after the TUI redirects fd 2 to `/dev/null`; its refusal must still reach the real terminal.
+/// A regression that does not restore fd 2 leaves a managed user a blank `exit 1`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn managed_policy_gate_refusal_reaches_real_terminal() {
@@ -11,7 +11,7 @@ async fn managed_policy_gate_refusal_reaches_real_terminal() {
     let home_path = sandbox.grok_home();
     std::fs::write(
         home_path.join("config.toml"),
-        // Dead local port so any incidental fetch fails fast offline (the gate is synchronous anyway).
+        // A dead local port makes any incidental fetch fail fast offline (the gate is synchronous anyway)
         "[endpoints]\n\
          deployment_key = \"KEY-AAA\"\n\
          managed_config_url = \"http://127.0.0.1:1/deployment/config\"\n\
@@ -23,7 +23,7 @@ async fn managed_policy_gate_refusal_reaches_real_terminal() {
         "[cli]\ntheme = \"dark\"\n",
     )
     .expect("write managed_config.toml");
-    // requirements.toml is deliberately absent (served-then-deleted).
+    // requirements.toml is deliberately absent even though the cache below records it existed
     let synced_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock after epoch")
@@ -66,7 +66,7 @@ async fn managed_policy_gate_refusal_reaches_real_terminal() {
                 PtyExitPoll::Running | PtyExitPoll::PendingStatus => {}
             }
             if exit_code.is_some() {
-                harness.update(Duration::from_millis(200)); // final drain after exit
+                harness.update(Duration::from_millis(200)); // the exit may flush more output
                 break;
             }
         }

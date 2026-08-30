@@ -1,7 +1,6 @@
 //! Markdown styling types.
 //!
-//! This module provides the `MarkdownStyle` struct which defines colors and
-//! effects for all markdown elements.
+//! This module provides the `MarkdownStyle` struct which defines colors and effects for all markdown elements.
 
 use anstyle::{Effects, Style};
 
@@ -121,9 +120,7 @@ impl Default for TableBorders {
 
 /// Style configuration for markdown rendering.
 ///
-/// Each field controls the styling for a specific markdown element.
-/// The `_inner` variants are applied to the content, while `_outer` variants
-/// are applied to the syntax markers (which are hidden in pretty mode).
+/// The `_inner` variants are applied to the content, while `_outer` variants are applied to the syntax markers (which are hidden in pretty mode).
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash)]
 pub struct MarkdownStyle {
     pub heading_inner: [Style; 6],
@@ -151,12 +148,10 @@ pub struct MarkdownStyle {
     pub code_background: Style,
     pub table_outer: Style,
     /// Default foreground for plain body text (paragraphs with no formatting).
-    /// When set, the renderer applies this to text spans that would otherwise
-    /// inherit the terminal's default foreground.
+    /// When set, the renderer applies this to text spans that would otherwise inherit the terminal's default foreground.
     pub text: Style,
-    /// Style for rendered LaTeX math (inline `$...$`/`\(...\)` content after
-    /// Unicode conversion, and display math block lines). In raw mode the
-    /// style applies to the unconverted TeX source.
+    /// Style for rendered LaTeX math (inline `$...$`/`\(...\)` content after Unicode conversion, and display math block lines).
+    /// In raw mode the style applies to the unconverted TeX source.
     pub math: Style,
 }
 
@@ -230,7 +225,7 @@ pub(crate) fn all_hidden(styles: impl IntoIterator<Item = Option<Style>>) -> boo
 }
 
 /// Merge multiple styles into one for rendering.
-/// Strips HIDDEN from final output - it's a semantic marker, not a visual style.
+/// Strips HIDDEN from the final output, since it marks text to skip rather than an effect to draw.
 pub(crate) fn merge_styles(styles: impl IntoIterator<Item = Option<Style>>) -> Style {
     let mut out = Style::new();
     let mut prev = Style::new();

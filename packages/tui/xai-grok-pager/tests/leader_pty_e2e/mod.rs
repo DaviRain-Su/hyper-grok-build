@@ -1,19 +1,15 @@
 //! Leader-mode PTY e2e tests, split out of the shared `pty_e2e` target.
 //!
-//! These cases spawn multi-process leader clusters (each test boots 2-3 full
-//! pager processes plus a leader subprocess), so running them interleaved
-//! with the ~45-test `pty_e2e` suite was the root of the 60→240s
-//! `LEADER_TIMEOUT` flake history. As their own `[[test]]` target they get
-//! their own Bazel test action (serialized from the main PTY pool) and can be
-//! invoked in isolation:
+//! These cases spawn multi-process leader clusters: each test boots 2-3 full pager processes plus a leader subprocess.
+//! Running them interleaved with the ~45-test `pty_e2e` suite is what made `LEADER_TIMEOUT` flake and grow from 60s to 240s.
+//! As their own `[[test]]` target they get their own Bazel test action (serialized from the main PTY pool) and can be invoked in isolation:
 //!
 //! ```bash
 //! cargo test -p xai-grok-pager --test leader_pty_e2e -- --ignored --test-threads=1 --nocapture
 //! ```
 //!
-//! Binary resolution and harness plumbing are identical to `pty_e2e` (see
-//! that target's `mod.rs`); the shared helpers these tests need live in this
-//! directory's `common.rs`.
+//! Binary resolution and harness setup are identical to `pty_e2e` (see that target's `mod.rs`).
+//! The shared helpers these tests need live in this directory's `common.rs`.
 
 mod common;
 

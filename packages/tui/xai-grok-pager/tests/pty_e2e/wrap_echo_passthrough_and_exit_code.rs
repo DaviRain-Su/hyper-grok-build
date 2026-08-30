@@ -2,9 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Direct-route e2e: `grok wrap` with a resolvable explicit path runs the
-/// command inside the wrap PTY with output passing through, and propagates the
-/// child's exit code — both for success and for a nonzero exit.
+/// Direct-route e2e: `grok wrap` with a resolvable explicit path runs the command inside the wrap PTY with output passing through.
+/// It propagates the child's exit code, both for success and for a nonzero exit.
 #[test]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 #[cfg(unix)]

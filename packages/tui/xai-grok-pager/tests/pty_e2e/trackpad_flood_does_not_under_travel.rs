@@ -6,89 +6,68 @@ use super::scroll::*;
 
 // ── Regression: trackpad feel — fast flicks must not under-travel ─────────
 //
-// User complaint: fast trackpad flicks felt "laggy AND too sensitive" and
-// under-traveled. The trackpad flush path had a fixed 6-line per-flush cap:
-// at the 16ms cadence that is a hard ~360 lines/s delivery ceiling no matter
-// how fast the gesture or how tall the viewport, and whatever backlog was
-// still queued when the stream finalized was discarded beyond one more
-// 6-line flush — the flick's tail simply evaporated. The fix makes the cap
-// proportional (half the viewport per flush, floored at 6) so delivery
-// scales with gesture demand, and the finalize flush drains the whole-line
-// backlog up to that cap.
+// User complaint: fast trackpad flicks felt "laggy AND too sensitive" and under-traveled
+// The trackpad flush path had a fixed 6-line per-flush cap
+// At the 16ms cadence that is a hard ~360 lines/s delivery ceiling no matter how fast the gesture or how tall the viewport
+// Whatever backlog was still queued when the stream finalized was discarded beyond one more 6-line flush; the flick's tail simply evaporated
+// The cap is now proportional (half the viewport per flush, floored at 6) so delivery scales with gesture demand
+// The finalize flush drains the whole-line backlog up to that cap
 //
-// The trackpad cap only binds once a stream is CONFIRMED trackpad, which
-// happens mid-stream only on ept=1 brands (their rapid same-direction runs
-// promote at the 3rd event; the harness default `TerminalName::Unknown` is
-// ept=3, where auto streams stay Unknown until finalize and flush uncapped).
-// So this test presents `TERM_PROGRAM=iTerm.app` (ept=1) and floods wheel-up
-// reports with `GROK_SCROLL_SPEED=100` (6x multiplier — an existing user
-// setting, used here as a deterministic demand amplifier). Total viewport
-// travel is then classification- and jitter-robust:
+// The trackpad cap only binds once a stream is CONFIRMED trackpad, which happens mid-stream only on ept=1 brands
+// Their rapid same-direction runs promote at the 3rd event
+// The harness default `TerminalName::Unknown` is ept=3, where auto streams stay Unknown until finalize and flush uncapped
+// So this test presents `TERM_PROGRAM=iTerm.app` (ept=1) and floods wheel-up reports with `GROK_SCROLL_SPEED=100`
+// That speed setting is a 6x multiplier, an existing user setting used here to amplify demand deterministically
+// Total viewport travel then holds up under any classification outcome and any scheduler jitter:
 //
-// - Every event contributes at least 1 base line even at the 1.0x accel
-//   floor, so desired travel is ≥ 40 × 1 × 6 = 240 rows no matter how much
-//   scheduler jitter stretches the 6ms gaps (jitter only lowers the accel
-//   multiplier toward 1.0; the speed multiplier is timing-independent). The
-//   proportional cap (~20 lines/flush at the 50-row PTY) drains that demand
-//   within the burst plus the 80ms stream-gap window, so travel stays above
-//   TRAVEL_FLOOR. If extreme stretching (avg gap > 30ms) prevents trackpad
-//   promotion entirely, the stream is wheel-like and uncapped: travel = 240.
-// - Under the parent's fixed 6-line cap the same flood delivers at most 6
-//   lines per 16ms slot: a ~260ms burst spans ~16 slots (~96 rows), plus the
-//   post-stop gap window (5 slots + one finalize flush ≈ 36 rows) — ≈ 130
-//   rows total, with the remaining backlog discarded at finalize. Verified
-//   against a parent-built binary: travel came out 138 rows (< TRAVEL_FLOOR).
+// - Every event contributes at least 1 base line even at the 1.0x accel floor, so desired travel is ≥ 40 × 1 × 6 = 240 rows under any jitter
+//   (Jitter only stretches the 6ms gaps and lowers the accel multiplier toward 1.0; the speed multiplier is timing-independent.)
+//   The proportional cap (~20 lines/flush at the 50-row PTY) drains that demand within the burst plus the 80ms stream-gap window
+//   So travel stays above TRAVEL_FLOOR
+//   If extreme stretching (avg gap > 30ms) prevents trackpad promotion entirely, the stream is wheel-like and uncapped: travel = 240
+// - Under the parent's fixed 6-line cap the same flood delivers at most 6 lines per 16ms slot
+//   A ~260ms burst spans ~16 slots (~96 rows), plus the post-stop gap window (5 slots + one finalize flush ≈ 36 rows), about 130 rows total
+//   The remaining backlog is discarded at finalize
+//   Running the flood against a parent-built binary gave 138 rows of travel (< TRAVEL_FLOOR)
 //
-// One jitter regime the floor does NOT cover is arrival COMPRESSION (the
-// mirror of stretching, per the driver contract in `scroll.rs`): if the
-// pager is descheduled for the whole host-paced burst, all reports queue in
-// the PTY and arrive as one batch. Accel maxes but delivery is cap-bound to
-// one in-batch flush plus the post-stop gap window (~5 cadence slots + one
-// finalize flush ≈ 7 flushes × ~20 lines ≈ 140 rows) — a legitimate
-// cap-bound outcome numerically indistinguishable from the parent defect
-// (138). The regimes separate by CAUSE, visible in the frame count: a
-// compressed burst paints ≲7 frames, while the parent's 6-line cap needs
-// ~16+ flush frames to travel that far. The detector below softens the
-// floor assertion in the compressed regime (distinct message) so a CI stall
-// is not misread as the regression; the floor stays a hard assertion in the
-// normal regime.
+// One jitter regime the floor does NOT cover is arrival COMPRESSION, the mirror of stretching per the driver contract in `scroll.rs`
+// If the pager is descheduled for the whole host-paced burst, all reports queue in the PTY and arrive as one batch
+// Accel maxes out, but the cap bounds delivery to one in-batch flush plus the post-stop gap window
+// That is ~5 cadence slots + one finalize flush ≈ 7 flushes × ~20 lines ≈ 140 rows
+// This capped outcome is legitimate yet numerically indistinguishable from the parent defect (138)
+// The regimes separate by CAUSE, visible in the frame count
+// A compressed burst paints at most ~7 frames, while the parent's 6-line cap needs ~16+ flush frames to travel that far
+// The detector below softens the floor assertion in the compressed regime (distinct message) so a CI stall is not misread as the regression
+// The floor stays a hard assertion in the normal regime
 //
-// Only byte-deterministic quantities are asserted (marker indices on the
-// final screen, frame counts from the preamble's reset_timing() capture) —
-// the post-burst update() is a drain window, not a timing assertion.
-// Per-flush pacing/cap math is pinned by the synthetic-clock unit tests in
-// `src/input/mouse.rs`.
+// Only quantities that are deterministic byte-for-byte are asserted
+// Those are the marker indices on the final screen and the frame counts from the preamble's reset_timing() capture
+// The post-burst update() is a drain window, not a timing assertion
+// Per-flush pacing and cap math is pinned by the synthetic-clock unit tests in `src/input/mouse.rs`
 
-/// Marker count: tall enough that maximum plausible travel (bounded by the
-/// ~590-row desired total at full nominal acceleration) never clamps at the
-/// transcript top, which would mask a travel measurement.
+/// Tall enough that maximum plausible travel, bounded by the ~590-row desired total at full nominal acceleration, never clamps at the transcript top.
+/// A clamp there would mask the travel measurement.
 const MARKER_COUNT: usize = 700;
 
-/// 40 spaced single reports at a nominal 6ms: rapid enough that the ept=1
-/// brand promotes the stream to confirmed trackpad at the 3rd event
-/// (avg interval < 30ms), engaging the per-flush cap under test.
+/// 40 spaced single reports at a nominal 6ms: the ept=1 brand promotes the stream to confirmed trackpad at the 3rd event (avg interval < 30ms).
+/// That engages the per-flush cap under test.
 const BURST_EVENTS: usize = 40;
 
 const BURST_INTERVAL: Duration = Duration::from_millis(6);
 
-/// Rows the flood must travel. Below every new-code delivery regime
-/// (jitter floor ≈ 240) and above the parent's cap-bound ceiling (≈ 130).
+/// Rows the flood must travel.
+/// The floor sits below every delivery regime of the new code (jitter floor ≈ 240) and above the parent's capped ceiling (≈ 130).
 const TRAVEL_FLOOR: usize = 200;
 
-/// Compressed-burst signature: a fully batched arrival delivers over at
-/// most one in-batch flush + ~5 post-stop cadence slots + one finalize
-/// flush (≈ 7 painted frames), while a genuine cap regression must pace the
-/// 260ms burst window at 6 lines per 16ms slot (≥ 21 frames to reach ~138
-/// rows). 12 splits that band: it also absorbs partial stalls (~205-230ms
-/// deschedules batching most-but-not-all of the burst into 9-10 frames with
-/// travel just under the floor) without ever reaching the ≥ 21-frame
-/// real-regression signature.
+/// A fully batched arrival delivers over at most one in-batch flush + ~5 post-stop cadence slots + one finalize flush (≈ 7 painted frames).
+/// A genuine cap regression instead must pace the 260ms burst window at 6 lines per 16ms slot (≥ 21 frames to reach ~138 rows).
+/// 12 splits that band.
+/// It also absorbs partial stalls: a ~205-230ms deschedule batches most of the burst into 9-10 frames with travel just under the floor.
+/// Even those stalls never reach the 21 frames a real regression paces.
 const COMPRESSED_BURST_FRAMES_MAX: u64 = 12;
 
-/// **Trackpad fast-flick travel regression.** A dense trackpad flood at high
-/// scroll speed must move the viewport by at least [`TRAVEL_FLOOR`] rows:
-/// the proportional per-flush cap keeps up with gesture demand and the
-/// finalize flush drains the backlog instead of discarding the flick's tail.
+/// A dense trackpad flood at high scroll speed must move the viewport by at least [`TRAVEL_FLOOR`] rows.
+/// The proportional per-flush cap keeps up with gesture demand, and the finalize flush drains the backlog instead of discarding the flick's tail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn trackpad_flood_does_not_under_travel() {
@@ -106,8 +85,7 @@ async fn trackpad_flood_does_not_under_travel() {
         WHEEL_COL,
         BURST_INTERVAL,
     );
-    // Drain window: outlasts the 80ms stream gap plus the post-stop cadence
-    // flushes and the finalize flush.
+    // Drain window: outlasts the 80ms stream gap plus the post-stop cadence flushes and the finalize flush
     harness.update(Duration::from_millis(800));
 
     assert!(
@@ -137,10 +115,9 @@ async fn trackpad_flood_does_not_under_travel() {
     );
     let travel = top_before - top_after;
     let frames = harness.frame_count();
-    // Compressed-burst detector (see header): sub-floor travel with only a
-    // handful of frames means the reports arrived batched (pager stalled
-    // through the burst window) — a cap-bound outcome, not the under-travel
-    // regression. Soften with a distinct message instead of failing.
+    // Compressed-burst detector (see header): travel under the floor with only a handful of frames means the reports arrived batched
+    // That is the pager stalling through the burst window, a capped outcome and not the under-travel regression
+    // Soften with a distinct message instead of failing
     if travel < TRAVEL_FLOOR && frames <= COMPRESSED_BURST_FRAMES_MAX {
         eprintln!(
             "SKIP(compressed burst): {frames} frames \

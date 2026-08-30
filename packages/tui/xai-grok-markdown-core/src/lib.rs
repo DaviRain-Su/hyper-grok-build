@@ -1,23 +1,19 @@
 //! Headless markdown analysis sharing Grok Build's exact `pulldown-cmark` config.
 //!
-//! This crate is intentionally lean -- it depends only on `pulldown-cmark` -- so it
-//! can be used without pulling in the terminal-rendering stack (syntect, ratatui,
-//! two-face). [`parser_options`] is the single source of truth for the parser
-//! feature set, shared with `xai-grok-markdown` so analysis matches what Grok
-//! Build actually renders 1:1.
+//! This crate depends only on `pulldown-cmark`, so it can be used without pulling in the terminal-rendering stack (syntect, ratatui, two-face).
+//! [`parser_options`] is the single source of truth for the parser feature set.
+//! `xai-grok-markdown` uses the same options, so analysis matches what Grok Build renders.
 //!
-//! After parsing, Grok applies [`offset_events`]: only `~~…~~` is strikethrough.
-//! Single-tilde pairs (`~text~`) are demoted to literal `~` text so LLM output
-//! like `~**10%**` is not struck (pulldown treats those pairs as strike; we do not).
+//! After parsing, Grok applies [`offset_events`]: only `~~…~~` counts as strikethrough.
+//! Single-tilde pairs (`~text~`), which pulldown treats as strike, are demoted to literal `~` text so LLM output like `~**10%**` is not struck.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 
 /// The exact `pulldown-cmark` option set Grok Build uses to render markdown.
 ///
-/// With `ENABLE_STRIKETHROUGH`, pulldown treats both `~~…~~` and single-`~` pairs as
-/// strike. Callers must consume events via [`offset_events`] so only double-tilde
-/// strikethrough is retained (LLM-friendly post-policy).
+/// With `ENABLE_STRIKETHROUGH`, pulldown treats both `~~…~~` and single-`~` pairs as strike.
+/// Callers must consume events via [`offset_events`] so only double-tilde strikethrough is retained.
 pub fn parser_options() -> Options {
     Options::ENABLE_GFM
         | Options::ENABLE_STRIKETHROUGH
@@ -26,10 +22,9 @@ pub fn parser_options() -> Options {
         | Options::ENABLE_TABLES
 }
 
-/// Offset event stream from Grok's parser, with single-tilde strikethrough demoted.
+/// Returns Grok's parser events with source byte ranges, single-tilde strikethrough already demoted.
 ///
-/// Prefer this over `Parser::new_ext(...).into_offset_iter()` so analysis and
-/// rendering agree on what counts as strikethrough.
+/// Prefer this over `Parser::new_ext(...).into_offset_iter()` so analysis and rendering agree on what counts as strikethrough.
 pub fn offset_events(text: &str) -> impl Iterator<Item = (Event<'_>, Range<usize>)> + '_ {
     DoubleTildeOnlyStrike {
         text,
@@ -37,9 +32,8 @@ pub fn offset_events(text: &str) -> impl Iterator<Item = (Event<'_>, Range<usize
     }
 }
 
-/// Stackless filter: Start and End share the same byte span in pulldown, so both
-/// are classified by whether that span opens with `~~`. Single-tilde frames emit
-/// delimiter `Text` instead of strike tags (delimiters are not separate events).
+/// Filter with no pairing stack: pulldown gives Start and End the same byte span, so each is classified by whether that span opens with `~~`.
+/// A single-tilde Start or End becomes its `~` delimiter as a `Text` event, since pulldown emits no separate delimiter events.
 struct DoubleTildeOnlyStrike<'a, I> {
     text: &'a str,
     events: I,
@@ -50,7 +44,7 @@ fn is_double_tilde_strike(text: &str, range: &Range<usize>) -> bool {
     text.get(range.start..).is_some_and(|s| s.starts_with("~~"))
 }
 
-/// Opening or closing delimiter byte as `Text`, with the matching source range.
+/// Returns the opening or closing delimiter byte as a `Text` event, with the matching source range.
 fn strike_delim_text<'a>(
     text: &'a str,
     range: &Range<usize>,
@@ -90,8 +84,7 @@ where
 
 /// Counts of markdown elements found in a document.
 ///
-/// Counting mirrors the `pulldown-cmark` event stream the renderer walks, so a few
-/// overlaps are intentional and documented per-field below.
+/// Counting mirrors the `pulldown-cmark` event stream the renderer walks, so a few overlaps are intentional and documented per field below.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MarkdownStats {
@@ -108,8 +101,7 @@ pub struct MarkdownStats {
     pub strong: u32,
     pub emphasis: u32,
     pub strikethrough: u32,
-    /// All GFM link types: inline, reference, collapsed, shortcut-when-defined,
-    /// angle-bracket autolink, and email autolink.
+    /// All GFM link types: inline, reference, collapsed, shortcut (when its reference is defined), angle-bracket autolink, and email autolink.
     pub links: u32,
     /// Markup inside an image's alt text is still counted (e.g. `![**x**](u)` bumps `strong`).
     pub images: u32,
@@ -129,7 +121,7 @@ impl MarkdownStats {
         self.h1 + self.h2 + self.h3 + self.h4 + self.h5 + self.h6
     }
 
-    /// Single source of truth for name->value mapping; the exhaustive destructure makes adding a field a compile error here, so downstream consumers cannot drift from the struct.
+    /// Single source of truth mapping each stat name to its value, so downstream consumers cannot drift from the struct.
     pub fn as_pairs(&self) -> [(&'static str, u32); 22] {
         // Exhaustive (no `..`): adding a field to MarkdownStats fails to compile until it is mapped below.
         let Self {
@@ -182,18 +174,14 @@ impl MarkdownStats {
     }
 }
 
-/// A render-fidelity failure: the model emitted markdown that does not render as
-/// the structure it clearly intended.
+/// The model emitted markdown that does not render as the structure it intended.
 ///
-/// Distinct from [`MarkdownStats`] counts: a count answers "how many tables", an
-/// issue answers "did a construct silently degrade". `pulldown-cmark` never errors
-/// (CommonMark is total), so each issue is detected by comparing intent (the raw
-/// syntax) against what actually parsed.
+/// Distinct from [`MarkdownStats`] counts: a count answers "how many tables", an issue answers "did a construct silently degrade".
+/// `pulldown-cmark` never errors (every input parses as something), so each issue is detected by comparing the raw syntax against what parsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructuralIssue {
-    /// A GFM table delimiter row (`|---|---|`) sits under a header line, but the
-    /// table did not parse (e.g. the delimiter's column count != the header's), so
-    /// the lines render as a paragraph -- the "made a table but it didn't show" bug.
+    /// A GFM table delimiter row (`|---|---|`) sits under a header line, but the table did not parse (e.g. the column counts differ).
+    /// The lines render as a paragraph: the "made a table but it didn't show" bug.
     MalformedTable,
     /// A fenced code block runs to EOF without a closing fence, swallowing the rest of the message.
     UnterminatedCodeBlock,
@@ -221,10 +209,10 @@ fn strip_block_prefix(line: &str) -> &str {
     line.trim_start_matches(['>', ' ', '\t'])
 }
 
-/// Unterminated iff no line after the opener is a closing fence matching the opener's char and length.
+/// True when no line after the opener is a closing fence matching the opener's character and length.
 ///
-/// Works off raw block source (the only thing carrying closure info), so a verbatim fence line in
-/// content could mask a real EOF -- a rare, safe-direction (under-penalizing) miss we accept for simplicity.
+/// Only the raw block source carries whether the fence closed, so a fence-shaped line inside the content can hide a truly unterminated block.
+/// That miss is rare and errs toward reporting fewer issues, so we accept it for simplicity.
 fn fenced_block_is_unterminated(block_src: &str) -> bool {
     let mut lines = block_src.lines();
     let Some(open) = lines.next().map(strip_block_prefix) else {
@@ -241,9 +229,8 @@ fn fenced_block_is_unterminated(block_src: &str) -> bool {
     })
 }
 
-/// A GFM table delimiter row: only `|`, `-`, `:`, and whitespace, with at least one
-/// pipe and one dash. The pipe requirement rejects a bare `---` thematic break or a
-/// setext `-----` underline; the dash requirement rejects a `|||`-only row.
+/// A GFM table delimiter row: only `|`, `-`, `:`, and whitespace, with at least one pipe and one dash.
+/// The pipe requirement rejects a bare `---` thematic break or a setext `-----` underline; the dash requirement rejects a `|||`-only row.
 fn is_table_delimiter_line(line: &str) -> bool {
     let line = line.trim();
     line.contains('|')
@@ -253,21 +240,18 @@ fn is_table_delimiter_line(line: &str) -> bool {
             .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
 }
 
-/// A line that could be a table header: non-empty, containing a column pipe, and
-/// not itself delimiter-shaped (a `|---|` row arming the next line would chain one
-/// broken table into a duplicate flag per extra delimiter row).
+/// A line that could be a table header: non-empty, containing a column pipe, and not itself delimiter-shaped.
+/// If a `|---|` row could serve as the next line's header, one broken table would flag once per extra delimiter row.
 fn line_looks_like_header(line: &str) -> bool {
     let line = line.trim();
     !line.is_empty() && line.contains('|') && !is_table_delimiter_line(line)
 }
 
-/// Flag delimiter rows the model intended as a table but that `pulldown-cmark` did
-/// not parse as one (so they render as a paragraph -- the broken-table bug).
+/// Flag delimiter rows the model intended as a table but that `pulldown-cmark` did not parse as one, so they render as a paragraph.
 ///
-/// `parsed_spans` are the byte ranges of real tables and code blocks: a delimiter
-/// line starting inside one is either part of a valid table or literal code text, so
-/// it never signals a malformed table. Everything else is fair game -- a delimiter
-/// row directly under a pipe-bearing header line is an intended-but-unparsed table.
+/// `parsed_spans` are the byte ranges of real tables and code blocks.
+/// A delimiter line starting inside one is either part of a valid table or literal code text, so it never signals a malformed table.
+/// Outside those spans, a delimiter row directly under a header line with a pipe is an intended table that did not parse.
 fn detect_malformed_tables(
     text: &str,
     parsed_spans: &[Range<usize>],
@@ -282,14 +266,14 @@ fn detect_malformed_tables(
         let start = offset;
         offset += line.len();
 
-        // A `|---|` line inside a parsed table/code block is not an intended-but-broken table.
+        // A `|---|` line inside a parsed table or code block belongs to a valid table or is literal code text
         let excluded = in_parsed_span(start);
         let content = strip_block_prefix(line.trim_end_matches(['\n', '\r']));
 
         if !excluded && prev_is_header && is_table_delimiter_line(content) {
             issues.push(StructuralIssue::MalformedTable);
         }
-        // The delimiter's header must be the immediately-preceding, non-excluded pipe line.
+        // Only a non-excluded pipe line directly above can serve as the delimiter's header
         prev_is_header = !excluded && line_looks_like_header(content);
     }
 }
@@ -298,16 +282,16 @@ fn detect_malformed_tables(
 pub fn analyze(text: &str) -> MarkdownAnalysis {
     let mut stats = MarkdownStats::default();
     let mut issues = Vec::new();
-    // Byte ranges of constructs where a `|---|`-shaped line is legitimately not an
-    // intended table (real tables and code blocks); consumed by `detect_malformed_tables`.
+    // Byte ranges of real tables and code blocks, where a `|---|`-shaped line is legitimate
+    // `detect_malformed_tables` skips delimiter lines inside these spans
     let mut parsed_spans: Vec<Range<usize>> = Vec::new();
 
-    // u32 element counters can't overflow: model output is token-bounded, far below `u32::MAX`.
-    // `offset_events` attaches byte ranges and demotes single-tilde strike so counts match render.
+    // The u32 element counters can't overflow: model output is bounded by its token limit, far below `u32::MAX`
+    // `offset_events` attaches byte ranges and demotes single-tilde strike, so counts match what Grok Build renders
     for (event, range) in offset_events(text) {
         // Structural-issue bookkeeping, tracked alongside the element counting below.
         match &event {
-            // A parsed table's span covers its delimiter row -- exclude it from malformed-table scanning.
+            // A parsed table's span covers its delimiter row; exclude it from malformed-table scanning
             Event::Start(Tag::Table(_)) => parsed_spans.push(range.clone()),
             // The range spans the opening fence through the close (or to EOF when unterminated).
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -349,8 +333,7 @@ pub fn analyze(text: &str) -> MarkdownAnalysis {
         }
     }
 
-    // Second pass: with every real-table/code-block span known, flag delimiter rows
-    // the model intended as tables but that did not parse as one.
+    // Second pass: with every table and code block span known, flag delimiter rows the model intended as tables but that did not parse as one
     detect_malformed_tables(text, &parsed_spans, &mut issues);
 
     MarkdownAnalysis { stats, issues }
@@ -453,8 +436,8 @@ mod tests {
 
     #[test]
     fn as_pairs_pins_every_pair() {
-        // One golden doc exercising several element types pins every label, value, AND order
-        // at once -- a mislabel like ("inline_math", display_math) would fail here.
+        // One golden doc exercising several element types pins every label, value, and order at once
+        // A mislabel like ("inline_math", display_math) would fail here
         let doc = "# Title\n## Sub\n\nSome **bold**, *italic*, ~~strike~~, `code`, and a [link](https://x.com).\n\n| a | b |\n| - | - |\n| c | d |\n\n- [ ] todo\n- [x] done\n- plain\n";
         assert_eq!(
             analyze(doc).stats.as_pairs(),
@@ -515,7 +498,7 @@ mod tests {
 
     #[test]
     fn bill_single_tilde_percent_is_not_strikethrough() {
-        // Trigger case: approx percentages must not strike; nested strong still applies.
+        // The real model output that motivated demoting single-tilde strike pairs
         let doc = "- `n=1` only: ~**10%** (~**300**)";
         let stats = analyze(doc).stats;
         assert_eq!(stats.strikethrough, 0);
@@ -558,7 +541,7 @@ mod tests {
 
     #[test]
     fn nested_double_inside_single_tilde_is_balanced() {
-        // Outer single-`~` demoted; inner `~~…~~` kept — Start/End must stay paired.
+        // The outer single-`~` pair is demoted and the inner `~~…~~` kept; Start and End must stay paired
         let doc = "~start ~~double~~ end~";
         assert_eq!(analyze(doc).stats.strikethrough, 1);
         assert_eq!(strike_start_end_counts(doc), (1, 1));
@@ -568,7 +551,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // Outer delimiters visible as literal text (not only via strike styling).
+        // The two outer `~` delimiters appear as literal text events
         assert!(texts.iter().filter(|t| t.as_str() == "~").count() >= 2);
     }
 
@@ -581,7 +564,7 @@ mod tests {
 
     #[test]
     fn well_formed_table_is_not_malformed() {
-        // A leading, body-bearing table parses cleanly: a count, never a render-fidelity failure.
+        // A leading table with a body row parses cleanly, so it only bumps the count and raises no issue
         let analysis = analyze("| a | b |\n| - | - |\n| c | d |\n");
         assert_eq!(analysis.stats.tables, 1);
         assert!(!analysis.issues.contains(&StructuralIssue::MalformedTable));
@@ -589,10 +572,9 @@ mod tests {
 
     #[test]
     fn chained_delimiter_rows_flag_one_malformed_table() {
-        // One broken table with stacked delimiter-shaped rows must flag exactly once:
-        // a delimiter row never doubles as the next row's "header". Column counts
-        // differ on every adjacent pair so pulldown parses no table at all (two
-        // equal-width delimiter rows would parse as a table themselves).
+        // One broken table with stacked delimiter-shaped rows must flag exactly once: a delimiter row never doubles as the next row's "header"
+        // Column counts differ on every adjacent pair, so pulldown parses no table at all
+        // Two equal-width delimiter rows would parse as a table themselves
         let doc = "| a | b | c |\n|---|---|---|----|\n|---|---|---|---|----|\n| 1 | 2 | 3 |\n";
         let analysis = analyze(doc);
         assert_eq!(analysis.stats.tables, 0);
@@ -608,7 +590,7 @@ mod tests {
 
     #[test]
     fn header_only_table_is_not_malformed() {
-        // A header + delimiter (no body) still parses as a table, so it is not a malformed table.
+        // A header row and delimiter row with no body still parse as a table, so it is not a malformed table
         let analysis = analyze("| a | b |\n| - | - |\n");
         assert_eq!(analysis.stats.tables, 1);
         assert!(!analysis.issues.contains(&StructuralIssue::MalformedTable));
@@ -624,9 +606,8 @@ mod tests {
 
     #[test]
     fn broken_table_extra_delimiter_column_flags_malformed_table() {
-        // Wide synthetic table whose delimiter row has 12 columns but the header
-        // has 11 (an extra `|---|`), so pulldown-cmark renders the lines as a
-        // paragraph instead of a table.
+        // This wide synthetic table's delimiter row has 12 columns but its header has 11 (an extra `|---|`)
+        // pulldown-cmark renders the lines as a paragraph instead of a table
         let doc = "\
 | ColA | ColB | ColC | ColD | ColE | ColF | ColG | ColH | ColI | ColJ | ColK |
 |---|---|---|---|---|---|---|---|---|---|---|------------------------------------|
@@ -707,7 +688,7 @@ mod tests {
 
     #[test]
     fn blockquoted_closed_fence_has_no_unterminated_issue() {
-        // The block range keeps the `>` prefixes; a properly-closed quoted fence must be clean.
+        // The block range keeps the `>` prefixes; a closed fence inside a blockquote must not flag
         let analysis = analyze("> ```\n> code\n> ```\n");
         assert!(
             !analysis
@@ -728,7 +709,7 @@ mod tests {
 
     #[test]
     fn longer_opener_not_closed_by_shorter_fence() {
-        // A 5-backtick opener is not closed by a 3-backtick line (close must be >= opener length).
+        // A 5-backtick opener is not closed by a 3-backtick line; the close must be at least as long as the opener
         let analysis = analyze("`````\ncode\n```\n");
         assert!(
             analysis
@@ -737,8 +718,8 @@ mod tests {
         );
     }
 
-    // (name, doc, parsed_tables) corpus of intended-but-broken tables, shared by the
-    // detection test and the flagged-implies-not-parsed invariant below.
+    // (name, doc, parsed_tables) corpus of tables the model intended but that did not parse
+    // Shared by `malformed_table_true_positives` and `flagged_implies_table_not_parsed` below
     const MALFORMED_TABLE_TRUE_POSITIVES: &[(&str, &str, u32)] = &[
         (
             "delimiter_wider_than_header",
@@ -816,7 +797,7 @@ mod tests {
                 "two_valid_tables_with_prose_between",
                 "| a | b |\n| - | - |\n| c | d |\n\nprose here\n\n| e | f |\n| - | - |\n| g | h |\n",
             ),
-            // The `---` has no pipe, so it is a setext underline / break, not a delimiter row.
+            // The `---` has no pipe, so it is a setext underline or a thematic break, not a delimiter row
             ("pipe_prose_then_plain_dashes", "uses a | b pipe\n---\n"),
             (
                 "mismatched_delimiter_in_indented_code_block",
@@ -835,9 +816,8 @@ mod tests {
 
     #[test]
     fn legacy_mdx_rule_divergence() {
-        // Legacy markdown-validator MDX_* rule -> our verdict. We only flag
-        // render-fidelity failures (intended structure that pulldown did not parse),
-        // never style opinions:
+        // How each legacy markdown-validator MDX_* rule maps to our verdict
+        // We only flag intended structure that pulldown did not parse, never style opinions:
         //   FENCE_UNBALANCED          -> UnterminatedCodeBlock (fence swallows the rest of the doc).
         //   TABLE_COLUMN_MISMATCH     -> MalformedTable (header/delimiter arity mismatch un-parses it).
         //   TABLE_DIVIDER_INVALID     -> NOT flagged: pulldown rejects the table, but a divider with
@@ -934,11 +914,10 @@ mod tests {
 
     #[test]
     fn gfm_spec_derived_table_cases() {
-        // Minimal docs re-derived from the GFM spec's table-recognition rules
-        // (section 4.10 "Tables (extension)"); each comment cites the behavior.
+        // Minimal docs re-derived from the GFM spec's table-recognition rules (section 4.10 "Tables (extension)"); each comment cites the behavior
         let cases: &[(&str, &str, u32, bool)] = &[
             // (name, doc, parsed tables, malformed_table?)
-            // GFM: a header row + matching delimiter row form a table (ex. 198).
+            // GFM: a header row and a matching delimiter row form a table (ex. 198).
             (
                 "arity_match_is_table",
                 "| foo | bar |\n| --- | --- |\n| baz | bim |\n",
@@ -959,30 +938,29 @@ mod tests {
                 1,
                 false,
             ),
-            // GFM: header/delimiter cell-count mismatch -> no table is recognized (ex. 203).
+            // GFM: when the header and delimiter cell counts differ, no table is recognized (ex. 203).
             (
                 "arity_mismatch_not_recognized",
                 "| abc | def |\n| --- |\n| bar |\n",
                 0,
                 true,
             ),
-            // GFM: body rows may have more/fewer cells; padded/truncated, still a table (ex. 204).
+            // GFM: body rows may have more or fewer cells; they are padded or truncated and it is still a table (ex. 204).
             (
                 "ragged_body_rows_still_table",
                 "| abc | def |\n| --- | --- |\n| bar |\n| bar | baz | boo |\n",
                 1,
                 false,
             ),
-            // GFM: the table is broken at the first empty line (ex. 205); the
-            // pipe line after the blank is plain prose, not a second table.
+            // GFM: the table is broken at the first empty line (ex. 205); the pipe line after the blank is plain prose, not a second table.
             (
                 "blank_line_ends_table",
                 "| abc | def |\n| --- | --- |\n\n| bar | baz |\n",
                 1,
                 false,
             ),
-            // A blank line between header and delimiter prevents recognition, and the
-            // delimiter no longer sits under a header line, so we do not flag either.
+            // A blank line between the header and the delimiter prevents table recognition
+            // The delimiter no longer sits directly under a header line, so we do not flag it either
             (
                 "blank_between_header_and_delimiter",
                 "| a | b |\n\n| - | - |\n",
@@ -1006,8 +984,8 @@ mod tests {
 
     #[test]
     fn valid_table_mutations_flag() {
-        // Corrupting ONLY the delimiter row of a valid table must both un-parse the
-        // table and raise MalformedTable -- the detector tracks pulldown exactly.
+        // Corrupting only the delimiter row of a valid table must both keep the table from parsing and raise MalformedTable
+        // The detector tracks pulldown exactly
         let bases = [
             "| a | b |\n| - | - |\n| c | d |\n",
             "| a | b | c |\n| - | - | - |\n| d | e | f |\n",

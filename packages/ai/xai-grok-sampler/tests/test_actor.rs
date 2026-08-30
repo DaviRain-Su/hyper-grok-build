@@ -619,6 +619,72 @@ async fn legacy_phrase_400_strips_as_heuristic() {
     );
 }
 
+/// Guards that `user_facing_api_error_message` keeps the `.image.source` path
+/// in a codeless `invalid_request_error`, so the codeless image-strip recovery
+/// fires on many-image dimension 400s instead of hard-failing every turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn many_image_dimension_400_strips_as_heuristic() {
+    const IMAGE_URI: &str = "data:image/png;base64,cG9pc29uZWQ=";
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err::<Sse<_>, (StatusCode, String)>((
+                        StatusCode::BAD_REQUEST,
+                        json!({
+                            "error": {
+                                "message": "messages.0.content.4.image.source.base64.data: At least one of the image dimensions exceed max allowed size for many-image requests: 2000 pixels",
+                                "type": "invalid_request_error",
+                            }
+                        })
+                        .to_string(),
+                    ))
+                } else {
+                    let events = sse::chat_completion_events("recovered", "test-model");
+                    Ok(Sse::new(stream::iter(
+                        events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                    )))
+                }
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        test_config(server.base_url(), "test-model"),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let mut request = user_request("what is in this image?");
+    if let Some(ConversationItem::User(u)) = request.items.first_mut() {
+        u.add_image(IMAGE_URI);
+    }
+    handle.submit(RequestId::from("req-many-image-dimension-strip"), request);
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            SamplingEvent::ImagesStripped {
+                reason: StripReason::PayloadHeuristic,
+                ..
+            }
+        )),
+        "codeless many-image dimension 400 must strip as PayloadHeuristic, got {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Completed { .. })),
+        "expected Completed after strip-retry"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn image_400_with_nothing_left_to_strip_is_fatal_after_one_cycle() {
     // `stripped == 0` is the only bound on the strip-retry loop.
@@ -1445,10 +1511,10 @@ async fn responses_doom_loop_signals_reach_completed_response() {
     assert_eq!(response.assistant_text(), "an answer");
 }
 
-/// Acceptance spec for the recovery rung: a confident signal
-/// (`tail_repetition:8@thinking` at the default threshold) is resampled once
-/// and the clean second response is accepted on its own budget, even with
-/// transport retries disabled.
+/// Acceptance spec for the recovery rung: a confident tail signal is
+/// resampled once while its detector label remains observable, and the clean
+/// second response is accepted on its own budget even with transport retries
+/// disabled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_confident_doom_loop_signal_resamples_once() {
     let counter = Arc::new(AtomicU32::new(0));
@@ -1488,23 +1554,50 @@ async fn responses_confident_doom_loop_signal_resamples_once() {
         }),
     );
     let server = MockServer::spawn(app).await;
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let mut config = responses_config(server.base_url(), Some(DoomLoopRecoveryPolicy::default()));
     config.max_retries = Some(0);
     let handle = SamplerActor::spawn(config, RetryPolicy::default(), event_tx);
 
-    let result = handle
-        .submit_and_collect(RequestId::from("req-doom-resample"), user_request("hi"))
+    let collected = handle
+        .submit_and_collect_with_metadata(RequestId::from("req-doom-resample"), user_request("hi"))
         .await;
     server.shutdown();
 
-    let (response, _metrics) = result.expect("recovery accepts the clean resample");
+    assert!(collected.terminal_event_queued);
+    assert_eq!(
+        collected.doom_loop_signals,
+        vec!["tail_repetition:8@thinking".to_string()],
+    );
+    assert_eq!(1, collected.doom_loop_recovery_attempts.len());
+    assert_eq!(
+        collected.doom_loop_recovery_attempts[0].triggers,
+        vec!["tail_repetition:8@thinking".to_string()]
+    );
+    let (response, _metrics) = collected
+        .result
+        .expect("recovery accepts the clean resample");
     assert_eq!(counter.load(Ordering::SeqCst), 2, "exactly one resample");
     assert_eq!(response.assistant_text(), "clean answer");
     assert!(
         response.doom_loop_signals.is_empty(),
         "the accepted response is the clean resample"
     );
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(1)).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SamplingEvent::DoomLoopSignals { triggers, .. }
+            if triggers == &["tail_repetition:8@thinking".to_string()]
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SamplingEvent::Retrying {
+            doom_loop_triggers: Some(triggers),
+            ..
+        } if triggers == &["tail_repetition:8@thinking".to_string()]
+    )));
+
     let bodies = bodies.lock().unwrap();
     let retry_input = bodies[1]["input"].as_array().unwrap();
     assert_eq!(retry_input.len(), 4);

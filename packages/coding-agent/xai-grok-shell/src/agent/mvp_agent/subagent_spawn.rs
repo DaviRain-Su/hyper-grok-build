@@ -356,6 +356,9 @@ impl MvpAgent {
                 .unwrap_or_else(|| {
                     xai_grok_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string()
                 }),
+            scheduler_delete_tool_name: parent_handle
+                .as_ref()
+                .and_then(|h| h.tool_context.scheduler_delete_tool_name.clone()),
             auto_wake_enabled: self
                 .cfg
                 .borrow()

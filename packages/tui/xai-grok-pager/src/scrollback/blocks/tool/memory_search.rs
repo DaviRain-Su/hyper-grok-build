@@ -1,5 +1,3 @@
-//! MemorySearchToolCallBlock — structured memory search results display.
-
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
@@ -23,7 +21,6 @@ pub struct MemoryResult {
     pub snippet: String,
 }
 
-/// Memory search tool call block with structured result display.
 #[derive(Debug, Clone)]
 pub struct MemorySearchToolCallBlock {
     pub query: String,
@@ -159,8 +156,7 @@ impl BlockContent for MemorySearchToolCallBlock {
                     .into_iter()
                     .enumerate()
                     .map(|(i, line)| {
-                        // First span is label (or indent on continuations); only
-                        // the query span is selectable on the first visual row.
+                        // First span is label (or indent on continuations); only the query span is selectable on the first visual row
                         let selectable = if i == 0 {
                             let query_end = 2.min(line.spans.len()).max(1);
                             Selectable::Spans(1..query_end)
@@ -448,7 +444,7 @@ session content
 
     #[test]
     fn shorten_memory_path() {
-        // Paths under the configured grok memory root keep one trailing segment group.
+        // Paths under the configured grok memory root drop the root and the first directory below it
         let memory_root = xai_grok_config::grok_home().join("memory");
         let session = memory_root.join("xai-50aa78f0/sessions/2026-05-01.md");
         let top = memory_root.join("MEMORY.md");

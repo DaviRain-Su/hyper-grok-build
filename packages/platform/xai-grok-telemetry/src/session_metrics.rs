@@ -80,6 +80,25 @@ pub struct TurnCompletedLifecycle {
     pub turn_number: u64,
 }
 
+/// Server-side doom-loop detection observed this turn. Aggregated detector
+/// metadata only — never generation content or token IDs.
+#[derive(Serialize)]
+pub struct DoomLoopDetected {
+    pub session_id: String,
+    pub turn_number: u64,
+    pub trigger_count: u32,
+    pub detector_kinds: Vec<String>,
+    pub channels: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tightest_tail_threshold: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_exact_sequence_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_exact_repeat_count: Option<u32>,
+    pub recovery_attempts: u32,
+    pub model: String,
+}
+
 /// Doom-loop recovery acted this turn: poisoned attempts were resampled
 /// and/or a response was accepted with confident signals after the budget
 /// was spent. Trigger labels only — never generation content.
@@ -178,6 +197,43 @@ mod tests {
     use xai_file_utils::UploadMethod;
 
     use super::TraceUploadReason;
+
+    #[test]
+    fn doom_loop_detected_event_shape_is_stable() {
+        use crate::events::TelemetryEvent;
+        assert_eq!(super::DoomLoopDetected::NAME, "doom_loop_detected");
+        let event = serde_json::to_value(super::DoomLoopDetected {
+            session_id: "s1".to_string(),
+            turn_number: 7,
+            trigger_count: 3,
+            detector_kinds: vec![
+                "tail_repetition".to_string(),
+                "exact_repetition".to_string(),
+            ],
+            channels: vec!["thinking".to_string(), "response".to_string()],
+            tightest_tail_threshold: Some(32),
+            max_exact_sequence_tokens: Some(42),
+            max_exact_repeat_count: Some(3),
+            recovery_attempts: 1,
+            model: "grok-4.6".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            event,
+            serde_json::json!({
+                "session_id": "s1",
+                "turn_number": 7,
+                "trigger_count": 3,
+                "detector_kinds": ["tail_repetition", "exact_repetition"],
+                "channels": ["thinking", "response"],
+                "tightest_tail_threshold": 32,
+                "max_exact_sequence_tokens": 42,
+                "max_exact_repeat_count": 3,
+                "recovery_attempts": 1,
+                "model": "grok-4.6",
+            })
+        );
+    }
 
     /// `session_context_snapshot` property keys are a Mixpanel dashboard
     /// contract — pin the shape so a rename cannot silently break queries.

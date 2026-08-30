@@ -1,8 +1,6 @@
-//! Expanded goal detail overlay — full-screen popup showing goal progress
-//! with token budget bar, todo list, and event history.
+//! Expanded goal detail overlay: a full-screen popup showing goal progress with the token budget bar, todo list, and event history.
 //!
-//! Rendered as a centered overlay when `AgentView::show_goal_detail` is true
-//! and `goal_state` is `Some`. Dismissed by `Esc` or `g`.
+//! The overlay renders centered when `AgentView::show_goal_detail` is true and `goal_state` is `Some`; `Esc` or `g` dismisses it.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -27,12 +25,10 @@ const MAX_TODO_DISPLAY: usize = 15;
 /// Maximum per-model token rows displayed before a "+N more" summary row.
 const MAX_MODEL_DISPLAY: usize = 6;
 
-/// Rows the per-model breakdown contributes to the modal: the capped model
-/// rows plus an optional "+N more" overflow row, or 0 when the breakdown is
-/// suppressed (a single-model / all-inherit goal collapses to the single
-/// tokens line). The cap is applied BEFORE the `u16` cast so the height sum
-/// can never overflow, and this is the single source of truth shared by the
-/// height calc and the render loop so they stay in lockstep.
+/// Rows the per-model breakdown contributes to the modal: the capped model rows plus an optional "+N more" overflow row.
+/// Returns 0 when the breakdown is suppressed (a single-model or all-inherit goal collapses to the single tokens line).
+/// The cap is applied BEFORE the `u16` cast so the height sum can never overflow.
+/// The height calc and the render loop both use this, so they stay in lockstep.
 fn per_model_row_count(models: &[(String, u64)]) -> u16 {
     if models.len() < 2 {
         return 0;
@@ -58,7 +54,7 @@ fn budget_color(pct: f32, theme: &Theme) -> Color {
 }
 
 /// Format elapsed milliseconds as a compact human-readable duration.
-/// Same style as `goal_orchestrator::format_elapsed` — keep in sync.
+/// Same style as `goal_orchestrator::format_elapsed`; keep in sync.
 pub(crate) fn format_elapsed(ms: u64) -> String {
     let total_secs = ms / 1000;
     let hours = total_secs / 3600;
@@ -125,33 +121,26 @@ fn status_label(goal: &GoalDisplayState) -> (std::borrow::Cow<'static, str>, Col
 }
 
 // ---------------------------------------------------------------------------
-// Wrapping helpers — pause-message reason block
+// Wrapping helpers: pause-message reason block
 // ---------------------------------------------------------------------------
 
 /// Wrap a string into rows of at most `width` terminal columns.
 ///
-/// Splits on whitespace first, then hard-splits any token wider than
-/// `width`. Preserves explicit `\n` line breaks so multi-line block
-/// reasons (the concatenated `blocked_reason\nmessage` form emitted by
-/// the shell) render with the same structure they had on the wire.
+/// Splits on whitespace first, then hard-splits any token wider than `width`.
+/// Explicit `\n` line breaks are preserved, so a multi-line block reason (the shell's `blocked_reason\nmessage` form) keeps its structure.
 ///
-/// Width is measured in terminal columns via `UnicodeWidthStr` /
-/// `UnicodeWidthChar`, not Unicode code points — CJK / East-Asian Wide
-/// characters take 2 columns each, combining marks take 0, and emoji
-/// can take 2. Using `chars().count()` here would let model-emitted
-/// block reasons containing wide chars overflow the modal's inner
-/// rectangle into the right border.
+/// Width is measured in terminal columns via `UnicodeWidthStr` and `UnicodeWidthChar`, not Unicode code points.
+/// CJK and East-Asian Wide characters take 2 columns each, combining marks take 0, and emoji can take 2.
+/// Using `chars().count()` would let a model-emitted block reason with wide chars overflow into the right border.
 ///
-/// `width` of zero or one returns a single un-split row to avoid
-/// divide-by-zero behaviour at degenerate modal widths (unreachable in
-/// practice — the modal bails below width 20).
+/// `width` of zero or one returns a single un-split row to avoid divide-by-zero behaviour at degenerate modal widths.
+/// That case is unreachable in practice; the modal bails below width 20.
 fn wrap_pause_message_lines(text: &str, width: u16) -> Vec<String> {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
     let w = width as usize;
     if w <= 1 {
-        // Collapse the kept `\n` here too so "no control byte in any returned
-        // line" holds even on this un-split degenerate path.
+        // Collapse the kept `\n` here too so "no control byte in any returned line" holds even on this un-split degenerate path
         return vec![text.replace('\n', " ")];
     }
     let mut out = Vec::new();
@@ -163,11 +152,9 @@ fn wrap_pause_message_lines(text: &str, width: u16) -> Vec<String> {
         let mut current = String::new();
         for word in paragraph.split_whitespace() {
             if UnicodeWidthStr::width(word) > w {
-                // Hard-split overlong tokens so the row-width invariant
-                // holds even for paths/URLs without whitespace. Build
-                // each chunk by accumulating chars until the next char
-                // would push the chunk past `w` columns, honouring
-                // zero-width marks (they don't consume capacity).
+                // Hard-split overlong tokens so the row-width invariant holds even for paths/URLs without whitespace
+                // Build each chunk by accumulating chars until the next char would push the chunk past `w` columns
+                // Zero-width marks don't consume capacity
                 if !current.is_empty() {
                     out.push(std::mem::take(&mut current));
                 }
@@ -176,9 +163,8 @@ fn wrap_pause_message_lines(text: &str, width: u16) -> Vec<String> {
                 for ch in word.chars() {
                     let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
                     if cw > w {
-                        // Pathological: a single char wider than the
-                        // whole row. Emit it alone — anything else
-                        // would silently drop the codepoint.
+                        // Pathological: a single char wider than the whole row
+                        // Emit it alone; anything else would silently drop the codepoint
                         if !chunk.is_empty() {
                             out.push(std::mem::take(&mut chunk));
                             chunk_w = 0;
@@ -223,10 +209,8 @@ fn wrap_pause_message_lines(text: &str, width: u16) -> Vec<String> {
     out
 }
 
-/// Truncate `text` to at most `budget` terminal columns, appending an
-/// ellipsis if truncated. Uses display width (not char count) so CJK
-/// and emoji characters measure correctly — matches the
-/// `wrap_pause_message_lines` pattern.
+/// Truncate `text` to at most `budget` terminal columns, appending an ellipsis if truncated.
+/// Uses display width (not char count) so CJK and emoji characters measure correctly, matching `wrap_pause_message_lines`.
 pub(crate) fn truncate_to_width(text: &str, budget: usize) -> String {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -248,11 +232,10 @@ pub(crate) fn truncate_to_width(text: &str, budget: usize) -> String {
     out
 }
 
-/// Replace control characters (tab, ESC, BEL, …) with spaces so free-form
-/// model/wire-derived text (objective title, humanized event detail/name/
-/// timestamp, pause reason) can't break a rendered row even if ratatui's own
-/// filter regresses. `keep_newlines` preserves `\n` for the pause-reason
-/// wrapper (which splits on it before render); single-row sinks pass `false`.
+/// Replace control characters (tab, ESC, BEL, and so on) with spaces.
+/// The callers pass free-form model or wire text (objective title, event detail, timestamp, pause reason) that must not break a rendered row.
+/// Stripping here does not rely on ratatui's own filter, so a ratatui regression can't leak control bytes.
+/// `keep_newlines` preserves `\n` for the pause-reason wrapper (which splits on it before render); single-row callers pass `false`.
 pub(crate) fn strip_control_chars(s: &str, keep_newlines: bool) -> String {
     s.chars()
         .map(|c| {
@@ -265,16 +248,14 @@ pub(crate) fn strip_control_chars(s: &str, keep_newlines: bool) -> String {
         .collect()
 }
 
-/// Strip control chars from the objective title, then trim (the title is
-/// short and centered). A bare `\n` is zero-width to `truncate_to_width` and
-/// would otherwise leak into the border row.
+/// Strip control chars from the objective title, then trim (the title is short and centered).
+/// A bare `\n` is zero-width to `truncate_to_width` and would otherwise leak into the border row.
 fn sanitize_title(s: &str) -> String {
     strip_control_chars(s, false).trim().to_owned()
 }
 
-/// Build the wrapped-reason source line for a paused goal's `pause_message`,
-/// control-stripped (newlines kept — [`wrap_pause_message_lines`] splits on
-/// them for multi-line block reasons and they never reach a rendered row).
+/// Build the wrapped-reason source line for a paused goal's `pause_message`, control-stripped with newlines kept.
+/// [`wrap_pause_message_lines`] splits on the kept newlines for multi-line block reasons, so they never reach a rendered row.
 /// Shared by the height calc and the render so they wrap identical text.
 fn format_pause_reason(msg: &str) -> String {
     format!("Reason: {}", strip_control_chars(msg, true))
@@ -284,10 +265,8 @@ fn format_pause_reason(msg: &str) -> String {
 // Public render
 // ---------------------------------------------------------------------------
 
-/// True when the goal carries at least one signal from the
-/// completion classifier — gates rendering of the modal's
-/// "Completion review" section so a goal that has never been
-/// classified shows nothing extra.
+/// True when the goal carries at least one signal from the completion classifier.
+/// Gates the modal's "Completion review" section so a goal that has never been classified shows nothing extra.
 fn has_classifier_activity(goal: &GoalDisplayState) -> bool {
     goal.classifier_runs_attempted.is_some()
         || goal.classifier_max_runs.is_some()
@@ -295,11 +274,10 @@ fn has_classifier_activity(goal: &GoalDisplayState) -> bool {
         || goal.last_classifier_details_path.is_some()
 }
 
-/// Display string for the classifier details-path row: the path when it
-/// exists (existence resolved once on receipt and passed as `exists`),
-/// `(unavailable)` when a path was reported but the file is missing (a
-/// fail-open run may not have written it), or a hyphen when no path was
-/// reported at all.
+/// Display string for the classifier details-path row.
+/// Shows the path when it exists (existence resolved once on receipt and passed as `exists`).
+/// Shows `(unavailable)` when a path was reported but the file is missing (a fail-open run may not have written it).
+/// Shows a hyphen when no path was reported at all.
 fn classifier_details_display(path: Option<&str>, exists: bool) -> &str {
     match path {
         Some(p) if exists => p,
@@ -308,9 +286,8 @@ fn classifier_details_display(path: Option<&str>, exists: bool) -> &str {
     }
 }
 
-/// Human-readable label for a classifier verdict. Explicit match
-/// (no wildcard) so adding a third verdict variant forces an audit
-/// of every render site.
+/// Human-readable label for a classifier verdict.
+/// Explicit match (no wildcard) so adding a third verdict variant forces an audit of every render site.
 fn classifier_verdict_label(verdict: Option<GoalClassifierVerdict>) -> &'static str {
     match verdict {
         Some(GoalClassifierVerdict::Achieved) => "Achieved",
@@ -319,15 +296,12 @@ fn classifier_verdict_label(verdict: Option<GoalClassifierVerdict>) -> &'static 
     }
 }
 
-/// Humanize a wire goal-event name (+ optional detail) for the Recent
-/// History row — the single wire→display mapping, so machine vocabulary
-/// (`goal_paused`, snake_case detail) never reaches the user. Detail is
-/// folded into the label for the events that carry one (pause cause,
-/// premature-stop pattern); unknown events fall back to a de-snake-cased
-/// form so a future shell event still renders readably.
+/// Humanize a wire goal-event name (and optional detail) for the Recent History row.
+/// This is the single wire-to-display mapping, so machine vocabulary (`goal_paused`, snake_case detail) never reaches the user.
+/// Detail is folded into the label for the events that carry one (pause cause, premature-stop pattern).
+/// Unknown events fall back to a de-snake-cased form so a future shell event still renders readably.
 fn humanize_goal_event(event: &str, detail: Option<&str>) -> String {
-    // Variable passthroughs (model/wire-derived) are control-stripped so they
-    // can't leak control bytes; the fixed labels below are `&'static`.
+    // Variable passthroughs (model/wire-derived) are control-stripped so they can't leak control bytes; the fixed labels below are `&'static`
     let phrase = |d: Option<&str>| d.map(|s| strip_control_chars(&s.replace('_', " "), false));
     match event {
         "goal_created" => rust_i18n::t!("goal.event.created").into_owned(),
@@ -363,9 +337,8 @@ fn humanize_goal_event(event: &str, detail: Option<&str>) -> String {
     }
 }
 
-/// Render a wire RFC3339 event timestamp as a coarse relative time
-/// ("2m ago"). Empty stays empty; an unparseable value (legacy / non-RFC3339)
-/// is returned verbatim (control-stripped, since it's a raw passthrough).
+/// Render a wire RFC3339 event timestamp as a coarse relative time ("2m ago").
+/// Empty stays empty; an unparseable value (legacy or non-RFC3339) is returned verbatim, control-stripped since it's a raw passthrough.
 fn humanize_event_timestamp(ts: &str) -> String {
     if ts.is_empty() {
         return String::new();
@@ -393,18 +366,15 @@ pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, todos: &[TodoItem
         .clamp(60, 140)
         .min(screen.width.saturating_sub(4));
 
-    // Inner content width matches the render path:
-    //   `inner` = block.inner(area) gives `w - 2` (the rounded border).
-    //   We further indent by 1 column on each side (`x = inner.x + 1`,
-    //   `w = inner.width - 2`), so the usable text width is `w - 4`.
-    // Mirror that here so pause-message wrapping computes the same row
-    // count the renderer will produce.
+    // Inner content width matches the render path
+    // `block.inner(area)` gives `w - 2` (the rounded border)
+    // The render indents 1 more column on each side (`x = inner.x + 1`, `w = inner.width - 2`), so the usable text width is `w - 4`
+    // Mirror that here so pause-message wrapping computes the same row count the renderer will produce
     let inner_w = w.saturating_sub(4);
 
-    // Compute content height based on what will actually be rendered. Each
-    // optional section OWNS its leading blank separator (rendered only when
-    // the section renders) so the height budget and the render path stay in
-    // lockstep.
+    // Compute content height based on what will actually be rendered
+    // Each optional section OWNS its leading blank separator (rendered only when the section renders)
+    // That keeps the height budget and the render path in lockstep
     //   2  border (top + bottom)
     //   1  status line
     //   N  pause_message reason block (wrapped, when paused + Some)
@@ -431,13 +401,10 @@ pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, todos: &[TodoItem
     } else {
         0
     };
-    // Reason block renders as `Reason: <pause_message>` wrapped to the
-    // inner column width. Prefix is part of the wrapped content so
-    // continuation rows just continue at column 0 without alignment
-    // tricks; matches the renderer's loop exactly. Gated on
-    // `is_paused()` to stay in sync with the renderer — a future shell
-    // bug that leaks `pause_message` on a non-paused snapshot must not
-    // grow the modal box without also rendering content into it.
+    // The Reason block renders as `Reason: <pause_message>` wrapped to the inner column width
+    // The prefix is part of the wrapped content, so continuation rows continue at column 0 without alignment tricks; matches the renderer's loop
+    // Gated on `is_paused()` to stay in sync with the renderer
+    // A future shell bug that leaks `pause_message` on a non-paused snapshot must not grow the modal box without also rendering content into it
     let reason_lines = if goal.status.is_paused()
         || matches!(
             goal.status,
@@ -465,9 +432,8 @@ pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, todos: &[TodoItem
         1 + item_count + overflow // header + items + optional "+N more"
     };
     let subagent_lines = if goal.current_subagent_role.is_some() {
-        // blank + role line, plus the detail line ONLY when there's a live
-        // metric to show — matches the render, which skips the detail row when
-        // every live_* field is None (a just-spawned subagent).
+        // A blank plus the role line, plus the detail line ONLY when there's a live metric to show
+        // Matches the render, which skips the detail row when every live_* field is None (a just-spawned subagent)
         let has_detail = goal.live_subagent_tokens.is_some()
             || goal.live_context_pct.is_some()
             || goal.live_turn_count.is_some()
@@ -476,9 +442,8 @@ pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, todos: &[TodoItem
     } else {
         0
     };
-    // Gated on an active subagent so the breakdown can't render orphaned;
-    // `per_model_row_count` owns the ≥2 collapse + cap (and keeps this
-    // height term in lockstep with the render loop below).
+    // Gated on an active subagent so the breakdown can't render orphaned
+    // `per_model_row_count` owns the two-model minimum and the cap, keeping this height term in lockstep with the render loop below
     let per_model_lines = if goal.current_subagent_role.is_some() {
         per_model_row_count(&goal.live_tokens_by_model)
     } else {
@@ -521,7 +486,7 @@ pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, todos: &[TodoItem
 ///
 /// Draws a bordered popup with:
 /// - Title: objective
-/// - Status + phase
+/// - Status and phase
 /// - Token budget progress bar
 /// - Todo progress list
 /// - Active subagent metrics
@@ -564,20 +529,16 @@ pub fn render_goal_detail(
     let inner = block.inner(area);
     ratatui::widgets::Widget::render(block, area, buf);
 
-    // Close button geometry is needed up-front so the title can be budgeted
-    // to stop before it. Close button [✗] in top-right (ASCII `[x]` on legacy
-    // ConHost).
+    // Close button geometry is needed up-front so the title can be budgeted to stop before it
+    // The close button renders [✗] in the top-right (ASCII `[x]` on legacy ConHost)
     let close_text = format!("[{}]", crate::glyphs::ballot_x());
-    // Display width (not byte length) so the hit-rect matches the glyph cells
-    // and the title budget below is computed from the real column position.
+    // Display width (not byte length) so the hit-rect matches the glyph cells and the title budget below is computed from the real column position
     let close_w = unicode_width::UnicodeWidthStr::width(close_text.as_str()) as u16;
     let close_x = area.x + area.width.saturating_sub(close_w + 1);
 
-    // Title in the top border: the live objective so the user can see WHICH
-    // goal is running (with a spinner when active). The objective is
-    // truncated by DISPLAY WIDTH (CJK / emoji safe) to the columns between
-    // the left inset and the close button, so a long objective can never
-    // collide with `[✗]` or overflow the right border.
+    // Title in the top border: the live objective so the user can see WHICH goal is running (with a spinner when active)
+    // The objective is truncated by DISPLAY WIDTH (CJK and emoji safe) to the columns between the left inset and the close button
+    // A long objective can therefore never collide with `[✗]` or overflow the right border
     let is_active = matches!(goal.status, GoalDisplayStatus::Active);
     let spinner_prefix = if is_active {
         let frames = crate::glyphs::dot_spinner_frames();
@@ -591,7 +552,7 @@ pub fn render_goal_detail(
         .saturating_sub(unicode_width::UnicodeWidthStr::width(
             spinner_prefix.as_str(),
         ))
-        .saturating_sub(2); // leading + trailing space
+        .saturating_sub(2); // leading and trailing space
     let cleaned = sanitize_title(&goal.objective);
     let objective = if cleaned.is_empty() {
         "Active Goal".to_owned()
@@ -755,7 +716,7 @@ pub fn render_goal_detail(
         return Some(close_rect);
     }
 
-    // Progress bar — only when a budget is set.
+    // Progress bar, only when a budget is set
     if has_budget {
         let bar_w = w.min(30);
         let fg = budget_color(pct, &theme);
@@ -821,8 +782,8 @@ pub fn render_goal_detail(
                 TodoStatus::Completed => (crate::glyphs::check_mark(), theme.accent_success),
                 TodoStatus::Cancelled => (crate::glyphs::ballot_x(), theme.accent_error),
             };
-            // Reserve space for "  {icon} " prefix (~4 cols) + content.
-            // Use display width (not char count) so CJK / emoji measure correctly.
+            // Reserve space for the "  {icon} " prefix (~4 cols) plus content
+            // Use display width (not char count) so CJK and emoji measure correctly
             let content_budget = (w as usize).saturating_sub(5);
             let content_display = truncate_to_width(&item.content, content_budget);
             let spans = vec![
@@ -855,7 +816,7 @@ pub fn render_goal_detail(
 
     // ── Active subagent metrics (with a leading blank separator) ──
     if let Some(ref role) = goal.current_subagent_role {
-        // Leading blank — budgeted in `subagent_lines` (renders only with the block).
+        // Leading blank, budgeted in `subagent_lines` (renders only with the block)
         y += 1;
         if y >= inner.y + inner.height {
             return Some(close_rect);
@@ -916,7 +877,7 @@ pub fn render_goal_detail(
         }
 
         // Per-model token breakdown, under the active-subagent block.
-        // `per_model_row_count` is the shared gate/cap (height ↔ render).
+        // `per_model_row_count` is the shared gate and cap for both the height calc and the render
         if per_model_row_count(&goal.live_tokens_by_model) > 0 {
             use unicode_width::UnicodeWidthStr;
             for (model_id, tokens) in goal.live_tokens_by_model.iter().take(MAX_MODEL_DISPLAY) {
@@ -924,9 +885,8 @@ pub fn render_goal_detail(
                     return Some(close_rect);
                 }
                 let tokens_str = format_tokens_compact((*tokens).min(i64::MAX as u64) as i64);
-                // Budget the model id to the columns left after the "  "
-                // indent and "  <tokens>" suffix, measured in display
-                // columns (not bytes) so wide glyphs never overflow the row.
+                // Budget the model id to the columns left after the "  " indent and the "  <tokens>" suffix
+                // The budget is measured in display columns (not bytes) so wide glyphs never overflow the row
                 let id_budget = (w as usize)
                     .saturating_sub(4)
                     .saturating_sub(UnicodeWidthStr::width(tokens_str.as_str()));
@@ -1001,8 +961,7 @@ pub fn render_goal_detail(
         }
 
         if y < inner.y + inner.height {
-            // Shared label with the chip; empty (no run reserved yet) falls
-            // back to a hyphen so the row never reads "Attempts: ".
+            // Shared label with the chip; empty (no run reserved yet) falls back to a hyphen so the row never reads "Attempts: "
             let attempts = classifier_attempts_label(goal);
             let attempts_display = if attempts.is_empty() {
                 "-".to_owned()
@@ -1054,7 +1013,7 @@ pub fn render_goal_detail(
 
     // ── Recent history (with a leading blank separator) ──
     if goal.last_event.is_some() {
-        // Leading blank — budgeted in `history_lines` (renders only with the block).
+        // Leading blank, budgeted in `history_lines` (renders only with the block)
         y += 1;
         if y >= inner.y + inner.height {
             return Some(close_rect);
@@ -1075,10 +1034,9 @@ pub fn render_goal_detail(
         if y < inner.y + inner.height
             && let Some(ref event) = goal.last_event
         {
-            // Humanize both the event label (folding in the detail) and the
-            // timestamp so the user sees "2m ago  Paused: doom loop", not the
-            // raw wire vocabulary. The timestamp renders first (left gutter),
-            // then the humanized label — matching the span order below.
+            // Humanize both the event label (folding in the detail) and the timestamp
+            // The user sees "2m ago  Paused: doom loop", not the raw wire vocabulary
+            // The timestamp renders first (left gutter), then the humanized label, matching the span order below
             let label = humanize_goal_event(event, goal.last_event_detail.as_deref());
             let ts_display =
                 humanize_event_timestamp(goal.last_event_timestamp.as_deref().unwrap_or(""));
@@ -1197,14 +1155,12 @@ mod tests {
         assert!(area.width <= 20);
         // content_h=14, clamped to 10 - v_margin*2 = 6
         assert_eq!(area.height, 6);
-        // Still fits on screen
         assert!(area.y + area.height <= screen.height);
     }
 
     #[test]
     fn goal_detail_area_very_tiny_screen() {
-        // Screen so small the render function would bail (< 6 height),
-        // but the area computation itself still produces valid rects.
+        // A screen so small the render function would bail (below 6 rows), but the area computation itself still produces valid rects
         let screen = Rect::new(0, 0, 20, 8);
         let goal = make_goal();
         let area = goal_detail_area(screen, &goal, &[]);
@@ -1215,9 +1171,8 @@ mod tests {
 
     #[test]
     fn goal_detail_area_widens_for_pause_hint() {
-        // A paused goal renders one extra row (the "Type /goal resume"
-        // hint), so the modal's content height must be exactly +1 row
-        // larger than the same goal in the Active state.
+        // A paused goal renders one extra row (the "Type /goal resume" hint)
+        // The modal's content height must be exactly one row larger than the same goal in the Active state
         let screen = Rect::new(0, 0, 120, 40);
         let mut goal = make_goal();
         let baseline = goal_detail_area(screen, &goal, &[]).height;
@@ -1226,10 +1181,8 @@ mod tests {
         assert_eq!(with_hint, baseline + 1);
     }
 
-    /// Helper: render the goal-detail modal at a known size and return
-    /// the buffer flattened to a single string so assertions can
-    /// `.contains(...)` on the visible text without worrying about
-    /// span boundaries.
+    /// Render the goal-detail modal at a known size and return the buffer flattened to one string.
+    /// Assertions can then `.contains(...)` on the visible text without worrying about span boundaries.
     fn render_to_text(goal: &GoalDisplayState) -> String {
         let screen = Rect::new(0, 0, 100, 40);
         let mut buf = ratatui::buffer::Buffer::empty(screen);
@@ -1249,11 +1202,8 @@ mod tests {
 
     #[test]
     fn goal_detail_renders_completion_review_section_when_classifier_ran() {
-        // Completion-review section: when the goal carries at least one
-        // classifier signal, the modal shows a "Completion review"
-        // block with the verdict, attempts counter, and details path.
-        // Existence is the cached `last_classifier_details_exists` bool
-        // (resolved on receipt), so set it true to render the path.
+        // When the goal carries at least one classifier signal, the modal shows "Completion review": verdict, attempts counter, details path
+        // Existence is the cached `last_classifier_details_exists` bool (resolved on receipt), so set it true to render the path
         let mut goal = make_goal();
         goal.classifier_runs_attempted = Some(1);
         goal.classifier_max_runs = Some(3);
@@ -1282,8 +1232,7 @@ mod tests {
 
     #[test]
     fn goal_detail_renders_achieved_verdict() {
-        // Both verdict variants exercise the explicit match — guards
-        // against a future wildcard arm collapsing the labels.
+        // Both verdict variants exercise the explicit match, guarding against a future wildcard arm collapsing the labels
         let mut goal = make_goal();
         goal.classifier_runs_attempted = Some(2);
         goal.classifier_max_runs = Some(3);
@@ -1298,10 +1247,8 @@ mod tests {
 
     #[test]
     fn goal_detail_omits_completion_review_when_no_classifier_activity() {
-        // Defaults: a goal that has never been classified shows
-        // nothing extra — the modal must omit the entire section
-        // (including its header) when all four classifier fields are
-        // `None`.
+        // Defaults: a goal that has never been classified shows nothing extra
+        // The modal must omit the entire section (including its header) when all four classifier fields are `None`
         let goal = make_goal();
         assert!(goal.classifier_runs_attempted.is_none());
         assert!(goal.classifier_max_runs.is_none());
@@ -1321,9 +1268,8 @@ mod tests {
 
     #[test]
     fn goal_detail_renders_completion_review_with_partial_signal() {
-        // Edge case: only `classifier_max_runs` is set (e.g. the goal
-        // was configured but the classifier has not yet run). The
-        // section still renders so the user can see the configured cap.
+        // Edge case: only `classifier_max_runs` is set (the goal was configured but the classifier has not yet run)
+        // The section still renders so the user can see the configured cap
         let mut goal = make_goal();
         goal.classifier_max_runs = Some(3);
 
@@ -1336,8 +1282,7 @@ mod tests {
 
     #[test]
     fn goal_detail_status_line_shows_verifying_phase_with_counter() {
-        // The `verifying_completion` overlay must surface in the modal,
-        // not just the chip; the counter comes from the classifier fields.
+        // The `verifying_completion` overlay must show in the modal, not just the chip; the counter comes from the classifier fields
         let mut goal = make_goal();
         goal.verifying_completion = true;
         goal.classifier_runs_attempted = Some(2);
@@ -1413,7 +1358,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 4);
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let goal = make_goal();
-        // Should not panic, just bail early.
+        // Must not panic; it just bails early
         render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
     }
 
@@ -1446,9 +1391,8 @@ mod tests {
     #[test]
     fn budget_color_boundary_at_50_pct() {
         let theme = Theme::current();
-        // Exactly 50% should be yellow per spec (green <50%, yellow 50-80%).
+        // Exactly 50% is yellow (green below 50%, yellow 50-80%)
         assert_eq!(budget_color(0.50, &theme), theme.warning);
-        // Just below 50% should be green.
         assert_eq!(budget_color(0.499, &theme), theme.accent_success);
     }
 
@@ -1503,9 +1447,8 @@ mod tests {
         render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
     }
 
-    /// Count rendered rows whose text contains `needle`. Each line in
-    /// `render_to_text` is one screen row, so this counts actual rendered
-    /// rows (not raw substring hits).
+    /// Count rendered rows whose text contains `needle`.
+    /// Each line in `render_to_text` is one screen row, so this counts actual rendered rows (not raw substring hits).
     fn rows_containing(goal: &GoalDisplayState, needle: &str) -> usize {
         render_to_text(goal)
             .lines()
@@ -1515,11 +1458,8 @@ mod tests {
 
     #[test]
     fn goal_detail_area_height_matches_rendered_rows_for_0_2_3_models() {
-        // Computed modal height must grow by EXACTLY the number of
-        // per-model rows actually rendered (0 / 2 / 3). The area is
-        // measured at the SAME width `render_to_text` renders at (100) so
-        // the height math and the rendered row count cannot silently
-        // diverge.
+        // Computed modal height must grow by EXACTLY the number of per-model rows actually rendered (0, 2, or 3)
+        // The area is measured at the SAME width `render_to_text` renders at (100) so the height math and the rendered row count cannot diverge
         let screen = Rect::new(0, 0, 100, 40);
         let mut goal = make_goal();
 
@@ -1575,9 +1515,8 @@ mod tests {
     fn render_single_model_collapses_breakdown() {
         let mut goal = make_goal();
         goal.live_tokens_by_model = vec![("solo-model".into(), 12_300)];
-        // Positive collapse assertions: the active-subagent metrics block
-        // still renders its single tokens line, and zero per-model rows are
-        // emitted for a single-model goal.
+        // Positive collapse assertions: the active-subagent metrics block still renders its single tokens line
+        // Zero per-model rows are emitted for a single-model goal
         assert!(
             rows_containing(&goal, "Active Subagent:") >= 1,
             "metrics block must still render"
@@ -1591,8 +1530,7 @@ mod tests {
 
     #[test]
     fn per_model_breakdown_suppressed_without_active_subagent() {
-        // The breakdown is gated on the active-subagent block, so it must
-        // not render (or grow the modal) when no subagent is active.
+        // The breakdown is gated on the active-subagent block, so it must not render (or grow the modal) when no subagent is active
         let screen = Rect::new(0, 0, 120, 40);
         let mut goal = make_goal();
         goal.current_subagent_role = None;
@@ -1610,9 +1548,8 @@ mod tests {
 
     #[test]
     fn per_model_breakdown_caps_rows_with_plus_n_more() {
-        // More than MAX_MODEL_DISPLAY models render the cap plus a
-        // single "+N more" row, and the height stays in lockstep. Measured
-        // at the same width `render_to_text` renders at (100).
+        // More than MAX_MODEL_DISPLAY models render the cap plus a single "+N more" row, and the height stays in lockstep
+        // Measured at the same width `render_to_text` renders at (100)
         let screen = Rect::new(0, 0, 100, 40);
         let mut goal = make_goal();
         goal.live_tokens_by_model = Vec::new();
@@ -1645,15 +1582,12 @@ mod tests {
 
     #[test]
     fn render_per_model_truncates_wide_model_id_by_display_width() {
-        // A model id wider than the modal must be truncated using
-        // display width (not bytes); the full id must not appear and the
-        // ellipsis marker must be present.
+        // A model id wider than the modal must truncate by display width (not bytes); the full id must not appear and the ellipsis must render
         let long_id = "x".repeat(200);
         let cjk_id = "宽".repeat(120); // each glyph is 2 display columns
         let mut goal = make_goal();
         goal.live_tokens_by_model = vec![(long_id.clone(), 12_000), (cjk_id.clone(), 8_000)];
-        // render_to_text renders at width 100; mirror that exactly so the
-        // per-row column budget below matches the render path.
+        // render_to_text renders at width 100; mirror that exactly so the per-row column budget below matches the render path
         let screen = Rect::new(0, 0, 100, 40);
         let area = goal_detail_area(screen, &goal, &[]);
         let text = render_to_text(&goal);
@@ -1667,15 +1601,12 @@ mod tests {
         );
         assert!(text.contains('…'), "truncation ellipsis must render");
 
-        // The CJK row's id is budgeted to the columns left after the "  "
-        // indent and "  <tokens>" suffix — identical to the render path
-        // (`w = inner.width - 2 = area.width - 4`; tokens "8k" is 2 cols).
+        // The CJK row's id is budgeted to the columns left after the "  " indent and the "  <tokens>" suffix
+        // This matches the render path: `w = inner.width - 2 = area.width - 4`, and tokens "8k" is 2 cols
         let row_w = area.width as usize - 4;
         let budget = row_w - 4 - "8k".len();
-        // Display-width truncation keeps as many 2-column glyphs as fit the
-        // budget; a byte-length bug (3 bytes per glyph) would keep strictly
-        // FEWER. Compare the rendered glyph count to the display-width
-        // truncation of the SAME id at the SAME budget.
+        // Display-width truncation keeps as many 2-column glyphs as fit the budget; a byte-length bug (3 bytes per glyph) would keep strictly FEWER
+        // Compare the rendered glyph count to the display-width truncation of the SAME id at the SAME budget
         let expected_glyphs = truncate_to_width(&cjk_id, budget).matches('宽').count();
         let byte_bug_glyphs = budget.saturating_sub(1) / 3;
         assert!(
@@ -1689,10 +1620,9 @@ mod tests {
             "rendered CJK glyph count must match display-width truncation \
              ({expected_glyphs}), not a byte-length bug ({byte_bug_glyphs})"
         );
-        // And the truncated id fills the column budget to within one
-        // 2-column glyph (glyphs + 1-column ellipsis), proving the budget
-        // is measured in display columns — a byte-length bug would leave it
-        // far short. Banded (not exact) to stay parity-robust.
+        // The truncated id fills the column budget to within one 2-column glyph (glyphs plus the 1-column ellipsis)
+        // That proves the budget is measured in display columns; a byte-length bug would leave it far short
+        // The band (not an exact value) keeps the test stable across glyph parity
         let rendered_cols = rendered_glyphs * 2 + 1;
         assert!(
             rendered_cols > budget - 2 && rendered_cols <= budget,
@@ -1740,9 +1670,8 @@ mod tests {
         assert_eq!(s, "Complete");
     }
 
-    /// Walk the buffer and collect every cell's symbol into a single string,
-    /// joining rows with `\n`. Used to assert that rendered text contains
-    /// specific user-visible substrings.
+    /// Walk the buffer and collect every cell's symbol into a single string, joining rows with `\n`.
+    /// Used to assert that rendered text contains specific user-visible substrings.
     fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
         let area = buf.area;
         let mut out = String::new();
@@ -1849,9 +1778,8 @@ mod tests {
 
     #[test]
     fn render_blocked_without_pause_message_omits_reason_line() {
-        // Defensive: if the shell sends `status: "blocked"` but no
-        // pause_message (e.g. via a forward-compat raw update), the
-        // modal should not crash and should not render a Reason line.
+        // Defensive: the shell may send `status: "blocked"` with no pause_message (a forward-compat raw update)
+        // The modal must not crash and must not render a Reason line
         let screen = Rect::new(0, 0, 100, 30);
         let mut buf = ratatui::buffer::Buffer::empty(screen);
         let mut goal = make_goal();
@@ -1869,11 +1797,9 @@ mod tests {
 
     #[test]
     fn render_non_paused_with_stale_pause_message_omits_reason_line() {
-        // Defence in depth. Even if a buggy shell emitted
-        // `pause_message: Some(...)` alongside a non-paused status
-        // (guaranteed not to happen today, but a future regression on
-        // the shell side must not corrupt the modal), the renderer gates
-        // on `is_paused()` and skips the Reason block.
+        // Defence in depth: a buggy shell could emit `pause_message: Some(...)` alongside a non-paused status
+        // That cannot happen today, but a future shell regression must not corrupt the modal
+        // The renderer gates on `is_paused()` and skips the Reason block
         for status in [
             GoalDisplayStatus::Active,
             GoalDisplayStatus::Complete,
@@ -1897,10 +1823,8 @@ mod tests {
 
     #[test]
     fn render_blocked_reason_line_appears_after_pause_hint() {
-        // Modal visual order: Status → "Type /goal resume" pause hint →
-        // "Reason: ...". Pin both the presence of each line and their
-        // relative position so a future refactor that reorders the
-        // render blocks gets caught.
+        // Modal visual order: Status, then the "Type /goal resume" pause hint, then "Reason: ..."
+        // Pin both the presence of each line and their relative position so a refactor that reorders the render blocks gets caught
         let screen = Rect::new(0, 0, 100, 30);
         let mut buf = ratatui::buffer::Buffer::empty(screen);
         let mut goal = make_goal();
@@ -1924,8 +1848,7 @@ mod tests {
 
     #[test]
     fn goal_detail_area_grows_for_multi_line_pause_message() {
-        // pause_message that spans multiple wrapped rows must enlarge
-        // the modal so the wrapped content fits without truncation.
+        // A pause_message that spans multiple wrapped rows must enlarge the modal so the wrapped content fits without truncation
         let screen = Rect::new(0, 0, 80, 40);
         let mut goal = make_goal();
         goal.status = GoalDisplayStatus::UserPaused;
@@ -1949,11 +1872,8 @@ mod tests {
     #[test]
     fn wrap_pause_message_lines_respects_width() {
         use unicode_width::UnicodeWidthStr;
-        // Each wrapped row must be at most `width` *terminal columns*
-        // wide so it fits inside the modal's inner content rect without
-        // overflow into the right border. Pin to width-not-char-count
-        // measurement so future refactors can't quietly regress to a
-        // chars().count() comparison and start mis-wrapping wide text.
+        // Each wrapped row must be at most `width` *terminal columns* wide so it fits inside the modal's inner content rect
+        // Pin the measurement to display width so a refactor can't quietly regress to a chars().count() comparison and mis-wrap wide text
         let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa";
         for width in [10u16, 20, 40] {
             for line in wrap_pause_message_lines(text, width) {
@@ -1967,10 +1887,8 @@ mod tests {
 
     #[test]
     fn wrap_pause_message_lines_preserves_explicit_newlines() {
-        // The shell concatenates `blocked_reason\nmessage`; the wrap
-        // must keep them as separate paragraphs so the rendered modal
-        // preserves the structural break between the short label and
-        // the long body.
+        // The shell concatenates `blocked_reason\nmessage`; the wrap must keep them as separate paragraphs
+        // The rendered modal then preserves the break between the short label and the long body
         let text = "short reason\nlonger body content";
         let lines = wrap_pause_message_lines(text, 80);
         assert_eq!(lines.len(), 2);
@@ -1980,8 +1898,7 @@ mod tests {
 
     #[test]
     fn wrap_pause_message_lines_degenerate_width_strips_newline() {
-        // At unusable width (0/1) the wrapper returns a single un-split row;
-        // the kept `\n` must still collapse so the row carries no control byte.
+        // At unusable width (0/1) the wrapper returns a single un-split row; the kept `\n` must still collapse so the row carries no control byte
         let out = wrap_pause_message_lines("a\nb", 1);
         assert_eq!(out, vec!["a b".to_string()]);
         assert!(!out[0].contains('\n'));
@@ -1990,9 +1907,7 @@ mod tests {
     #[test]
     fn wrap_pause_message_lines_hard_splits_overlong_tokens() {
         use unicode_width::UnicodeWidthStr;
-        // A single 36-char URL/path with width=10 must hard-split into
-        // ≤10-column chunks rather than overflowing or returning a
-        // single overlong row.
+        // A single 36-char URL/path with width=10 must hard-split into chunks of at most 10 columns rather than overflow or return one overlong row
         let text = "abcdefghijklmnopqrstuvwxyz0123456789";
         let lines = wrap_pause_message_lines(text, 10);
         for line in &lines {
@@ -2007,12 +1922,10 @@ mod tests {
     #[test]
     fn wrap_pause_message_lines_uses_display_width_for_cjk() {
         use unicode_width::UnicodeWidthStr;
-        // Each Han ideograph occupies 2 terminal columns. A 10-char
-        // CJK string is 20 columns wide and must NOT fit on a single
-        // width=10 row — the chars().count() shape (10) would have
-        // mis-wrapped this and silently overflowed the modal border.
-        // Use Han chars from a separate word so wrapping isn't blocked
-        // by the hard-split path.
+        // Each Han ideograph occupies 2 terminal columns
+        // A 10-char CJK string is 20 columns wide and must NOT fit on a single width=10 row
+        // A chars().count() measure (10) would have mis-wrapped this and silently overflowed the modal border
+        // Use Han chars split into two words so wrapping isn't forced down the hard-split path
         let text = "你好世界 再見天空";
         for line in wrap_pause_message_lines(text, 10) {
             assert!(
@@ -2020,8 +1933,7 @@ mod tests {
                 "CJK row {line:?} wider than 10 columns",
             );
         }
-        // A single 8-char CJK token at width=10 must hard-split (each
-        // char = 2 cols, so 5 chars = 10 cols max per row).
+        // A single 8-char CJK token at width=10 must hard-split (each char is 2 cols, so at most 5 chars fit a row)
         let single_token = "你好世界再見天空";
         let chunks = wrap_pause_message_lines(single_token, 10);
         assert!(chunks.len() >= 2);
@@ -2036,10 +1948,8 @@ mod tests {
     #[test]
     fn wrap_pause_message_lines_uses_display_width_for_emoji() {
         use unicode_width::UnicodeWidthStr;
-        // Most emoji occupy 2 terminal columns. At width=6 a string of
-        // emojis must hard-split into chunks of at most 3 emoji each.
-        // (chars().count() would have allowed 6 emoji = 12 columns and
-        // overflowed.)
+        // Most emoji occupy 2 terminal columns. At width=6 a string of emojis must hard-split into chunks of at most 3 emoji each.
+        // A chars().count() measure would have allowed 6 emoji (12 columns) and overflowed
         let text = "🎉🎊🎈🍰🎁🎀";
         for line in wrap_pause_message_lines(text, 6) {
             assert!(
@@ -2098,7 +2008,7 @@ mod tests {
 
         let text = buffer_text(&buf);
         // Completed = ✓, InProgress = ▶, Pending = □, Cancelled = ✗
-        // Match icon + content to disambiguate from the close button [✗].
+        // Match icon and content to disambiguate from the close button [✗]
         assert!(text.contains("\u{2713} done"), "missing ✓ for Completed");
         assert!(text.contains("\u{25b6} wip"), "missing ▶ for InProgress");
         assert!(text.contains("\u{25a1} todo"), "missing □ for Pending");
@@ -2148,7 +2058,7 @@ mod tests {
     #[test]
     fn truncate_to_width_cjk() {
         use unicode_width::UnicodeWidthStr;
-        // Each CJK char = 2 cols. "你好世界" = 8 cols. Budget 5 → 2 chars (4 cols) + ellipsis.
+        // Each CJK char is 2 cols and "你好世界" is 8 cols, so budget 5 keeps 2 chars (4 cols) plus the ellipsis
         let result = truncate_to_width("你好世界", 5);
         assert!(
             UnicodeWidthStr::width(result.as_str()) <= 5,
@@ -2161,8 +2071,7 @@ mod tests {
 
     #[test]
     fn modal_title_renders_objective() {
-        // The objective must appear in the modal title (top border) so the
-        // user can see which goal is running — not a static placeholder.
+        // The objective must appear in the modal title (top border) so the user can see which goal is running, not a static placeholder
         let goal = make_goal(); // objective = "Implement dark mode"
         let text = render_to_text(&goal);
         assert!(
@@ -2177,8 +2086,7 @@ mod tests {
 
     #[test]
     fn modal_title_truncates_long_objective_with_ellipsis() {
-        // A long objective must be truncated (with an ellipsis) so it cannot
-        // collide with the close button or overflow the border.
+        // A long objective must be truncated (with an ellipsis) so it cannot collide with the close button or overflow the border
         let mut goal = make_goal();
         goal.objective = "x".repeat(300);
         let text = render_to_text(&goal);
@@ -2194,9 +2102,8 @@ mod tests {
 
     #[test]
     fn modal_title_truncates_wide_objective_by_display_width() {
-        // A wide-glyph objective must be truncated by DISPLAY WIDTH so it
-        // can't overflow the title columns into the close button / border;
-        // the close button must survive.
+        // A wide-glyph objective must be truncated by DISPLAY WIDTH so it can't overflow the title columns into the close button or border
+        // The close button must survive
         let mut goal = make_goal();
         goal.objective = "宽".repeat(120); // 240 display columns
         let screen = Rect::new(0, 0, 100, 40);
@@ -2219,9 +2126,8 @@ mod tests {
 
     #[test]
     fn commands_hint_visible_without_subagent_or_history() {
-        // With no active subagent and no recent-history event, the height
-        // calc and render must agree on the conditional blank separators so
-        // the commands hint isn't clipped.
+        // With no active subagent and no recent-history event, the height calc and render must agree on the conditional blank separators
+        // Otherwise the commands hint is clipped
         let screen = Rect::new(0, 0, 100, 40);
         let mut goal = make_goal();
         goal.current_subagent_role = None;
@@ -2252,8 +2158,8 @@ mod tests {
 
     #[test]
     fn classifier_details_display_handles_missing_present_and_none() {
-        // Existence is a precomputed bool, so the display is pure: no path →
-        // hyphen; path + !exists → "(unavailable)"; path + exists → the path.
+        // Existence is a precomputed bool, so the display is pure
+        // No path gives a hyphen; a reported path with a missing file gives "(unavailable)"; an existing file gives the path
         assert_eq!(classifier_details_display(None, false), "-");
         assert_eq!(
             classifier_details_display(Some("/no/such/path/zzz-details.md"), false),
@@ -2267,8 +2173,7 @@ mod tests {
 
     #[test]
     fn modal_details_row_shows_unavailable_for_missing_file() {
-        // A reported path whose cached existence is false (fail-open may not
-        // have written it) must render "(unavailable)" not a dangling path.
+        // A reported path whose cached existence is false (fail-open may not have written it) must render "(unavailable)", not a dangling path
         let mut goal = make_goal(); // make_goal default: last_classifier_details_exists = false
         goal.last_classifier_verdict = Some(GoalClassifierVerdict::Achieved);
         goal.last_classifier_details_path = Some("/no/such/path/zzz-details.md".into());
@@ -2287,8 +2192,8 @@ mod tests {
 
     #[test]
     fn modal_attempts_shows_hyphen_when_classifier_active_without_counts() {
-        // Completion review renders (a verdict is present) but no run counter
-        // has arrived (both counts absent) → "Attempts: —", never "Attempts: ".
+        // Completion review renders (a verdict is present) but no run counter has arrived (both counts absent)
+        // The row must read "Attempts: -", never "Attempts: "
         let mut goal = make_goal();
         goal.classifier_runs_attempted = None;
         goal.classifier_max_runs = None;
@@ -2324,7 +2229,7 @@ mod tests {
             humanize_goal_event("budget_exceeded", None),
             "Budget exceeded"
         );
-        // Forward-compat: an unmapped event de-snakes + capitalizes.
+        // Forward-compat: an unmapped event de-snakes and capitalizes
         assert_eq!(
             humanize_goal_event("some_future_event", None),
             "Some future event"
@@ -2334,9 +2239,9 @@ mod tests {
     #[test]
     fn humanize_event_timestamp_relative_and_fallback() {
         assert_eq!(humanize_event_timestamp(""), "");
-        // Non-RFC3339 (legacy / fixture) returned verbatim.
+        // A non-RFC3339 value (legacy or fixture) is returned verbatim
         assert_eq!(humanize_event_timestamp("1m ago"), "1m ago");
-        // A fresh RFC3339 stamp → "just now"; ~2h ago → "2h ago".
+        // A fresh RFC3339 stamp reads "just now"; one from ~2h ago reads "2h ago"
         let now = chrono::Utc::now().to_rfc3339();
         assert_eq!(humanize_event_timestamp(&now), "just now");
         let past = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
@@ -2345,8 +2250,7 @@ mod tests {
 
     #[test]
     fn recent_history_renders_humanized_event_and_relative_time() {
-        // The modal must NOT show raw machine vocabulary — event names or
-        // RFC3339 stamps — only humanized text.
+        // The modal must NOT show raw machine vocabulary (event names or RFC3339 stamps), only humanized text
         let mut goal = make_goal();
         goal.last_event = Some("goal_paused".into());
         goal.last_event_detail = Some("back_off".into());
@@ -2370,10 +2274,9 @@ mod tests {
 
     #[test]
     fn humanizers_strip_control_chars_independently() {
-        // Defense-in-depth: the humanizer's variable passthroughs (folded
-        // detail, unknown-event name, verbatim-timestamp fallback) must strip
-        // control bytes THEMSELVES — not rely on ratatui's filter — so a
-        // ratatui change can't leak ESC/newline into a rendered row.
+        // Defense-in-depth: the humanizer's variable passthroughs must strip control bytes THEMSELVES rather than rely on ratatui's filter
+        // The passthroughs are the folded detail, the unknown-event name, and the verbatim-timestamp fallback
+        // A ratatui change then can't leak ESC/newline into a rendered row
         let label = humanize_goal_event("goal_paused", Some("doom\u{1b}[31m_loop\n\t"));
         assert!(
             !label.chars().any(|c| c.is_control()),
@@ -2384,7 +2287,7 @@ mod tests {
             !unknown.chars().any(|c| c.is_control()),
             "unknown-event name leaked a control char: {unknown:?}"
         );
-        // Non-RFC3339 → verbatim fallback, still stripped.
+        // Non-RFC3339 falls back to verbatim, still stripped
         let ts = humanize_event_timestamp("2026\u{1b}]0;evil\u{7}");
         assert!(
             !ts.chars().any(|c| c.is_control()),
@@ -2394,10 +2297,9 @@ mod tests {
 
     #[test]
     fn pause_reason_wrapped_lines_have_no_control_bytes() {
-        // The pause-reason row strips control bytes too. `\n` is kept (the
-        // wrapper splits on it) but consumed by wrapping, so no wrapped line
-        // carries a control byte. Discriminating (no ratatui): reverting the
-        // strip leaves ESC/BEL/tab in the lines.
+        // The pause-reason row strips control bytes too
+        // `\n` is kept (the wrapper splits on it) but consumed by wrapping, so no wrapped line carries a control byte
+        // No ratatui involved: reverting the strip leaves ESC/BEL/tab in the lines
         let msg = "blocked\u{1b}[31m here\nsecond\tline\u{7}\r";
         for line in wrap_pause_message_lines(&format_pause_reason(msg), 40) {
             assert!(
@@ -2414,11 +2316,8 @@ mod tests {
 
     #[test]
     fn recent_history_render_emits_no_control_bytes() {
-        // End-to-end SMOKE check only — it reads cells AFTER ratatui's own
-        // control filter, so it passes even if the strip is reverted. The
-        // discriminating ("killing") test is
-        // `humanizers_strip_control_chars_independently`, which asserts on the
-        // humanizer output directly (before ratatui).
+        // This only checks the final buffer; it reads cells AFTER ratatui's own control filter, so it passes even if the strip is reverted
+        // The test that would fail on a revert is `humanizers_strip_control_chars_independently`, which asserts on the humanizer output directly
         let mut goal = make_goal();
         goal.last_event = Some("goal_paused".into());
         goal.last_event_detail = Some("doom\u{1b}[31m_loop\n\t".into());
@@ -2436,9 +2335,8 @@ mod tests {
 
     #[test]
     fn modal_title_collapses_control_chars_to_one_row() {
-        // A newline in the objective must be collapsed to a space so the whole
-        // objective stays on the single-row title (the bare `\n` is zero-width
-        // to truncation and would otherwise leak into the border row).
+        // A newline in the objective must be collapsed to a space so the whole objective stays on the single-row title
+        // A bare `\n` is zero-width to truncation and would otherwise leak into the border row
         let mut goal = make_goal();
         goal.objective = "line one\nline two".into();
         let text = render_to_text(&goal);
@@ -2461,9 +2359,9 @@ mod tests {
 
     #[test]
     fn truncate_to_width_boundaries() {
-        // Exactly at budget → unchanged (no ellipsis).
+        // Exactly at budget stays unchanged (no ellipsis)
         assert_eq!(truncate_to_width("abcd", 4), "abcd");
-        // One column over → truncated with the ellipsis.
+        // One column over truncates with the ellipsis
         assert_eq!(truncate_to_width("abcde", 4), "abc\u{2026}");
         // Zero-width combining marks don't consume the budget.
         let combining = "a\u{0301}b\u{0301}"; // 2 display columns
@@ -2473,7 +2371,7 @@ mod tests {
             "combining marks are zero-width"
         );
         assert_eq!(truncate_to_width(combining, 5), combining);
-        // Degenerate budget 0 → just the ellipsis (no codepoint dropped silently).
+        // Degenerate budget 0 yields just the ellipsis (no codepoint dropped silently)
         assert_eq!(truncate_to_width("x", 0), "\u{2026}");
     }
 
@@ -2481,8 +2379,8 @@ mod tests {
 
     #[test]
     fn subagent_just_spawned_budgets_no_detail_row() {
-        // A subagent with no live metrics yet renders blank + role (2 rows, no
-        // detail row); the budget must match — NOT over-count to 3.
+        // A subagent with no live metrics yet renders the blank and the role line (2 rows, no detail row)
+        // The budget must match, NOT over-count to 3
         let screen = Rect::new(0, 0, 100, 40);
         let mut goal = make_goal();
         goal.current_subagent_role = Some("Worker".into());

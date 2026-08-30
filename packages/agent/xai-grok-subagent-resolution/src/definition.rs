@@ -1,4 +1,4 @@
-//! Production subagent definition discovery and tool-policy resolution.
+//! Subagent definition discovery and tool-policy resolution, matching the production spawn path.
 use crate::config::{SubagentPersona, SubagentRole};
 use crate::types::{EffectiveRuntimeConfig, ResolutionError};
 use std::collections::HashMap;
@@ -37,9 +37,8 @@ pub struct HarnessToolsetContext<'a> {
     pub parent_model_agent_type: Option<&'a str>,
     pub file_tool_overrides: Option<&'a [ToolConfig]>,
 }
-/// `false` twin: the alternate flavors re-select toolset presets and
-/// templates, so none is representable when the optional harness is compiled
-/// out. Keeps ungated call sites compiling.
+/// Without the `cursor` feature no flavor is representable: the alternate flavors re-select toolset presets and templates that are compiled out.
+/// This stub keeps ungated call sites compiling.
 pub fn subagent_harness_flavor_is_representable(_agent_type: &str) -> bool {
     false
 }
@@ -60,8 +59,7 @@ pub fn apply_harness_toolset(
         definition.override_file_tools(file_tools.to_vec());
     }
 }
-/// Discover the same project/builtin/user/plugin definition used by production,
-/// with session CLI definitions as the final fallback.
+/// Discover the same project/builtin/user/plugin definition used by production, with session CLI definitions as the final fallback.
 pub fn discover_agent_definition(
     subagent_type: &str,
     context: &DefinitionResolutionContext<'_>,
@@ -79,7 +77,7 @@ pub fn discover_agent_definition(
             .cloned()
     })
 }
-/// Sorted model-facing names available under the current discovery context.
+/// Sorted agent names the model can request under the current discovery context.
 pub fn available_agent_names(context: &DefinitionResolutionContext<'_>) -> Vec<String> {
     let mut available: Vec<String> = xai_grok_agent::discovery::all_subagents_with_plugins(
         context.cwd,
@@ -217,8 +215,7 @@ pub fn apply_definition_runtime_defaults(
         runtime.isolation = SubagentIsolationMode::Worktree;
     }
 }
-/// Apply capability filtering and recursion depth to the exact production
-/// definition toolset.
+/// Apply capability filtering and recursion depth to the exact production definition toolset.
 pub fn apply_child_tool_policy(
     definition: &mut AgentDefinition,
     capability_mode: Option<SubagentCapabilityMode>,
@@ -262,9 +259,8 @@ pub fn resolve_runtime_config(
     apply_definition_runtime_defaults(&mut runtime, definition);
     runtime
 }
-/// Render the same full subagent base template + definition body used by the
-/// production `AgentBuilder`, for runtimes that expose only finalized tool
-/// names rather than a complete `ToolBridge`.
+/// Render the same full subagent base template and definition body the production `AgentBuilder` uses.
+/// This serves runtimes that expose only finalized tool names rather than a complete `ToolBridge`.
 pub fn render_subagent_system_prompt(
     definition: &AgentDefinition,
     runtime: &EffectiveRuntimeConfig,

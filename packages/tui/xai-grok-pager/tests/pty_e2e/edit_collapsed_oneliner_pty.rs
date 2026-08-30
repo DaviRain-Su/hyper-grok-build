@@ -4,17 +4,15 @@ use super::common::*;
 
 const DONE_SENTINEL: &str = "EDIT_COLLAPSED_DONE";
 
-/// Comment planted in the replacement text: visible only when the diff body
-/// renders, so it separates the collapsed one-liner from the expanded view.
+/// Comment planted in the replacement text, visible only when the diff body renders.
+/// It separates the collapsed one-liner from the expanded view.
 const BODY_MARKER: &str = "EXPANDED_BODY_MARKER";
 
-/// PTY: with the `collapsed_edit_blocks` flag enabled (config tier here;
-/// remote settings/managed in production), an Edit tool call lands as a collapsed
-/// one-liner — header with the colored `+N/-M` diffstat, no diff body — and a
-/// double-click on the header expands it to the full diff. (The keyboard fold
-/// keys operate on the scrollback selection, which this test does not
-/// exercise.) The flag-off/legacy default is covered end-to-end by
-/// `edit_hl_inplace_refresh_pty`, which relies on expanded-on-arrival diffs.
+/// PTY: with the `collapsed_edit_blocks` flag enabled, an Edit tool call lands as a collapsed one-liner.
+/// The flag comes from the config tier here; production sets it via remote settings/managed.
+/// The one-liner is the header with the colored `+N/-M` diffstat and no diff body; a double-click on the header expands it to the full diff.
+/// (The keyboard fold keys operate on the scrollback selection, which this test does not exercise.)
+/// With the flag off (the legacy default), `edit_hl_inplace_refresh_pty` covers the end-to-end path; it relies on diffs that arrive expanded.
 /// Doubles as the demo-cast generator via `GROK_PTY_CAST_DIR`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
@@ -22,7 +20,7 @@ async fn edit_collapsed_oneliner_pty() {
     let content = ContentController::start().await.expect("start content");
     seed_ui_config(&content, "collapsed_edit_blocks = true");
 
-    // Fixture under the isolated HOME so the scripted search_replace succeeds.
+    // The fixture lives under the isolated HOME so the scripted search_replace succeeds
     let target = content.home().join("greet_fix.py");
     std::fs::write(
         &target,
@@ -31,7 +29,7 @@ async fn edit_collapsed_oneliner_pty() {
     .expect("write fixture");
     let abs = dunce::canonicalize(&target).unwrap_or(target.clone());
 
-    // One deleted line, two inserted lines => a `+2/-1` diffstat.
+    // One deleted line, two inserted lines give a `+2/-1` diffstat
     let _tool_turn = expect_tool_turn(
         &content,
         "call_collapsed",
@@ -73,7 +71,7 @@ async fn edit_collapsed_oneliner_pty() {
             )
         });
 
-    // Collapsed one-liner: basename + colored diffstat right after it.
+    // Collapsed one-liner: the basename with the colored diffstat right after it
     harness
         .wait_for_text("Edit greet_fix.py +2/-1", Duration::from_secs(20))
         .unwrap_or_else(|_| {

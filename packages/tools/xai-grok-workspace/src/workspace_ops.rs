@@ -280,8 +280,7 @@ const REPOS_MANIFEST_MAX_ANCESTOR_HOPS: usize = 16;
 /// `$GROK_HOME/repos.json` (user-global, not a provisioned workspace).
 fn repos_manifest_search_dirs(start: &std::path::Path) -> Vec<std::path::PathBuf> {
     let rel = xai_grok_workspace_types::rpc::repos::REPOS_MANIFEST_RELATIVE_PATH;
-    #[allow(deprecated)]
-    let home = std::env::home_dir();
+    let home = xai_dirs::home_dir();
     let mut global_manifests = Vec::with_capacity(2);
     if let Some(v) = std::env::var_os("GROK_HOME")
         && !v.is_empty()

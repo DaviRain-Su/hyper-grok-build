@@ -1,8 +1,7 @@
-//! `ListPaneState` — non-generic view state for a scrollable list pane.
+//! `ListPaneState`: non-generic view state for a scrollable list pane.
 //!
-//! Owns scroll position, selection (via stable IDs), layout cache, follow mode,
-//! wrap mode and filter.  Does **not** own any items — those are borrowed from
-//! an external model during [`prepare_layout`] and rendering.
+//! Owns scroll position, selection (via stable IDs), layout cache, follow mode, wrap mode and filter.
+//! Does **not** own any items; those are borrowed from an external model during [`prepare_layout`] and rendering.
 
 use std::ops::Range;
 
@@ -27,16 +26,15 @@ pub enum MatchMode {
     /// Filter mode: non-matching items are hidden from the list.
     /// `vis_map` is derived from `match_indices`.
     Filter,
-    /// Search mode: all items remain visible.  Matching items are
-    /// highlighted and navigable with n/N.
+    /// Search mode: all items remain visible.
+    /// Matching items are highlighted and navigable with n/N.
     Search,
 }
 
 /// Unified filter / search state for a list pane.
 ///
-/// Wraps a [`TextMatcher`] with the list-specific bits: whether matches are
-/// hidden or highlighted ([`MatchMode`]), the eagerly-built physical match
-/// indices, and the `current_match` cursor used by n/N navigation.
+/// Wraps a [`TextMatcher`] with the list-specific bits: [`MatchMode`] (hide or highlight) and the eagerly-built physical match indices.
+/// It also holds the `current_match` cursor used by n/N navigation.
 #[derive(Debug, Clone)]
 pub struct ListMatcher {
     text: TextMatcher,
@@ -44,17 +42,17 @@ pub struct ListMatcher {
     pub mode: MatchMode,
     /// Physical indices of items whose `search_text()` matches, sorted ascending.
     pub match_indices: Vec<usize>,
-    /// Index into `match_indices` identifying the "current" match for n/N
-    /// navigation.  `None` when there are no matches.
+    /// Index into `match_indices` identifying the "current" match for n/N navigation.
+    /// `None` when there are no matches.
     pub current_match: Option<usize>,
 }
 
 impl ListMatcher {
     /// Build a new matcher.
     ///
-    /// `query` — the raw user input.
-    /// `kind` — substring or regex interpretation.
-    /// `mode` — filter (hide) or search (highlight).
+    /// `query`: the raw user input.
+    /// `kind`: substring or regex interpretation.
+    /// `mode`: filter (hide) or search (highlight).
     pub fn new(query: impl Into<String>, kind: QueryKind, mode: MatchMode) -> Self {
         Self {
             text: TextMatcher::new(query, kind),
@@ -128,8 +126,7 @@ impl ListMatcher {
 
 /// Backward-compatible alias for [`ListMatcher`].
 ///
-/// Existing code that constructs `FilterMatcher::substring(...)` or
-/// `FilterMatcher::regex(...)` continues to work via these helper methods.
+/// Existing code that constructs `FilterMatcher::substring(...)` or `FilterMatcher::regex(...)` continues to work via these helper methods.
 /// New code should use [`ListMatcher::new`] directly.
 pub type FilterMatcher = ListMatcher;
 
@@ -174,11 +171,11 @@ impl ListFilter {
 /// Which mode the input bar is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputBarMode {
-    /// `/` — regex search.  All items visible, matches highlighted.
+    /// `/`: regex search. All items visible, matches highlighted.
     Search,
-    /// `f` — regex filter.  Non-matching items hidden.
+    /// `f`: regex filter. Non-matching items hidden.
     Filter,
-    /// `:` — go to line number (or line range).
+    /// `:`: go to line number (or line range).
     GotoLine,
     Comment,
 }
@@ -199,7 +196,7 @@ impl InputBarMode {
         match self {
             InputBarMode::Search => MatchMode::Search,
             InputBarMode::Filter => MatchMode::Filter,
-            InputBarMode::GotoLine => MatchMode::Search, // unused, but needed for exhaustive match
+            InputBarMode::GotoLine => MatchMode::Search, // Unused, but needed for exhaustive match
             InputBarMode::Comment => MatchMode::Search,
         }
     }
@@ -221,9 +218,7 @@ struct GotoLineSnapshot {
 
 /// Snapshot of parameters used to build the current layout cache.
 ///
-/// Stored in [`ListPaneState`] and compared each frame to decide whether
-/// the layout cache can be reused, extended incrementally, or must be
-/// fully rebuilt.
+/// Stored in [`ListPaneState`] and compared each frame to decide whether the layout cache can be reused, extended incrementally, or must be rebuilt.
 #[derive(Debug, Clone, Copy)]
 struct LayoutStamp {
     /// Width at which the cache was built.
@@ -240,8 +235,7 @@ struct LayoutStamp {
 
 /// View state for a scrollable list pane.
 ///
-/// **Non-generic** — the item type `T: ListItem` only appears at the
-/// boundaries: [`prepare_layout`] and `ListPane<'a, T>` (the widget).
+/// **Non-generic**: the item type `T: ListItem` only appears at the boundaries, [`prepare_layout`] and `ListPane<'a, T>` (the widget).
 #[derive(Debug)]
 pub struct ListPaneState {
     // -- Scroll ---------------------------------------------------------------
@@ -257,7 +251,7 @@ pub struct ListPaneState {
     selected_id: Option<u64>,
 
     /// The resolved index of `selected_id` after the last [`prepare_layout`].
-    /// Ephemeral — valid only until the next item mutation.
+    /// Ephemeral: valid only until the next item mutation.
     selected_index: Option<usize>,
 
     /// Multi-selection as a contiguous range of stable IDs (anchor, end).
@@ -275,7 +269,7 @@ pub struct ListPaneState {
     visual_anchor_id: Option<u64>,
 
     // -- Layout ---------------------------------------------------------------
-    /// Layout cache (heights + prefix sums, or fixed-height).
+    /// Layout cache (heights and prefix sums, or fixed-height).
     layout: ListLayoutCache,
 
     /// Current wrap mode.
@@ -289,25 +283,21 @@ pub struct ListPaneState {
     /// Whether the filter has changed since the last layout build.
     filter_dirty: bool,
 
-    /// Total item count from last `prepare_layout` call (for detecting length
-    /// changes that require refilter).
+    /// Total item count from last `prepare_layout` call (for detecting length changes that require refilter).
     last_item_count: usize,
 
-    /// Scroll anchor: after the next layout rebuild (e.g. wrap toggle, resize),
-    /// place the selected item at this screen-y offset.  Consumed by
-    /// `prepare_layout` and reset to `None`.
+    /// Scroll anchor: after the next layout rebuild (e.g. wrap toggle, resize), place the selected item at this screen-y offset.
+    /// Consumed by `prepare_layout` and reset to `None`.
     scroll_anchor: Option<usize>,
 
     /// Pinned screen-y for viewport scrolling.
     ///
-    /// When scrolling the viewport (Ctrl-d/u, mouse wheel, etc.), we want
-    /// the selection to stay at a fixed screen row.  If the target item is
-    /// non-selectable (separator), we pick a neighbor — but that shifts the
-    /// *actual* screen-y by 1.  Without this pin, the drift accumulates
-    /// across every separator crossing.
+    /// When scrolling the viewport (Ctrl-d/u, mouse wheel, etc.), we want the selection to stay at a fixed screen row.
+    /// If the target item is non-selectable (separator), we pick a neighbor, but that shifts the *actual* screen-y by 1.
+    /// Without this pin, the drift accumulates across every separator crossing.
     ///
-    /// Set on the first viewport scroll after a selection change.  Cleared
-    /// by any intentional selection movement (j/k, click, g/G, etc.).
+    /// Set on the first viewport scroll after a selection change.
+    /// Cleared by any intentional selection movement (j/k, click, g/G, etc.).
     scroll_screen_y: Option<usize>,
 
     // -- Modes ----------------------------------------------------------------
@@ -316,23 +306,21 @@ pub struct ListPaneState {
     pub follow_mode: bool,
 
     // -- Follow / NAV edge tracking -------------------------------------------
-    /// NAV only: true when the last downward action was clamped at the
-    /// content bottom (viewport or selection at the end).  The next
-    /// downward action with this flag set engages follow ("one-past").
+    /// NAV only: true when the last downward action was clamped at the content bottom (viewport or selection at the end).
+    /// The next downward action with this flag set engages follow ("one-past").
     at_content_edge: bool,
 
-    /// NAV only: mouse-wheel overscroll counter.  Incremented on each
-    /// wheel-down event that is clamped at the bottom while
-    /// `at_content_edge` is true.  When it reaches
-    /// [`MOUSE_OVERSCROLL_THRESHOLD`], follow mode engages.
+    /// NAV only: mouse-wheel overscroll counter.
+    /// Incremented on each wheel-down event that is clamped at the bottom while `at_content_edge` is true.
+    /// When it reaches [`MOUSE_OVERSCROLL_THRESHOLD`], follow mode engages.
     overscroll_ticks: u8,
 
-    /// Active matcher (filter or search).  `None` = show all, no highlights.
+    /// Active matcher (filter or search).  `None` means show all, no highlights.
     matcher: Option<ListMatcher>,
 
-    /// Visible-index → physical-index mapping.
-    /// `None` = identity (no filter active, vis[i] == i).
-    /// `Some(vec)` = filtered mapping.
+    /// Visible-index to physical-index mapping.
+    /// `None` means identity (no filter active, vis[i] == i).
+    /// `Some(vec)` means a filtered mapping.
     /// Built in `prepare_layout`, consumed by the renderer.
     vis_map: Option<Vec<usize>>,
 
@@ -346,9 +334,8 @@ pub struct ListPaneState {
     // -- Highlight visibility -------------------------------------------------
     /// Whether the highlight post-pass should render match inversions.
     ///
-    /// Callers set this to `false` after accepting a filter (Enter) to avoid
-    /// visual noise when every visible line matches.  Set back to `true` when
-    /// re-entering the input bar or switching to search mode.
+    /// Callers set this to `false` after accepting a filter (Enter) to avoid visual noise when every visible line matches.
+    /// Set back to `true` when re-entering the input bar or switching to search mode.
     ///
     /// Defaults to `true` (highlights always shown).
     pub show_highlights: bool,
@@ -356,12 +343,12 @@ pub struct ListPaneState {
     // -- Height cache (Wrap mode) ---------------------------------------------
     /// Per-physical-item height cache for Wrap mode.
     ///
-    /// Indexed by physical item index.  Computed once when the width changes
-    /// (or on first layout), reused across filter changes.  This avoids
-    /// calling `desired_height` (which runs word-wrapping) on every filter
-    /// keystroke for 100K+ items.
+    /// Indexed by physical item index.
+    /// Computed once when the width changes (or on first layout), reused across filter changes.
+    /// This avoids calling `desired_height` (which runs word-wrapping) on every filter keystroke for 100K+ items.
     ///
-    /// Invalidated when width changes.  Extended incrementally on appends.
+    /// Invalidated when width changes.
+    /// Extended incrementally on appends.
     height_cache: Vec<u16>,
 
     /// Width at which `height_cache` was computed.
@@ -389,9 +376,9 @@ pub struct ListPaneState {
     scrollbar_dragging: bool,
 
     // -- Clipboard ------------------------------------------------------------
-    /// Clipboard provider for `y` (copy).  Default is `InternalClipboard`
-    /// (in-memory).  Host app can inject system clipboard via
-    /// [`set_clipboard_provider`].
+    /// Clipboard provider for `y` (copy).
+    /// Default is `InternalClipboard` (in-memory).
+    /// Host app can inject system clipboard via [`set_clipboard_provider`].
     clipboard: Box<dyn ClipboardProvider>,
 
     /// When the last successful copy happened (for toast notification).
@@ -401,13 +388,12 @@ pub struct ListPaneState {
     goto_line_snapshot: Option<GotoLineSnapshot>,
 
     /// Whether visual mode was active when goto-line was opened.
-    /// Used to decide if single-number input extends the existing range
-    /// or just jumps.
+    /// Used to decide if single-number input extends the existing range or just jumps.
     goto_line_had_visual: bool,
 }
 
 /// Mouse-wheel overscroll ticks required to snap into follow mode.
-/// Tunable — start with 1 (easy to trigger), increase if too twitchy.
+/// Tunable: start with 1 (easy to trigger), increase if too twitchy.
 const MOUSE_OVERSCROLL_THRESHOLD: u8 = 1;
 
 // ---------------------------------------------------------------------------
@@ -441,8 +427,7 @@ pub struct ListPaneConfig {
 
     /// Whether `/` (search) and `f` (filter) are available.
     ///
-    /// When `false`, these keys are not consumed and the input bar
-    /// never opens.
+    /// When `false`, these keys are not consumed and the input bar never opens.
     pub search_enabled: bool,
 
     /// Whether `y` copies the selected item(s) to clipboard.
@@ -464,8 +449,8 @@ pub struct ListPaneConfig {
 
     /// Whether `f` (filter) is available.
     ///
-    /// When `false`, `f` is not consumed. `/` (search) is still controlled
-    /// by `search_enabled`. This allows search-only without filter.
+    /// When `false`, `f` is not consumed.
+    /// `/` (search) is still controlled by `search_enabled`; this allows search-only without filter.
     pub filter_enabled: bool,
 
     /// Whether `:` (go to line) is available.
@@ -477,10 +462,8 @@ pub struct ListPaneConfig {
 impl Default for ListPaneConfig {
     /// Default config: follow and search disabled, wrap toggle enabled.
     ///
-    /// This is the safe default for static lists (todo items, background
-    /// tasks) where follow mode and search don't make sense.  For
-    /// streaming/append-only lists (tracing pane), use
-    /// `ListPaneConfig::streaming()`.
+    /// This is the safe default for static lists (todo items, background tasks) where follow mode and search don't make sense.
+    /// For streaming/append-only lists (tracing pane), use `ListPaneConfig::streaming()`.
     fn default() -> Self {
         Self {
             follow_enabled: false,
@@ -532,12 +515,11 @@ enum GotoTarget {
 /// Parse goto-line input text into a target.
 ///
 /// Supports:
-/// - `N` — single line number (clamped to 1..=max)
-/// - `N-M` — range (clamped, M >= N enforced)
+/// - `N`: single line number (clamped to 1..=max)
+/// - `N-M`: range (clamped, with the end raised to at least `N`)
 ///
-/// Partial inputs like `12-` (separator typed, no end yet) are treated as
-/// a single line jump to the start number (the end will update live as
-/// the user types more digits).
+/// Partial inputs like `12-` (separator typed, no end yet) are treated as a single line jump to the start number.
+/// The end updates live as the user types more digits.
 fn parse_goto_input(text: &str, max_lines: usize) -> GotoTarget {
     let text = text.trim();
     if text.is_empty() {
@@ -552,7 +534,7 @@ fn parse_goto_input(text: &str, max_lines: usize) -> GotoTarget {
         };
         let end_s = end_s.trim();
         if end_s.is_empty() {
-            // "N-" with no end yet — treat as single jump to N.
+            // "N-" with no end yet: treat as single jump to N
             return GotoTarget::Single(start);
         }
         match end_s.parse::<usize>() {

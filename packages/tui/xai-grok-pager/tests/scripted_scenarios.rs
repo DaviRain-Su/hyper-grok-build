@@ -1,8 +1,7 @@
 //! Declarative end-to-end TUI scenario tests.
 //!
-//! These tests exercise the real `xai-grok-pager` binary through a PTY using
-//! YAML scenarios under `tests/scenarios/`. They are ignored by default because
-//! they build/spawn the pager and stream through a mock inference server.
+//! These tests exercise the real `xai-grok-pager` binary through a PTY using YAML scenarios under `tests/scenarios/`.
+//! They are ignored by default because they build and spawn the pager and stream through a mock inference server.
 
 use std::path::PathBuf;
 
@@ -57,7 +56,7 @@ async fn scripted_welcome_screen() {
     run_scenario("welcome.yaml").await;
 }
 
-/// Resize while slash dropdown is open must not kill the pager.
+/// Resizing while the slash dropdown is open must not kill the pager.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_slash_resize_storm() {
@@ -76,8 +75,7 @@ async fn scripted_mock_response() {
     run_scenario("mock_response.yaml").await;
 }
 
-/// GBT-6092: Esc on `/agents` opened from a dashboard conversation peek must
-/// close the modal and stay in the overlay, not pop back to the dashboard.
+/// Esc on `/agents` opened from a dashboard conversation peek must close the modal and stay in the overlay, not pop back to the dashboard.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_dashboard_overlay_agents_esc() {
@@ -108,20 +106,18 @@ async fn scripted_table_cell_selection() {
     run_scenario("table_cell_selection.yaml").await;
 }
 
-/// Type-to-find pickers carry vim-mode. With vim-mode ON the command
-/// palette opens in INPUT (a letter filters immediately); Esc clears the query
-/// then a second Esc drops to NAV (letters no longer filter); `i` re-enters
-/// INPUT. The footer's `i search` hint is absent on open (input) and present in
-/// nav.
+/// Type-to-find pickers carry vim-mode.
+/// With vim-mode on, the command palette opens in INPUT (a letter filters immediately).
+/// Esc clears the query, a second Esc drops to NAV (letters no longer filter), and `i` re-enters INPUT.
+/// The footer's `i search` hint is absent on open (input) and present in nav.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_vim_modal_command_palette() {
     run_scenario("vim_modal_command_palette.yaml").await;
 }
 
-/// Tool header selection copies only the operand (path/command), not the
-/// `Read ` / `Run ` / `$ ` label — regression guard for Selectable::Spans on
-/// tool-call headers.
+/// Selecting a tool header copies only the operand (the path or command), not the `Read ` / `Run ` / `$ ` label.
+/// This guards the Selectable::Spans regression on tool-call headers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_tool_header_path_selection() {
@@ -135,16 +131,14 @@ async fn scripted_bracket_prompt_input() {
     run_scenario("bracket_prompt_input.yaml").await;
 }
 
-/// Double-clicking a `[Pasted: N lines]` chip expands it into plain
-/// editable prompt text (user feedback: clicking the chip means "edit").
+/// Double-clicking a `[Pasted: N lines]` chip expands it into plain editable prompt text (user feedback: clicking the chip means "edit").
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_paste_chip_double_click() {
     run_scenario("paste_chip_double_click.yaml").await;
 }
 
-/// Pasting identical content twice expands the chip instead of stacking a
-/// duplicate one ("paste again" means "show the text").
+/// Pasting identical content twice expands the chip instead of stacking a duplicate one ("paste again" means "show the text").
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_paste_chip_repaste() {
@@ -157,7 +151,7 @@ async fn scripted_image_inputs() {
     run_scenario("image_inputs.yaml").await;
 }
 
-/// Path-free image-chip preview and dismissal on a non-graphics PTY.
+/// An image chip with no backing file path previews and dismisses on a PTY without graphics support.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_image_chip_preview_path_free() {
@@ -176,21 +170,19 @@ async fn scripted_image_normalize_persist_atomic() {
     run_scenario("image_normalize_persist_atomic.yaml").await;
 }
 
-/// Mermaid fence (the engine is always compiled in) → inline Unicode-art diagram
-/// + clickable affordance row ([Open Image] [Copy Image Path] [Copy Source]) and
-/// NO inline image. The diagram renders as text art and the run never panics.
+/// A Mermaid fence (the engine is always compiled in) renders as an inline Unicode-art diagram, not an inline image.
+/// A clickable affordance row follows: [Open Image] [Copy Image Path] [Copy Source].
+/// The run never panics.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_mermaid_affordances() {
     run_scenario("mermaid-affordances.yaml").await;
 }
 
-/// User report: file path with a space (`Demo App.app`) must render
-/// fully and the ptyctl/PTY harness must carry OSC 8 for the *full* path
-/// (`Demo%20App.app`), not a truncated link ending at `Demo`.
-/// Screen assertions live in `path_space_hyperlink.yaml`; this wrapper also
-/// checks `raw_output.bin` so CI has byte-level proof without only relying on
-/// the ignored `pty_e2e` test.
+/// User report: a file path with a space (`Demo App.app`) must render fully.
+/// The ptyctl PTY stream must carry OSC 8 for the full path (`Demo%20App.app`), not a truncated link ending at `Demo`.
+/// Screen assertions live in `path_space_hyperlink.yaml`.
+/// This wrapper also checks `raw_output.bin` so CI has byte-level proof without relying only on the ignored `pty_e2e` test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_path_space_hyperlink() {
@@ -278,7 +270,7 @@ fn count_kitty_actions(raw: &[u8]) -> (usize, usize, usize) {
     (transmit_display, transmit_only, place_only)
 }
 
-/// PTY harness: paste one PNG, hammer redraws, prove uploads stay bounded.
+/// PTY harness: paste one PNG, redraw repeatedly, and prove image uploads stay bounded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_inline_image_memory() {
@@ -294,7 +286,7 @@ async fn scripted_inline_image_memory() {
     ));
     let report = runner.run(&scenario).await.expect("run scenario");
 
-    // Harness writes raw bytes under the per-run artifact dir (see scripted.rs).
+    // The harness writes raw bytes under the per-run artifact dir (see scripted.rs)
     let raw_path = report.artifact_dir.join("raw_output.bin");
     let raw = std::fs::read(&raw_path).unwrap_or_else(|err| {
         panic!(
@@ -342,132 +334,116 @@ async fn scripted_inline_image_memory() {
     );
 }
 
-/// enterprise deploy report: with `GROK_GOAL=1`, `/goal` must
-/// show in the slash menu on the welcome screen *before* the first user turn.
-/// The scenario types `/goal` pre-session and asserts the dropdown carries the
-/// builtin's description (which only renders when the command is advertised),
-/// then captures screenshot artifacts.
+/// Enterprise deploy report: with `GROK_GOAL=1`, `/goal` must show in the slash menu on the welcome screen before the first user turn.
+/// The scenario types `/goal` pre-session and asserts the dropdown carries the builtin's description, then captures screenshot artifacts.
+/// The description only renders when the command is advertised.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_goal_slash_presession() {
     run_scenario("goal_slash_presession.yaml").await;
 }
 
-/// Counterpart to `scripted_goal_slash_presession`: with the goal flag
-/// explicitly off (`GROK_GOAL=0`; goal mode defaults on), `/goal` must stay
-/// hidden pre-session (gate fail-closed) while an
-/// AlwaysOn builtin (`/compact`) still shows — proving it's the gate, not a
-/// broken dropdown.
+/// Counterpart to `scripted_goal_slash_presession`, with the goal flag explicitly off (`GROK_GOAL=0`; goal mode defaults on).
+/// `/goal` must stay hidden pre-session: the gate fails closed.
+/// The AlwaysOn builtin `/compact` still shows, proving the gate hides `/goal` and the dropdown itself works.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_goal_slash_presession_disabled() {
     run_scenario("goal_slash_presession_disabled.yaml").await;
 }
 
-/// Full folder-trust session: with `GROK_FOLDER_TRUST=1` and a git repo that
-/// ships a repo-local `.mcp.json` (declared via the scenario `workspace`), the
-/// trust question renders before any session, accepting it (`y`) lets the
-/// session proceed, and a submitted prompt streams the mock response. The
-/// declarative counterpart to the programmatic `folder_trust_*` PTY tests.
+/// Full folder-trust session: `GROK_FOLDER_TRUST=1` and a git repo that ships a repo-local `.mcp.json` (declared via the scenario `workspace`).
+/// The trust question renders before any session, accepting it (`y`) lets the session proceed, and a submitted prompt streams the mock response.
+/// This is the declarative counterpart to the programmatic `folder_trust_*` PTY tests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_folder_trust_prompt() {
     run_scenario("folder_trust_prompt.yaml").await;
 }
 
-/// Dashboard `/model` list: mouse-clicking a model must accept the completion
-/// into the dispatch prompt and must not attach the session row under the
-/// dropdown (click-through regression).
+/// Dashboard `/model` list: mouse-clicking a model must accept the completion into the dispatch prompt.
+/// It must not attach the session row under the dropdown (the click-through regression).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_dashboard_model_list_click() {
     run_scenario("dashboard_model_list_click.yaml").await;
 }
 
-/// Shortcuts cheatsheet end-to-end: open the modal, inline-expand a hint (→) and
-/// collapse it (←), open the man-style detail screen (Enter) showing long_help,
-/// return to browse (Esc), and close with the global Ctrl+X chord.
+/// Shortcuts cheatsheet end-to-end: open the modal, inline-expand a hint (→), and collapse it (←).
+/// Then open the man-style detail screen (Enter) showing long_help, return to browse (Esc), and close with the global Ctrl+X chord.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_shortcuts_help_detail() {
     run_scenario("shortcuts_help_detail.yaml").await;
 }
 
-/// Undo tip happy path: a substantial Ctrl+U wipe shows the "… to undo"
-/// banner (which then clears on its own TTL — no early retire on undo).
+/// Undo tip happy path: a substantial Ctrl+U wipe shows the "… to undo" banner.
+/// The banner clears on its own TTL; undoing does not retire it early.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_undo_tip_clear_shows() {
     run_scenario("undo_tip_clear_shows.yaml").await;
 }
 
-/// Undo tip Ctrl+C variant: clearing a substantial draft with Ctrl+C shows
-/// the banner too.
+/// Undo tip Ctrl+C variant: clearing a substantial draft with Ctrl+C shows the banner too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_undo_tip_ctrl_c_clear_shows() {
     run_scenario("undo_tip_ctrl_c_clear_shows.yaml").await;
 }
 
-/// Undo tip no-show edge: wiping a short (<20 char) draft shows nothing.
+/// Undo tip no-show edge: wiping a short draft (under 20 chars) shows nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_undo_tip_short_draft_no_show() {
     run_scenario("undo_tip_short_draft_no_show.yaml").await;
 }
 
-/// Undo tip no-show edge: on a short terminal the renderability gate refuses
-/// the banner even after a substantial wipe.
+/// Undo tip no-show edge: on a short terminal the renderability gate refuses the banner even after a substantial wipe.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_undo_tip_short_terminal_no_show() {
     run_scenario("undo_tip_short_terminal_no_show.yaml").await;
 }
 
-/// Undo tip no-show edge: accepting an @-file completion is not a wipe and
-/// must not hint.
+/// Undo tip no-show edge: accepting an @-file completion is not a wipe and must not hint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_undo_tip_completion_accept_no_show() {
     run_scenario("undo_tip_completion_accept_no_show.yaml").await;
 }
 
-/// Plan-nudge happy path: with contextual hints enabled, typing a planning
-/// keyword shows the "Planning? Check out plan mode via shift+tab" banner.
+/// Plan-nudge happy path: with contextual hints enabled, typing a planning keyword shows the "Planning? Check out plan mode via shift+tab" banner.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_plan_nudge_shows() {
     run_scenario("plan_nudge_shows.yaml").await;
 }
 
-/// Plan-nudge opt-out edge: contextual hints ship default-OFF, so this scenario
-/// also pins `GROK_CONTEXTUAL_HINTS=0` (belt-and-suspenders); the same planning
-/// keyword shows nothing.
+/// Plan-nudge opt-out edge: contextual hints are off by default, and this scenario also pins `GROK_CONTEXTUAL_HINTS=0` to be sure.
+/// The same planning keyword shows nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_plan_nudge_opt_out_no_show() {
     run_scenario("plan_nudge_opt_out_no_show.yaml").await;
 }
 
-/// Follow-up: a mid-message `/test-skill` token stays teal in the
-/// scrollback echo after submit (screenshots capture composer + echo styling).
+/// A mid-message `/test-skill` token stays teal in the scrollback echo after submit (screenshots capture the composer and echo styling).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_mid_text_skill_token_echo() {
     run_scenario("mid_text_skill_token_echo.yaml").await;
 }
 
-/// Auto-compact: shrinking to 14 rows drops the sticky prev-question header
-/// (compact chrome engages); growing back to 32 rows restores it.
+/// Auto-compact: shrinking to 14 rows drops the sticky previous-question header (compact chrome engages); growing back to 32 rows restores it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_auto_compact_resize() {
     run_scenario("auto_compact_resize.yaml").await;
 }
 
-/// Small-screen tip happy path: a 24-row terminal (in the 21..=28 band) shows
-/// the one-shot "Tight on space? Try /compact-mode" banner, which expires on
-/// its TTL and never re-shows after resizes.
+/// Small-screen tip happy path: a 24-row terminal (in the 21..=28 band) shows the one-shot "Tight on space? Try /compact-mode" banner.
+/// The banner expires on its TTL and never re-shows after resizes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_small_screen_tip_band() {
@@ -481,45 +457,40 @@ async fn scripted_small_screen_tip_no_show_tall() {
     run_scenario("small_screen_tip_no_show_tall.yaml").await;
 }
 
-/// Small-screen tip no-show edge: at 14 rows auto-compact engages instead and
-/// the banner row cannot render.
+/// Small-screen tip no-show edge: at 14 rows auto-compact engages instead and the banner row cannot render.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_small_screen_tip_no_show_tiny() {
     run_scenario("small_screen_tip_no_show_tiny.yaml").await;
 }
 
-/// Inline edit-and-resubmit happy path: Enter on a selected previous prompt
-/// opens the in-place editor; Enter with changed text raises the confirm
-/// dialog; `y` rewinds the conversation and resubmits the edited text as a
-/// fresh turn (distinct per-turn mock sentinels prove the tail was
-/// truncated), with no "Reverted conversation" note.
+/// Inline edit-and-resubmit happy path: Enter on a selected previous prompt opens the in-place editor.
+/// Enter with changed text raises the confirm dialog.
+/// `y` rewinds the conversation and resubmits the edited text as a fresh turn, with no "Reverted conversation" note.
+/// Distinct per-turn mock sentinels prove the tail was truncated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_inline_edit_resubmit() {
     run_scenario("inline_edit_resubmit.yaml").await;
 }
 
-/// Enter on an unchanged inline edit just closes the editor: no rewind
-/// popup, no resubmit, transcript untouched.
+/// Enter on an unchanged inline edit just closes the editor: no rewind popup, no resubmit, and the transcript stays untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_inline_edit_unchanged_exit() {
     run_scenario("inline_edit_unchanged_exit.yaml").await;
 }
 
-/// Esc from the inline resubmit popup returns to the still-open editor with
-/// the edit intact; a second Esc discards the edit and restores the original
-/// prompt text in place.
+/// Esc from the inline resubmit popup returns to the still-open editor with the edit intact.
+/// A second Esc discards the edit and restores the original prompt text in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_inline_edit_dismiss_returns_to_editor() {
     run_scenario("inline_edit_dismiss_returns_to_editor.yaml").await;
 }
 
-/// Sanity-check: every scenario YAML in the list below must parse. Runs at
-/// `cargo test` time without `--ignored` so a malformed YAML breaks CI
-/// immediately rather than only when the scripted runner is opted in.
+/// Sanity-check: every scenario YAML in the list below must parse.
+/// This runs at `cargo test` time without `--ignored`, so a malformed YAML breaks CI immediately, not only when the scripted runner is opted in.
 #[test]
 fn scenarios_parse() {
     for name in [

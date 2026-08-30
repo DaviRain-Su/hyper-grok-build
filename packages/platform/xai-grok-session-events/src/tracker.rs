@@ -5,8 +5,8 @@ use std::time::Instant;
 use crate::log::EventWriter;
 use crate::types::{CancellationCategory, Event, RedirectKind, TurnOutcomeLabel};
 
-/// In-flight tool for cancel telemetry. Duration is the dispatch wall already
-/// measured, so cancel can reuse it instead of re-timing post-flight.
+/// The tool call currently running, kept so a cancel can report it.
+/// `dispatch_duration_ms` was measured when the call was dispatched, so a cancel reports that instead of timing the call itself.
 #[derive(Debug, Clone)]
 struct ActiveTool {
     tool_name: String,
@@ -14,33 +14,27 @@ struct ActiveTool {
     dispatch_duration_ms: u64,
 }
 
-/// Per-session event state. `!Send` — lives on the session actor.
-/// Background tasks use `tracker.writer()` to get a `Clone + Send + Sync` handle.
+/// One session's event state. It is `!Send` and lives on the session actor.
+/// Background tasks emit through the `Clone + Send + Sync` handle from `writer()`.
 pub struct EventTracker {
     writer: EventWriter,
     turn_ended_emitted: Cell<bool>,
     active_tool: RefCell<Option<ActiveTool>>,
     turn_tool_count: Cell<u32>,
-    /// Cross-turn one-shot: the *fatal* user-interrupt cause that cancelled the
-    /// most recent turn (set by the cancel paths), consumed by the *next* real
-    /// user prompt to tag `UserItem::prior_turn_interrupt`. Deliberately NOT
-    /// reset by `begin_turn` — it must survive into the next turn; the consumer
-    /// clears it via `take_prior_interrupt_category`. Interjections are NOT
-    /// recorded here (they don't cancel the turn; see `Event::Interjected`).
+    /// Why a user interrupt cancelled the most recent turn, set by the cancel paths.
+    /// The next real user prompt consumes it once, via `take_prior_interrupt_category`, to tag `UserItem::prior_turn_interrupt`.
+    /// `begin_turn` must not clear it: it has to survive into that next turn.
+    /// An interjection does not cancel the turn, so it is never recorded here (see `Event::Interjected`).
     prior_interrupt_category: Cell<Option<CancellationCategory>>,
-    /// Cross-turn one-shot: the redirect mechanism for the NEXT turn after a
-    /// mid-turn abort — `CancelThenSend` (nothing was queued) or
-    /// `QueuedAfterCancel` (a prompt sat queued behind the aborted turn). Set
-    /// by `cancel_running_task`, consumed by the next user `turn_started` to
-    /// stamp `Event::TurnStarted::redirect_kind`. Like `prior_interrupt_category`
-    /// it deliberately survives `begin_turn` so it reaches the next real turn.
+    /// The `RedirectKind` for the turn that follows a mid-turn abort.
+    /// `CancelThenSend` means nothing was queued; `QueuedAfterCancel` means a prompt sat queued behind the aborted turn.
+    /// `cancel_running_task` sets it, and the next user `turn_started` consumes it into `Event::TurnStarted::redirect_kind`.
+    /// Like `prior_interrupt_category` it survives `begin_turn` so it reaches that next turn.
     prior_redirect_kind: Cell<Option<RedirectKind>>,
-    /// Cross-turn one-shot: armed by the cancel path only when a turn was aborted
-    /// mid-stream with NO tool in flight, so neither the dangling-tool-call
-    /// repair nor a permission tool-result will tell the model it was
-    /// interrupted. Consumed by the next *real* user prompt to frame that
-    /// query with the interrupt envelope. Like the markers above it deliberately
-    /// survives `begin_turn` so it reaches the next real turn.
+    /// Set by the cancel path only when a turn was aborted mid-stream with no tool in flight.
+    /// Nothing else then tells the model it was interrupted: no dangling tool call gets repaired and no permission tool result is written.
+    /// The next real user prompt consumes it and frames that query with the interrupt envelope.
+    /// Like the markers above it survives `begin_turn` so it reaches that next turn.
     pending_interrupt_reminder: Cell<bool>,
 }
 
@@ -87,13 +81,12 @@ impl EventTracker {
         self.writer.emit(event);
     }
 
-    /// Reset per-turn state. Called at the start of each turn.
     pub fn begin_turn(&self) {
         self.turn_ended_emitted.set(false);
         self.turn_tool_count.set(0);
     }
 
-    /// Emit `turn_ended` with a double-emission guard.
+    /// Emits `turn_ended` at most once per turn; later calls do nothing.
     pub fn emit_turn_ended(
         &self,
         outcome: TurnOutcomeLabel,
@@ -110,10 +103,8 @@ impl EventTracker {
         });
     }
 
-    /// Mark a tool as active for cancellation tracking.
-    ///
-    /// `dispatch_duration_ms` is the wall time already measured for this call, so
-    /// a cancel can report it rather than re-measure from post-flight.
+    /// Marks a tool as active so a cancel can report it.
+    /// `dispatch_duration_ms` was measured when the call was dispatched, so a cancel reports it instead of timing the call again.
     pub fn tool_started(&self, tool_name: String, tool_call_id: String, dispatch_duration_ms: u64) {
         let is_new = self.active_tool.borrow().is_none();
         *self.active_tool.borrow_mut() = Some(ActiveTool {
@@ -121,7 +112,7 @@ impl EventTracker {
             tool_call_id,
             dispatch_duration_ms,
         });
-        // Re-entry (e.g. after reauth adds retry wall time) only refreshes duration.
+        // A repeat call for the same tool (e.g. after a reauth retry) only refreshes the duration.
         if is_new {
             self.turn_tool_count.set(self.turn_tool_count.get() + 1);
         }
@@ -139,11 +130,9 @@ impl EventTracker {
         *self.active_tool.borrow_mut() = None;
     }
 
-    /// Cancel in-flight tool and emit `ToolCompleted(cancelled)`.
-    /// Called from `cancel_running_task()` before `turn_ended`.
-    ///
-    /// A tool cancelled while still dispatching was never marked active, so it
-    /// gets no `tool_completed` row at all.
+    /// Cancels the in-flight tool and emits `ToolCompleted(cancelled)`.
+    /// `cancel_running_task()` calls this before `turn_ended`.
+    /// A tool cancelled while still dispatching was never marked active, so it gets no `tool_completed` row.
     pub fn cancel_active_tool(&self) {
         if let Some(tool) = self.active_tool.borrow_mut().take() {
             self.emit(Event::ToolCompleted {
@@ -152,13 +141,13 @@ impl EventTracker {
                 outcome: crate::types::ToolOutcome::Cancelled,
                 tool_call_id: tool.tool_call_id,
                 source: crate::types::ToolCompletedSource::Shell,
+                rewriting_hook: None,
             });
         }
     }
 
-    /// Record the *fatal* user-interrupt cause that cancelled this turn so the
-    /// *next* real user prompt can be tagged. Overwrites any prior value (latest
-    /// cause wins).
+    /// Records why a user interrupt cancelled this turn, for tagging the next real user prompt.
+    /// A later cause overwrites an earlier one.
     pub fn set_prior_interrupt_category(&self, category: CancellationCategory) {
         self.prior_interrupt_category.set(Some(category));
     }
@@ -168,9 +157,8 @@ impl EventTracker {
         self.prior_interrupt_category.take()
     }
 
-    /// Record the redirect mechanism (`CancelThenSend` / `QueuedAfterCancel`)
-    /// for the next turn after a mid-turn abort. Overwrites any prior value
-    /// (latest abort wins).
+    /// Records how the turn after a mid-turn abort starts (`CancelThenSend` or `QueuedAfterCancel`).
+    /// A later abort overwrites an earlier one.
     pub fn set_prior_redirect_kind(&self, kind: RedirectKind) {
         self.prior_redirect_kind.set(Some(kind));
     }
@@ -180,9 +168,8 @@ impl EventTracker {
         self.prior_redirect_kind.take()
     }
 
-    /// Arm the one-shot interrupt envelope for the next real user prompt. Set
-    /// only on the cancel path when no tool was in flight (the case where the
-    /// model would otherwise get no signal that it was interrupted).
+    /// Turns on the one-shot interrupt envelope for the next real user prompt.
+    /// Only the cancel path sets it, and only when no tool was in flight, because the model would otherwise never learn it was interrupted.
     pub fn set_pending_interrupt_reminder(&self) {
         self.pending_interrupt_reminder.set(true);
     }
@@ -192,8 +179,8 @@ impl EventTracker {
         self.pending_interrupt_reminder.replace(false)
     }
 
-    /// Emit PhaseChanged(PermissionPrompt) → PermissionRequested.
-    /// Returns the Instant for `permission_resolved()` to compute wait_ms.
+    /// Emits `PhaseChanged(PermissionPrompt)` and then `PermissionRequested`.
+    /// Returns the `Instant` that `permission_resolved()` uses to compute `wait_ms`.
     pub fn permission_requested(&self, tool_name: &str) -> Instant {
         self.emit(Event::PhaseChanged {
             phase: crate::types::Phase::PermissionPrompt,
@@ -256,10 +243,9 @@ mod tests {
         ));
         assert!(t.take_prior_redirect_kind().is_none());
 
-        // `begin_turn` runs at the START of a turn — BEFORE the next real user
-        // prompt consumes the markers — so it must NOT clear these cross-turn
-        // markers (it only resets per-turn counters). A regression here would
-        // silently drop the `prior_turn_interrupt` tag / `redirect_kind`.
+        // `begin_turn` runs at the start of a turn, before the next real user prompt consumes the markers
+        // It must not clear these cross-turn markers; it only resets the per-turn counters
+        // A regression here would silently drop the `prior_turn_interrupt` tag and the `redirect_kind`
         t.set_prior_interrupt_category(CancellationCategory::PermissionRejected);
         t.set_prior_redirect_kind(RedirectKind::CancelThenSend);
         t.set_pending_interrupt_reminder();

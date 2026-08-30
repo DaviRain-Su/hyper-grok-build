@@ -2,9 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// After queuing a follow-up mid-turn, the ephemeral tip advertises send-now
-/// (`… to send now`). Opt into contextual hints explicitly so the tip cannot
-/// be soft-disabled by remote defaults in CI.
+/// After queuing a follow-up mid-turn, the ephemeral tip advertises send-now (`… to send now`).
+/// Opt into contextual hints explicitly so the tip cannot be soft-disabled by remote defaults in CI.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn send_now_tip_after_mid_turn_queue() {

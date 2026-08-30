@@ -1,24 +1,27 @@
 use std::time::Duration;
 
-/// The outcome of a blocking (`pre_tool_use`) hook dispatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookDecision {
     Allow,
-    Deny { reason: String, hook_name: String },
+    Ask {
+        hook_name: String,
+        reason: Option<String>,
+    },
+    Defer {
+        hook_name: String,
+    },
+    Deny {
+        hook_name: String,
+        reason: String,
+    },
 }
 
-/// The outcome of a `user_prompt_submit` gate dispatch. Deliberately not
-/// [`HookDecision`]: the prompt gate's wire vocabulary is `block` (`deny` is
-/// a tool-gate word and an error here), and `reason` is user-facing text,
-/// never model context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptDecision {
     Allow,
     Block { reason: String, hook_name: String },
 }
 
-/// Parsed output of one `Stop`/`SubagentStop` gate hook. The dispatcher
-/// aggregates these across hooks; `force_stop` overrides blocks.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StopHookOutcome {
     pub block_reason: Option<String>,
@@ -26,7 +29,6 @@ pub struct StopHookOutcome {
     pub force_stop: Option<StopOverride>,
 }
 
-/// A `continue: false` force-stop; `reason` is `stopReason`, shown to the user.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StopOverride {
     pub reason: Option<String>,
@@ -40,43 +42,37 @@ impl StopHookOutcome {
     }
 }
 
-/// HTTP execution details for `"http"` hooks, for scrollback enrichment.
 #[derive(Debug, Clone)]
 pub struct HttpInfo {
-    /// Post-expansion target (for SSRF debugging). May contain secrets from
-    /// resolved `${VAR}` substitutions, so user-facing display MUST prefer
-    /// `raw_url` when present.
-    pub url: String,
-    /// Pre-expansion source URL as written in the file, safe for display.
-    /// `None` when the spec was built without it (fall back to `url`).
-    pub raw_url: Option<String>,
+    pub expanded_url: String,
+    pub source_url: Option<String>,
     pub status: Option<u16>,
     pub response_preview: Option<String>,
 }
 
-/// The outcome of a single hook execution.
 #[derive(Debug)]
 pub enum HookRunResult {
     Success {
         hook_name: String,
         elapsed: Duration,
         http_info: Option<HttpInfo>,
+        system_message: Option<String>,
     },
     Skipped {
         hook_name: String,
     },
-    /// Ran and blocked: a stop-gate decision, not a failure (distinct from `Failed`).
     Blocked {
         hook_name: String,
         detail: String,
         elapsed: Duration,
         http_info: Option<HttpInfo>,
+        system_message: Option<String>,
     },
-    /// Hook failed (timeout, crash, bad output): fail-open.
     Failed {
         hook_name: String,
         error: String,
         elapsed: Duration,
         http_info: Option<HttpInfo>,
+        system_message: Option<String>,
     },
 }

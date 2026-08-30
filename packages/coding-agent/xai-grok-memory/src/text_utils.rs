@@ -1,22 +1,15 @@
-//! Pure text-classification helpers shared by the sibling [`crate::flush`]
-//! and [`crate::dream`] response-processing modules.
+//! Text-classification helpers shared by the [`crate::flush`] and [`crate::dream`] response-processing modules.
 //!
-//! Keeping these helpers separate lets both memory domains depend on
-//! `text_utils` without depending on each other.
+//! Keeping them here lets flush and dream depend on `text_utils` without depending on each other.
 
-/// Check if text contains at least one markdown header (`#` or `##`).
-///
-/// Used by both flush and dream response processing to ensure the model
-/// produced structured output.
+/// Flush and dream response processing call this to check the model produced structured output.
 pub fn has_markdown_headers(text: &str) -> bool {
     text.contains("## ") || text.contains("# ")
 }
 
-/// Check if the response matches the NO_REPLY convention.
+/// True when the response is the NO_REPLY marker in any case or separator variant: `"no reply"`, `"no_reply"`, `"No-Reply"`, `"NO REPLY"`.
 ///
-/// Strips all non-alphanumeric characters, lowercases, and checks if the
-/// remainder is exactly `"noreply"`. This handles common separator variants:
-/// `"no reply"`, `"no_reply"`, `"no-reply"`, `"NO REPLY"`, etc.
+/// Strips all non-alphanumeric characters, lowercases, and checks if the remainder is exactly `"noreply"`.
 pub fn is_no_reply(text: &str) -> bool {
     let normalized: String = text
         .to_lowercase()

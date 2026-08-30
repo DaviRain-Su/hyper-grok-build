@@ -2,12 +2,10 @@
 
 use crate::buffers::unicode_display_width;
 
-/// Two-dimensional text box with an anchor row where horizontal flow
-/// attaches.
+/// Two-dimensional text box with an anchor row where horizontal flow attaches.
 ///
-/// Multi-row content (matrix-family environments) extends above/below the
-/// anchor row; subsequent output continues on the anchor row. This keeps a
-/// prefix, a matrix, and a suffix aligned:
+/// Multi-row content (matrix-family environments) extends above/below the anchor row; subsequent output continues on the anchor row.
+/// This keeps a prefix, a matrix, and a suffix aligned:
 ///
 /// ```text
 /// A = ⎛1  2⎞,   det(A) = −2
@@ -17,12 +15,10 @@ pub(super) struct MathBox {
     lines: Vec<String>,
     /// Row index that horizontal flow currently appends to.
     anchor: usize,
-    /// First row belonging to the current visual line. Rows before `floor`
-    /// are completed lines from earlier `\\` breaks and must never be
-    /// touched by box attachment.
+    /// First row belonging to the current visual line.
+    /// Rows before `floor` are completed lines from earlier `\\` breaks and must never be touched by box attachment.
     floor: usize,
-    /// Flat mode (inline math): vertical layout is impossible, so row breaks
-    /// render as `; ` and environments render single-row.
+    /// Flat mode (inline math): vertical layout is impossible, so row breaks render as `; ` and environments render single-row.
     pub(super) flat: bool,
 }
 
@@ -65,8 +61,8 @@ impl MathBox {
         }
     }
 
-    /// End the current visual line; flow continues on a fresh row below all
-    /// existing rows. Flat mode renders the break as `; `.
+    /// End the current visual line; flow continues on a fresh row below all existing rows.
+    /// Flat mode renders the break as `; `.
     fn vbreak(&mut self) {
         if self.flat {
             if !self.at_line_start() {
@@ -83,9 +79,8 @@ impl MathBox {
         }
     }
 
-    /// Attach `rows` as a box at the current flow position, anchored at the
-    /// box's upper-middle row. All box rows start at the same column; flow
-    /// resumes on the anchor row past the box's widest row.
+    /// Attach `rows` as a box at the current flow position, anchored at the box's upper-middle row.
+    /// All box rows start at the same column; flow resumes on the anchor row past the box's widest row.
     pub(super) fn hcat_rows(&mut self, rows: Vec<String>) {
         if rows.is_empty() {
             return;

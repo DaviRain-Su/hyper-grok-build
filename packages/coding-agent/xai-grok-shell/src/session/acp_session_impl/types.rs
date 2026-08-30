@@ -42,6 +42,12 @@ pub(crate) enum SamplerFailureRecovery {
         credential: xai_grok_sampling_types::SentCredential,
         store: RecoveredStore,
     },
+    /// Transient failure: back off and resubmit instead of killing the
+    /// turn. Bounded.
+    RetryTransient {
+        kind: xai_grok_sampler::SamplingErrorKind,
+        status_code: Option<u16>,
+    },
 }
 
 /// Outcome of a single turn attempt via the sampler-based path.
@@ -60,6 +66,11 @@ pub(crate) enum SamplerTurnOutcome {
     RefreshAuthAndResubmit {
         credential: xai_grok_sampling_types::SentCredential,
         store: RecoveredStore,
+    },
+    /// Mirrors [`SamplerFailureRecovery::RetryTransient`].
+    RetryTransient {
+        kind: xai_grok_sampler::SamplingErrorKind,
+        status_code: Option<u16>,
     },
 }
 

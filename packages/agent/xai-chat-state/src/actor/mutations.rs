@@ -515,14 +515,32 @@ impl ChatStateActor {
         });
     }
 
-    /// Replace the entire conversation, persist, re-estimate `total_tokens`,
-    /// and emit reset + token-update events.
-    ///
-    /// Compaction replaces carry the provider-side overhead forward as a
-    /// *ratio* (`base_estimate × provider_total ÷ estimate_at_last_response`,
-    /// capped at the pre-compaction total; `base_estimate` when that estimate is
-    /// 0) so the reseed neither springs back nor over-counts (see
+    /// Reseed for `total_tokens` after a conversation rewrite (compaction,
+    /// rewind, mode switch, goal-directive prune): the raw `base_estimate`
+    /// scaled by the provider-confirmed ratio (`total_tokens ÷
+    /// estimate_at_last_response`), capped at the pre-rewrite total (see
     /// `COMPACTION.md`).
+    pub(super) fn reseed_total_tokens(&self, base_estimate: u64) -> u64 {
+        let pre_replace_total = self.state.total_tokens;
+        let mut estimated_tokens =
+            if pre_replace_total > 0 && self.state.estimate_at_last_response > 0 {
+                let ratio = pre_replace_total as f64 / self.state.estimate_at_last_response as f64;
+                (base_estimate as f64 * ratio).round() as u64
+            } else {
+                base_estimate
+            };
+        // Over-counting fires premature compaction; an under-count self-heals
+        // on the next model response.
+        if pre_replace_total > 0 {
+            estimated_tokens = estimated_tokens.min(pre_replace_total);
+        }
+        estimated_tokens
+    }
+
+    /// Replace the entire conversation, persist, re-estimate `total_tokens`
+    /// via [`Self::reseed_total_tokens`], and emit reset + token-update events.
+    /// `is_compaction` only marks the turn capture; the reseed math is the
+    /// same for every rewrite.
     pub(super) fn replace_conversation(
         &mut self,
         items: Vec<ConversationItem>,
@@ -532,28 +550,16 @@ impl ChatStateActor {
         if is_compaction && let Some(cap) = &mut self.state.turn_capture {
             cap.compaction_occurred = true;
         }
-        let pre_replace_total = self.state.total_tokens;
         // `harness_trace_buffer` / `harness_trace_turns` intentionally untouched:
         // the planner/verifier subagents ran, so their sealed trace turns survive
         // a conversation replace (same intent as the `TruncateToPromptIndex` arm).
         self.persistence.replace_history(&items);
         let base_estimate = super::state::estimate_conversation_tokens(&items);
-        let mut estimated_tokens =
-            if is_compaction && pre_replace_total > 0 && self.state.estimate_at_last_response > 0 {
-                let ratio = pre_replace_total as f64 / self.state.estimate_at_last_response as f64;
-                (base_estimate as f64 * ratio).round() as u64
-            } else {
-                base_estimate
-            };
-        // Compaction must never appear to increase usage.
-        if is_compaction && pre_replace_total > 0 {
-            estimated_tokens = estimated_tokens.min(pre_replace_total);
-        }
+        let estimated_tokens = self.reseed_total_tokens(base_estimate);
         self.state.conversation = items;
         self.state.estimated_tokens_since_model = 0;
         self.state.total_tokens = estimated_tokens;
-        self.state.estimate_at_last_response =
-            super::state::estimate_conversation_tokens(&self.state.conversation);
+        self.state.estimate_at_last_response = base_estimate;
         self.rebase_turn_capture_offset();
         self.send_event(ChatStateEvent::ConversationReset {
             new_len: self.state.conversation.len(),

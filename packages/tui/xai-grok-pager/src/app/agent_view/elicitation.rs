@@ -1,6 +1,5 @@
-//! MCP elicitation card (`x.ai/mcp/elicit`): key/mouse/paste routing,
-//! accept/decline/cancel resolution, the pending-request promotion chain,
-//! and the composer stash handoff.
+//! The MCP elicitation card (`x.ai/mcp/elicit`): routes key, mouse, and paste input and resolves accept, decline, and cancel.
+//! Also promotes the next pending request when a card closes, and stashes and restores the composer draft.
 
 use super::AgentView;
 use crate::app::app_view::InputOutcome;
@@ -23,9 +22,8 @@ impl AgentView {
             return InputOutcome::Unchanged;
         };
 
-        // URL stages have no fields: the walk keys scroll the URL body
-        // viewport instead (actions stay reachable via Tab / Left / Right),
-        // so keyboard-only users can inspect a long URL's tail.
+        // URL stages have no fields: Up, Down, PageUp, and PageDown scroll the URL body viewport instead
+        // That lets keyboard-only users see a long URL's tail; the actions stay reachable via Tab, Left, and Right
         if ev.url().is_some() {
             let scrolled = match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -51,8 +49,7 @@ impl AgentView {
             }
         }
 
-        // URL waiting: the response is already sent; only dismiss ("Done",
-        // also via d) and reopen remain.
+        // URL waiting: the response is already sent; only dismiss ("Done", also via d) and reopen remain
         if ev.is_url_waiting() {
             match key.code {
                 KeyCode::Enter
@@ -200,7 +197,7 @@ impl AgentView {
     pub(super) fn handle_elicitation_mouse(&mut self, mouse: &MouseEvent) -> InputOutcome {
         use crate::views::elicitation_view::{ElicitHit, ElicitationFocus};
         match mouse.kind {
-            // The body is a viewport: wheel scrolls it (render clamps).
+            // The body is a viewport: the wheel scrolls it and the render pass clamps the offset
             MouseEventKind::ScrollUp => {
                 if let Some(ev) = self.elicitation_view.as_mut() {
                     ev.scroll = ev.scroll.saturating_sub(1);
@@ -266,10 +263,9 @@ impl AgentView {
         }
     }
 
-    /// A `Some` `server_name` must additionally equal the card's verbatim
-    /// wire server name, so one server cannot dismiss another's waiting card
-    /// by guessing its elicitation id. `None` (older shells) matches by id
-    /// alone.
+    /// A `Some` `server_name` must also equal the card's verbatim wire server name.
+    /// That stops one server dismissing another's waiting card by guessing its elicitation id.
+    /// `None` (older shells) matches by id alone.
     pub(crate) fn dismiss_waiting_elicitation(
         &mut self,
         elicitation_id: &str,
@@ -287,9 +283,8 @@ impl AgentView {
         true
     }
 
-    /// Remove the card without answering (URL waiting already answered;
-    /// there is nothing left to send). Restores the stashed draft and
-    /// promotes any parked request.
+    /// Remove the card without answering: a URL-waiting card already answered, so there is nothing left to send.
+    /// Restores the stashed draft and promotes any parked request.
     fn dismiss_elicitation_view(&mut self) -> InputOutcome {
         let Some(ev) = self.elicitation_view.take() else {
             return InputOutcome::Unchanged;
@@ -339,8 +334,7 @@ impl AgentView {
             }
         };
 
-        // Waiting: the ACP response went out on consent; "Done" only
-        // dismisses the local chrome.
+        // Waiting: the ACP response went out on consent; "Done" only dismisses the local chrome
         if is_waiting {
             return self.dismiss_elicitation_view();
         }
@@ -350,23 +344,19 @@ impl AgentView {
         };
 
         if is_url_consent {
-            // The URL was validated at ingress (http(s), parseable, no
-            // credentials) or Accept would have been disabled.
+            // The URL was validated when the request arrived (http(s), parseable, no credentials) or Accept would have been disabled
             let (delivered, url) = {
                 let Some(ev) = self.elicitation_view.as_mut() else {
                     return InputOutcome::Changed;
                 };
                 if ev.send_response(resp) {
-                    // Capture the URL from the consent stage (where it
-                    // exists by construction) before the transition takes
-                    // the stage apart.
+                    // Capture the URL from the consent stage (it always has one) before `begin_url_waiting` tears that stage down
                     let url = ev.url().map(str::to_string);
                     ev.begin_url_waiting();
                     (true, url)
                 } else {
-                    // The MCP side already abandoned the request (server
-                    // cancel / teardown): nothing heard the accept, so do
-                    // not navigate and do not enter the waiting stage.
+                    // The MCP side already abandoned the request (server cancel or teardown)
+                    // Nothing heard the accept, so do not navigate and do not enter the waiting stage
                     (false, None)
                 }
             };
@@ -413,21 +403,18 @@ impl AgentView {
         let Some(mut ev) = self.elicitation_view.take() else {
             return InputOutcome::Unchanged;
         };
-        // The card closes either way; an undelivered answer just means the
-        // MCP side already gave up on the request.
+        // The card closes either way; an undelivered answer means the MCP side already gave up on the request
         let _ = ev.send_response(response);
         self.restore_elicitation_prompt(ev.stashed_prompt);
         self.promote_pending_elicitation();
         InputOutcome::Changed
     }
 
-    /// Take composer ownership for an opening elicitation card.
+    /// Stash the composer draft for an opening elicitation card.
     ///
-    /// Returns `None` — leaving the composer untouched — when an earlier card
-    /// (permission / question / plan approval) already displaced the session
-    /// draft: the live composer then holds that card's followup/freeform text
-    /// (or nothing), and stashing it would make the elicitation restore an
-    /// empty draft over the one the earlier card puts back.
+    /// Returns `None` (composer untouched) when an earlier card (permission, question, plan approval) already displaced the session draft.
+    /// The live composer then holds that card's followup or freeform text, or nothing.
+    /// Stashing that would make this card later restore an empty draft over the one the earlier card puts back.
     pub(crate) fn stash_prompt_for_elicitation(
         &mut self,
     ) -> Option<crate::views::prompt_widget::StashedPrompt> {

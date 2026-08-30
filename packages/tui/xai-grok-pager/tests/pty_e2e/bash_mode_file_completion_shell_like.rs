@@ -4,17 +4,14 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Content of the nested file — `cat`ing it through the completed, quoted
-/// command must print this into the scrollback (proves the inserted quoting
-/// parses as a valid command in the real shell).
+/// Content of the nested file: `cat`ing it through the completed, quoted command must print this into the scrollback.
+/// That proves the inserted quoting parses as a valid command in the real shell.
 const INNER_SENTINEL: &str = "INNER-NOTE-SENTINEL-4173";
 
-/// Env: NO suggestion flag — Tab completion in bash mode is always on, and
-/// this test is the acceptance proof. `GROK_SUGGESTIONS=0` pins the
-/// as-you-type pipeline OFF hermetically (the PTY child inherits the parent
-/// env, so a dev shell exporting the flag must not turn it on here); the
-/// history tier is pinned to a nonexistent file so file completions are the
-/// ONLY dropdown source.
+/// There is NO env flag for this: Tab completion in bash mode is always on, and this test is the acceptance proof.
+/// `GROK_SUGGESTIONS=0` pins the as-you-type suggestion pipeline OFF.
+/// The PTY child inherits the parent env, so a dev shell exporting that flag must not turn suggestions on here.
+/// `HISTFILE` points at a nonexistent file so file completions are the ONLY dropdown source.
 fn suggestions_env(content: &ContentController) -> Vec<(String, String)> {
     vec![
         ("SHELL".into(), "/bin/bash".into()),
@@ -31,10 +28,9 @@ fn suggestions_env(content: &ContentController) -> Vec<(String, String)> {
 }
 
 /// Seed the session cwd the file provider lists:
-/// - `alpha_one.txt` + `alpha_two.txt` — the common-prefix-fill pair;
-/// - `notes.md` + `Notes Archive/inner_note.txt` — exact vs case-insensitive
-///   candidates, a spaced directory to drill into, and the file to run;
-/// - `script.sh` — unrelated noise that must never match either prefix.
+/// - `alpha_one.txt` and `alpha_two.txt`: the pair whose shared prefix Tab fills;
+/// - `notes.md` and `Notes Archive/inner_note.txt`: exact and case-insensitive candidates, a spaced directory to drill into, and the file to run;
+/// - `script.sh`: unrelated noise that must never match either prefix.
 fn seed_cwd(cwd: &Path) {
     std::fs::create_dir_all(cwd.join(".git")).expect("create .git");
     std::fs::write(cwd.join("alpha_one.txt"), "").expect("seed alpha_one");
@@ -47,24 +43,18 @@ fn seed_cwd(cwd: &Path) {
         .expect("seed inner note");
 }
 
-/// The Tab-armed fetch and the post-accept/fill refreshes are async; give a
-/// landed response comfortable slack before the next Tab consumes it.
+/// The fetch a Tab starts and the refreshes after an accept or a fill are async; give a landed response slack before the next Tab consumes it.
 async fn settle() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
 }
 
-/// **Bash-mode file completion behaves like a real shell — with NO env
-/// flag.** In a seeded sandbox cwd:
-/// - `!cat al` + Tab fills the shared prefix `alpha_` in place (no dropdown
-///   flash); the next Tab opens the dropdown listing both candidates;
-/// - `cat "no` + Tab opens the dropdown (exact `notes.md` above the
-///   case-insensitive `Notes Archive/`); Down+Tab accepts the directory,
-///   preserving the open quote and keeping it open for drill-down;
-/// - the next Tab finds exactly one candidate inside the directory and
-///   accepts it immediately, closing the quote;
-/// - Enter runs the completed command through the real shell — the file's
-///   sentinel content reaching the scrollback proves the quoting produced a
-///   valid command.
+/// **Bash-mode file completion behaves like a real shell, with NO env flag.**
+/// In a seeded sandbox cwd:
+/// - `!cat al` then Tab fills the shared prefix `alpha_` in place (no dropdown flash); the next Tab opens the dropdown listing both candidates;
+/// - `cat "no` then Tab opens the dropdown (exact `notes.md` above the case-insensitive `Notes Archive/`);
+///   Down+Tab accepts the directory, preserving the open quote for drill-down;
+/// - the next Tab finds exactly one candidate inside the directory and accepts it immediately, closing the quote;
+/// - Enter runs the completed command through the real shell; the sentinel content reaching the scrollback proves the quoting produced a valid command.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 #[cfg(unix)]
@@ -97,8 +87,7 @@ async fn bash_mode_file_completion_shell_like() {
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
 
-    // Establish a session: bash mode lives on the agent-view prompt (the
-    // welcome prompt never completes).
+    // Establish a session: bash mode lives on the agent-view prompt (the welcome prompt never completes)
     harness
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("start session");
@@ -133,12 +122,12 @@ async fn bash_mode_file_completion_shell_like() {
     harness.inject_keys(b"\x1b").expect("Esc closes dropdown");
     harness.inject_keys(b"\x15").expect("Ctrl+U clears draft");
 
-    // ── Leg 2: quoted dropdown → dir accept → drill-down insta-accept ───
+    // ── Leg 2: quoted dropdown, directory accept, drill-down accept ─────
     harness
         .inject_keys(b"cat \"no")
         .expect("type quoted prefix");
     harness.inject_keys(b"\t").expect("Tab opens dropdown");
-    // Case-differing candidates share no common prefix: no fill, plain open.
+    // The candidates differ in case, so there is no shared prefix to fill: the dropdown just opens
     harness
         .wait_for_text("Notes Archive/", Duration::from_secs(10))
         .expect("dropdown lists the case-insensitive directory match");
@@ -153,15 +142,14 @@ async fn bash_mode_file_completion_shell_like() {
         .wait_for_text("cat \"Notes Archive/", Duration::from_secs(10))
         .expect("directory accepted with the quote preserved and open");
 
-    // The accept re-fetched inside the directory; its single candidate
-    // insta-accepts and closes the quote.
+    // The accept re-fetched inside the directory; its single candidate is accepted immediately, closing the quote
     settle().await;
     harness.inject_keys(b"\t").expect("Tab drills down");
     harness
         .wait_for_text("Notes Archive/inner_note.txt\"", Duration::from_secs(10))
         .expect("single inner candidate accepted immediately, quote closed");
 
-    // ── The completed command actually RUNS through the real shell ──────
+    // ── The completed command RUNS through the real shell ───────────────
     harness.inject_keys(b"\r").expect("Enter runs the command");
     harness
         .wait_for_text(INNER_SENTINEL, Duration::from_secs(30))

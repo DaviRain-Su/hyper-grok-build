@@ -1,5 +1,5 @@
-//! XTVERSION DCS reply filter for the input event channel (parser-integrated
-//! model as in helix and similar TUIs). See [`XtversionFilter`].
+//! XTVERSION DCS reply filter for the input event channel (parser-integrated model as in helix and similar TUIs).
+//! See [`XtversionFilter`].
 
 use std::time::{Duration, Instant};
 
@@ -7,30 +7,25 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 
 use super::event_loop::{TimedInputEvent, is_bare_esc_press};
 
-/// How long the filter stays armed waiting for the reply (opentui uses a
-/// non-blocking 5s window); zero-cost after disarm.
+/// How long the filter stays armed waiting for the reply (opentui uses a non-blocking 5s window); zero-cost after disarm.
 const XT_ARM_WINDOW: Duration = Duration::from_secs(5);
 
-/// How long a held partial reply waits for its remaining fragments before
-/// being resolved (other terminal UI stacks use 150ms).
+/// How long a held partial reply waits for its remaining fragments before being resolved (other terminal UI stacks use 150ms).
 pub(super) const XT_FRAGMENT_TIMEOUT: Duration = Duration::from_millis(150);
 
-/// Total bound on one hold, so a terminal trickling valid payload chars
-/// cannot stall the event loop beyond this.
+/// Total bound on one hold, so a terminal trickling valid payload chars cannot stall the event loop beyond this.
 pub(super) const XT_MAX_HOLD: Duration = Duration::from_secs(1);
 
 /// Payload size cap; real replies are short (`kitty 0.35.2`).
 const XT_MAX_PAYLOAD: usize = 64;
 
-/// Recognizes and swallows the XTVERSION DCS reply arriving through the
-/// input event channel. crossterm surfaces `ESC P` as Alt+Shift+P, the payload as
-/// plain Char presses, ST as Alt+\ and BEL as Ctrl+G. Events behind a partial
-/// prefix are staged so surviving input retains FIFO order and timestamps.
+/// Recognizes and swallows the XTVERSION DCS reply arriving through the input event channel.
+/// crossterm surfaces `ESC P` as Alt+Shift+P, the payload as plain Char presses, ST as Alt+\ and BEL as Ctrl+G.
+/// Events behind a partial prefix are staged so surviving input retains FIFO order and timestamps.
 pub(super) struct XtversionFilter {
     armed: bool,
-    /// Set on the first `filter()` call, not at construction — a loaded
-    /// startup can take seconds before the loop processes its first
-    /// batch, and that time must not burn the arm window.
+    /// Set on the first `filter()` call, not at construction.
+    /// A loaded startup can take seconds before the loop processes its first batch, and that time must not burn the arm window.
     deadline: Option<Instant>,
     state: XtState,
     staged: Vec<StagedEvent>,
@@ -126,9 +121,8 @@ impl XtversionFilter {
 
     /// Remove a complete DCS reply from the batch; pass everything else.
     fn filter(&mut self, events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
-        // Don't expire mid-hold once the intro is confirmed: the in-flight
-        // reply must resolve (Complete or dead-hold drop), or its tail
-        // would pass through as typed text.
+        // Don't expire mid-hold once the intro is confirmed
+        // The in-flight reply must resolve (Complete or dead-hold drop), or its tail would pass through as typed text
         let deadline = *self
             .deadline
             .get_or_insert_with(|| Instant::now() + XT_ARM_WINDOW);
@@ -144,8 +138,7 @@ impl XtversionFilter {
 
         let mut result = Vec::with_capacity(events.len());
         for ev in events {
-            // Once the reply completed mid-batch the filter is done —
-            // matching further events would hold them forever.
+            // Once the reply completed mid-batch the filter is done; matching further events would hold them forever
             if !self.armed {
                 result.push(ev);
                 continue;
@@ -165,9 +158,8 @@ impl XtversionFilter {
                     self.armed = false;
                     result.extend(self.release_pass_through());
                 }
-                // Dead hold: drop a confirmed reply fragment, flush back a
-                // pre-intro one; re-evaluate the rejecting event from Idle
-                // so a following reply is still caught.
+                // Dead hold: drop a confirmed reply fragment, flush back a pre-intro one
+                // Re-evaluate the rejecting event from Idle so a following reply is still caught
                 XtAdvance::Mismatch => {
                     result.append(&mut self.resolve_dead_hold());
                     if matches!(self.advance(&ev.event), XtAdvance::Hold) {
@@ -208,9 +200,8 @@ impl XtversionFilter {
             (EscHeld, 'P') => self.state = AwaitGt,
             (AwaitGt, '>') => self.state = AwaitPipe,
             (AwaitPipe, '|') => self.state = Payload,
-            // Strict alphabet so the first typed char outside a real
-            // name+version payload (e.g. a `/slash` command after an
-            // unterminated reply) breaks the hold instead of being eaten.
+            // Strict alphabet so the first typed char outside a real `name version` payload breaks the hold instead of being eaten
+            // Example: a `/slash` command typed after an unterminated reply
             (Payload, c) if is_xt_payload_char(c) && self.payload.len() < XT_MAX_PAYLOAD => {
                 self.payload.push(c)
             }
@@ -228,11 +219,9 @@ enum XtAdvance {
     Mismatch,
 }
 
-/// Apply the filter to a batch and, while a partial reply is held, await
-/// follow-up fragments — bounded per-fragment by [`XT_FRAGMENT_TIMEOUT`]
-/// and overall by [`XT_MAX_HOLD`] so a trickling terminal can't stall the
-/// event loop. Cost: a real bare-Esc press during the arm window is
-/// delayed by up to one fragment timeout before flushing back.
+/// Apply the filter to a batch and, while a partial reply is held, await follow-up fragments.
+/// The hold is bounded per fragment by [`XT_FRAGMENT_TIMEOUT`] and overall by [`XT_MAX_HOLD`] so a trickling terminal can't stall the event loop.
+/// Cost: a real bare-Esc press during the arm window is delayed by up to one fragment timeout before flushing back.
 pub(super) async fn filter_with_fragment_wait(
     xt_filter: &mut XtversionFilter,
     mut raw_events: Vec<TimedInputEvent>,
@@ -259,8 +248,7 @@ pub(super) async fn filter_with_fragment_wait(
     }
     if let Some(payload) = xt_filter.take_completed() {
         crate::terminal::xtversion::record_reply(&payload);
-        // The startup terminal_context emission raced the async reply —
-        // re-emit so the populated xtversion field reaches telemetry.
+        // The startup terminal_context emission may have missed the async reply; re-emit so the populated xtversion field reaches telemetry
         if crate::terminal::xtversion::detected().is_some() {
             tokio::task::spawn_blocking(|| {
                 let t = crate::terminal::terminal_context().telemetry_snapshot();
@@ -271,8 +259,7 @@ pub(super) async fn filter_with_fragment_wait(
     raw_events
 }
 
-/// Real XTVERSION payloads are `name version` strings like
-/// `kitty 0.35.2`, `XTerm(388)`, `tmux 3.4`.
+/// Real XTVERSION payloads are `name version` strings like `kitty 0.35.2`, `XTerm(388)`, `tmux 3.4`.
 fn is_xt_payload_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-' | '(' | ')' | '+')
 }
@@ -345,8 +332,7 @@ mod tests {
         press_mods(code, KeyModifiers::SHIFT)
     }
 
-    /// The reply `ESC P > | <payload> ESC \` as crossterm surfaces it in
-    /// one read: Alt+Shift+P, plain chars, Alt+\.
+    /// The reply `ESC P > | <payload> ESC \` as crossterm surfaces it in one read: Alt+Shift+P, plain chars, Alt+\.
     fn dcs_reply_events(payload: &str) -> Vec<TimedInputEvent> {
         let mut evs = vec![press_mods(
             KeyCode::Char('P'),
@@ -531,8 +517,7 @@ mod tests {
 
     #[test]
     fn xt_filter_confirmed_fragment_dropped_not_typed() {
-        // Unterminated reply followed by typing: fragment is dropped, the
-        // typed char survives.
+        // Unterminated reply followed by typing: fragment is dropped, the typed char survives
         let mut f = XtversionFilter::with_armed(true);
         let mut evs = dcs_reply_events("x");
         evs.pop();
@@ -555,8 +540,7 @@ mod tests {
 
     #[test]
     fn xt_filter_events_after_completion_pass_same_batch() {
-        // A bare Esc (or Alt+P) right after the reply in the SAME batch
-        // must come out — the disarmed filter must stop matching.
+        // A bare Esc (or Alt+P) right after the reply in the SAME batch must come out; the disarmed filter must stop matching
         let mut f = XtversionFilter::with_armed(true);
         let mut evs = dcs_reply_events("kitty 0.35.2");
         evs.push(press(KeyCode::Esc));

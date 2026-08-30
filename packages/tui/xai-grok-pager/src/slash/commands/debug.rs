@@ -1,34 +1,27 @@
-//! `/debug` — debug-overlay toggles (scroll HUD, FPS HUD, scroll log).
+//! `/debug`: debug-overlay toggles (scroll HUD, FPS HUD, scroll log).
 //!
-//! Registration/visibility split: the command is registered on EVERY binary
-//! and fully functional in release — like the hidden diagnostics it fronts
-//! (`/scroll-debug`, `/gboom`) — but it is LISTED (dropdown, completion,
-//! recognized-token highlight via `visible()`) only on debug binaries
-//! (`cfg(debug_assertions)`). Discoverable where developers live, out of
-//! sight for users, yet still typeable in the field when support asks.
+//! The command is registered on every binary and fully functional in release, like the hidden diagnostics it fronts (`/scroll-debug`, `/gboom`).
+//! It is listed (dropdown, completion, recognized-token highlight via `visible()`) only on debug binaries (`cfg(debug_assertions)`).
+//! Release users never see it in a menu, but support can still ask them to type it.
 //!
 //! Subcommands (args-based; a popup menu can come later):
-//! - `/debug` bare — print the toggles and their state to the transcript.
-//! - `/debug scroll` — the scroll-diagnostics HUD; same
-//!   [`Action::ToggleScrollDebugHud`] as `/scroll-debug`, which stays
-//!   registered as the hidden long-form alias.
-//! - `/debug fps` — the release-safe FPS HUD
-//!   ([`crate::views::fps_hud`]).
-//! - `/debug log` — the scroll flight recorder
-//!   ([`crate::input::scroll_log`]), runtime-constructed to a fresh
-//!   timestamped path.
+//! - `/debug` bare: print the toggles and their state to the transcript.
+//! - `/debug scroll`: the scroll-diagnostics HUD, the same [`Action::ToggleScrollDebugHud`] as `/scroll-debug`.
+//!   `/scroll-debug` stays registered as the hidden long-form alias.
+//! - `/debug fps`: the release-safe FPS HUD ([`crate::views::fps_hud`]).
+//! - `/debug log`: the scroll flight recorder (`input::scroll_log` in xai-grok-pager-render), constructed at runtime to a fresh timestamped path.
 
 use crate::app::actions::Action;
-use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{
+    AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand, slash_meta,
+};
 
-/// Whether `/debug` is listed on completion surfaces. `visible()` returns
-/// this constant, so release invisibility is pinned by the constant's shape
-/// (`cfg!(debug_assertions)`) rather than a runtime check — tests always
-/// compile with `debug_assertions`, so the release half is untestable by
-/// assertion and locked by construction instead.
+/// Whether `/debug` is listed in the dropdown and completions.
+/// `visible()` returns this constant, so release builds hide the command through `cfg!(debug_assertions)` itself rather than a runtime check.
+/// Tests always compile with `debug_assertions`, so no assertion can cover the release half; the constant carries it by construction.
 pub const LISTED_IN_COMPLETIONS: bool = cfg!(debug_assertions);
 
-/// Subcommand name/description pairs (single source for run + suggestions).
+/// Subcommand name/description pairs, one source for both `run` and `suggest_args`.
 const SUBCOMMANDS: &[(&str, &str)] = &[
     ("scroll", "Toggle the scroll-diagnostics HUD"),
     ("fps", "Toggle the FPS overlay"),
@@ -39,27 +32,15 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
 pub struct DebugCommand;
 
 impl SlashCommand for DebugCommand {
-    fn name(&self) -> &str {
-        "debug"
+    slash_meta! {
+        name: "debug",
+        description: "Toggle debug overlays",
+        usage: "/debug [scroll|fps|log]",
+        takes_args: true,
+        arg_placeholder: "scroll | fps | log",
     }
 
-    fn description(&self) -> &str {
-        "Toggle debug overlays"
-    }
-
-    fn usage(&self) -> &str {
-        "/debug [scroll|fps|log]"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("scroll | fps | log")
-    }
-
-    /// Debug binaries only; release keeps it registered but unlisted.
+    /// Listed on debug binaries only; release keeps it registered but unlisted.
     fn visible(&self, _ctx: &AppCtx) -> bool {
         LISTED_IN_COMPLETIONS
     }
@@ -83,7 +64,7 @@ impl SlashCommand for DebugCommand {
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         match args.trim() {
-            // Bare: the cheapest useful menu — a status line in scrollback.
+            // Bare: the cheapest useful menu, a status line in scrollback
             "" => CommandResult::Action(Action::ShowDebugStatus),
             "scroll" => CommandResult::Action(Action::ToggleScrollDebugHud),
             "fps" => CommandResult::Action(Action::ToggleFpsHud),
@@ -117,13 +98,9 @@ mod tests {
         }
     }
 
-    /// Tests compile with `debug_assertions`, so this asserts the
-    /// debug-binary half live: `/debug` must be visible here. The release
-    /// half (invisible) is untestable from a debug test build and pinned by
-    /// mechanism instead — `visible()` returns `LISTED_IN_COMPLETIONS =
-    /// cfg!(debug_assertions)`, which a release compile evaluates to
-    /// `false` by construction; the `assert_eq!` locks `visible()` to that
-    /// constant under whichever profile compiles the test.
+    /// Tests compile with `debug_assertions`, so this asserts the debug-binary half live: `/debug` must be visible here.
+    /// The release half is untestable from a debug build.
+    /// `visible()` returns `LISTED_IN_COMPLETIONS`, which a release compile evaluates to `false`; the `assert_eq!` pins `visible()` to it.
     #[test]
     fn debug_listed_on_debug_binaries_only() {
         let models = ModelState::default();
@@ -136,8 +113,7 @@ mod tests {
         assert_eq!(listed, LISTED_IN_COMPLETIONS);
     }
 
-    /// `/debug scroll` and `/scroll-debug` must stay routed to the SAME
-    /// action — the HUD has one toggle, two spellings.
+    /// `/debug scroll` and `/scroll-debug` must stay routed to the same action: the HUD has one toggle, two spellings.
     #[test]
     fn debug_scroll_routes_to_same_action_as_scroll_debug() {
         let models = ModelState::default();

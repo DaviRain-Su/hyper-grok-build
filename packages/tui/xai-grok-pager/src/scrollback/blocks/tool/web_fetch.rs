@@ -1,5 +1,3 @@
-//! WebFetchToolCallBlock — URL fetch with content preview.
-
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span, Text};
 
@@ -15,20 +13,19 @@ use crate::theme::Theme;
 const MAX_INLINE_LINES: usize = 10;
 const TRUNCATED_INLINE_LINES: usize = 3;
 
-/// Web fetch tool call — fetching a URL and returning markdown content.
+/// Web fetch tool call: fetches a URL and returns markdown content.
 #[derive(Debug, Clone)]
 pub struct WebFetchToolCallBlock {
     /// The fetched URL.
     pub url: String,
     /// HTTP status code (e.g. 200, 404).
-    /// `Option` because the block exists pre-completion (pending/running state)
-    /// before any response data arrives.
+    /// `Option` because the block exists pre-completion (pending/running state) before any response data arrives.
     pub status_code: Option<u16>,
     /// Content type (e.g. "markdown", "text/plain").
     pub content_type: Option<String>,
     /// Content size in bytes.
     pub bytes: Option<usize>,
-    /// Error message if the tool call failed (None = success).
+    /// Error message if the tool call failed (None means success).
     pub error: Option<String>,
     /// Fetched content (markdown or raw text).
     pub output: Option<String>,
@@ -195,9 +192,8 @@ impl BlockContent for WebFetchToolCallBlock {
                     Some(ctx.content_width()),
                 ))],
             },
-            // Fetch completes in one shot (no streaming), so Truncated
-            // is never visible in practice. Treat it the same as Expanded
-            // to always show the full content the model saw.
+            // Fetch completes in one shot (no streaming), so Truncated is never visible in practice
+            // Treat it the same as Expanded to always show the full content the model saw
             DisplayMode::Truncated | DisplayMode::Expanded => {
                 let header = self.header_line(&theme, false, None);
                 let wrapped = crate::render::wrapping::wrap_header_flush(

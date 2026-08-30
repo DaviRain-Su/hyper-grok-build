@@ -328,12 +328,10 @@ fn test_app() -> AppView {
         live_mode_enabled: false,
     }
 }
-/// Build a default `AgentSession` for
-/// tests. Centralises the fixture so new fields on `AgentSession`
-/// don't break every test that constructs one by hand. The
-/// `acp_tx` is cloned from the test `AppView`; the
-/// `deferred_model_switch` is pulled from the `AppView`'s CLI
-/// overrides for parity with `dispatch_new_session_inner`.
+/// Build a default `AgentSession` for tests.
+/// Centralises the fixture so new fields on `AgentSession` don't break every test that constructs one by hand.
+/// The `acp_tx` is cloned from the test `AppView`.
+/// The `deferred_model_switch` is pulled from the `AppView`'s CLI overrides for parity with `dispatch_new_session_inner`.
 fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSession {
     AgentSession {
         id,
@@ -387,19 +385,16 @@ pub(super) fn test_app_with_agent() -> AppView {
 }
 /// Give a test agent a generated title so the dashboard renders it.
 ///
-/// The dashboard hides empty (no-real-turn) sessions
-/// (`views::dashboard::row::is_empty_top_level`); nav/render tests that
-/// rely on their placeholder agents being visible call this to opt in.
+/// The dashboard hides sessions with no real turn (`views::dashboard::row::is_empty_top_level`).
+/// Nav and render tests that rely on their placeholder agents being visible call this to opt in.
 fn mark_agent_nonempty(app: &mut AppView, id: AgentId) {
     if let Some(a) = app.agents.get_mut(&id) {
         a.generated_session_title = Some(format!("Session {}", id.0));
     }
 }
-/// Push a plain prompt directly onto the LOCAL drip-feed queue
-/// (`pending_prompts`), bypassing the server-authoritative
-/// immediate-send routing. Used by tests that exercise the local
-/// `maybe_drain_queue` / editing / `DrainQueue` machinery, which is still
-/// the path for image/skill/bash/editing prompts and idle drains.
+/// Push a plain prompt directly onto the local drip-feed queue (`pending_prompts`), bypassing the server-authoritative immediate send.
+/// Used by tests exercising the local `maybe_drain_queue`, editing, and `DrainQueue` machinery.
+/// That local path still handles image, skill, bash, and editing prompts and idle drains.
 pub(super) fn enqueue_local(app: &mut AppView, id: AgentId, text: &str) {
     app.agents
         .get_mut(&id)
@@ -532,8 +527,7 @@ fn arm_reconcile_with_trigger(
 ) {
     arm_reconcile_with_meta(app, id, prompt_id, stop_reason, cancel_trigger, None, age);
 }
-/// [`arm_reconcile`] with explicit `_meta.cancelTrigger` /
-/// `_meta.cancellationCategory`.
+/// [`arm_reconcile`] with explicit `_meta.cancelTrigger` and `_meta.cancellationCategory`.
 #[allow(clippy::too_many_arguments)]
 fn arm_reconcile_with_meta(
     app: &mut AppView,
@@ -552,6 +546,7 @@ fn arm_reconcile_with_meta(
             cancel_trigger: cancel_trigger.map(str::to_string),
             cancellation_category: cancellation_category.map(str::to_string),
             cancellation_context: None,
+            error_kind: None,
             received_at: std::time::Instant::now() - age,
         });
 }
@@ -563,8 +558,8 @@ pub(super) fn end_turn() -> Action {
         prompt_id: None,
     })
 }
-/// Plant a Build session under the process `grok_home()` (OnceLock-cached;
-/// do not rely on setting `GROK_HOME` mid-process). Caller must remove `sess_dir`.
+/// Plant a Build session under the process `grok_home()` (OnceLock-cached; do not rely on setting `GROK_HOME` mid-process).
+/// Caller must remove `sess_dir`.
 fn plant_local_build_session(cwd: &std::path::Path, session_id: &str) -> std::path::PathBuf {
     let home = xai_grok_shell::util::grok_home::grok_home();
     let encoded = xai_grok_shell::util::grok_home::encode_cwd_dirname(&cwd.to_string_lossy());
@@ -573,8 +568,7 @@ fn plant_local_build_session(cwd: &std::path::Path, session_id: &str) -> std::pa
     std::fs::write(sess_dir.join("summary.json"), b"{}").expect("plant summary");
     sess_dir
 }
-/// Extract the in-flight auth request sequence, panicking if the auth
-/// state is not `Authenticating`.
+/// Extract the in-flight auth request sequence, panicking if the auth state is not `Authenticating`.
 fn authenticating_seq(app: &AppView) -> u64 {
     match app.auth_state {
         AuthState::Authenticating { request_seq, .. } => request_seq,
@@ -596,11 +590,8 @@ fn system_text_from_end(app: &AppView, id: AgentId, offset: usize) -> String {
         other => panic!("expected System block at index {idx}, got {other:?}"),
     }
 }
-/// Insert a placeholder agent at `id` so `switch_to_agent` recognises
-/// it (the helper's defensive check uses `app.agents.contains_key`).
-/// `session_id` and `active_pane` are populated to mirror the
-/// existing `test_app_with_agent` setup; these tests do not read
-/// either field.
+/// Insert a placeholder agent at `id` so `switch_to_agent` recognises it (the helper's defensive check uses `app.agents.contains_key`).
+/// `session_id` and `active_pane` are populated to mirror the existing `test_app_with_agent` setup; these tests do not read either field.
 fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
     let mut agent = AgentView::new(
         AgentSession {
@@ -646,8 +637,7 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
     agent.active_pane = ActivePane::Scrollback;
     app.agents.insert(id, agent);
 }
-/// Build an app with three agents (ids 0, 1, 2) and `active_view` set
-/// to agent 0.
+/// Build an app with three agents (ids 0, 1, 2) and `active_view` set to agent 0.
 pub(super) fn three_agent_app() -> AppView {
     let mut app = test_app_with_agent();
     insert_placeholder_agent(&mut app, AgentId(1));
@@ -682,18 +672,15 @@ fn fork_args(worktree_override: Option<bool>, directive: Option<&str>) -> ForkAr
 }
 /// Build a single-agent app for the `/fork` dispatcher tests.
 ///
-/// Sets `current_branch` to `Some("main")` so the agent appears to be
-/// inside a git repo. This is required because `dispatch_fork` skips
-/// the worktree question when `current_branch` is `None` (non-git cwd).
+/// Sets `current_branch` to `Some("main")` so the agent appears to be inside a git repo.
+/// `dispatch_fork` skips the worktree question when `current_branch` is `None` (non-git cwd).
 fn fork_test_app() -> AppView {
     let mut app = test_app_with_agent();
     app.agents.get_mut(&AgentId(0)).unwrap().current_branch = Some("main".into());
     app
 }
-/// Build a minimal `AcpArgs<acp::ExtRequest>` for an
-/// `x.ai/ask_user_question` ext-method request. Returns the args
-/// plus the receiver half of the response oneshot so the test can
-/// assert the handler completes the ACP roundtrip.
+/// Build a minimal `AcpArgs<acp::ExtRequest>` for an `x.ai/ask_user_question` ext-method request.
+/// Returns the args and the receiver half of the response oneshot so the test can assert the handler completes the ACP roundtrip.
 fn make_ask_user_question_args(
     tool_call_id: &str,
 ) -> (
@@ -762,8 +749,7 @@ fn make_bg_task(task_id: &str) -> crate::app::agent::BgTaskState {
         restored_from_replay: false,
     }
 }
-/// Set up a two-agent app: agent 0 is active with "sess-A",
-/// agent 1 is inactive with "sess-B" and a bg task.
+/// Set up a two-agent app: agent 0 is active with "sess-A", agent 1 is inactive with "sess-B" and a bg task.
 fn two_agent_app_with_bg_task() -> AppView {
     let mut app = test_app_with_agent();
     app.agents[&AgentId(0)].session.session_id = Some(acp::SessionId::new("sess-A"));
@@ -819,8 +805,7 @@ fn two_agent_app_with_bg_task() -> AppView {
     app
 }
 /// Test helper: open Settings then OpenResetConfirm for `key`.
-/// Extracted so individual tests don't have to repeat the
-/// open-then-open ritual.
+/// Extracted so individual tests don't have to repeat the two opens.
 fn setup_reset_confirm_open(app: &mut AppView, key: crate::settings::SettingKey) {
     use crate::views::modal::ActiveModal;
     let _ = dispatch(Action::OpenSettings, app);
@@ -862,9 +847,8 @@ fn make_conversation_entry(id: &str) -> crate::app::app_view::SessionPickerEntry
 }
 /// Open a SessionPicker modal on the active agent seeded with `entries`.
 ///
-/// Stamps a real allocated generation (production modals get theirs from
-/// `dispatch_fetch_session_list`), so helper-seeded modals can receive
-/// generation-gated results.
+/// Stamps a real allocated generation, as production modals get theirs from `dispatch_fetch_session_list`.
+/// Helper-seeded modals can then receive generation-gated results.
 fn open_session_picker_with(
     app: &mut AppView,
     entries: Vec<crate::app::app_view::SessionPickerEntry>,
@@ -889,8 +873,7 @@ fn open_session_picker_with(
         pending_delete: None,
     });
 }
-/// Live generation of the active agent's SessionPicker modal, for stamping
-/// modal-host results the way the executors echo them.
+/// Live generation of the active agent's SessionPicker modal, for stamping modal-host results the way the executors echo them.
 fn modal_picker_generation(app: &AppView) -> u64 {
     use crate::views::modal::ActiveModal;
     match get_active_agent(app)
@@ -914,8 +897,7 @@ fn modal_picker_detail_seq(app: &AppView) -> u64 {
         _ => panic!("expected SessionPicker modal"),
     }
 }
-/// Toast strings match the expected format and contain on/off
-/// status.
+/// Read the active agent's toast text, panicking if none is set.
 fn read_toast(app: &AppView) -> String {
     let agent = app.agents.get(&AgentId(0)).expect("agent must exist");
     agent
@@ -924,12 +906,8 @@ fn read_toast(app: &AppView) -> String {
         .map(|(s, _)| s.clone())
         .expect("toast should be set")
 }
-/// Helper: enqueue a single permission containing the new
-/// "enable-always-approve" option (AllowOnce kind, position 0 —
-/// default-selected by the real `enqueue_permission` helper),
-/// a regular "opt-allow-once" (AllowOnce kind, position 1), and
-/// a "opt-reject-once" (RejectOnce, position 2). Mirrors the
-/// option list the shell builds for TUI/Pager/Desktop.
+/// Enqueue one permission whose options mirror the list the shell builds for TUI, Pager, and Desktop.
+/// The options: "enable-always-approve" (AllowOnce, position 0, default-selected), "opt-allow-once" (AllowOnce), and "opt-reject-once" (RejectOnce).
 /// Returns the response receiver for the injected permission.
 fn enqueue_permission_with_enable_always_approve(
     app: &mut AppView,
@@ -997,9 +975,8 @@ fn agent_toast(app: &AppView) -> Option<String> {
         .as_ref()
         .map(|(s, _)| s.clone())
 }
-/// Use the `theme_cache::test_lock` to serialize tests that touch
-/// the in-memory theme state (single mutable global). Mirrors the
-/// pattern used by `theme::cache::tests`.
+/// Use the `theme_cache::test_lock` to serialize tests that touch the in-memory theme state (single mutable global).
+/// Mirrors the pattern used by `theme::cache::tests`.
 fn with_theme_test_env(f: impl FnOnce()) {
     let _guard = crate::theme::cache::test_lock()
         .lock()
@@ -1020,9 +997,8 @@ use crate::scrollback::blocks::UserPromptBlock;
 fn open_dashboard(app: &mut AppView) {
     let _ = dispatch_open_dashboard(app);
 }
-/// Display-order list of selectable row ids — the same order
-/// `dashboard_neighbor_row` and the renderer walk. Test-only mirror
-/// of the row build in `dispatch_dashboard_select`.
+/// Display-order list of selectable row ids, the same order `dashboard_neighbor_row` and the renderer walk.
+/// Test-only mirror of the row build in `dispatch_dashboard_select`.
 fn dashboard_row_order(app: &AppView) -> Vec<crate::views::dashboard::DashboardRowId> {
     let d = app.dashboard.as_ref().unwrap();
     let home = crate::views::dashboard::render::cached_home();
@@ -1043,7 +1019,6 @@ fn dashboard_row_order(app: &AppView) -> Vec<crate::views::dashboard::DashboardR
             &app.agents,
             &d.pinned,
             &d.reorder,
-            None,
             d.grouping,
             &d.filter,
             home,
@@ -1066,15 +1041,9 @@ fn dashboard_row_order(app: &AppView) -> Vec<crate::views::dashboard::DashboardR
     })
     .collect()
 }
-/// Build a synthetic `PermissionViewState` with the given id and
-/// options. Pushes it to the agent's permission_queue.
+/// Build a synthetic `PermissionViewState` with the given id and options, and push it onto the agent's permission_queue.
 ///
-/// Returns the response receiver so tests can verify
-/// the response was actually `send`'d through the oneshot. The
-/// previous version dropped the receiver (`_rx`), which let
-/// "happy-path" tests assert the queue was popped but masked
-/// regressions where the pop happened without the corresponding
-/// send.
+/// Returns the response receiver so tests can assert the response was actually sent through the oneshot, not merely that the queue was popped.
 fn push_synthetic_permission(
     agent: &mut crate::app::agent_view::AgentView,
     id: usize,

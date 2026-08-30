@@ -34,6 +34,8 @@ supports-color = { workspace = true }
 
 # Data
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+chrono = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true, features = ["serde"] }
 documented = { workspace = true }
@@ -69,7 +71,8 @@ xai-grok-shared = { workspace = true }
 xai-grok-workspace = { workspace = true }
 xai-grok-telemetry = { workspace = true }
 xai-grok-tools = { workspace = true }
-xai-grok-paths = { path = "../../platform/xai-grok-paths" }
+xai-grok-paths = { path = "../xai-grok-paths" }
+xai-grok-gboom = { path = "../xai-grok-gboom" }
 
 # Base64 encoding for image data
 base64 = { workspace = true }
@@ -81,7 +84,7 @@ image = { workspace = true, features = ["png", "jpeg", "tiff", "gif", "webp"] }
 uuid = { workspace = true, features = ["v4"] }
 
 # Path computation
-dirs = { workspace = true }
+xai-dirs = { workspace = true }
 shellexpand = "3.1"
 
 # Parsing

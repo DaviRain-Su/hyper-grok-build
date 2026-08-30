@@ -79,8 +79,7 @@ async fn runaway_output_is_capped_rather_than_waiting_out_the_deadline() {
     assert!(lines.iter().all(|line| *line == "hello"), "got {row:?}");
 }
 
-/// Past the 64 KiB the log keeps and the 64 KiB the pipe buffers, so the script
-/// is still writing when the log has all it wants.
+/// Past the 64 KiB the log keeps and the 64 KiB the pipe buffers, so the script is still writing when the log has all it wants.
 const STDERR_PAST_THE_CAP: &str = "printf '%300000s' '' >&2";
 
 #[tokio::test]
@@ -92,16 +91,14 @@ async fn stderr_past_the_cap_neither_kills_the_script_nor_stalls_it() {
 
 #[tokio::test]
 async fn script_that_closes_stdout_early_still_answers() {
-    // stdout reaches EOF while the script is still writing to stderr, so the
-    // drain has to keep running while we wait for the script to exit.
+    // stdout reaches EOF while the script is still writing to stderr, so the drain has to keep running while we wait for the script to exit
     let row = run_row(&format!("printf ok; exec 1>&-; {STDERR_PAST_THE_CAP}")).await;
 
     assert_eq!(row, "ok");
 }
 
-/// The wrapper backgrounds a grandchild that touches a marker 0.5s in, long
-/// after the run should have torn the group down. Returns the row and whether
-/// the grandchild lived to touch it.
+/// The wrapper backgrounds a grandchild that touches a marker 0.5s in, long after the run should have torn the group down.
+/// Returns the row and whether the grandchild lived to touch it.
 async fn no_grandchild_survives(case: &str, head: &str, timeout: Duration) -> (String, bool) {
     grandchild_outcome(
         case,
@@ -116,8 +113,7 @@ async fn grandchild_outcome(
     script: impl FnOnce(&str) -> String,
     timeout: Duration,
 ) -> (String, bool) {
-    // `case` rather than anything derived from the script: the callers run
-    // concurrently, and a shared path lets one clear the other's marker.
+    // `case` rather than anything derived from the script: the callers run concurrently, and a shared path lets one clear the other's marker
     let marker =
         std::env::temp_dir().join(format!("status_line-group-{}-{case}", std::process::id()));
     let _ = std::fs::remove_file(&marker);
@@ -141,8 +137,7 @@ async fn timeout_kills_the_whole_process_group() {
 
 #[tokio::test]
 async fn script_that_exits_cleanly_still_loses_what_it_backgrounded() {
-    // Redirected, or the background job holds stdout open and the read waits
-    // for it: the run would then end on the timeout, not on a clean exit.
+    // Redirected, or the background job holds stdout open and the read waits for it: the run would then end on the timeout, not on a clean exit
     let (row, survived) = grandchild_outcome(
         "clean-exit",
         |marker| format!("(sleep 0.5; touch {marker}) >/dev/null 2>&1 & printf row"),
@@ -156,8 +151,8 @@ async fn script_that_exits_cleanly_still_loses_what_it_backgrounded() {
 
 #[tokio::test]
 async fn background_job_holding_stdout_does_not_hold_the_row() {
-    // No redirect, so the grandchild inherits stdout and the pipe stays open
-    // for five seconds after the shell exits. Reading to EOF would wait for it.
+    // No redirect, so the grandchild inherits stdout and the pipe stays open for five seconds after the shell exits
+    // Reading to EOF would wait for it
     let started = Instant::now();
     let row =
         row_text(run_status_command("sleep 5 & printf row", &ctx(), ROW, COMMAND_TIMEOUT).await);

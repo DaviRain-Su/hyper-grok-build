@@ -1,6 +1,6 @@
-//! Terminal-usage projection for `streaming-messages-json`: reshaping the turn's
-//! aggregate ledger into `result.usage` (`message.usage` shape) and the per-model
-//! `modelUsage` map. Kept apart so the token/cost/model math is self-contained.
+//! Terminal-usage projection for `streaming-messages-json`.
+//! Reshapes the turn's aggregate ledger into `result.usage` (`message.usage` shape) and the per-model `modelUsage` map.
+//! Kept apart so the token/cost/model math is self-contained.
 
 use serde_json::{Value, json};
 
@@ -85,8 +85,8 @@ impl MessagesReducer {
     }
 }
 
-/// Map the ledger's per-model rows into `ModelUsage` entries; the web-search count
-/// and `context_window` go to `current_model` only. `{}` when there is no breakdown.
+/// Map the ledger's per-model rows into `ModelUsage` entries; the web-search count and `context_window` go to `current_model` only.
+/// `{}` when there is no breakdown.
 pub(super) fn messages_model_usage(
     rows: Option<&Value>,
     current_model: Option<&str>,

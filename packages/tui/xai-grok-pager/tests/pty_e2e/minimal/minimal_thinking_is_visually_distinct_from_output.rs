@@ -18,9 +18,8 @@ struct Turn {
     _expectation: InferenceExpectation,
 }
 
-/// Drive one minimal turn that streams reasoning and then an answer, under
-/// `NO_COLOR=1` — the case that was 100% broken, because the `bg_blend` fade is
-/// a complete no-op under the terminal-native palette.
+/// Drive one minimal turn that streams reasoning and then an answer, under `NO_COLOR=1`.
+/// That case was 100% broken: the `bg_blend` fade is a complete no-op under the terminal-native palette.
 async fn run_reasoning_turn(collapse_thinking: bool) -> Turn {
     // Reasoning summary deltas are a Responses-API stream shape.
     let content = ContentController::start_with_models(vec![
@@ -87,9 +86,8 @@ async fn run_reasoning_turn(collapse_thinking: bool) -> Turn {
     }
 }
 
-/// Every styled screen row carrying `needle`, rendered as
-/// `["text" dim=… italic=…]` runs: the SGR attributes the terminal emulator
-/// actually received, not just the glyphs.
+/// Every styled screen row carrying `needle`, rendered as `["text" dim=… italic=…]` runs.
+/// These are the SGR attributes the terminal emulator actually received, not just the glyphs.
 fn styled_rows_with(harness: &PtyHarness, needle: &str) -> Vec<String> {
     harness
         .screen_styled()
@@ -112,9 +110,9 @@ fn styled_rows_with(harness: &PtyHarness, needle: &str) -> Vec<String> {
         .collect()
 }
 
-/// Reasoning must read as "not the answer" in a static native scrollback, with
-/// no blank-row separator, no indent, and under `NO_COLOR` no color delta at
-/// all. Three orthogonal cues, on the body rows and off the assistant rows.
+/// Reasoning must read as "not the answer" in a static native scrollback.
+/// There is no blank-row separator, no indent, and under `NO_COLOR` no color delta at all.
+/// The test checks three orthogonal cues, present on the body rows and absent on the assistant rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_thinking_is_visually_distinct_from_output() {
@@ -188,8 +186,7 @@ async fn minimal_thinking_is_visually_distinct_from_output() {
     quit_minimal(&mut harness);
 }
 
-/// The collapsed header advertises the only way back into the body, and
-/// `Ctrl+E` must honour the advertisement by re-printing it in full (K10).
+/// The collapsed header advertises the only way back into the body, and `Ctrl+E` must honour the advertisement by re-printing it in full.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_collapse_thinking_toggle_folds_and_ctrl_e_reopens() {

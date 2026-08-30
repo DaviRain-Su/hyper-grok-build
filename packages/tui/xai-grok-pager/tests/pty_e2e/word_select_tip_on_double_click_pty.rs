@@ -4,8 +4,7 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Unique prefix of the word-select settings tip:
-/// `Want double-click to select? /settings → Text selection · Ctrl+Y: enable now`.
+/// Unique prefix of the word-select settings tip: `Want double-click to select? /settings → Text selection · Ctrl+Y: enable now`.
 pub(crate) const WORD_SELECT_TIP_SENTINEL: &str = "Want double-click to select";
 
 /// Stable body text we double-click in scrollback (also the mock response).
@@ -31,10 +30,8 @@ fn spawn_with_hints(content: &ContentController) -> PtyHarness {
         .expect("spawn pager with contextual hints")
 }
 
-/// Double-click scrollback while Text selection is fold/nav (`flash`) →
-/// ephemeral tip advertises the settings path and the Ctrl+Y accept chord;
-/// pressing Ctrl+Y while the tip is up flips the setting to `word_select`
-/// and persists it to config.toml.
+/// Double-clicking scrollback while Text selection is fold/nav (`flash`) shows an ephemeral tip naming the settings path and the Ctrl+Y accept chord.
+/// Pressing Ctrl+Y while the tip is up flips the setting to `word_select` and persists it to config.toml.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 #[cfg(unix)]
@@ -67,8 +64,8 @@ async fn word_select_tip_shows_and_ctrl_y_accepts() {
     let (row, col) = locate_screen_text(&screen, BODY_SENTINEL).unwrap_or_else(|| {
         panic!("locate body for double-click; screen:\n{screen}");
     });
-    // Click mid-word so the hit lands on selectable text columns. The FIRST
-    // double-click gesture is treated as intentional folding — no tip.
+    // Click mid-word so the hit lands on selectable text columns
+    // The first double-click gesture is treated as intentional folding, so no tip
     double_click_at(&mut harness, row, col + 2);
     harness.update(Duration::from_millis(600));
     assert!(
@@ -77,8 +74,7 @@ async fn word_select_tip_shows_and_ctrl_y_accepts() {
         harness.screen_contents()
     );
 
-    // The REPEATED gesture (separate multi-click window, inside the repeat
-    // window) is the selection-attempt signal that fires the tip.
+    // A second gesture, in its own multi-click window but inside the repeat window, reads as an attempt to select and fires the tip
     double_click_at(&mut harness, row, col + 2);
 
     harness
@@ -111,8 +107,7 @@ async fn word_select_tip_shows_and_ctrl_y_accepts() {
             )
         });
 
-    // The flip persists: `[ui].keep_text_selection = "word_select"` lands in
-    // config.toml (async persist — poll briefly).
+    // The flip persists: `[ui].keep_text_selection = "word_select"` lands in config.toml. The persist is async, so poll briefly.
     let config_path = content.home().join(".grok").join("config.toml");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -127,7 +122,7 @@ async fn word_select_tip_shows_and_ctrl_y_accepts() {
         harness.update(Duration::from_millis(200));
     }
 
-    // With word_select live, another double-click selects instead of tipping.
+    // With word_select live, another double-click selects instead of showing the tip
     let screen = harness.screen_contents();
     let (row, col) = locate_screen_text(&screen, BODY_SENTINEL).unwrap_or_else(|| {
         panic!("locate body for second double-click; screen:\n{screen}");
@@ -148,7 +143,7 @@ async fn word_select_tip_shows_and_ctrl_y_accepts() {
     harness.quit().expect("clean quit");
 }
 
-/// Already on `word_select` → double-click selects a word; tip must not fire.
+/// Already on `word_select`: a double-click selects a word and the tip must not fire.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 #[cfg(unix)]
@@ -180,8 +175,7 @@ async fn word_select_tip_skipped_when_mode_is_word_select() {
     let (row, col) = locate_screen_text(&screen, BODY_SENTINEL).unwrap_or_else(|| {
         panic!("locate body for double-click; screen:\n{screen}");
     });
-    // Two separate gestures — the repeat gate would pass, so absence here
-    // proves the word_select-mode gate, not the repeat gate.
+    // Two separate gestures: the repeat gate would pass, so absence here proves the word_select-mode gate, not the repeat gate
     double_click_at(&mut harness, row, col + 2);
     harness.update(Duration::from_millis(600));
     double_click_at(&mut harness, row, col + 2);
@@ -202,14 +196,14 @@ async fn word_select_tip_skipped_when_mode_is_word_select() {
     harness.quit().expect("clean quit");
 }
 
-/// Per-tip gate off (`[ui.contextual_hints].word_select = false`) → no tip.
+/// With the per-tip gate off (`[ui.contextual_hints].word_select = false`), the tip must not show.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 #[cfg(unix)]
 async fn word_select_tip_skipped_when_contextual_hint_disabled() {
     let content = ContentController::start().await.expect("start content");
-    // flash mode + tip explicitly disabled. GROK_CONTEXTUAL_HINTS is NOT set —
-    // that env master would force all tips on and defeat the config opt-out.
+    // Flash mode with the tip explicitly disabled
+    // GROK_CONTEXTUAL_HINTS stays unset here; that master switch would force all tips on and defeat the config opt-out
     let grok_home = content.home().join(".grok");
     std::fs::create_dir_all(&grok_home).expect("create .grok");
     std::fs::write(
@@ -225,9 +219,7 @@ async fn word_select_tip_skipped_when_contextual_hint_disabled() {
     ));
 
     let binary = pager_binary().expect("resolve pager binary");
-    // Content env only — pin the env master to empty (parsed as unset) so an
-    // inherited GROK_CONTEXTUAL_HINTS from the runner's shell can't force
-    // tips on and defeat the config opt-out under test.
+    // Pin GROK_CONTEXTUAL_HINTS to empty (parsed as unset) so a value inherited from the runner's shell can't force tips on
     let overrides: Vec<(String, String)> = vec![("GROK_CONTEXTUAL_HINTS".into(), String::new())];
     let env_refs: Vec<(&str, &str)> = overrides
         .iter()
@@ -263,8 +255,7 @@ async fn word_select_tip_skipped_when_contextual_hint_disabled() {
     let (row, col) = locate_screen_text(&screen, BODY_SENTINEL).unwrap_or_else(|| {
         panic!("locate body for double-click; screen:\n{screen}");
     });
-    // Two separate gestures — the repeat gate would pass, so absence here
-    // proves the per-tip config opt-out, not the repeat gate.
+    // Two separate gestures: the repeat gate would pass, so absence here proves the per-tip config opt-out, not the repeat gate
     double_click_at(&mut harness, row, col + 2);
     harness.update(Duration::from_millis(600));
     double_click_at(&mut harness, row, col + 2);

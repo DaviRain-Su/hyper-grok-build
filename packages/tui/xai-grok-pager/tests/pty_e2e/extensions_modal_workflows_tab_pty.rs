@@ -1,8 +1,7 @@
 // Per-test-case module for the `pty_e2e` integration test crate.
 //
-// The extensions modal's Workflows tab lists a seeded user workflow as a
-// flat browse-only row. Run with `--nocapture` to dump screen contents
-// when debugging failures.
+// The extensions modal's Workflows tab lists a seeded user workflow as a flat browse-only row
+// Run with `--nocapture` to dump screen contents when debugging failures
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -47,9 +46,8 @@ async fn extensions_modal_workflows_tab_pty() {
         .wait_for_text("Workflows", Duration::from_secs(15))
         .expect("extensions modal tab bar with Workflows");
 
-    // Navigate by content, not tab position: cycle until the seeded catalog
-    // row shows (it renders only on the Workflows tab), so tab insertions or
-    // reorders can't silently land the assertions on the wrong tab.
+    // Navigate by content, not tab position: cycle until the seeded catalog row shows (it renders only on the Workflows tab)
+    // Tab insertions or reorders then can't silently land the assertions on the wrong tab
     let mut reached_workflows_tab = false;
     for _ in 0..6 {
         harness.inject_keys(b"\t").expect("cycle tab");
@@ -67,8 +65,8 @@ async fn extensions_modal_workflows_tab_pty() {
         harness.screen_contents()
     );
     dump_screen("workflows tab with seeded row", &harness);
-    // No spawn cwd: portable-pty falls back to the sandbox $HOME, and with no
-    // git repo there project_root() == $HOME, so the seeded file is project scope.
+    // No spawn cwd: portable-pty falls back to the sandbox $HOME
+    // With no git repo there, project_root() == $HOME, so the seeded file is project scope
     assert!(
         harness.contains_text("(project)"),
         "workflow row must show its source as the right label\nscreen:\n{}",

@@ -4,14 +4,11 @@ pub mod http;
 use std::time::Duration;
 
 use crate::config::HookSpec;
-use crate::event::HookEventEnvelope;
+use crate::event::{HookEventEnvelope, MAX_HOOK_FEEDBACK_CHARS, clip_reason, clip_text};
 use serde::Deserialize;
 
-use crate::result::{HookDecision, HttpInfo, StopHookOutcome};
+use crate::result::{HttpInfo, StopHookOutcome};
 
-/// How a hook's output is interpreted, per the event's [`GateKind`]: `Observe`
-/// ignores output, `Tool` parses the allow/deny vocabulary, `Stop` the stop
-/// vocabulary.
 pub use crate::event::GateKind;
 
 pub struct RunContext<'a> {
@@ -20,98 +17,342 @@ pub struct RunContext<'a> {
     pub process_scope: Option<xai_grok_tools::util::ProcessScope>,
 }
 
-/// Result of running a single hook (any handler type).
 #[derive(Debug)]
 pub enum HookRunnerResult {
     Allow {
-        updated_input: Option<serde_json::Value>,
+        updated_input: Option<serde_json::Map<String, serde_json::Value>>,
+        additional_context: Option<String>,
     },
+    Ask {
+        reason: Option<String>,
+        updated_input: Option<serde_json::Map<String, serde_json::Value>>,
+        additional_context: Option<String>,
+    },
+    Defer,
     Deny {
         reason: String,
         hook_name: String,
     },
-    /// A `user_prompt_submit` gate block — the prompt gate's own word for its
-    /// terminal verdict (`Deny` is the tool gate's).
     Block {
         reason: String,
         hook_name: String,
     },
     Stop(StopHookOutcome),
     Success,
-    /// Failed: the caller fails open.
     Failed(String),
 }
 
-/// JSON emitted by a `PreToolUse` gate hook. Every field is optional: `decision`
-/// carries the allow/deny verdict, `reason` its message, and
-/// `hookSpecificOutput.updatedInput` an optional rewrite of the tool input.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct GateHookJson {
     #[serde(default)]
-    pub decision: Option<String>,
+    decision: Option<String>,
     #[serde(default)]
-    pub reason: Option<String>,
-    #[serde(default, rename = "hookSpecificOutput")]
-    pub hook_specific_output: Option<GateHookSpecificOutputJson>,
+    reason: Option<String>,
+    #[serde(default)]
+    hook_specific_output: Option<GateHookSpecificOutputJson>,
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct GateHookSpecificOutputJson {
-    #[serde(default, rename = "updatedInput")]
-    pub updated_input: Option<serde_json::Value>,
+    #[serde(default)]
+    permission_decision: Option<String>,
+    #[serde(default)]
+    permission_decision_reason: Option<String>,
+    #[serde(default)]
+    updated_input: Option<serde_json::Value>,
+    #[serde(default)]
+    additional_context: Option<serde_json::Value>,
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
 }
+
+struct NonObjectRewrite;
 
 impl GateHookJson {
-    /// True only when the payload carries a `decision` or `hookSpecificOutput`;
-    /// a stray JSON log line is not a gate document and must not read as allow.
     fn is_gate_document(&self) -> bool {
-        self.decision.is_some() || self.hook_specific_output.is_some()
+        self.decision.is_some()
+            || self.hook_specific_output.is_some()
+            || self.rest.keys().any(|key| {
+                matches!(
+                    key.as_str(),
+                    "updatedInput"
+                        | "permissionDecision"
+                        | "permissionDecisionReason"
+                        | "continue"
+                        | "additionalContext"
+                )
+            })
     }
 
-    fn updated_input(&self, hook_name: &str) -> Option<serde_json::Value> {
-        let value = self.hook_specific_output.as_ref()?.updated_input.as_ref()?;
-        if value.is_object() {
-            return Some(value.clone());
+    fn permission_decision(&self) -> Option<&str> {
+        non_empty(
+            self.hook_specific_output
+                .as_ref()
+                .and_then(|output| output.permission_decision.as_deref()),
+        )
+    }
+
+    fn permission_decision_reason(&self) -> Option<&str> {
+        self.hook_specific_output
+            .as_ref()
+            .and_then(|output| output.permission_decision_reason.as_deref())
+    }
+
+    fn resolve_decision(&self) -> GateDecision {
+        let (field, decision_str) = match (
+            self.permission_decision(),
+            non_empty(self.decision.as_deref()),
+        ) {
+            (Some(token), _) => (DecisionField::HookSpecific, Some(token)),
+            (None, legacy) => (DecisionField::TopLevel, legacy),
+        };
+        let token = decision_str.map_or(DecisionToken::Allow, |token| {
+            DecisionToken::classify(field, token)
+        });
+        let reason = non_empty(self.permission_decision_reason())
+            .or(non_empty(self.reason.as_deref()))
+            .map(str::to_string);
+        GateDecision { token, reason }
+    }
+
+    fn take_updated_input(
+        self,
+    ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, NonObjectRewrite> {
+        match self
+            .hook_specific_output
+            .and_then(|output| output.updated_input)
+        {
+            None => Ok(None),
+            Some(serde_json::Value::Object(input)) => Ok(Some(input)),
+            Some(_) => Err(NonObjectRewrite),
         }
-        tracing::warn!(hook_name, "ignoring non-object `updatedInput` from hook");
-        None
+    }
+
+    fn ignored_parts(&self, decision: &DecisionToken) -> Vec<String> {
+        let top = self
+            .rest
+            .keys()
+            .filter(|key| !SILENTLY_IGNORED_TOP_LEVEL_KEYS.contains(&key.as_str()))
+            .cloned();
+        let nested = self
+            .hook_specific_output
+            .iter()
+            .flat_map(|output| output.rest.keys())
+            .filter(|key| !SILENTLY_IGNORED_NESTED_KEYS.contains(&key.as_str()))
+            .map(|key| format!("hookSpecificOutput.{key}"));
+        let stop_request = (self.rest.get("continue") == Some(&serde_json::Value::Bool(false)))
+            .then(|| "continue: false".to_string());
+        let unread_reason = (matches!(decision, DecisionToken::Allow | DecisionToken::Defer)
+            && (non_empty(self.reason.as_deref()).is_some()
+                || non_empty(self.permission_decision_reason()).is_some()))
+        .then(|| "reason (only a deny or an ask has one)".to_string());
+        let nested_output = self.hook_specific_output.as_ref();
+        let deferred_rewrite = (matches!(decision, DecisionToken::Defer)
+            && nested_output.is_some_and(|output| output.updated_input.is_some()))
+        .then(|| "hookSpecificOutput.updatedInput".to_string());
+        let bad_context = self
+            .raw_additional_context()
+            .is_some_and(|value| !value.is_string());
+        let unread_valid_context = matches!(decision, DecisionToken::Defer | DecisionToken::Deny)
+            && self.additional_context().is_some();
+        let unread_context = (bad_context || unread_valid_context)
+            .then(|| "hookSpecificOutput.additionalContext".to_string());
+        top.chain(nested)
+            .chain(stop_request)
+            .chain(unread_reason)
+            .chain(deferred_rewrite)
+            .chain(unread_context)
+            .collect()
+    }
+
+    fn raw_additional_context(&self) -> Option<&serde_json::Value> {
+        self.hook_specific_output
+            .as_ref()
+            .and_then(|output| output.additional_context.as_ref())
+    }
+
+    fn additional_context(&self) -> Option<String> {
+        let text = self.raw_additional_context()?.as_str()?;
+        (!text.trim().is_empty()).then(|| clip_text(text, MAX_HOOK_FEEDBACK_CHARS))
     }
 }
 
-/// Interpret a [`GateHookJson`] as a [`HookDecision`]. An unknown decision value
-/// is an error so typos surface instead of failing open.
-///
-/// `fallback_reason` supplies the deny message when the JSON carries none
-/// (command hooks pass the first stderr line — the hook's feedback channel;
-/// HTTP hooks have no stderr and pass `None`).
-pub(crate) fn gate_json_to_decision(
-    json: &GateHookJson,
+const SILENTLY_IGNORED_TOP_LEVEL_KEYS: &[&str] = &["hookEventName", "continue", "systemMessage"];
+const SILENTLY_IGNORED_NESTED_KEYS: &[&str] = &["hookEventName"];
+
+fn non_empty(text: Option<&str>) -> Option<&str> {
+    let trimmed = text?.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// Extract a hook's top-level `systemMessage` warning from its stdout JSON.
+pub(crate) fn extract_system_message(stdout: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    non_empty(
+        value
+            .get("systemMessage")
+            .and_then(serde_json::Value::as_str),
+    )
+    .map(crate::event::clip_reason)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DecisionToken {
+    Allow,
+    Deny,
+    Ask,
+    Defer,
+    Unknown { field: DecisionField, token: String },
+}
+
+impl DecisionToken {
+    fn classify(field: DecisionField, token: &str) -> Self {
+        match token {
+            "allow" | "approve" => Self::Allow,
+            "deny" | "block" => Self::Deny,
+            "ask" => Self::Ask,
+            "defer" => Self::Defer,
+            other => Self::Unknown {
+                field,
+                token: other.to_string(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecisionField {
+    TopLevel,
+    HookSpecific,
+}
+
+impl DecisionField {
+    const fn wire_name(self) -> &'static str {
+        match self {
+            Self::TopLevel => "decision",
+            Self::HookSpecific => "hookSpecificOutput.permissionDecision",
+        }
+    }
+}
+
+struct GateDecision {
+    token: DecisionToken,
+    reason: Option<String>,
+}
+
+pub(crate) enum GateOutcome {
+    Allow {
+        updated_input: Option<serde_json::Map<String, serde_json::Value>>,
+        additional_context: Option<String>,
+    },
+    Ask {
+        reason: Option<String>,
+        updated_input: Option<serde_json::Map<String, serde_json::Value>>,
+        additional_context: Option<String>,
+    },
+    Defer,
+    Deny(String),
+    Failed(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HookHealth {
+    Healthy,
+    Broken,
+}
+
+impl HookHealth {
+    pub(crate) fn from_success(success: bool) -> Self {
+        if success { Self::Healthy } else { Self::Broken }
+    }
+}
+
+pub(crate) fn gate_outcome(
+    json: GateHookJson,
     hook_name: &str,
     fallback_reason: Option<&str>,
-) -> Result<HookDecision, String> {
-    match json.decision.as_deref() {
-        Some("deny") => Ok(HookDecision::Deny {
-            reason: json
-                .reason
-                .clone()
-                .filter(|r| !r.trim().is_empty())
+    health: HookHealth,
+) -> GateOutcome {
+    let GateDecision { token, reason } = json.resolve_decision();
+    let mut ignored = json.ignored_parts(&token);
+    let additional_context = json.additional_context();
+    let updated_input = resolve_rewrite(json, hook_name, health, &mut ignored);
+
+    if !ignored.is_empty() {
+        tracing::warn!(
+            hook_name,
+            ignored = %ignored.join(", "),
+            "ignoring parts of a gate hook document"
+        );
+    }
+
+    match token {
+        DecisionToken::Deny => GateOutcome::Deny(clip_reason(
+            &reason
                 .or_else(|| fallback_reason.map(str::to_string))
                 .unwrap_or_else(|| format!("denied by hook '{hook_name}'")),
-            hook_name: hook_name.to_string(),
-        }),
-        Some("allow") | None => Ok(HookDecision::Allow),
-        Some(other) => Err(format!(
-            "unknown decision value '{other}' from hook '{hook_name}'"
         )),
+        DecisionToken::Unknown { field, token } => GateOutcome::Failed(format!(
+            "unknown decision value '{}' in '{}' from hook '{hook_name}'",
+            clip_reason(&token),
+            field.wire_name()
+        )),
+        DecisionToken::Ask => GateOutcome::Ask {
+            reason: reason.as_deref().map(clip_reason),
+            updated_input,
+            additional_context: drop_if_broken(
+                additional_context,
+                hook_name,
+                "additionalContext",
+                health,
+            ),
+        },
+        DecisionToken::Defer => GateOutcome::Defer,
+        DecisionToken::Allow => GateOutcome::Allow {
+            updated_input,
+            additional_context: drop_if_broken(
+                additional_context,
+                hook_name,
+                "additionalContext",
+                health,
+            ),
+        },
     }
 }
 
-/// JSON from `UserPromptSubmit` gate hooks. The vocabulary for this event is
-/// `decision: "block"` + `reason`; to allow, the hook omits `decision`
-/// (`"approve"` is accepted as the same no-verdict, for ported hooks).
-/// Serde skips unknown fields, so hooks that emit `additionalContext` or
-/// `sessionTitle` parse cleanly — those behaviors are unsupported and the
-/// fields are discarded.
+fn resolve_rewrite(
+    json: GateHookJson,
+    hook_name: &str,
+    health: HookHealth,
+    ignored: &mut Vec<String>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let updated_input = match json.take_updated_input() {
+        Ok(updated_input) => updated_input,
+        Err(NonObjectRewrite) => {
+            ignored.push("hookSpecificOutput.updatedInput (not an object)".to_string());
+            None
+        }
+    };
+    drop_if_broken(updated_input, hook_name, "updatedInput", health)
+}
+
+fn drop_if_broken<T>(
+    value: Option<T>,
+    hook_name: &str,
+    wire_field: &str,
+    health: HookHealth,
+) -> Option<T> {
+    if value.is_some() && health == HookHealth::Broken {
+        tracing::warn!(hook_name, wire_field, "dropping a failed hook's field");
+        return None;
+    }
+    value
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct PromptHookJson {
     #[serde(default)]
@@ -120,14 +361,6 @@ pub(crate) struct PromptHookJson {
     pub reason: Option<String>,
 }
 
-/// Interpret a [`PromptHookJson`] as an optional block reason.
-///
-/// `decision: "block"` blocks; a missing `decision` renders no verdict, and
-/// so does `"approve"` — an allow vocabulary accepted from ported hooks
-/// (matching [`stop_json_to_outcome`]). Any other value is an error so
-/// typos surface instead of failing open. `fallback_reason` supplies the
-/// block message when the JSON carries none (command hooks pass stderr — the
-/// hook's feedback channel; HTTP hooks have no stderr and pass `None`).
 pub(crate) fn prompt_json_to_block(
     json: &PromptHookJson,
     hook_name: &str,
@@ -148,8 +381,6 @@ pub(crate) fn prompt_json_to_block(
     }
 }
 
-/// JSON from `Stop`/`SubagentStop` gate hooks. All fields optional; one output
-/// can combine several signals.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct StopHookJson {
     #[serde(default)]
@@ -170,11 +401,6 @@ pub(crate) struct StopHookSpecificOutputJson {
     pub additional_context: Option<String>,
 }
 
-/// Interpret a [`StopHookJson`] as a [`StopHookOutcome`].
-///
-/// `decision: "block"` requires a reason (a missing one falls back to a generic
-/// message). `decision: "approve"` is a no-op; any other value is an error so
-/// typos surface.
 pub(crate) fn stop_json_to_outcome(
     json: StopHookJson,
     hook_name: &str,
@@ -197,16 +423,15 @@ pub(crate) fn stop_json_to_outcome(
         additional_context: json
             .hook_specific_output
             .and_then(|output| output.additional_context)
-            .filter(|context| !context.trim().is_empty()),
+            .filter(|context| !context.trim().is_empty())
+            .map(|context| clip_text(&context, MAX_HOOK_FEEDBACK_CHARS)),
         force_stop: (json.continue_ == Some(false)).then_some(crate::result::StopOverride {
             reason: json.stop_reason,
         }),
     })
 }
 
-/// Each runner returns the result, wall-clock duration, and optional HTTP
-/// metadata for enriched scrollback logging.
-pub type HookRunOutput = (HookRunnerResult, Duration, Option<HttpInfo>);
+pub type HookRunOutput = (HookRunnerResult, Duration, Option<HttpInfo>, Option<String>);
 
 pub async fn run_hook(
     spec: &HookSpec,
@@ -216,9 +441,203 @@ pub async fn run_hook(
 ) -> HookRunOutput {
     match spec.handler_type {
         crate::config::HandlerType::Command => {
-            let (result, elapsed) = command::run_command_hook(spec, envelope, ctx, mode).await;
-            (result, elapsed, None)
+            let (result, elapsed, system_message) =
+                command::run_command_hook(spec, envelope, ctx, mode).await;
+            (result, elapsed, None, system_message)
         }
         crate::config::HandlerType::Http => http::run_http_hook(spec, envelope, ctx, mode).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_system_message_trims_and_ignores_blank_or_absent() {
+        assert_eq!(
+            extract_system_message(r#"{"systemMessage":"  heads up  ","decision":"allow"}"#),
+            Some("heads up".to_string())
+        );
+        assert_eq!(extract_system_message(r#"{"decision":"allow"}"#), None);
+        assert_eq!(extract_system_message(r#"{"systemMessage":"   "}"#), None);
+        assert_eq!(extract_system_message(""), None);
+        assert_eq!(extract_system_message("not json"), None);
+    }
+
+    #[test]
+    fn ignored_parts_names_what_changed_nothing() {
+        for (json, expected) in [
+            (
+                r#"{"decision":"allow","hookSpecificOutput":{"updateInput":{}}}"#,
+                vec!["hookSpecificOutput.updateInput"],
+            ),
+            (
+                r#"{"permissionDecision":"deny"}"#,
+                vec!["permissionDecision"],
+            ),
+            (
+                r#"{"decision":"allow","continue":false}"#,
+                vec!["continue: false"],
+            ),
+            (
+                r#"{"decision":"allow","reason":"why"}"#,
+                vec!["reason (only a deny or an ask has one)"],
+            ),
+            (r#"{"decision":"deny","reason":"why"}"#, vec![]),
+            (
+                r#"{"decision":"deny","reason":"why","hookSpecificOutput":{"additionalContext":"note"}}"#,
+                vec!["hookSpecificOutput.additionalContext"],
+            ),
+            (
+                r#"{"hookSpecificOutput":{"permissionDecision":"defer","updatedInput":{"command":"x"},"additionalContext":"note"}}"#,
+                vec![
+                    "hookSpecificOutput.updatedInput",
+                    "hookSpecificOutput.additionalContext",
+                ],
+            ),
+        ] {
+            let document: GateHookJson = serde_json::from_str(json).expect("valid gate JSON");
+            let decision = document.resolve_decision().token;
+            assert_eq!(document.ignored_parts(&decision), expected, "for {json}");
+        }
+    }
+
+    #[test]
+    fn blank_permission_decision_falls_back_to_legacy_decision() {
+        for (json, expected) in [
+            (
+                r#"{"decision":"deny","hookSpecificOutput":{"permissionDecision":"  "}}"#,
+                DecisionToken::Deny,
+            ),
+            (
+                r#"{"hookSpecificOutput":{"permissionDecision":"  "}}"#,
+                DecisionToken::Allow,
+            ),
+            (
+                r#"{"hookSpecificOutput":{"permissionDecision":""}}"#,
+                DecisionToken::Allow,
+            ),
+        ] {
+            let document: GateHookJson = serde_json::from_str(json).expect("valid gate JSON");
+            assert_eq!(document.resolve_decision().token, expected, "for {json}");
+        }
+    }
+
+    #[test]
+    fn ask_with_non_object_updated_input_keeps_asking() {
+        let json = r#"{"hookSpecificOutput":{"permissionDecision":"ask","permissionDecisionReason":"confirm","updatedInput":"nope"}}"#;
+
+        let document: GateHookJson = serde_json::from_str(json).expect("valid gate JSON");
+        let mut ignored = Vec::new();
+        let rewrite = resolve_rewrite(document, "h", HookHealth::Healthy, &mut ignored);
+        assert!(
+            rewrite.is_none(),
+            "a non-object updatedInput must drop the rewrite"
+        );
+        assert!(
+            ignored.iter().any(|part| part.contains("updatedInput")),
+            "the dropped rewrite must be named in ignored_parts, got {ignored:?}"
+        );
+
+        let document: GateHookJson = serde_json::from_str(json).expect("valid gate JSON");
+        let outcome = gate_outcome(document, "h", None, HookHealth::Healthy);
+        assert!(
+            matches!(
+                outcome,
+                GateOutcome::Ask {
+                    updated_input: None,
+                    ..
+                }
+            ),
+            "ask + non-object updatedInput must stay an Ask with no rewrite, not fail open"
+        );
+    }
+
+    #[test]
+    fn deny_with_array_additional_context_still_denies() {
+        let json = r#"{"decision":"deny","reason":"blocked","hookSpecificOutput":{"permissionDecision":"deny","additionalContext":["a","b"]}}"#;
+        let document: GateHookJson =
+            serde_json::from_str(json).expect("a non-string additionalContext must still parse");
+        assert!(
+            document.is_gate_document(),
+            "the document must still be recognized as a gate"
+        );
+        let outcome = gate_outcome(document, "h", None, HookHealth::Healthy);
+        assert!(
+            matches!(outcome, GateOutcome::Deny(ref reason) if reason == "blocked"),
+            "a deny must land despite an array additionalContext"
+        );
+    }
+
+    #[test]
+    fn bad_additional_context_is_dropped_and_named_and_the_decision_survives() {
+        for (json, expected) in [
+            (
+                r#"{"hookSpecificOutput":{"permissionDecision":"ask","additionalContext":[1,2]}}"#,
+                "ask",
+            ),
+            (
+                r#"{"hookSpecificOutput":{"permissionDecision":"defer","additionalContext":1}}"#,
+                "defer",
+            ),
+            (
+                r#"{"hookSpecificOutput":{"permissionDecision":"block","additionalContext":{}}}"#,
+                "deny",
+            ),
+        ] {
+            let document: GateHookJson = serde_json::from_str(json).expect("valid gate JSON");
+            let decision = document.resolve_decision().token;
+            assert!(
+                document
+                    .ignored_parts(&decision)
+                    .iter()
+                    .any(|part| part == "hookSpecificOutput.additionalContext"),
+                "a bad additionalContext must be named in ignored_parts, for {json}"
+            );
+
+            let document: GateHookJson = serde_json::from_str(json).expect("valid gate JSON");
+            let got = match gate_outcome(document, "h", None, HookHealth::Healthy) {
+                GateOutcome::Ask {
+                    additional_context, ..
+                } => {
+                    assert!(
+                        additional_context.is_none(),
+                        "the bad context must be dropped, for {json}"
+                    );
+                    "ask"
+                }
+                GateOutcome::Defer => "defer",
+                GateOutcome::Deny(_) => "deny",
+                GateOutcome::Allow { .. } => "allow",
+                GateOutcome::Failed(_) => "failed",
+            };
+            assert_eq!(got, expected, "the token must survive, for {json}");
+        }
+    }
+
+    #[test]
+    fn top_level_additional_context_is_a_recognized_gate_document_and_is_named() {
+        let document: GateHookJson =
+            serde_json::from_str(r#"{"additionalContext":"note"}"#).expect("valid JSON");
+        assert!(
+            document.is_gate_document(),
+            "a top-level additionalContext must mark a gate document"
+        );
+        let decision = document.resolve_decision().token;
+        assert_eq!(document.ignored_parts(&decision), vec!["additionalContext"]);
+    }
+
+    #[test]
+    fn valid_additional_context_flows_through() {
+        let json =
+            r#"{"hookSpecificOutput":{"permissionDecision":"allow","additionalContext":"note"}}"#;
+        let document: GateHookJson = serde_json::from_str(json).expect("valid gate JSON");
+        match gate_outcome(document, "h", None, HookHealth::Healthy) {
+            GateOutcome::Allow {
+                additional_context, ..
+            } => assert_eq!(additional_context.as_deref(), Some("note")),
+            _ => panic!("a valid additionalContext must flow through an allow"),
+        }
     }
 }

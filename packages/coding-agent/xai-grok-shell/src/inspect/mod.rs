@@ -520,7 +520,7 @@ async fn list_instructions(cwd: &Path) -> Vec<InstructionFile> {
     .await;
 
     let grok_home = crate::util::grok_home::grok_home();
-    let vendor_homes = dirs::home_dir()
+    let vendor_homes = xai_dirs::home_dir()
         .map(|home_dir| {
             vec![
                 (home_dir.join(".claude"), true),

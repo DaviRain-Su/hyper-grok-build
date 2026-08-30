@@ -35,6 +35,44 @@ pub const COMMAND_REJECTED_NOT_YET_ENABLED: &str = "not_yet_enabled";
 /// `reason` on `command_rejected` when envelope `agentId` and `args.agentId` disagree.
 pub const COMMAND_REJECTED_AGENT_ID_MISMATCH: &str = "agent_id_mismatch";
 
+/// `reason` on `command_rejected` when `uploadAttachment` args JSON exceeds 3 MiB.
+pub const COMMAND_REJECTED_ARGS_TOO_LARGE: &str = "args_too_large";
+
+/// `reason` on `command_rejected` when required command args are missing or empty.
+pub const COMMAND_REJECTED_ARGS_INVALID: &str = "args_invalid";
+
+/// `reason` on `command_rejected` when Live mode cannot accept attachments.
+pub const COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE: &str =
+    "attachments_not_supported_in_live";
+
+/// `reason` on `command_rejected` when Live mode cannot interrupt or look up
+/// prompt acceptance (no Temporal interrupt RPC; on-box ledger is never written).
+pub const COMMAND_REJECTED_NOT_SUPPORTED_IN_LIVE: &str = "not_supported_in_live";
+
+/// `reason` on `command_rejected` when attachUpload cannot see the file (missing or not the caller's).
+pub const COMMAND_REJECTED_ATTACHMENT_NOT_FOUND: &str = "attachment_not_found";
+
+/// `reason` on `command_rejected` when the file exists but is not a BOT_CHAT upload.
+pub const COMMAND_REJECTED_ATTACHMENT_WRONG_SOURCE: &str = "attachment_wrong_source";
+
+/// `reason` on `command_rejected` when the stored BotChat object exceeds 25 MiB.
+pub const COMMAND_REJECTED_ATTACHMENT_TOO_LARGE: &str = "attachment_too_large";
+
+/// `reason` on `command_rejected` when the BotChat upload is not PostProcessDone.
+pub const COMMAND_REJECTED_ATTACHMENT_NOT_READY: &str = "attachment_not_ready";
+
+/// `reason` on `command_rejected` when the box refused a well-formed
+/// catalog method (capability skew, not a client catalog bug).
+pub const COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD: &str = "gateway/unknown-method";
+
+/// True only when the hub classified a box unknown-method refusal.
+/// False for `unknown_method` (catalog-miss), `not_yet_enabled`,
+/// `host_only`, and every non-`command_rejected` code.
+pub fn is_gateway_method_unsupported(err: &BotRelayError) -> bool {
+    err.code == BotRelayErrorCode::CommandRejected
+        && err.reason.as_deref() == Some(COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD)
+}
+
 // ── Shared empty payloads ────────────────────────────────────────────────
 
 /// Empty JSON object (`{}`). Used by verbs whose design params/result are `{}`.
@@ -1024,6 +1062,41 @@ mod tests {
                 "reason": "not_yet_enabled",
             })
         );
+    }
+
+    #[test]
+    fn helper_true_only_for_gateway_unknown_method() {
+        let skew = BotRelayError {
+            code: BotRelayErrorCode::CommandRejected,
+            retryable: false,
+            detail: BotRelayErrorDetail::default(),
+            reason: Some(COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD.to_owned()),
+        };
+        assert!(is_gateway_method_unsupported(&skew));
+
+        let catalog_miss = BotRelayError {
+            code: BotRelayErrorCode::CommandRejected,
+            retryable: false,
+            detail: BotRelayErrorDetail::default(),
+            reason: Some("unknown_method".to_owned()),
+        };
+        assert!(!is_gateway_method_unsupported(&catalog_miss));
+
+        let gated = BotRelayError {
+            code: BotRelayErrorCode::CommandRejected,
+            retryable: false,
+            detail: BotRelayErrorDetail::default(),
+            reason: Some(COMMAND_REJECTED_NOT_YET_ENABLED.to_owned()),
+        };
+        assert!(!is_gateway_method_unsupported(&gated));
+
+        let upstream = BotRelayError {
+            code: BotRelayErrorCode::UpstreamError,
+            retryable: false,
+            detail: BotRelayErrorDetail::default(),
+            reason: Some(COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD.to_owned()),
+        };
+        assert!(!is_gateway_method_unsupported(&upstream));
     }
 
     #[test]

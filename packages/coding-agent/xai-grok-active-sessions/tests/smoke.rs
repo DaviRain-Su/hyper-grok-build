@@ -1,4 +1,5 @@
-//! End-to-end smoke test exercising the full active_sessions lifecycle.
+//! Runs the full session flow in one temp directory: register, clean unregister, then crash detection.
+//! Proves a clean exit removes its entry and crash detection returns only the session with a dead PID.
 
 use chrono::Utc;
 use tempfile::TempDir;
@@ -20,19 +21,19 @@ fn full_lifecycle() {
     let pid = std::process::id();
     let sid = |s: &str| agent_client_protocol::SessionId::new(s);
 
-    // Start session, verify listed.
+    // Start a session and verify it is listed
     register_in(r, session("s1", pid)).unwrap();
     assert_eq!(list_in(r).unwrap().len(), 1);
 
-    // Clean exit, verify gone.
+    // Unregister (a clean exit) and verify the entry is gone
     unregister_in(r, &sid("s1")).unwrap();
     assert!(list_in(r).unwrap().is_empty());
 
-    // Simulate crash (dead PID) + live session.
+    // Register a crashed session (dead PID) alongside a live one
     register_in(r, session("crashed", 2_000_000_000)).unwrap();
     register_in(r, session("alive", pid)).unwrap();
 
-    // Crash detection finds dead PID, keeps live one.
+    // Crash detection returns the dead session and keeps the live one
     let crashed = collect_crashed_in(r).unwrap();
     assert_eq!(crashed.len(), 1);
     assert_eq!(&*crashed[0].session_id.0, "crashed");

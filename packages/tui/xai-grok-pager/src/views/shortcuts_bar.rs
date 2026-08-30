@@ -1,10 +1,6 @@
-//! Shortcuts bar — renders keyboard hints.
+//! The bar accepts `&[HintItem]` from any source (action registry, prompt widget, scrollback state); each view builds its own hints dynamically.
 //!
-//! Accepts `&[HintItem]` from any source — action registry, prompt widget,
-//! scrollback state, etc. Each view builds its own hints dynamically.
-//!
-//! When a `PendingAction` is active (double-press confirmation),
-//! the bar replaces all hints with "press again to {label}".
+//! When a `PendingAction` is active (double-press confirmation), the bar replaces all hints with "press again to {label}".
 
 use std::borrow::Cow;
 
@@ -20,7 +16,7 @@ use crate::theme::Theme;
 
 /// A single hint for the shortcuts bar.
 ///
-/// Carries semantic key data — the bar handles rendering.
+/// It carries the keys as structured data; the bar decides how they render.
 /// Views build these dynamically from the registry, widget keymaps, or local state.
 #[derive(Debug, Clone)]
 pub struct HintItem {
@@ -28,16 +24,14 @@ pub struct HintItem {
     pub keys: Vec<KeyShortcut>,
     /// Short label for the bottom bar (e.g., "send", "nav", "cancel").
     pub label: Cow<'static, str>,
-    /// Optional custom key text for single-key bar paint (and cheatsheet).
-    /// Multi-key bar paint (`keys.len() > 1`) ignores this and builds from
-    /// structured keys (shared-mod compact or full-form join).
+    /// Optional custom key text, used when the bar paints a single key (and in the cheatsheet).
+    /// With more than one key (`keys.len() > 1`) the bar ignores this and builds the text from the structured keys.
     pub custom_display: Option<&'static str>,
-    /// Longer description for the all-shortcuts cheatsheet (e.g.,
-    /// "Send prompt to agent"). When `None`, falls back to `label`.
+    /// Longer description for the all-shortcuts cheatsheet (e.g., "Send prompt to agent").
+    /// When `None`, falls back to `label`.
     pub description: Option<Cow<'static, str>>,
-    /// When true, the hint survives compact-mode truncation — it is always
-    /// rendered regardless of `max_visible`. Use for hints that should be
-    /// discoverable in every scrollback context (e.g. nav, turn, mode).
+    /// When true, the hint survives compact-mode truncation and renders regardless of `max_visible`.
+    /// Use for hints that should be discoverable in every scrollback context (e.g. nav, turn, mode).
     pub pinned: bool,
 }
 
@@ -64,8 +58,7 @@ impl HintItem {
         }
     }
 
-    /// Mark this hint as pinned — it will always be shown in the compact
-    /// shortcuts bar, even when the hint list exceeds `max_visible`.
+    /// Mark this hint as pinned: it is always shown in the compact shortcuts bar, even when the hint list exceeds `max_visible`.
     pub fn pinned(mut self) -> Self {
         self.pinned = true;
         self
@@ -144,26 +137,22 @@ fn bar_key_segments(hint: &HintItem) -> Vec<BarKeySeg> {
     segs
 }
 
-/// Shortcuts bar widget. Renders a list of `HintItem`s.
 pub struct ShortcutsBar<'a> {
     hints: &'a [HintItem],
     /// If set, replaces all hints with "press again to {label}".
     pending_confirmation: Option<PendingHint>,
     /// Right-aligned text (e.g. team name).
     right_text: Option<&'a str>,
-    /// Compact mode config: render only the first `max_visible` hints from
-    /// `hints`, then always append `help_hint` (e.g. the "all shortcuts"
-    /// modal trigger). When None, all hints are rendered.
+    /// Compact mode: render only the first `max_visible` hints from `hints`, then always append `help_hint` (e.g. the "all shortcuts" modal trigger).
+    /// When None, all hints are rendered.
     compact: Option<CompactConfig>,
 }
 
-/// Compact-mode configuration for the shortcuts bar.
 pub struct CompactConfig {
-    /// Maximum number of items to render from the hint list before the
-    /// trailing help hint.
+    /// Maximum number of items to render from the hint list before the trailing help hint.
     pub max_visible: usize,
-    /// The trailing help hint (typically the binding for the all-shortcuts
-    /// modal). Always rendered when set, even if the hint list is empty.
+    /// The trailing help hint (typically the binding for the all-shortcuts modal).
+    /// It is always rendered when set, even if the hint list is empty.
     pub help_hint: Option<HintItem>,
 }
 
@@ -175,7 +164,6 @@ pub struct PendingHint {
 }
 
 impl<'a> ShortcutsBar<'a> {
-    /// Create from a pre-built list of hints.
     pub fn new(hints: &'a [HintItem]) -> Self {
         Self {
             hints,
@@ -185,8 +173,7 @@ impl<'a> ShortcutsBar<'a> {
         }
     }
 
-    /// Render only the first `max_visible` hints, then append `help_hint`
-    /// (typically the binding that opens the all-shortcuts modal).
+    /// Render only the first `max_visible` hints, then append `help_hint` (typically the binding that opens the all-shortcuts modal).
     pub fn compact(mut self, max_visible: usize, help_hint: Option<HintItem>) -> Self {
         self.compact = Some(CompactConfig {
             max_visible,
@@ -220,8 +207,7 @@ impl Widget for ShortcutsBar<'_> {
             .bg(theme.bg_base)
             .fg(theme.gray)
             .remove_modifier(Modifier::all());
-        // Clear area content and style — set_style only patches style, leaving
-        // old text from previous renders. Fill with spaces to clear.
+        // Clear both content and style: set_style only patches style and would leave old text from previous renders
         for x in area.x..area.x + area.width {
             if let Some(cell) = buf.cell_mut((x, area.y)) {
                 cell.reset();
@@ -270,7 +256,6 @@ impl Widget for ShortcutsBar<'_> {
 
         let mut x = area.x;
 
-        // Build the effective hint list (compact-aware).
         let effective = compute_effective_hints(self.hints, self.compact.as_ref());
 
         for (i, hint) in effective.iter().enumerate() {
@@ -350,10 +335,8 @@ fn paint_hint_keys(
 /// Compute the hint list the bar will actually render.
 ///
 /// Without `compact`: returns every hint from the input slice.
-/// With `compact`: pinned hints are always included; the remaining
-/// `max_visible − pinned_count` slots are filled with unpinned hints in
-/// their original order. The trailing `help_hint` is unconditionally
-/// appended so users always see how to discover the rest.
+/// With `compact`: pinned hints are always included; the remaining `max_visible − pinned_count` slots take unpinned hints in their original order.
+/// The trailing `help_hint` is unconditionally appended so users always see how to discover the rest.
 pub fn compute_effective_hints<'a>(
     hints: &'a [HintItem],
     compact: Option<&'a CompactConfig>,
@@ -409,7 +392,7 @@ mod tests {
             help_hint: Some(help),
         };
         let out = compute_effective_hints(&hints, Some(&cfg));
-        assert_eq!(out.len(), 3); // 2 + help
+        assert_eq!(out.len(), 3); // two visible hints plus the help hint
         assert_eq!(out[0].label, "a");
         assert_eq!(out[1].label, "b");
         assert_eq!(out[2].label, "shortcuts");
@@ -452,9 +435,8 @@ mod tests {
 
     #[test]
     fn compact_pinned_hints_always_included() {
-        // 5 hints: a, b, c are unpinned; d, e are pinned.
-        // max_visible=3 → budget for unpinned = 3-2 = 1.
-        // Result: a (unpinned slot 1), d (pinned), e (pinned) = 3 items.
+        // a, b, c are unpinned; d, e are pinned
+        // With max_visible 3 the two pinned hints leave one unpinned slot, which goes to a
         let hints = vec![
             h("a", key!('a')),
             h("b", key!('b')),
@@ -473,7 +455,7 @@ mod tests {
 
     #[test]
     fn compact_pinned_preserves_original_order() {
-        // Pinned hint appears between unpinned ones — order is preserved.
+        // The pinned hint sits between unpinned ones and keeps its position
         let hints = vec![
             h("a", key!('a')),
             h("nav", key!('j')).pinned(),
@@ -486,13 +468,13 @@ mod tests {
         };
         let out = compute_effective_hints(&hints, Some(&cfg));
         let labels: Vec<&str> = out.iter().map(|h| h.label.as_ref()).collect();
-        // 1 pinned + budget 2 unpinned: a, nav, b
+        // One pinned hint leaves a budget of two unpinned ones
         assert_eq!(labels, vec!["a", "nav", "b"]);
     }
 
     #[test]
     fn compact_all_pinned_exceeding_max_visible() {
-        // More pinned hints than max_visible — all pinned still shown.
+        // More pinned hints than max_visible: every pinned hint still shows
         let hints = vec![
             h("a", key!('a')).pinned(),
             h("b", key!('b')).pinned(),
@@ -505,7 +487,7 @@ mod tests {
         };
         let out = compute_effective_hints(&hints, Some(&cfg));
         let labels: Vec<&str> = out.iter().map(|h| h.label.as_ref()).collect();
-        // All 3 pinned, 0 budget for unpinned.
+        // All three pinned hints show; the unpinned budget is zero
         assert_eq!(labels, vec!["a", "b", "c"]);
     }
 
@@ -548,7 +530,7 @@ mod tests {
             leading_text(&buf, 12)
         );
 
-        // "Ctrl+[/]:prev/next agent" — join slash at col 6
+        // In "Ctrl+[/]:prev/next agent" the join slash lands at col 6
         let slash = buf.cell((6, 0)).expect("slash cell");
         assert_eq!(slash.symbol(), "/");
         assert_eq!(
@@ -572,7 +554,7 @@ mod tests {
         assert_eq!(close.style().fg, Some(key_fg));
         assert!(close.style().add_modifier.contains(Modifier::BOLD));
 
-        // "Ctrl+[/]:" = 9 cols, then "prev" = 4, "/" at col 13.
+        // "Ctrl+[/]:" is 9 cols and "prev" is 4, putting the label "/" at col 13
         let label_slash = buf.cell((13, 0)).expect("label slash cell");
         assert_eq!(label_slash.symbol(), "/");
         assert_eq!(label_slash.style().fg, Some(action_fg));
@@ -616,7 +598,7 @@ mod tests {
         item.custom_display = Some("\u{2191}/\u{2193}");
         let buf = render_hints(&[item]);
 
-        // "↑/↓:nav" — all three key cells must be key-styled, including `/`.
+        // In "↑/↓:nav" all three key cells must be key-styled, including `/`
         for col in 0..3 {
             let cell = buf.cell((col, 0)).expect("key cell");
             assert_eq!(
@@ -662,7 +644,7 @@ mod tests {
         let hints = [HintItem::new(key!('/', CONTROL), "search")];
         let buf = render_hints(&hints);
 
-        // "Ctrl+/" — every cell key-styled; the trailing / is not a join.
+        // In "Ctrl+/" every cell is key-styled; the trailing / is not a join
         for col in 0..6 {
             let cell = buf.cell((col, 0)).expect("key cell");
             assert_eq!(
@@ -690,7 +672,7 @@ mod tests {
 
         // "Ctrl+Space/F8:toggle"
         //  0123456789...
-        // join / at col 10
+        // The join / lands at col 10
         let mut text = String::new();
         for col in 0..20 {
             text.push_str(buf.cell((col, 0)).expect("cell").symbol());

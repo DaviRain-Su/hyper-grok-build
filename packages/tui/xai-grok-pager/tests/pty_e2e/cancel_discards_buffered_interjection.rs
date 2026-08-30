@@ -2,13 +2,12 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 22. **Send-now delivery vs. explicit cancel.** (Historical name: the chord
-/// used to buffer a same-turn interjection that a cancel could discard.)
-/// The chord is now cancel-and-send: text + Ctrl+Enter mid-stream silently
-/// cancels the running turn and delivers the text as its OWN next turn (with
-/// the interjection preamble). A later explicit Ctrl+C still renders
-/// its "Turn cancelled by user" marker — the consumed send-now expectation
-/// must never suppress a real user cancel.
+/// 22. **Send-now delivery vs. explicit cancel.**
+/// (Historical name: the chord used to buffer a same-turn interjection that a cancel could discard.)
+/// The chord is now cancel-and-send: typing text and pressing Ctrl+Enter mid-stream silently cancels the running turn.
+/// The text is delivered as its OWN next turn (with the interjection preamble).
+/// A later explicit Ctrl+C still renders its "Turn cancelled by user" marker.
+/// The consumed send-now expectation must never suppress a real user cancel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn cancel_discards_buffered_interjection() {
@@ -44,8 +43,7 @@ async fn cancel_discards_buffered_interjection() {
         .inject_keys(b"deliver this steer now")
         .expect("type steering");
     harness.inject_keys(CTRL_ENTER).expect("send-now chord");
-    // Cancel-and-send: the steer commits as a standard "❯ " prompt block via
-    // the turn-start adoption and runs as its own turn.
+    // Cancel-and-send: the steer commits as a standard "❯ " prompt block via the turn-start adoption and runs as its own turn
     harness
         .wait_for_text("\u{276F} deliver this steer now", Duration::from_secs(15))
         .expect("send-now prompt block");
@@ -59,9 +57,8 @@ async fn cancel_discards_buffered_interjection() {
         harness.screen_contents()
     );
 
-    // Explicit Ctrl+C on the steer turn (still streaming): a REAL cancel,
-    // whose marker must render — the earlier send-now expectation was
-    // consumed and must not silence it.
+    // Explicit Ctrl+C on the steer turn (still streaming): a REAL cancel, whose marker must render
+    // The earlier send-now expectation was consumed and must not silence it
     harness.inject_keys(keys::CTRL_C).expect("cancel turn");
     harness
         .wait_for_text("Turn cancelled by user", Duration::from_secs(10))

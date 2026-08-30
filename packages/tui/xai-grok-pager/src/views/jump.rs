@@ -1,14 +1,11 @@
 //! `/jump` picker: an overlay listing every turn in the conversation.
 //!
-//! Pure client-side navigation over the scrollback timeline
-//! ([`crate::scrollback::state::TimelineEntry`]): moving the cursor
-//! live-scrolls the transcript to the hovered turn, Enter jumps there,
-//! Esc restores the viewport the picker opened from. Unlike `/rewind`
-//! nothing is fetched and nothing is mutated.
+//! Navigation is pure client-side over the scrollback timeline ([`crate::scrollback::state::TimelineEntry`]).
+//! Moving the cursor live-scrolls the transcript to the hovered turn, Enter jumps there, and Esc restores the viewport the picker opened from.
+//! Unlike `/rewind` nothing is fetched and nothing is mutated.
 //!
-//! Chrome, row geometry, and hit-testing come from
-//! [`crate::views::overlay_list::ListOverlay`] (shared with the rewind
-//! picker); this module owns only the row content and input mapping.
+//! Chrome, row geometry, and hit-testing come from [`crate::views::overlay_list::ListOverlay`] (shared with the rewind picker).
+//! This module owns only the row content and input mapping.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::buffer::Buffer;
@@ -22,9 +19,8 @@ use crate::scrollback::state::{ScrollAnchor, TimelineEntry};
 use crate::theme::Theme;
 use crate::views::overlay_list::ListOverlay;
 
-/// Viewport snapshot captured when the picker opens, restored on Esc / failed
-/// jump. The viewport is a width-stable [`ScrollAnchor`] bookmark, not a raw
-/// scroll offset (which clamps and drifts under a resize).
+/// Viewport snapshot captured when the picker opens, restored on Esc / failed jump.
+/// The viewport is a width-stable [`ScrollAnchor`] bookmark, not a raw scroll offset (which clamps and drifts under a resize).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JumpRestore {
     pub(crate) bookmark: Option<ScrollAnchor>,

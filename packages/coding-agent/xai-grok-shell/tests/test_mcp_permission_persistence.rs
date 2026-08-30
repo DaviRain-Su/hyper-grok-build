@@ -1,10 +1,3 @@
-//! End-to-end actor tests for the MCP "always allow" persistence path.
-//!
-//! Spawns a real `spawn_permission_manager` actor with a fake gateway whose
-//! `request_permission` returns canned responses. Drives the actor through
-//! the request → prompt → grant → re-request flow and verifies that the
-//! state file on disk reflects the grant.
-
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -17,14 +10,10 @@ use xai_grok_workspace::permission::types::{
     PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
 };
 use xai_grok_workspace::permission::{
-    AccessKind, ClientType, Decision, PermissionCommand, PermissionHandle, PermissionState,
-    spawn_permission_manager, spawn_permission_manager_with_hub,
+    AccessKind, ClientType, Decision, PermissionCommand, PermissionHandle, PermissionRequest,
+    PermissionState, spawn_permission_manager, spawn_permission_manager_with_hub,
 };
 
-/// Shared `GROK_HOME` for the entire test binary. The `OnceLock` in
-/// `xai-grok-config` only allows one value per process, so all tests share
-/// this temp directory and `#[serial]` keeps them from clobbering each
-/// other's state files.
 fn test_home() -> &'static PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
@@ -78,13 +67,8 @@ fn make_session_id() -> acp::SessionId {
     acp::SessionId::new(Arc::from("test-session"))
 }
 
-/// Build a fake gateway plus a handle to enqueue scripted responses.
-///
-/// Each `expect_*` call queues one response; the gateway task pops them in
-/// FIFO order as `RequestPermission` messages arrive.
 struct FakeGateway {
     sender: AcpAgentGatewaySender,
-    /// Queue of (option_id, optional response meta) pairs.
     expected: tokio::sync::mpsc::UnboundedSender<(String, Option<serde_json::Value>)>,
 }
 
@@ -145,7 +129,6 @@ impl FakeGateway {
     }
 
     fn expect_plain_allow_always(&self) {
-        // Legacy `"always-allow"` option id from `fallback_options`.
         self.expected
             .send(("always-allow".to_string(), None))
             .unwrap();
@@ -155,13 +138,8 @@ impl FakeGateway {
 async fn request(handle: &PermissionHandle, access: AccessKind, id: &str) -> Decision {
     let (tx, rx) = oneshot::channel();
     let cmd = PermissionCommand::Request {
-        access,
-        tool_call_update: tool_call_update(id, "mcp"),
-        path_context: None,
+        request: PermissionRequest::new(access, tool_call_update(id, "mcp")),
         respond_to: tx,
-        session_id: None,
-        subagent_type: None,
-        subagent_description: None,
     };
     let PermissionHandle::Actor { cmd_tx, .. } = handle else {
         panic!("expected actor handle");
@@ -170,8 +148,6 @@ async fn request(handle: &PermissionHandle, access: AccessKind, id: &str) -> Dec
     rx.await.unwrap().decision
 }
 
-/// Build an MCP access kind from a tool name; these persistence tests only
-/// exercise the name, so args are empty.
 fn mcp(name: &str) -> AccessKind {
     AccessKind::MCPTool {
         name: name.to_string(),
@@ -218,7 +194,7 @@ async fn run_actor_test_full<F, Fut>(
                 cwd.clone(),
                 client_type,
                 policy,
-                vec![], // deny_read_globs
+                vec![],
                 vec![],
                 initial_yolo,
                 None,
@@ -237,18 +213,14 @@ fn rule(action: RuleAction, pattern: &str) -> PermissionRule {
     }
 }
 
-// --- mcp_pre_decision-style end-to-end ---
-
 #[tokio::test]
 #[serial]
 async fn mcp_tool_grant_persists_and_short_circuits_next_request() {
     run_actor_test(ClientType::GrokPager, |handle, gw, cwd| async move {
-        // First request prompts; user picks tool-scope.
         gw.expect_allow_always_mcp_tool("linear__list");
         let d = request(&handle, mcp("linear__list"), "1").await;
         assert!(matches!(d, Decision::Allow));
 
-        // Allow disk write to land.
         for _ in 0..50 {
             if permission_state_path(&cwd).exists() {
                 break;
@@ -260,21 +232,13 @@ async fn mcp_tool_grant_persists_and_short_circuits_next_request() {
         assert!(state.allowed_mcp_tools.contains("linear__list"));
         assert!(state.allowed_mcp_servers.is_empty());
 
-        // Second request for the same tool must NOT prompt — actor returns
-        // Allow without consuming a scripted response. If it tried to
-        // prompt, the gateway task would block forever, and the request
-        // call below would hang; we assert by simply receiving an Allow
-        // synchronously.
         let d = request(&handle, mcp("linear__list"), "2").await;
         assert!(matches!(d, Decision::Allow));
 
-        // A different tool from the same server still prompts (tool-scope
-        // is exact). We script a server-scope grant for "linear" next.
         gw.expect_allow_always_mcp_server("linear");
         let d = request(&handle, mcp("linear__create"), "3").await;
         assert!(matches!(d, Decision::Allow));
 
-        // Wait for the new write.
         for _ in 0..50 {
             let s = load_state(&cwd);
             if s.allowed_mcp_servers.contains("linear") {
@@ -285,11 +249,9 @@ async fn mcp_tool_grant_persists_and_short_circuits_next_request() {
         let state = load_state(&cwd);
         assert!(state.allowed_mcp_servers.contains("linear"));
 
-        // Now any other linear__* tool short-circuits via server-scope.
         let d = request(&handle, mcp("linear__update"), "4").await;
         assert!(matches!(d, Decision::Allow));
 
-        // A different server still prompts.
         gw.expect_allow_always_mcp_tool("notion__fetch");
         let d = request(&handle, mcp("notion__fetch"), "5").await;
         assert!(matches!(d, Decision::Allow));
@@ -300,10 +262,6 @@ async fn mcp_tool_grant_persists_and_short_circuits_next_request() {
 #[tokio::test]
 #[serial]
 async fn fallback_client_plain_allow_always_persists_mcp_tool() {
-    // Regression: Generic / GrokWeb / Extension clients
-    // submit the legacy `"always-allow"` option id. The prompter maps that
-    // to plain `PromptOutcome::AllowAlways`, and the manager's plain arm
-    // must persist tool-scope into `allowed_mcp_tools`.
     run_actor_test(ClientType::Generic, |handle, gw, cwd| async move {
         gw.expect_plain_allow_always();
         let d = request(&handle, mcp("notion__fetch"), "1").await;
@@ -322,7 +280,6 @@ async fn fallback_client_plain_allow_always_persists_mcp_tool() {
             "fallback client AllowAlways must persist tool-scope, got state={state:?}"
         );
 
-        // Re-request the same tool — must short-circuit without prompting.
         let d = request(&handle, mcp("notion__fetch"), "2").await;
         assert!(matches!(d, Decision::Allow));
     })
@@ -332,10 +289,6 @@ async fn fallback_client_plain_allow_always_persists_mcp_tool() {
 #[tokio::test]
 #[serial]
 async fn policy_ask_suppresses_mcp_tool_allowlist() {
-    // With `remember_tool_approvals` OFF (explicitly disabled), a policy `Ask` rule on an
-    // MCP tool overrides a session tool-scope grant: the actor must prompt rather
-    // than auto-allow. (The gate-ON "grant satisfies ask" path is covered by the
-    // `mcp_pre_decision` unit tests in `manager.rs`.)
     let policy = PermissionConfig::new(vec![rule(RuleAction::Ask, "linear__*")]);
 
     let local = tokio::task::LocalSet::new();
@@ -343,7 +296,6 @@ async fn policy_ask_suppresses_mcp_tool_allowlist() {
         .run_until(async move {
             let cwd = fresh_cwd();
 
-            // Pre-seed the state file with a tool-scope grant.
             let mut state = PermissionState::default();
             state.allowed_mcp_tools.insert("linear__list".to_owned());
             let dir = test_home()
@@ -357,28 +309,23 @@ async fn policy_ask_suppresses_mcp_tool_allowlist() {
             .unwrap();
 
             let (gw, _gw_task) = fake_gateway();
-            // Gate OFF so the `ask` rule stays a hard floor over the grant.
             let (handle, _events) = spawn_permission_manager_with_hub(
                 make_session_id(),
                 gw.sender.clone(),
                 cwd.clone(),
                 ClientType::GrokPager,
                 Some(policy),
-                vec![], // deny_read_globs
+                vec![],
                 vec![],
                 false,
                 None,
-                false, // remember_tool_approvals
+                false,
                 None,
             );
 
-            // Script an outright reject so we can confirm the prompt fires.
             gw.expected.send(("reject-once".to_string(), None)).unwrap();
 
             let d = request(&handle, mcp("linear__list"), "1").await;
-            // If the allowlist had won, the actor would have returned Allow
-            // without consuming the scripted response; the gateway's reject
-            // proves the prompt path executed.
             assert!(matches!(d, Decision::Reject(_)));
         })
         .await;
@@ -387,7 +334,6 @@ async fn policy_ask_suppresses_mcp_tool_allowlist() {
 #[tokio::test]
 #[serial]
 async fn policy_ask_suppresses_mcp_server_allowlist() {
-    // Gate-OFF floor over a server-scope grant (see the tool-scope test above).
     let policy = PermissionConfig::new(vec![rule(RuleAction::Ask, "linear__*")]);
 
     let local = tokio::task::LocalSet::new();
@@ -408,18 +354,17 @@ async fn policy_ask_suppresses_mcp_server_allowlist() {
             .unwrap();
 
             let (gw, _gw_task) = fake_gateway();
-            // Gate OFF so the `ask` rule stays a hard floor over the grant.
             let (handle, _events) = spawn_permission_manager_with_hub(
                 make_session_id(),
                 gw.sender.clone(),
                 cwd.clone(),
                 ClientType::GrokPager,
                 Some(policy),
-                vec![], // deny_read_globs
+                vec![],
                 vec![],
                 false,
                 None,
-                false, // remember_tool_approvals
+                false,
                 None,
             );
 
@@ -460,15 +405,12 @@ async fn policy_deny_takes_precedence_over_mcp_allowlist() {
                 cwd.clone(),
                 ClientType::GrokPager,
                 Some(policy),
-                vec![], // deny_read_globs
+                vec![],
                 vec![],
                 false,
                 None,
             );
 
-            // Do NOT script a response: a policy Deny must short-circuit
-            // before the prompt path is reached, so the gateway must never
-            // be invoked.
             let d = request(&handle, mcp("linear__list"), "1").await;
             assert!(matches!(d, Decision::PolicyDeny(_)));
         })
@@ -478,8 +420,6 @@ async fn policy_deny_takes_precedence_over_mcp_allowlist() {
 #[tokio::test]
 #[serial]
 async fn policy_allow_short_circuits_before_mcp_allowlist() {
-    // Sanity: a policy Allow returns Allow immediately and never touches
-    // the pre-decision lookup.
     let policy = PermissionConfig::new(vec![rule(RuleAction::Allow, "linear__*")]);
 
     run_actor_test_with_policy(
@@ -496,10 +436,6 @@ async fn policy_allow_short_circuits_before_mcp_allowlist() {
 #[tokio::test]
 #[serial]
 async fn empty_server_prefix_falls_back_to_tool_scope() {
-    // Defense-in-depth: even if a malformed `McpScopeSelection::Server { server: "" }`
-    // somehow makes it through, the prompter must downgrade to tool-scope
-    // and persist via `AllowAlwaysMcpTool` — never write an empty server
-    // prefix into `allowed_mcp_servers`.
     run_actor_test(ClientType::GrokPager, |handle, gw, cwd| async move {
         let meta = serde_json::json!({
             "kind": "server",
@@ -528,13 +464,7 @@ async fn empty_server_prefix_falls_back_to_tool_scope() {
 #[tokio::test]
 #[serial]
 async fn allow_always_mcp_tool_ignores_client_supplied_tool_name() {
-    // Security regression: the response meta `tool_name` is informational
-    // only. The manager MUST persist the name from `AccessKind::MCPTool`
-    // so a buggy or malicious client cannot whitelist a different tool
-    // than the one the user saw in the prompt.
     run_actor_test(ClientType::GrokPager, |handle, gw, cwd| async move {
-        // Request approves `linear__list`, but the response claims a
-        // different tool name (e.g. `notion__fetch`).
         let meta = serde_json::json!({
             "kind": "tool",
             "tool_name": "notion__fetch",
@@ -568,13 +498,7 @@ async fn allow_always_mcp_tool_ignores_client_supplied_tool_name() {
 #[tokio::test]
 #[serial]
 async fn allow_always_mcp_server_rejects_mismatched_prefix() {
-    // Security regression: the response meta `server` must match the
-    // canonical server prefix derived from the access kind. On mismatch,
-    // the manager downgrades to tool-scope on the access-kind name -- the
-    // smallest blast radius the user actually approved.
     run_actor_test(ClientType::GrokPager, |handle, gw, cwd| async move {
-        // Approve `linear__list` (canonical server prefix is `linear`),
-        // but the client claims `notion` as the server.
         let meta = serde_json::json!({
             "kind": "server",
             "server": "notion",
@@ -612,8 +536,6 @@ async fn allow_always_mcp_server_rejects_mismatched_prefix() {
 #[tokio::test]
 #[serial]
 async fn allow_always_mcp_server_persists_canonical_prefix_on_match() {
-    // Sanity: a client that supplies the correct canonical prefix
-    // succeeds (this is the common case post-fix).
     run_actor_test(ClientType::GrokPager, |handle, gw, cwd| async move {
         let meta = serde_json::json!({
             "kind": "server",
@@ -642,10 +564,6 @@ async fn allow_always_mcp_server_persists_canonical_prefix_on_match() {
 #[tokio::test]
 #[serial]
 async fn allow_always_mcp_server_downgrades_when_access_has_no_separator() {
-    // Defensive: if the access name itself has no `__` (e.g. via a
-    // malformed `ToolInput::MCPTool`), the canonical prefix is None and
-    // server-scope is unreachable. The manager downgrades to tool-scope
-    // on the raw access name rather than persisting the client prefix.
     run_actor_test(ClientType::GrokPager, |handle, gw, cwd| async move {
         let meta = serde_json::json!({
             "kind": "server",
@@ -679,8 +597,6 @@ async fn dont_ask_policy_denies_without_prompting() {
     let mut policy = PermissionConfig::new(vec![]);
     policy.prompt_policy = PromptPolicy::Deny;
 
-    // No scripted gateway responses: if the manager tried to prompt,
-    // the gateway would block forever, proving dont_ask short-circuits.
     run_actor_test_with_policy(
         ClientType::GrokPager,
         Some(policy),
@@ -691,7 +607,6 @@ async fn dont_ask_policy_denies_without_prompting() {
             let d = request(&handle, AccessKind::Bash("npm install".to_string()), "2").await;
             assert!(matches!(d, Decision::PolicyDeny(_)));
 
-            // Reads still auto-approve (pre-decision, before dont_ask)
             let d = request(
                 &handle,
                 AccessKind::Read(Some("/tmp/test.txt".to_string())),
@@ -703,8 +618,6 @@ async fn dont_ask_policy_denies_without_prompting() {
     )
     .await;
 }
-
-// --- deny rules survive YOLO mode ---
 
 #[tokio::test]
 #[serial]

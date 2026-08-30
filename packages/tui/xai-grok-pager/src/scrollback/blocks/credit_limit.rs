@@ -1,9 +1,8 @@
-//! CreditLimitBlock — scrollback card shown when a max-tier user exhausts credits.
+//! CreditLimitBlock: scrollback card shown when a max-tier user exhausts credits.
 //!
-//! Replaces the Q&A question modal for users already at the highest tier
-//! (SuperGrok Heavy). Instead of offering "Upgrade tier" + PAYG / buy-credits
-//! options in the question overlay, this block renders an inline card with a
-//! descriptive message and a link to the usage/billing page.
+//! Replaces the Q&A question modal for users already at the highest tier (SuperGrok Heavy).
+//! Instead of offering "Upgrade tier" and PAYG / buy-credits options in the question overlay, this block renders an inline card.
+//! The card carries a descriptive message and a link to the usage/billing page.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -13,7 +12,7 @@ use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockLine, BlockOutput, DisplayMode};
 use crate::theme::Theme;
 
-/// Which continue-path the max-tier credit-limit card recommends.
+/// Which "You can continue by ..." action the card recommends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreditLimitCardAction {
     /// Legacy on-demand: PAYG not enabled yet.
@@ -29,14 +28,13 @@ pub enum CreditLimitCardAction {
 pub struct CreditLimitBlock {
     /// Card heading (e.g. "You've hit your free credits limit.").
     pub heading: String,
-    /// Continue-path body copy selector.
+    /// Selects the "You can continue by ..." body line.
     pub action: CreditLimitCardAction,
     /// URL to the usage/billing page.
     pub url: String,
 }
 
 impl CreditLimitBlock {
-    /// Create a new credit-limit card.
     pub fn new(
         heading: impl Into<String>,
         action: CreditLimitCardAction,
@@ -60,7 +58,7 @@ impl BlockContent for CreditLimitBlock {
             .add_modifier(Modifier::BOLD);
         let heading = Line::from(Span::styled(self.heading.clone(), heading_style));
 
-        // Body copy — contextual message based on billing mode.
+        // Body copy: contextual message based on billing mode
         let muted = theme.muted();
         let body = match self.action {
             CreditLimitCardAction::IncreasePaygLimit => {
@@ -220,7 +218,7 @@ mod tests {
         let block = CreditLimitBlock::new("Test heading", CreditLimitCardAction::EnablePayg, url);
         let output = block.output(&ctx());
 
-        // heading, separator, body, link = 4 lines
+        // The four lines are the heading, separator, body, and link
         assert_eq!(output.lines.len(), 4);
 
         let all_text: String = output

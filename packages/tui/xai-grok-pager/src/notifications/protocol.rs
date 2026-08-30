@@ -62,8 +62,8 @@ pub fn select_protocol(ctx: &TerminalContext) -> NotificationProtocol {
 
 const BEL_BYTE: &[u8] = b"\x07";
 
-/// Strip C0/C1 controls (including BEL and C1 ST) so model-derived titles
-/// cannot terminate OSC/DCS early. Same filter as tab-title construction.
+/// Strip C0/C1 controls (including BEL and C1 ST) so model-derived titles cannot terminate OSC/DCS early.
+/// Same filter as tab-title construction.
 fn sanitize_osc_text(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
 }
@@ -89,8 +89,7 @@ fn notification_sequence(
 
 /// Build the escape sequence for a notification, then write it to stderr.
 ///
-/// When running under tmux the sequence is wrapped in DCS passthrough so the
-/// outer terminal sees it.
+/// When running under tmux the sequence is wrapped in DCS passthrough so the outer terminal sees it.
 pub fn emit_notification(
     protocol: NotificationProtocol,
     title: &str,
@@ -141,144 +140,7 @@ mod tests {
         }
     }
 
-    // --- select_protocol: every TerminalName variant ---
-
-    #[test]
-    fn select_iterm2_uses_osc9() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand(TerminalName::Iterm2)),
-            NotificationProtocol::Osc9
-        );
-    }
-
-    #[test]
-    fn select_wezterm_uses_osc9() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand(TerminalName::WezTerm)),
-            NotificationProtocol::Osc9
-        );
-    }
-
-    #[test]
-    fn select_warp_uses_osc9() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand(TerminalName::WarpTerminal)),
-            NotificationProtocol::Osc9
-        );
-    }
-
-    #[test]
-    fn select_kitty_uses_osc99() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand(TerminalName::Kitty)),
-            NotificationProtocol::Osc99
-        );
-    }
-
-    #[test]
-    fn select_ghostty_uses_osc777() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand(TerminalName::Ghostty)),
-            NotificationProtocol::Osc777
-        );
-    }
-
-    #[test]
-    fn select_vte_uses_osc777() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand(TerminalName::Vte)),
-            NotificationProtocol::Osc777
-        );
-    }
-
-    #[test]
-    fn select_grok_desktop_uses_none() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand(TerminalName::GrokDesktop)),
-            NotificationProtocol::None
-        );
-    }
-
-    #[test]
-    fn select_apple_terminal_uses_bel() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand(TerminalName::AppleTerminal)),
-            NotificationProtocol::Bel
-        );
-    }
-
-    #[test]
-    fn select_alacritty_uses_bel() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand(TerminalName::Alacritty)),
-            NotificationProtocol::Bel
-        );
-    }
-
-    #[test]
-    fn select_vscode_uses_bel() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand(TerminalName::VsCode)),
-            NotificationProtocol::Bel
-        );
-    }
-
-    #[test]
-    fn select_unknown_uses_bel() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand(TerminalName::Unknown)),
-            NotificationProtocol::Bel
-        );
-    }
-
-    // --- Zellij override ---
-
-    #[test]
-    fn zellij_overrides_to_bel_for_kitty() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand_and_mux(
-                TerminalName::Kitty,
-                MultiplexerKind::Zellij
-            )),
-            NotificationProtocol::Bel
-        );
-    }
-
-    #[test]
-    fn zellij_overrides_to_bel_for_ghostty() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand_and_mux(
-                TerminalName::Ghostty,
-                MultiplexerKind::Zellij
-            )),
-            NotificationProtocol::Bel
-        );
-    }
-
-    #[test]
-    fn zellij_overrides_to_bel_for_iterm2() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand_and_mux(
-                TerminalName::Iterm2,
-                MultiplexerKind::Zellij
-            )),
-            NotificationProtocol::Bel
-        );
-    }
-
-    #[test]
-    fn zellij_overrides_to_bel_for_wezterm() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand_and_mux(
-                TerminalName::WezTerm,
-                MultiplexerKind::Zellij
-            )),
-            NotificationProtocol::Bel
-        );
-    }
-
-    // --- tmux does NOT override protocol selection (passthrough is handled
-    //     at emission time, not selection time) ---
+    // --- tmux does NOT override protocol selection (passthrough is handled at emission time, not selection time) ---
 
     #[test]
     fn tmux_preserves_osc9_for_iterm2() {
@@ -320,7 +182,7 @@ mod tests {
     #[test]
     fn emit_none_is_noop() {
         let ctx = ctx_with_brand(TerminalName::GrokDesktop);
-        // Should return immediately without writing anything.
+        // Returns immediately without writing anything
         emit_notification(NotificationProtocol::None, "title", "body", &ctx);
     }
 

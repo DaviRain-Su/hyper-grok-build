@@ -1,5 +1,3 @@
-//! `/jump` picker: transcript preview syncing and key/mouse handling.
-
 use super::AgentView;
 use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
@@ -10,18 +8,16 @@ use crate::views::jump::{
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
 impl AgentView {
-    /// Close the `/jump` picker (if open) and restore the viewport it opened
-    /// from. Shared by the `Esc` dismiss path and the rewind / inline-edit entry
-    /// points, so a shadowed picker can't reappear stale.
+    /// Close the `/jump` picker (if open) and restore the viewport it opened from.
+    /// Shared by the `Esc` dismiss path and the rewind / inline-edit entry points, so a shadowed picker can't reappear stale.
     pub(crate) fn dismiss_jump_picker(&mut self) {
         if let Some(js) = self.jump_state.take() {
             self.restore_jump_viewport(js.restore);
         }
     }
 
-    /// Re-pin the viewport the picker captured (width-stable bookmark), restore
-    /// the prior selection, and re-arm follow mode. Shared by `Esc` dismiss and
-    /// the failed-jump restore, so both stay consistent under a resize.
+    /// Re-pin the viewport the picker captured (the bookmark survives width changes), restore the prior selection, and re-enable follow mode.
+    /// Shared by `Esc` dismiss and the failed-jump restore, so both stay consistent under a resize.
     pub(crate) fn restore_jump_viewport(&mut self, restore: JumpRestore) {
         self.scrollback.set_selected(restore.selected);
         if let Some(bookmark) = restore.bookmark {
@@ -32,11 +28,9 @@ impl AgentView {
         }
     }
 
-    /// True when another prompt overlay owns the input slot, so the `/jump`
-    /// picker must not open and an open one must be dismissed: rewind, inline
-    /// edit, the `/btw` panel, or a pending permission / question / cancel-turn /
-    /// plan-approval overlay. One predicate keeps dispatch, key, mouse, and
-    /// scroll routing from disagreeing on the owner.
+    /// True when another prompt overlay owns the input slot, so the `/jump` picker must not open and an open one must be dismissed.
+    /// The owners: rewind, inline edit, the `/btw` panel, or a pending permission / question / cancel-turn / plan-approval overlay.
+    /// One predicate keeps dispatch, key, mouse, and scroll routing from disagreeing on the owner.
     pub(crate) fn jump_slot_taken(&self) -> bool {
         self.rewind_state.is_some()
             || self.inline_edit.is_some()
@@ -44,11 +38,10 @@ impl AgentView {
             || !self.no_input_overlay_pending()
     }
 
-    /// Drop the picker when another overlay owns the input slot
-    /// ([`Self::jump_slot_taken`]), so it can't eat wheel/keys while hidden.
-    /// Returns whether it dropped one, so an `Esc` caller can spend that key
-    /// here rather than let it also dismiss the overlay shadowing the picker
-    /// (e.g. the `/btw` panel). Called at the input and scroll entry points.
+    /// Drop the picker when another overlay owns the input slot ([`Self::jump_slot_taken`]), so it can't eat wheel/keys while hidden.
+    /// Returns whether it dropped one, so an `Esc` caller can spend that key here.
+    /// Otherwise `Esc` would also dismiss the overlay shadowing the picker (e.g. the `/btw` panel).
+    /// Called at the input and scroll entry points.
     pub(super) fn dismiss_jump_picker_if_suppressed(&mut self) -> bool {
         if self.jump_state.is_some() && self.jump_slot_taken() {
             self.dismiss_jump_picker();
@@ -57,10 +50,9 @@ impl AgentView {
         false
     }
 
-    /// Live-scroll the transcript to the turn under the picker cursor,
-    /// anchored at the viewport TOP — where `jump_to_turn` lands — so the
-    /// preview shows exactly what Enter commits to. (Rewind centers
-    /// instead: it previews a cut point and needs both sides visible.)
+    /// Live-scroll the transcript to the turn under the picker cursor, anchored at the viewport TOP (where `jump_to_turn` lands).
+    /// The preview then shows exactly what Enter commits to.
+    /// (Rewind centers instead: it previews a cut point and needs both sides visible.)
     pub(super) fn sync_jump_preview(&mut self) {
         let Some(prompt_id) = self
             .jump_state
@@ -70,8 +62,7 @@ impl AgentView {
         else {
             return;
         };
-        // Resolve the stable id at the boundary; a removal since capture just
-        // means no preview scroll rather than landing on the wrong block.
+        // Resolve the stable id at the boundary; a removal since capture just means no preview scroll rather than landing on the wrong block
         if let Some(idx) = self.scrollback.index_of_id(prompt_id) {
             self.scrollback.scroll_to_entry_top(idx);
         }
@@ -100,8 +91,7 @@ impl AgentView {
         }
     }
 
-    /// Map a terminal `JumpInput` to its `InputOutcome`. Shared by the key,
-    /// mouse, and wheel paths so they can't drift.
+    /// Map a terminal `JumpInput` to its `InputOutcome`. Shared by the key, mouse, and wheel paths so they can't drift.
     fn jump_input_to_outcome(input: JumpInput) -> InputOutcome {
         match input {
             JumpInput::Select(id) => InputOutcome::Action(Action::JumpPickerSelect(id)),
@@ -110,8 +100,7 @@ impl AgentView {
         }
     }
 
-    /// `Moved` moves the cursor (and previews); `Down(Left)` activates the
-    /// row (Enter-equivalent). Row geometry comes from `jump_row_at`.
+    /// `Moved` moves the cursor (and previews); `Down(Left)` activates the row (Enter-equivalent). Row geometry comes from `jump_row_at`.
     pub(super) fn handle_jump_mouse(&mut self, mouse: &MouseEvent) -> InputOutcome {
         let Some(js) = self.jump_state.as_mut() else {
             return InputOutcome::Unchanged;

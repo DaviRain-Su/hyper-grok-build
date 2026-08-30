@@ -4,18 +4,14 @@
 //! 1. FTS5 keyword search (always available)
 //! 2. Vector KNN search (when sqlite-vec + embeddings are available)
 //! 3. Merge results by chunk_id, normalize scores to [0,1]
-//! 4. Skip content-free chunks: empty/boilerplate templates (the
-//!    auto-generated `MEMORY.md` stub) never appear in results / injection
-//! 5. Apply temporal decay: evergreen sources (global, workspace) are exempt;
-//!    session chunks decay with exponential half-life:
-//!    `decayed = base × e^(-λ × age_days)` where `λ = ln(2) / half_life_days`
-//! 6. Apply source weights + access-frequency boost, filter by `min_score`,
-//!    rank on the unclamped score, then clamp the stored display score to [0,1]
+//! 4. Skip content-free chunks: empty/boilerplate templates (the auto-generated `MEMORY.md` stub) never appear in results / injection
+//! 5. Apply temporal decay: evergreen sources (global, workspace) are exempt.
+//!    Session chunks decay with exponential half-life: `decayed = base × e^(-λ × age_days)` where `λ = ln(2) / half_life_days`
+//! 6. Apply source weights + access-frequency boost, filter by `min_score`, rank on the unclamped score, then clamp the display score to [0,1]
 //! 7. MMR diversity re-ranking (opt-in, penalizes redundant results)
 //! 8. Limit to `max_results`
 //!
-//! Graceful degradation: if vector search is unavailable, falls back to FTS-only
-//! with `text_weight = 1.0`.
+//! Graceful degradation: if vector search is unavailable, falls back to FTS-only with `text_weight = 1.0`.
 
 use std::collections::HashMap;
 
@@ -85,30 +81,20 @@ pub(super) struct SearchMerge {
     pub is_vector_degraded: bool,
 }
 
-/// Returns `true` for sources that contain curated long-term knowledge
-/// and should not be penalized by temporal decay.
-///
-/// Evergreen: `"global"` (MEMORY.md), `"workspace"` (project MEMORY.md).
-/// Decaying: `"session"` (auto-generated session logs).
+/// Returns `true` for the curated long-term sources (global and workspace MEMORY.md files) that temporal decay must not penalize.
 fn is_evergreen_source(source: &str) -> bool {
     matches!(source, "global" | "workspace")
 }
 
-/// Returns `true` when a chunk is an empty/boilerplate template (e.g. the
-/// auto-generated `MEMORY.md` stub) and should be filtered out.
-///
-/// True when the chunk is structurally empty, or matches a known scaffold
-/// template via [`super::dream::is_scaffold_template`]. The marker branch is
-/// scoped to evergreen sources, where scaffold templates live, so a session
-/// chunk that merely quotes a marker phrase is kept.
+/// Returns `true` for empty or boilerplate chunks (e.g. the auto-generated `MEMORY.md` stub) so they never reach results.
+/// The [`super::dream::is_scaffold_template`] branch only runs on evergreen sources, so a session chunk quoting a marker phrase is kept.
 fn is_content_free(text: &str, source: &str) -> bool {
     is_structurally_empty(text)
         || (is_evergreen_source(source) && super::dream::is_scaffold_template(text))
 }
 
-/// Returns `true` when `text` has no substantive content after stripping ATX
-/// headings, HTML comments, and whitespace. Blockquotes are NOT stripped —
-/// they are real user content.
+/// Returns `true` when `text` has no substantive content after stripping ATX headings, HTML comments, and whitespace.
+/// Blockquotes are not stripped; they are real user content.
 fn is_structurally_empty(text: &str) -> bool {
     // Fast path: no comment marker means no multi-line span to strip.
     if !text.contains("<!--") {
@@ -126,8 +112,7 @@ fn is_structurally_empty(text: &str) -> bool {
                 rest = &rest[after..];
             }
             None => {
-                // Unterminated comment: keep the remainder as literal text so a
-                // comment split across a chunk boundary can't drop real content.
+                // Unterminated comment: keep the remainder as literal text so a comment split across a chunk boundary can't drop real content
                 without_comments.push_str(rest);
                 rest = "";
                 break;
@@ -139,8 +124,7 @@ fn is_structurally_empty(text: &str) -> bool {
     lines_are_scaffolding(&without_comments)
 }
 
-/// Returns `true` when every non-blank line is an ATX heading (per
-/// [`super::chunker::header_level`]). Any other non-blank line is content.
+/// Returns `true` when every non-blank line is an ATX heading (per [`super::chunker::header_level`]). Any other non-blank line is content.
 fn lines_are_scaffolding(text: &str) -> bool {
     for line in text.lines() {
         if line.trim().is_empty() {
@@ -156,10 +140,9 @@ fn lines_are_scaffolding(text: &str) -> bool {
 
 /// Compute the temporal decay multiplier for a chunk.
 ///
-/// - Evergreen sources → `1.0` (no decay).
-/// - Session sources → exponential decay: `e^(-λ × age_days)` where
-///   `λ = ln(2) / half_life_days`. Score halves every `half_life_days`.
-/// - `half_life = None` → decay disabled, returns `1.0` for all sources.
+/// - Evergreen sources return `1.0` (no decay).
+/// - Session sources decay exponentially: `e^(-λ × age_days)` where `λ = ln(2) / half_life_days`; the score halves every `half_life_days`.
+/// - `half_life_days = None` disables decay and returns `1.0` for all sources.
 fn temporal_decay_multiplier(
     source: &str,
     created_at: i64,
@@ -175,8 +158,7 @@ fn temporal_decay_multiplier(
     if half_life <= 0.0 {
         return 1.0;
     }
-    // No upper clamp on age: with exponential decay a 2-year-old chunk at
-    // 30-day half-life scores ~6e-8, well below any reasonable min_score.
+    // No upper clamp on age: with exponential decay a 2-year-old chunk at 30-day half-life scores ~6e-8, well below any reasonable min_score
     let age_days = ((now_secs - created_at.max(0)) as f64 / 86400.0).max(0.0);
     let lambda = f64::ln(2.0) / half_life;
     (-lambda * age_days).exp()
@@ -187,8 +169,8 @@ fn temporal_decay_multiplier(
 /// Combines FTS5 keyword search with optional vector KNN similarity.
 /// Falls back to FTS-only when vector search is unavailable.
 ///
-/// Structured so that `&MemoryIndex` is never held across `.await` points,
-/// allowing the caller's future to be `Send` even though `MemoryIndex` is `!Sync`.
+/// `&MemoryIndex` is never held across `.await` points.
+/// That keeps the caller's future `Send` even though `MemoryIndex` is `!Sync`.
 #[tracing::instrument(name = "memory.hybrid_search", skip_all, fields(
     max_results = config.max_results,
 ))]
@@ -200,8 +182,7 @@ pub async fn hybrid_search(
 ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
     let candidate_limit = config.max_results * 3;
 
-    // Phase 1 (sync): FTS search + supplemental evergreen query so
-    // global/workspace chunks aren't crowded out by session volume.
+    // Phase 1 (sync): FTS search + supplemental evergreen query so global/workspace chunks aren't crowded out by session volume
     let mut fts_results = index.search_fts(query, candidate_limit).unwrap_or_default();
     let evergreen = index
         .search_fts_by_sources(query, candidate_limit, &["global", "workspace"])
@@ -213,7 +194,7 @@ pub async fn hybrid_search(
             fts_results.push(r);
         }
     }
-    // Phase 2 (async): embed query — no &index borrow here
+    // Phase 2 (async): embed the query; no &index borrow here
     let query_embedding =
         resolve_query_embedding(embedding_provider, index.vec_available(), query).await;
 
@@ -221,8 +202,7 @@ pub async fn hybrid_search(
     Ok(hybrid_search_merge(index, fts_results, query_embedding.embedding(), config)?.results)
 }
 
-/// Synchronous merge phase: vector search (if embedding provided), score
-/// normalization, temporal decay, source weighting, MMR, and truncation.
+/// Synchronous merge phase: vector search (if embedding provided), score normalization, temporal decay, source weighting, MMR, and truncation.
 pub(super) fn hybrid_search_merge(
     index: &MemoryIndex,
     fts_results: Vec<super::index::FtsResult>,
@@ -244,21 +224,11 @@ pub(super) fn hybrid_search_merge(
     };
 
     // Normalize and merge scores.
-    //
-    // Per-chunk scoring strategy:
-    //   - Chunks with BOTH FTS and vector matches: weighted combination
-    //     (text_weight × fts_score + vector_weight × vec_score)
-    //   - Chunks with ONLY FTS matches: score = fts_score (full weight, not
-    //     penalized to text_weight just because other chunks have vectors)
-    //   - Chunks with ONLY vector matches: score = vector_weight × vec_score
-    //
-    // This ensures FTS-only chunks (e.g., global MEMORY.md with no embedding
-    // match) can still score high enough to pass min_score.
+    // FTS-only chunks keep their full FTS score, so e.g. a global MEMORY.md chunk with no embedding match can still pass min_score.
     let mut fts_scores: HashMap<String, f64> = HashMap::new();
     let mut vec_scores: HashMap<String, f64> = HashMap::new();
 
-    // Normalize FTS BM25 scores to [0,1] (BM25 scores are negative in FTS5,
-    // more negative = better match)
+    // Normalize FTS BM25 scores to [0,1]. FTS5 ranks are negative; more negative means a better match.
     if !fts_results.is_empty() {
         let min_rank = fts_results
             .iter()
@@ -268,41 +238,32 @@ pub(super) fn hybrid_search_merge(
             .iter()
             .map(|r| r.rank)
             .fold(f64::NEG_INFINITY, f64::max);
-        // When there's only 1 FTS result, min_rank == max_rank, so range = EPSILON
-        // and normalized = 1.0. This is correct: a single result gets full score.
+        // With only one FTS result, min_rank == max_rank, so range = EPSILON and normalized = 1.0: a single result gets full score
         let range = (max_rank - min_rank).max(f64::EPSILON);
 
         for r in &fts_results {
-            // FTS5 rank: more negative = better. Normalize so best = 1.0
+            // Flip so the best (most negative) rank normalizes to 1.0
             let normalized = 1.0 - (r.rank - min_rank) / range;
             fts_scores.insert(r.chunk_id.clone(), normalized);
         }
     }
 
-    // Normalize vector distances to [0,1] similarity using absolute scale.
-    //
-    // For normalized embeddings, L2 distance ranges from 0 (identical) to 2
-    // (opposite). Using `similarity = 1.0 - distance / 2.0` maps this to
-    // [0, 1] on an absolute scale, avoiding the compression problem where
-    // relative normalization (`1 - d/max_d`) collapses all scores to near-zero
-    // when candidates cluster in a narrow distance band (common for
-    // high-dimensional embeddings due to concentration of measure).
-    //
-    // The constant `2.0` is the theoretical maximum L2 distance between two
-    // unit-norm vectors: ||u - v||₂ = sqrt(2 - 2·cos(θ)) ≤ sqrt(4) = 2.
+    // Normalize vector distances to [0,1] similarity on an absolute scale
+    // For normalized embeddings, L2 distance ranges from 0 (identical) to 2 (opposite), so `similarity = 1.0 - distance / 2.0` maps it to [0, 1]
+    // Relative normalization (`1 - d/max_d`) would collapse all scores to near-zero when candidates cluster in a narrow distance band
+    // High-dimensional embeddings cluster that way (concentration of measure)
+    // The constant `2.0` is the theoretical maximum L2 distance between two unit-norm vectors: `||u - v||₂ = sqrt(2 - 2·cos(θ)) ≤ sqrt(4) = 2`
     const MAX_L2_DISTANCE: f64 = 2.0;
     for (chunk_id, distance) in &vec_results {
         let similarity = (1.0 - (*distance as f64 / MAX_L2_DISTANCE)).clamp(0.0, 1.0);
         vec_scores.insert(chunk_id.clone(), similarity);
     }
 
-    // Merge per-chunk scores: use max(fts_only, hybrid) so FTS-only chunks
-    // are never penalized by the existence of unrelated vector results.
+    // Merge per-chunk scores: use max(fts_only, hybrid) so FTS-only chunks are never penalized by the existence of unrelated vector results
     let mut scores: HashMap<String, f64> = HashMap::new();
     let text_weight = config.text_weight as f64;
     let vector_weight = config.vector_weight as f64;
 
-    // Collect all unique chunk IDs across both result sets.
     let all_chunk_ids: std::collections::HashSet<&String> =
         fts_scores.keys().chain(vec_scores.keys()).collect();
 
@@ -311,9 +272,8 @@ pub(super) fn hybrid_search_merge(
         let vec = vec_scores.get(chunk_id).copied().unwrap_or(0.0);
 
         let score = if fts > 0.0 && vec > 0.0 {
-            // Both signals available: weighted combination, but never worse
-            // than the FTS score alone (since text_weight < 1.0 would otherwise
-            // penalize a strong keyword match).
+            // Both signals: weighted combination, floored at the FTS score alone
+            // Without the floor, text_weight < 1.0 would penalize a strong keyword match
             let hybrid = text_weight * fts + vector_weight * vec;
             hybrid.max(fts)
         } else if fts > 0.0 {
@@ -327,7 +287,7 @@ pub(super) fn hybrid_search_merge(
         scores.insert(chunk_id.clone(), score);
     }
 
-    // Apply temporal decay and source weights, build results
+    // Apply temporal decay and source weights, then build the results
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -335,8 +295,7 @@ pub(super) fn hybrid_search_merge(
 
     let half_life = config.effective_half_life_days();
 
-    // Pairs the unclamped ranking score with each result (see the raw_score /
-    // display_score split below).
+    // Pairs the unclamped ranking score with each result (see the raw_score / display_score split below)
     let mut ranked: Vec<(f64, SearchResult)> = Vec::new();
 
     for (chunk_id, base_score) in &scores {
@@ -344,8 +303,7 @@ pub(super) fn hybrid_search_merge(
             continue;
         };
 
-        // Filter at search time (not index time) so already-indexed stubs are
-        // excluded without requiring a reindex.
+        // Filter at search time (not index time) so already-indexed stubs are excluded without requiring a reindex
         if is_content_free(&chunk.text, &chunk.source) {
             continue;
         }
@@ -360,22 +318,13 @@ pub(super) fn hybrid_search_merge(
             .unwrap_or(1.0) as f64;
 
         // Access-frequency boost: chunks retrieved before score slightly higher.
-        //
-        // Uses ln(1 + access_count) so:
-        // - 0 accesses → boost = 1.0 (no penalty)
-        // - 1 access   → boost ≈ 1.035
-        // - 10 accesses → boost ≈ 1.120
-        // - 100 accesses → boost ≈ 1.230
-        //
-        // The 0.05 scale factor keeps the boost modest so retrieval relevance
-        // (BM25 / vector similarity) remains the primary ranking signal.
+        // ln_1p grows slowly: at 0 accesses the boost is 1.0 (no penalty), at 100 it is about 1.23
+        // The 0.05 scale factor keeps the boost modest so retrieval relevance (BM25/vector similarity) remains the primary ranking signal
         let access_boost = 1.0 + (chunk.access_count as f64).ln_1p() * 0.05;
-        // access_boost is an unbounded multiplier (> 1.0), so the product can
-        // exceed 1.0 for top evergreen chunks. Rank on the unclamped raw_score
-        // (so the boost still orders chunks that would otherwise both clamp to
-        // 1.0), but store the clamped display_score so it reads as a [0,1]
-        // similarity. Gating on display_score keeps the threshold and the
-        // stored value in agreement.
+        // access_boost is an unbounded multiplier (> 1.0), so the product can exceed 1.0 for top evergreen chunks
+        // Ranking uses the unclamped raw_score so the boost still orders chunks that would otherwise both clamp to 1.0
+        // The stored display_score is clamped so it reads as a [0,1] similarity
+        // Gating on display_score keeps the threshold and the stored value in agreement
         let raw_score = base_score * decay_multiplier * source_weight * access_boost;
         let display_score = raw_score.clamp(0.0, 1.0);
 
@@ -398,9 +347,8 @@ pub(super) fn hybrid_search_merge(
 
     ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Split into aligned `relevance` (unclamped) + `results` (clamped) vectors
-    // so MMR can rank on relevance. Only build `relevance` when MMR is enabled;
-    // otherwise `mmr_rerank` early-returns before reading it.
+    // Split into aligned `relevance` (unclamped) + `results` (clamped) vectors so MMR can rank on relevance
+    // Only build `relevance` when MMR is enabled; otherwise `mmr_rerank` early-returns before reading it
     let mmr_enabled = config.mmr.enabled;
     let mut relevance: Vec<f64> = if mmr_enabled {
         Vec::with_capacity(ranked.len())
@@ -415,7 +363,7 @@ pub(super) fn hybrid_search_merge(
         results.push(result);
     }
 
-    // MMR diversity re-ranking (opt-in, applied before truncation)
+    // MMR diversity re-ranking is opt-in and runs before truncation
     super::mmr::mmr_rerank(&mut results, &relevance, &config.mmr);
 
     results.truncate(config.max_results);
@@ -634,7 +582,7 @@ mod tests {
         let embeddings = mock.embed_batch(&[&chunk.text]).await.unwrap();
         idx.upsert_embedding(&chunk_id, &embeddings[0]).unwrap();
 
-        // Search — should use both FTS and vector paths
+        // Search: should use both FTS and vector paths
         let config = MemorySearchConfig {
             min_score: 0.0,
             ..Default::default()
@@ -703,7 +651,6 @@ mod tests {
         let created = 0;
 
         let multiplier = temporal_decay_multiplier("session", created, now, half_life);
-        // After exactly one half-life, multiplier should be ~0.5
         assert!(
             (multiplier - 0.5).abs() < 0.01,
             "30-day-old session chunk with 30-day half-life should score ~0.5, got {multiplier}"
@@ -808,9 +755,7 @@ mod tests {
         let ws = results.iter().find(|r| r.source == "workspace").unwrap();
         let sess = results.iter().find(|r| r.source == "session").unwrap();
 
-        // Workspace (evergreen) should rank above the 60-day-old session chunk.
-        // At 2 half-lives the session chunk decays to ~0.25× its base score,
-        // while the workspace chunk stays at 1.0×.
+        // At 2 half-lives the session chunk decays to ~0.25× its base score, while the workspace chunk stays at 1.0×
         assert!(
             ws.score > sess.score,
             "evergreen workspace ({:.4}) should outscore 60-day-old session ({:.4})",
@@ -823,8 +768,7 @@ mod tests {
     // PR-8: access-frequency boost tests
     // -----------------------------------------------------------------------
 
-    /// A chunk with access_count > 0 scores higher than an identical chunk
-    /// with access_count = 0, all else equal.
+    /// A chunk with access_count > 0 scores higher than an identical chunk with access_count = 0, all else equal.
     #[tokio::test]
     async fn test_access_boost_raises_frequently_accessed_chunks() {
         let tmp = TempDir::new().unwrap();
@@ -842,12 +786,10 @@ mod tests {
         let chunk_b_id = format!("{}:0", fb.to_string_lossy());
         idx.record_access(&chunk_b_id).unwrap();
 
-        // Use the DEFAULT config (all source_weights = 1.0). Both chunks
-        // normalize to base_score = 1.0 as the top FTS matches, so their
-        // display scores both clamp to 1.0 — but ranking is performed on the
-        // UNCLAMPED score, so the access boost still orders the accessed chunk
-        // first. This exercises the common default-config path where the clamp
-        // would otherwise make the boost inert.
+        // Use the DEFAULT config (all source_weights = 1.0)
+        // Both chunks normalize to base_score = 1.0 as the top FTS matches, so their display scores both clamp to 1.0
+        // Ranking is performed on the UNCLAMPED score, so the access boost still orders the accessed chunk first
+        // This exercises the common default-config path where the clamp would otherwise make the boost inert
         let config = MemorySearchConfig::default();
         let results = hybrid_search_merge(
             &idx,
@@ -858,7 +800,7 @@ mod tests {
         .unwrap()
         .results;
 
-        // Both chunks must be returned (no vacuous "inconclusive → pass" path).
+        // Both chunks must be returned so the test cannot pass vacuously
         let pos_a = results
             .iter()
             .position(|r| r.path == fa.to_string_lossy().as_ref())
@@ -868,15 +810,13 @@ mod tests {
             .position(|r| r.path == fb.to_string_lossy().as_ref())
             .expect("chunk B must be returned");
 
-        // The accessed chunk (B) must rank ahead of the unaccessed chunk (A),
-        // even though both display scores clamp to 1.0 under default weights.
+        // The accessed chunk (B) must rank ahead of the unaccessed chunk (A), even though both display scores clamp to 1.0 under default weights
         assert!(
             pos_b < pos_a,
             "accessed chunk (rank {pos_b}) should rank ahead of unaccessed (rank {pos_a})",
         );
-        // Pin the premise that makes rank-on-unclamped necessary: BOTH display
-        // scores are exactly 1.0 (the collision the split resolves). The rank
-        // ordering above therefore can only come from the unclamped score.
+        // Pin the premise: both display scores are exactly 1.0, the collision that ranking on the unclamped score resolves
+        // The rank ordering above therefore can only come from the unclamped score
         assert!(
             (results[pos_a].score - 1.0).abs() < 1e-9,
             "unaccessed display score ({:.6}) must clamp to exactly 1.0",
@@ -889,14 +829,11 @@ mod tests {
         );
     }
 
-    /// Covers the MMR-enabled handoff through `hybrid_search_merge` — the
-    /// construction and alignment of the `relevance`/`results` vectors — which
-    /// no other search test exercises (MMR is off by default).
+    /// Covers the MMR-enabled path through `hybrid_search_merge`: building the aligned `relevance`/`results` vectors.
+    /// No other search test exercises it because MMR is off by default.
     ///
-    /// This is NOT the raw-vs-clamped regression guard: `results` enters MMR
-    /// pre-sorted by `raw_score`, so the boosted chunk would stay first even on
-    /// a buggy `.score` read. That guarantee lives in the unit test
-    /// `test_mmr_ranks_on_relevance_not_clamped_score`.
+    /// The raw-vs-clamped guarantee lives in the unit test `test_mmr_ranks_on_relevance_not_clamped_score`.
+    /// Here `results` enters MMR already sorted by `raw_score`, so the boosted chunk would stay first even on a buggy `.score` read.
     #[tokio::test]
     async fn test_hybrid_search_merge_with_mmr_enabled() {
         let tmp = TempDir::new().unwrap();
@@ -917,7 +854,7 @@ mod tests {
         let chunk_b_id = format!("{}:0", fb.to_string_lossy());
         idx.record_access(&chunk_b_id).unwrap();
 
-        // Enable MMR (relevance-leaning lambda) to drive the aligned handoff.
+        // Enable MMR (relevance-leaning lambda) so the aligned relevance/results path runs
         let mut config = MemorySearchConfig {
             min_score: 0.0,
             ..Default::default()
@@ -947,9 +884,8 @@ mod tests {
             .position(|r| r.path == fb.to_string_lossy().as_ref())
             .expect("chunk B must be returned");
 
-        // Through the MMR handoff, the access-boosted chunk (B) ranks ahead of
-        // its identical twin (A) because MMR's relevance term reads the
-        // unclamped `relevance` slice (both share a clamped display score of 1.0).
+        // With MMR on, the access-boosted chunk (B) ranks ahead of its identical twin (A)
+        // MMR's relevance term reads the unclamped `relevance` slice; both chunks share a clamped display score of 1.0
         assert!(
             pos_b < pos_a,
             "boosted chunk (rank {pos_b}) should rank ahead of its twin (rank {pos_a}) with MMR on",
@@ -970,11 +906,8 @@ mod tests {
     // PR: scoring normalization fix tests
     // -----------------------------------------------------------------------
 
-    /// FTS-only results (no vector search) should score well above a
-    /// reasonable min_score threshold (e.g., 0.3). Before the fix,
-    /// FTS-only chunks in hybrid mode had their scores capped at
-    /// text_weight (0.3), making them impossible to retrieve at default
-    /// min_score = 0.35.
+    /// FTS-only results (no vector search) should score well above a reasonable min_score threshold (e.g. 0.3).
+    /// Capping FTS-only chunks in hybrid mode at text_weight (0.3) would make them impossible to retrieve at the default min_score of 0.35.
     #[tokio::test]
     async fn test_fts_only_scores_above_reasonable_threshold() {
         let tmp = TempDir::new().unwrap();
@@ -1008,10 +941,8 @@ mod tests {
         );
     }
 
-    /// Global MEMORY.md chunks (source_weight = 0.7) should still be
-    /// retrievable with a reasonable threshold. Before the fix, global
-    /// chunks were capped at text_weight × source_weight = 0.21, making
-    /// them invisible at any threshold above 0.2.
+    /// Global MEMORY.md chunks (source_weight = 0.7) should still be retrievable with a reasonable threshold.
+    /// Capping them at text_weight × source_weight = 0.21 would make them invisible at any threshold above 0.2.
     #[tokio::test]
     async fn test_global_source_scores_above_min_threshold() {
         let tmp = TempDir::new().unwrap();
@@ -1045,9 +976,8 @@ mod tests {
         );
     }
 
-    /// When vector results exist for some chunks but not others, FTS-only
-    /// chunks should NOT be penalized. Their FTS score should remain at
-    /// full weight (1.0 × normalized), not capped at text_weight.
+    /// When vector results exist for some chunks but not others, FTS-only chunks should not be penalized.
+    /// Their FTS score should remain at full weight (1.0 × normalized), not capped at text_weight.
     #[tokio::test]
     async fn test_fts_only_chunks_not_penalized_by_vec_existence() {
         let tmp = TempDir::new().unwrap();
@@ -1111,17 +1041,13 @@ mod tests {
         );
     }
 
-    /// Vector normalization should use absolute L2 distance scale (max = 2.0)
-    /// instead of relative normalization. This ensures that even when all
-    /// candidates have similar distances, vector scores still contribute
-    /// meaningfully.
+    /// Vector normalization should use the absolute L2 distance scale (max = 2.0) instead of relative normalization.
+    /// That way vector scores still contribute meaningfully even when all candidates have similar distances.
     ///
-    /// Note: `dimensions: 4` is chosen deliberately. The mock provider
-    /// (blake3 bytes / 255.0) does NOT produce unit-norm vectors. At low
-    /// dimensions the L2 distances stay within `MAX_L2_DISTANCE = 2.0`, so
-    /// the absolute normalization works. At production dimensions (1024),
-    /// mock distances could exceed 2.0 and clamp to 0 — use real embeddings
-    /// or normalize the mock output for high-dimensional tests.
+    /// `dimensions: 4` is chosen deliberately: the mock provider (blake3 bytes / 255.0) does not produce unit-norm vectors.
+    /// At low dimensions the L2 distances stay within `MAX_L2_DISTANCE = 2.0`, so the absolute normalization works.
+    /// At production dimensions (1024), mock distances could exceed 2.0 and clamp to 0.
+    /// Use real embeddings or normalize the mock output for high-dimensional tests.
     #[tokio::test]
     async fn test_vector_absolute_normalization() {
         let tmp = TempDir::new().unwrap();
@@ -1139,7 +1065,7 @@ mod tests {
         let embedding = mock.embed_batch(&["test"]).await.unwrap();
         idx.upsert_embedding(&chunk_id, &embedding[0]).unwrap();
 
-        // Search with vector — the mock returns deterministic embeddings
+        // Search with a vector; the mock returns deterministic embeddings
         let fts_results = idx.search_fts("content test", 10).unwrap_or_default();
         let query_embedding = mock.embed_batch(&["content test"]).await.unwrap();
 
@@ -1153,9 +1079,8 @@ mod tests {
             .results;
 
         assert!(!results.is_empty(), "should find at least one result");
-        // With absolute normalization, the combined score should be
-        // substantially above zero (mock embeddings produce deterministic
-        // but varying values).
+        // With absolute normalization, the combined score should be substantially above zero
+        // Mock embeddings produce deterministic but varying values
         assert!(
             results[0].score > 0.1,
             "hybrid score ({:.4}) should be meaningful with absolute normalization",
@@ -1167,9 +1092,8 @@ mod tests {
     // Empty-template filter + score clamp tests
     // -----------------------------------------------------------------------
 
-    /// The auto-generated global MEMORY.md stub, written verbatim by
-    /// `MemoryStorage::ensure_initialized` (storage.rs), including the trailing
-    /// newline. Kept in sync with that source.
+    /// The auto-generated global MEMORY.md stub, verbatim from `MemoryStorage::ensure_initialized` (storage.rs), trailing newline included.
+    /// Kept in sync with that source.
     const GLOBAL_STUB: &str = "# Global Memory\n\
          \n\
          > This file is automatically managed by Grok's memory system.\n\
@@ -1185,9 +1109,8 @@ mod tests {
 
     #[test]
     fn test_is_content_free_global_stub() {
-        // Caught via the marker-based scaffold predicate (it has blockquote
-        // disclaimer lines, so it is NOT structurally empty) — only on
-        // evergreen sources, where the stubs live.
+        // Caught via the marker-based scaffold predicate: the blockquote disclaimer lines mean the stub is not structurally empty
+        // That predicate only runs on evergreen sources, where the stubs live
         assert!(
             is_content_free(GLOBAL_STUB, "global"),
             "the unedited global MEMORY.md stub must be content-free"
@@ -1200,7 +1123,7 @@ mod tests {
 
     #[test]
     fn test_is_content_free_scaffolding_only() {
-        // The structural branch applies to ALL sources — use "session" here.
+        // The structural branch applies to ALL sources, so use "session" here
         assert!(
             is_content_free("# Heading\n## Subheading", "session"),
             "headings only"
@@ -1227,8 +1150,7 @@ mod tests {
 
     #[test]
     fn test_is_content_free_real_content() {
-        // Use "global" (evergreen) so both filter branches are active; real
-        // content must survive regardless.
+        // Use "global" (evergreen) so both filter branches are active; real content must survive regardless
         assert!(
             !is_content_free("## Preferences\n\n- Use tabs", "global"),
             "heading with a following bullet has real content"
@@ -1263,9 +1185,8 @@ mod tests {
         );
     }
 
-    /// The scaffold-marker branch is scoped to evergreen sources: a short
-    /// non-evergreen chunk that merely quotes a marker phrase must be kept,
-    /// while the same text on an evergreen source is filtered.
+    /// The scaffold-marker branch is scoped to evergreen sources.
+    /// A short non-evergreen chunk that merely quotes a marker phrase must be kept, while the same text on an evergreen source is filtered.
     #[test]
     fn test_is_content_free_marker_branch_scoped_to_evergreen() {
         // A short session note that happens to quote a scaffold marker phrase.
@@ -1281,8 +1202,7 @@ mod tests {
         );
     }
 
-    /// Blockquotes are real user content and must NOT be filtered (the user's
-    /// spec listed only headings/comments/whitespace as scaffolding).
+    /// Blockquotes are real user content and must NOT be filtered (only headings, comments, and whitespace count as scaffolding).
     #[test]
     fn test_is_content_free_preserves_blockquotes() {
         assert!(
@@ -1298,8 +1218,7 @@ mod tests {
         );
     }
 
-    /// An unterminated `<!--` keeps the remainder as literal text, so a chunk
-    /// with real content around it is not classified content-free.
+    /// An unterminated `<!--` keeps the remainder as literal text, so a chunk with real content around it is not classified content-free.
     #[test]
     fn test_is_content_free_unterminated_comment_keeps_content() {
         assert!(
@@ -1312,10 +1231,8 @@ mod tests {
         );
     }
 
-    /// An essentially-empty boilerplate chunk must be excluded from results
-    /// even though it matches FTS, while a real-content chunk in the same
-    /// scenario IS returned (proving the FTS pipeline is non-empty and the
-    /// filter — not an empty result set — is what removes the stub).
+    /// An essentially-empty boilerplate chunk must be excluded from results even though it matches FTS.
+    /// A real-content chunk in the same scenario IS returned, proving the filter (not an empty result set) removes the stub.
     #[tokio::test]
     async fn test_content_free_chunk_excluded_from_search() {
         let tmp = TempDir::new().unwrap();
@@ -1335,9 +1252,8 @@ mod tests {
         .unwrap();
         idx.reindex_file(&real_path, "global").unwrap();
 
-        // Precondition: the stub IS a raw FTS candidate for this query (the
-        // term "preferences" appears in it). This proves the filter — not a
-        // non-match — is what removes it from the final results below.
+        // Precondition: the stub IS a raw FTS candidate for this query (the term "preferences" appears in it)
+        // This proves the filter, not a non-match, removes it from the final results below
         let fts_candidates = idx
             .search_fts("project conventions preferences architecture", 10)
             .unwrap();
@@ -1380,10 +1296,8 @@ mod tests {
         );
     }
 
-    /// The display score must clamp to exactly 1.0 when the access boost pushes
-    /// the unclamped product above 1.0 — while the unclamped product (used for
-    /// ranking) is genuinely > 1.0 (precondition, asserted explicitly so the
-    /// test can't silently go vacuous).
+    /// The display score must clamp to exactly 1.0 when the access boost pushes the unclamped product above 1.0.
+    /// The precondition that the unclamped product really exceeds 1.0 is asserted explicitly so the test can't silently go vacuous.
     #[tokio::test]
     async fn test_final_score_clamped_to_one() {
         // Precondition: the boost at 100 accesses really does exceed 1.0.
@@ -1428,8 +1342,7 @@ mod tests {
             !results.is_empty(),
             "should find the frequently-accessed chunk"
         );
-        // The top chunk is a top FTS match (base 1.0) × workspace weight (1.0)
-        // × boost (>1.0) → unclamped > 1.0 → display score clamped to exactly 1.0.
+        // The top chunk is a top FTS match (base 1.0) times workspace weight (1.0) times a boost above 1.0, so its unclamped score exceeds 1.0
         assert!(
             (results[0].score - 1.0).abs() < 1e-9,
             "display score ({:.6}) must clamp to exactly 1.0",

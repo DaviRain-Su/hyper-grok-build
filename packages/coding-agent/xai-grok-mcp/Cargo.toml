@@ -70,6 +70,8 @@ xai-tool-types = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+# Serializes the integration tests that share the process-global $GROK_HOME.
+serial_test = { workspace = true }
 # Used in servers.rs test `test_same_raw_name_different_servers_no_local_registry_collision`
 # to verify MCP tools register into a `LocalRegistry` without collision.
 xai-computer-hub-sdk = { workspace = true }

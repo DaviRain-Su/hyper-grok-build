@@ -1,45 +1,20 @@
-//! Model state — tracks available models and current selection.
-
 use agent_client_protocol as acp;
 use indexmap::IndexMap;
 use xai_grok_shell::sampling::types::{
-    PlatformLockMeta, ReasoningEffort, ReasoningEffortOption, parse_platform_lock_meta,
-    parse_reasoning_effort_meta, parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
+    ReasoningEffort, ReasoningEffortOption, parse_reasoning_effort_meta,
+    parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
 };
 
 use crate::slash::commands::effort_levels::legacy_effort_options;
 
-/// Lock/setup metadata of a credential-less managed platform model, parsed
-/// from its ACP meta. `None` for ordinary (usable) models.
-pub(crate) fn platform_lock(info: &acp::ModelInfo) -> Option<PlatformLockMeta> {
-    parse_platform_lock_meta(info.meta.as_ref())
-}
-
-/// `(id, display name)` pairs for every model that is usable right now —
-/// i.e. not locked behind missing platform credentials. Surfaces that let
-/// the user route work to a model (e.g. the `/agents` subagent-model picker)
-/// should offer only these; pinning an unconfigured model would silently
-/// fall back to inherit at spawn.
-pub(crate) fn usable_model_choices(models: &ModelState) -> Vec<(String, String)> {
-    models
-        .available
-        .iter()
-        .filter(|(_, info)| platform_lock(info).is_none())
-        .map(|(id, info)| (id.0.to_string(), info.name.clone()))
-        .collect()
-}
-
-/// Why an effort token could not be applied to a model. Shared by every effort
-/// surface (`/effort`, the CLI deferred switch, and headless) so they classify
-/// the same input identically and differ only in how they surface the error.
+/// Why an effort token could not be applied to a model.
+/// Shared by `/effort`, the CLI deferred switch, and headless so they classify the same input identically and differ only in how they report the error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EffortTokenError {
     /// The target model does not advertise `supportsReasoningEffort`.
     Unsupported,
-    /// The token is neither a menu id nor a canonical value offered by this
-    /// model's menu. `offered` is the model-specific list of option ids the
-    /// user can type (never a hardcoded global set — so we do not advertise
-    /// `none`/`minimal` when the model does not offer them).
+    /// The token is neither a menu id nor a canonical value offered by this model's menu.
+    /// `offered` lists only the option ids this model's menu accepts, so `none`/`minimal` are not advertised when the model does not offer them.
     UnknownToken { token: String, offered: Vec<String> },
     /// No active model to resolve the effort against.
     NoActiveModel,
@@ -72,13 +47,9 @@ pub struct ModelState {
     pub available: IndexMap<acp::ModelId, acp::ModelInfo>,
     pub current: Option<acp::ModelId>,
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// This catalog came from an initialized ACP agent and may be refreshed
-    /// from the effective config when the user invokes `/model`.
-    pub reload_config_on_model_command: bool,
     /// External override for the context window size (tokens).
-    /// When set, `get_context_window()` returns this instead of
-    /// reading from the current model's metadata. Used for subagent
-    /// views where SubagentProgress reports the actual window size.
+    /// When set, `get_context_window()` returns this instead of reading from the current model's metadata.
+    /// Used for subagent views where SubagentProgress reports the actual window size.
     context_window_override: Option<u64>,
 }
 
@@ -102,9 +73,9 @@ impl ModelState {
         Some(self.current.as_ref()?.0.as_ref())
     }
 
-    /// Total context window tokens advertised for a catalog model.
-    pub fn context_window_for(&self, model_id: &acp::ModelId) -> Option<u64> {
-        let meta = self.available.get(model_id)?.meta.as_ref()?;
+    /// Total context window tokens for the current model (if available).
+    fn current_context_window_tokens(&self) -> Option<u64> {
+        let meta = self.available.get(self.current.as_ref()?)?.meta.as_ref()?;
         meta.get("totalContextTokens")
             .and_then(|value| match value {
                 serde_json::Value::Number(number) => number.as_u64(),
@@ -112,20 +83,10 @@ impl ModelState {
             })
     }
 
-    /// Total context window tokens for the current model (if available).
-    fn current_context_window_tokens(&self) -> Option<u64> {
-        self.context_window_for(self.current.as_ref()?)
-    }
-
-    /// Whether the current model accepts image input, read from the model's
-    /// `meta` (the ACP extension point — same source as `totalContextTokens`).
-    ///
-    /// Honors an explicit `acceptsImages` bool, else an `inputModalities` array
-    /// containing `"image"`. DEFAULTS TO `true` when neither key is present:
-    /// correct today (all current Grok models accept images, so nothing is
-    /// suppressed) and forward-compatible (suppresses non-vision models once the
-    /// ACP server populates the key). Populating that key server-side is a
-    /// separate change.
+    /// Whether the current model accepts image input, read from the model's `meta` (the ACP extension point, same source as `totalContextTokens`).
+    /// Honors an explicit `acceptsImages` bool, else an `inputModalities` array containing `"image"`.
+    /// DEFAULTS TO `true` when neither key is present: all current Grok models accept images, so nothing is suppressed today.
+    /// Once the ACP server populates the key, non-vision models get suppressed.
     pub fn current_model_accepts_images(&self) -> bool {
         let Some(meta) = self
             .current
@@ -146,56 +107,21 @@ impl ModelState {
         true
     }
 
-    /// Get the effective context window size (tokens).
-    ///
-    /// Returns the override if set, otherwise reads from the current model's
-    /// metadata. The override is set by `override_context_window()` when an
-    /// external source (e.g., SubagentProgress) reports the actual window size.
+    /// The effective context window size (tokens): the override if set, else the current model's metadata.
     pub fn get_context_window(&self) -> Option<u64> {
         self.context_window_override
             .or_else(|| self.current_context_window_tokens())
     }
 
-    /// Override the context window size.
-    ///
-    /// Used for subagent views where the actual context window is reported
-    /// via SubagentProgress and may differ from the inherited model's metadata.
+    /// Used for subagent views where SubagentProgress reports an actual window that may differ from the inherited model's metadata.
     pub fn override_context_window(&mut self, tokens: u64) {
         self.context_window_override = Some(tokens);
     }
 
-    /// Replace the available-model list. Leaves `current` and
-    /// `reasoning_effort` alone — those change only via `/model` / create / load.
+    /// Replace the available-model list.
+    /// Leaves `current` and `reasoning_effort` alone; those change only via `/model`, create, or load.
     pub fn update_catalog(&mut self, new_available: IndexMap<acp::ModelId, acp::ModelInfo>) {
         self.available = new_available;
-    }
-
-    /// Replace the available-model list and re-resolve `current` against a
-    /// fallback when the catalog drops it (Hyper config-catalog reload path).
-    pub fn update_catalog_with_fallback(
-        &mut self,
-        new_available: IndexMap<acp::ModelId, acp::ModelInfo>,
-        fallback_current: Option<acp::ModelId>,
-    ) {
-        let previous_current_model = self.current.clone();
-        self.available = new_available;
-        if let Some(ref id) = self.current {
-            if !self.available.contains_key(id) {
-                self.current = fallback_current;
-            }
-        } else {
-            self.current = fallback_current;
-        }
-        // The models/update broadcast carries each model's static default effort,
-        // not this session's choice; only re-derive when the model changed so a
-        // catalog refresh can't clobber a user-set effort.
-        if self.current != previous_current_model {
-            self.reasoning_effort = self
-                .current
-                .as_ref()
-                .and_then(|id| self.available.get(id))
-                .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref()));
-        }
     }
 
     /// Set the current model and resolve reasoning effort from catalog meta.
@@ -212,9 +138,8 @@ impl ModelState {
         });
     }
 
-    /// The reasoning-effort menu for the current model. Gate-first: an unset or
-    /// unsupported model yields no menu; a supported model uses the server list
-    /// when present, else the built-in fallback.
+    /// The reasoning-effort menu for the current model. An unset or unsupported model yields no menu.
+    /// A supported model uses the server list when present, else the built-in fallback.
     pub fn reasoning_effort_options(&self) -> Vec<ReasoningEffortOption> {
         match self.current.as_ref() {
             Some(id) => self.reasoning_effort_options_for(id),
@@ -223,9 +148,8 @@ impl ModelState {
     }
 
     /// Menu for a specific catalog model id (used by `/model`'s effort phase).
-    /// `parse_reasoning_efforts_meta` returns `None` for absent, non-array, or
-    /// present-but-unusable lists, so all of those fall back to the built-in menu
-    /// exactly as the shell's session picker does.
+    /// `parse_reasoning_efforts_meta` returns `None` when the list is absent, not an array, or present but unusable.
+    /// All of those fall back to the built-in menu, exactly as the shell's session picker does.
     pub(crate) fn reasoning_effort_options_for(
         &self,
         id: &acp::ModelId,
@@ -239,16 +163,14 @@ impl ModelState {
         parse_reasoning_efforts_meta(info.meta.as_ref()).unwrap_or_else(legacy_effort_options)
     }
 
-    /// Map a typed/selected effort token to its canonical value for the current
-    /// model. Accepts a menu option id (case-insensitive) or a canonical level
-    /// that appears as a **value** in that model's menu. Levels the model does
-    /// not offer (e.g. `none` on grok-4.5) are rejected so we fail in the TUI
-    /// instead of sending a blocked effort to the API.
+    /// Map a typed or selected effort token to its canonical value for the current model.
+    /// Accepts a menu option id (case-insensitive) or a canonical level that appears as a value in that model's menu.
+    /// Levels the model does not offer (e.g. `none` on grok-4.5) are rejected so the TUI fails instead of sending a blocked effort to the API.
     pub fn resolve_effort_token(&self, token: &str) -> Option<ReasoningEffort> {
         match self.current.as_ref() {
             Some(id) => self.resolve_effort_token_for(id, token),
-            // No model yet: still parse so deferred CLI can hold a token; it is
-            // re-validated with `resolve_effort_for_model` once a model is active.
+            // No model yet: still parse so the deferred CLI switch can hold a token
+            // It is re-validated with `resolve_effort_for_model` once a model is active
             None => token.parse::<ReasoningEffort>().ok(),
         }
     }
@@ -273,10 +195,9 @@ impl ModelState {
             .map(|o| o.value)
     }
 
-    /// Canonical effort-token policy: gate on the model's support flag first,
-    /// then resolve the token (menu id or canonical level). This is the single
-    /// decision shared by `/effort`, the CLI deferred switch, and headless —
-    /// each caller only maps the [`EffortTokenError`] to its own surface.
+    /// Gate on the model's support flag first, then resolve the token (menu id or canonical level).
+    /// This one decision is shared by `/effort`, the CLI deferred switch, and headless.
+    /// Each caller only maps the [`EffortTokenError`] to its own error message.
     pub(crate) fn resolve_effort_for_model(
         &self,
         id: &acp::ModelId,
@@ -293,8 +214,8 @@ impl ModelState {
         self.resolve_effort_token_for(id, token)
             .ok_or_else(|| EffortTokenError::UnknownToken {
                 token: token.to_string(),
-                // Menu option ids only — matches `/effort` autocomplete and
-                // never invents levels (none/minimal/…) the model does not offer.
+                // The offered list holds menu option ids only, matching `/effort` autocomplete
+                // It never invents levels (none/minimal/…) the model does not offer
                 offered: self
                     .reasoning_effort_options_for(id)
                     .into_iter()
@@ -303,45 +224,17 @@ impl ModelState {
             })
     }
 
-    /// Resolve a user-supplied name to a `ModelId` via case-insensitive
-    /// ASCII match against the catalog.
-    ///
-    /// Catalog **ids** win over display names (so `zai-coding-cn/glm-5.2` is
-    /// unambiguous when several rows share the label "GLM-5.2"). Display-name
-    /// matches only succeed when exactly one model uses that name; collisions
-    /// return `None` so the caller can ask the user to pick a provider-scoped
-    /// id instead of silently routing to the first catalog entry.
+    /// Resolve a user-supplied name to a `ModelId` via case-insensitive ASCII match against the catalog.
     pub fn resolve_by_name_or_id(&self, query: &str) -> Option<acp::ModelId> {
-        if let Some((id, _)) = self
-            .available
-            .iter()
-            .find(|(id, _)| id.0.as_ref().eq_ignore_ascii_case(query))
-        {
-            return Some(id.clone());
-        }
-        let mut name_match: Option<acp::ModelId> = None;
-        for (id, info) in &self.available {
-            if info.name.eq_ignore_ascii_case(query) {
-                if name_match.is_some() {
-                    return None; // ambiguous display name
-                }
-                name_match = Some(id.clone());
+        self.available.iter().find_map(|(id, info)| {
+            if info.name.eq_ignore_ascii_case(query) || id.0.as_ref().eq_ignore_ascii_case(query) {
+                Some(id.clone())
+            } else {
+                None
             }
-        }
-        name_match
+        })
     }
 
-    /// All catalog ids whose display name matches `query` (case-insensitive).
-    /// Used for ambiguous-name error messages.
-    pub fn ids_matching_name(&self, query: &str) -> Vec<acp::ModelId> {
-        self.available
-            .iter()
-            .filter(|(_, info)| info.name.eq_ignore_ascii_case(query))
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
-
-    /// Look up the display name for a `ModelId` in the catalog.
     pub fn display_name_for(&self, id: &acp::ModelId) -> String {
         self.available
             .get(id)
@@ -349,22 +242,16 @@ impl ModelState {
             .unwrap_or_else(|| id.0.to_string())
     }
 
-    /// Cycle to the next usable model. Locked platform models (credential-less
-    /// BYOK entries shown for discovery) are skipped — they can't sample.
+    /// Cycle to the next model.
     pub fn next_model(&self) -> Option<acp::ModelId> {
-        let usable: Vec<&acp::ModelId> = self
-            .available
-            .iter()
-            .filter(|(_, info)| platform_lock(info).is_none())
-            .map(|(id, _)| id)
-            .collect();
-        if usable.is_empty() {
+        if self.available.is_empty() {
             None
         } else if let Some(ref current) = self.current {
-            let idx = usable.iter().position(|id| *id == current)?;
-            Some(usable[(idx + 1) % usable.len()].clone())
+            let idx = self.available.get_index_of(current)?;
+            let idx = (idx + 1) % self.available.len();
+            Some(self.available.get_index(idx)?.0.clone())
         } else {
-            usable.first().map(|id| (*id).clone())
+            Some(self.available.first()?.0.clone())
         }
     }
 }
@@ -388,7 +275,6 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     available: models,
                     current: current_model,
                     reasoning_effort,
-                    reload_config_on_model_command: false,
                     context_window_override: None,
                 }
             })
@@ -424,112 +310,10 @@ mod tests {
     }
 
     #[test]
-    fn context_window_for_reads_target_model_metadata() {
-        let id = acp::ModelId::new(Arc::from("small-model"));
-        let mut state = ModelState::default();
-        state.available.insert(
-            id.clone(),
-            acp::ModelInfo::new(id.clone(), "Small Model".to_string()).meta(
-                serde_json::json!({ "totalContextTokens": 128_000 })
-                    .as_object()
-                    .cloned(),
-            ),
-        );
-        assert_eq!(state.context_window_for(&id), Some(128_000));
-    }
-
-    #[test]
-    fn resolve_by_name_or_id_prefers_id_and_rejects_ambiguous_names() {
-        let mut state = ModelState::default();
-        let zai = acp::ModelId::new(Arc::from("zai-coding-cn/glm-5.2"));
-        let ollama = acp::ModelId::new(Arc::from("ollama/glm-5.2"));
-        state.available.insert(
-            zai.clone(),
-            acp::ModelInfo::new(zai.clone(), "GLM-5.2".to_string()),
-        );
-        state.available.insert(
-            ollama.clone(),
-            acp::ModelInfo::new(ollama.clone(), "GLM-5.2".to_string()),
-        );
-
-        assert_eq!(
-            state.resolve_by_name_or_id("zai-coding-cn/glm-5.2"),
-            Some(zai)
-        );
-        assert_eq!(state.resolve_by_name_or_id("GLM-5.2"), None);
-        assert_eq!(state.ids_matching_name("glm-5.2").len(), 2);
-    }
-
-    #[test]
     fn test_next_model_cycles() {
         let state = sample_models();
         let next = state.next_model().unwrap();
         assert_eq!(next.0.as_ref(), "model-b");
-    }
-
-    #[test]
-    fn next_model_skips_locked_platform_models() {
-        let mut state = sample_models();
-        let locked_id = acp::ModelId::new(Arc::from("deepseek/deepseek-v4-flash"));
-        let meta = serde_json::json!({
-            "requiresApiKey": true,
-            "platform": "deepseek",
-            "platformName": "DeepSeek",
-            "apiKeyEnv": ["DEEPSEEK_API_KEY"],
-            "setupHint": "export DEEPSEEK_API_KEY=…",
-        })
-        .as_object()
-        .cloned();
-        state.available.insert(
-            locked_id,
-            acp::ModelInfo::new(
-                acp::ModelId::new(Arc::from("deepseek/deepseek-v4-flash")),
-                "DeepSeek V4 Flash".to_string(),
-            )
-            .meta(meta),
-        );
-        // model-a → model-b (skipping the locked row appended after it).
-        let next = state.next_model().unwrap();
-        assert_eq!(next.0.as_ref(), "model-b");
-        // model-b wraps to model-a, never landing on the locked entry.
-        let mut state = state;
-        state.current = Some(acp::ModelId::new(Arc::from("model-b")));
-        let next = state.next_model().unwrap();
-        assert_eq!(next.0.as_ref(), "model-a");
-    }
-
-    #[test]
-    fn usable_model_choices_excludes_locked_platform_models() {
-        let mut state = sample_models();
-        let locked_id = acp::ModelId::new(Arc::from("deepseek/deepseek-v4-flash"));
-        let meta = serde_json::json!({
-            "requiresApiKey": true,
-            "platform": "deepseek",
-            "platformName": "DeepSeek",
-            "apiKeyEnv": ["DEEPSEEK_API_KEY"],
-            "setupHint": "export DEEPSEEK_API_KEY=…",
-        })
-        .as_object()
-        .cloned();
-        state.available.insert(
-            locked_id,
-            acp::ModelInfo::new(
-                acp::ModelId::new(Arc::from("deepseek/deepseek-v4-flash")),
-                "DeepSeek V4 Flash".to_string(),
-            )
-            .meta(meta),
-        );
-        let choices = usable_model_choices(&state);
-        assert_eq!(choices.len(), 2);
-        assert!(
-            choices.iter().all(|(id, _)| !id.starts_with("deepseek/")),
-            "credential-less platform models must not be offered"
-        );
-        assert!(
-            choices
-                .iter()
-                .any(|(id, name)| id == "model-a" && name == "Model A")
-        );
     }
 
     #[test]
@@ -562,8 +346,7 @@ mod tests {
 
     #[test]
     fn accepts_images_defaults_true_when_meta_absent() {
-        // No current model, empty meta, and a meta without the key all default
-        // permissive — correct today and a no-op until the server populates it.
+        // No current model, empty meta, and a meta without the key all default to `true`; a no-op until the server populates the key
         assert!(ModelState::default().current_model_accepts_images());
         assert!(state_with_meta(None).current_model_accepts_images());
         assert!(
@@ -591,9 +374,9 @@ mod tests {
 
     #[test]
     fn reasoning_effort_options_gate_first_empty_when_unsupported() {
-        // No current model → empty.
+        // A default state has no current model, so no menu
         assert!(ModelState::default().reasoning_effort_options().is_empty());
-        // Current model that does not support effort → empty (even with a list).
+        // A model that does not support effort gets no menu, even with a list present
         let state = state_with_meta(Some(serde_json::json!({
             "reasoningEfforts": [{ "value": "high" }],
         })));
@@ -602,7 +385,7 @@ mod tests {
 
     #[test]
     fn reasoning_effort_options_falls_back_to_builtin_menu() {
-        // Supported but no server list → today's four-row built-in menu.
+        // Supported but no server list falls back to today's four-row built-in menu
         let state = state_with_meta(Some(serde_json::json!({
             "supportsReasoningEffort": true,
         })));
@@ -616,9 +399,8 @@ mod tests {
 
     #[test]
     fn reasoning_effort_options_falls_back_when_list_present_but_unusable() {
-        // Matches the shell picker: an explicit empty list, and a list where every
-        // entry skip-invalidated under version skew, both fall back to the built-in
-        // menu rather than silently vanishing.
+        // An explicit empty list, and a list whose every entry was skipped as invalid under version skew, both fall back to the built-in menu
+        // Falling back rather than silently vanishing matches the shell picker
         for meta in [
             serde_json::json!({ "supportsReasoningEffort": true, "reasoningEfforts": [] }),
             serde_json::json!({
@@ -644,7 +426,7 @@ mod tests {
                 { "id": "high", "value": "high", "label": "High" },
             ],
         })));
-        // Design-2 remap: the typed id resolves to its canonical wire value.
+        // The typed id resolves to its canonical wire value
         assert_eq!(
             state.resolve_effort_token("deep"),
             Some(ReasoningEffort::Xhigh)
@@ -658,8 +440,7 @@ mod tests {
             state.resolve_effort_token("high"),
             Some(ReasoningEffort::High)
         );
-        // Levels the model does not offer (none/minimal on 4.5-style menus)
-        // are rejected — better than a server-side 400.
+        // Levels the model does not offer (none/minimal on 4.5-style menus) are rejected; better than a server-side 400
         assert!(state.resolve_effort_token("minimal").is_none());
         assert!(state.resolve_effort_token("none").is_none());
         assert!(state.resolve_effort_token("bogus").is_none());
@@ -697,9 +478,8 @@ mod tests {
                 offered: vec!["high".to_string(), "low".to_string()],
             }
         );
-        // Error copy must list only this model's options — never hardcode
-        // none/minimal/… as offered values (the rejected token may still appear
-        // quoted in "unknown effort level '…'").
+        // The error copy must list only this model's options, never a hardcoded none/minimal/…
+        // The rejected token may still appear quoted in "unknown effort level '…'"
         let msg = err.message();
         assert!(msg.contains("use one of: high, low"), "msg={msg}");
         let offered_half = msg
@@ -722,7 +502,7 @@ mod tests {
 
     #[test]
     fn resolve_effort_token_legacy_menu_rejects_none() {
-        // supportsReasoningEffort without a server list → built-in low..xhigh.
+        // supportsReasoningEffort without a server list means the built-in low..xhigh menu
         let state = state_with_meta(Some(serde_json::json!({
             "supportsReasoningEffort": true,
         })));

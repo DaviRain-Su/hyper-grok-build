@@ -1,14 +1,13 @@
 //! Agent view layout and rendering helpers.
 //!
 //! This module provides:
-//! - [`AgentViewLayout`] — pure layout computation (screen area → pane rects)
-//! - [`ActivePane`] / [`PaneAreas`] — pane identity and hit-testing
-//! - Overlay helpers — small focused functions for selection/hover chrome
-//! - [`build_hints`] — shortcuts bar hint generation
+//! - [`AgentViewLayout`]: pure layout computation (screen area to pane rects)
+//! - [`ActivePane`] / [`PaneAreas`]: pane identity and hit-testing
+//! - Overlay helpers: small focused functions for selection/hover chrome
+//! - [`build_hints`]: shortcuts bar hint generation
 //!
-//! The actual rendering orchestration lives in [`AgentView::draw()`](crate::app::agent_view::AgentView::draw),
-//! which calls shared widgets (StatusBar, ScrollbackPane, PromptWidget,
-//! ShortcutsBar) and uses these helpers for the agent-specific glue.
+//! The drawing itself happens in [`AgentView::draw()`](crate::app::agent_view::AgentView::draw).
+//! It renders the shared widgets (StatusBar, ScrollbackPane, PromptWidget, ShortcutsBar) and uses these helpers for the agent-specific glue.
 use crate::actions::{ActionId, ActionRegistry, When};
 use crate::appearance::{LayoutConfig, ScrollbarConfig};
 use crate::render::SafeBuf;
@@ -77,43 +76,36 @@ impl PaneAreas {
         None
     }
 }
-/// Terminals at or below this height suppress the optional rows above the
-/// prompt (plugin CTA, follow-ups, banner/tip) so the prompt and scrollback
-/// are never starved.
+/// Terminals at or below this height suppress the optional rows above the prompt (plugin CTA, follow-ups, banner/tip).
+/// This keeps the prompt and the scrollback from being starved.
 pub const SHORT_TERMINAL_ROWS: u16 = 16;
-/// The scrollback's floor, pushed as the layout's only `Min`. The solver ranks
-/// it above every `Length`, so an over-committed layout shrinks another row.
+/// The scrollback's floor, pushed as the layout's only `Min`.
+/// The solver ranks it above every `Length`, so an over-committed layout shrinks another row.
 pub const SCROLLBACK_MIN_ROWS: u16 = 5;
-/// Auto-compact threshold: at or below this height the render-value compact
-/// flag is forced on. Deliberately above [`SHORT_TERMINAL_ROWS`], which stays
-/// the hard-degradation gate (tip-row renderability, CTA/follow-up trims).
+/// Auto-compact threshold: at or below this height the compact flag handed to rendering is forced on.
+/// Deliberately above [`SHORT_TERMINAL_ROWS`], which still gates the harder cuts (tip-row rendering, dropping the CTA and follow-up rows).
 pub const AUTO_COMPACT_MAX_ROWS: u16 = 20;
 const _: () = assert!(SHORT_TERMINAL_ROWS < AUTO_COMPACT_MAX_ROWS);
-/// Render-value derivation for compact mode: the user setting, force-enabled
-/// while the terminal is [`AUTO_COMPACT_MAX_ROWS`] or shorter (auto-compact).
+/// The compact flag rendering uses: the user setting, force-enabled while the terminal is [`AUTO_COMPACT_MAX_ROWS`] or shorter (auto-compact).
 ///
-/// Derived only — never persisted and never written back to the user setting
-/// (`current_ui.compact_mode` / the render cache / disk), so growing the
-/// window restores the user's choice. `terminal_rows == 0` means "not yet
-/// measured" and never forces compact.
+/// The result is never written back to `current_ui.compact_mode`, the render cache, or disk.
+/// Growing the window therefore restores the user's choice.
+/// `terminal_rows == 0` means "not yet measured" and never forces compact.
 pub fn effective_compact(user_compact: bool, terminal_rows: u16) -> bool {
     user_compact || (terminal_rows > 0 && terminal_rows <= AUTO_COMPACT_MAX_ROWS)
 }
-/// Every input [`AgentViewLayout::compute`] reads: the screen area, the
-/// appearance config it lays out under, and the requested height of each row
-/// it stacks.
+/// Every input [`AgentViewLayout::compute`] reads: the screen area, the appearance config, and the requested height of each row it stacks.
 ///
-/// An optional pane at height 0 is omitted along with the gap above it. The
-/// prompt, the shortcuts bar and their gaps follow their own rules; on a frame
-/// with bottom padding a `status_line_height` of 0 adds the gap above the
-/// shortcuts bar.
+/// An optional pane at height 0 is omitted along with the gap above it.
+/// The prompt, the shortcuts bar and their gaps follow their own rules.
+/// On a frame with bottom padding a `status_line_height` of 0 adds the gap above the shortcuts bar.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AgentViewLayoutParams {
     pub area: Rect,
     pub layout_cfg: LayoutConfig,
     pub scrollbar_cfg: ScrollbarConfig,
-    /// Rail columns taken in place of the scrollbar (0 = hidden). Requires the
-    /// scrollbar's gutter geometry, so a disabled scrollbar forces it to 0.
+    /// Rail columns taken in place of the scrollbar (0 means hidden).
+    /// The rail needs the scrollbar's gutter geometry, so a disabled scrollbar forces this to 0.
     pub timeline_width: u16,
     pub prompt_height: u16,
     pub tasks_height: u16,
@@ -123,8 +115,7 @@ pub struct AgentViewLayoutParams {
     pub btw_height: u16,
     pub turn_status_height: u16,
     pub banner_height: u16,
-    /// Forced to 0 on short terminals (`area.height <= SHORT_TERMINAL_ROWS`)
-    /// so the prompt and scrollback are never starved.
+    /// Forced to 0 on short terminals (`area.height <= SHORT_TERMINAL_ROWS`) so the prompt and scrollback are never starved.
     pub cta_height: u16,
     /// Force-suppressed on short terminals on the same rule as `cta_height`.
     pub follow_ups_height: u16,
@@ -132,16 +123,15 @@ pub struct AgentViewLayoutParams {
     pub prompt_gap: u16,
     pub voice_recording_height: u16,
     pub shortcuts_height: u16,
-    /// Clamped to the rows left over once every other row and the scrollback
-    /// minimum are counted, so a tall script loses its own rows rather than
-    /// the prompt or the shortcuts bar losing theirs.
+    /// Clamped to the rows left over once every other row and the scrollback minimum are counted.
+    /// A tall script loses its own rows rather than the prompt or the shortcuts bar losing theirs.
     pub status_line_height: u16,
     pub compact: bool,
 }
 /// Computed screen layout for the agent view.
 ///
-/// Pure data — no rendering. Computed from [`AgentViewLayoutParams`]. Shared
-/// widgets use these rects to render into.
+/// Pure data, no rendering. Computed from [`AgentViewLayoutParams`].
+/// Shared widgets use these rects to render into.
 pub struct AgentViewLayout {
     pub status_bar: Rect,
     pub tasks: Rect,
@@ -149,7 +139,7 @@ pub struct AgentViewLayout {
     pub scrollback: Rect,
     pub todo: Rect,
     pub queue: Rect,
-    /// Inline /btw side question panel (above queue / turn status / prompt).
+    /// Inline panel for /btw side questions (above the queue, turn status, and prompt rows).
     pub btw: Rect,
     pub turn_status: Rect,
     /// Banner rect above the prompt (mode-switch banner, ephemeral tips).
@@ -158,8 +148,7 @@ pub struct AgentViewLayout {
     pub plugin_cta: Rect,
     /// Follow-up suggestion chips row (below the plugin CTA, above the prompt).
     pub follow_ups: Rect,
-    /// Single-row record indicator ("◉ Recording") directly above the prompt,
-    /// shown only while voice capture is active.
+    /// Single-row record indicator ("◉ Recording") directly above the prompt, shown only while voice capture is active.
     pub voice_recording: Rect,
     pub prompt: Rect,
     pub shortcuts: Rect,
@@ -169,18 +158,17 @@ pub struct AgentViewLayout {
     pub scrollback_content: Rect,
     /// Scrollbar track position (x coordinate).
     pub scrollbar_x: u16,
-    /// Timeline rail left edge (only meaningful when `timeline_width > 0`;
-    /// the rail's right edge lands on the scrollbar column, which the rail
-    /// replaces).
+    /// Timeline rail left edge, only meaningful when `timeline_width > 0`.
+    /// The rail's right edge lands on the scrollbar column, which the rail replaces.
     pub timeline_x: u16,
-    /// Columns reserved for the timeline rail (0 = rail hidden). Non-zero
-    /// also means the scrollbar does not render this frame.
+    /// Columns reserved for the timeline rail (0 means the rail is hidden).
+    /// Non-zero also means the scrollbar does not render this frame.
     pub timeline_width: u16,
 }
 impl AgentViewLayout {
     /// Stack the rows described by `params` into the screen area.
     ///
-    /// Row-by-row semantics live on [`AgentViewLayoutParams`].
+    /// Each row's rules are documented on [`AgentViewLayoutParams`].
     pub fn compute(params: AgentViewLayoutParams) -> Self {
         let AgentViewLayoutParams {
             area,
@@ -439,13 +427,11 @@ impl AgentViewLayout {
             timeline_width,
         }
     }
-    /// Rows a prompt may take before it starts pushing other rows off their
-    /// requested height, given every other row in `params`.
+    /// Rows a prompt may take before it starts pushing other rows off their requested height, given every other row in `params`.
     ///
-    /// Measured through [`Self::compute`] rather than re-summed: a probe
-    /// layout with a zero-row prompt hands the scrollback every row nothing
-    /// else claimed, so the scrollback's surplus over [`SCROLLBACK_MIN_ROWS`]
-    /// is the most a prompt can take. `params.prompt_height` is ignored.
+    /// Measured through [`Self::compute`] rather than re-summed: a probe with a zero-row prompt hands the scrollback every row nothing else claimed.
+    /// The scrollback's surplus over [`SCROLLBACK_MIN_ROWS`] is then the most a prompt can take.
+    /// `params.prompt_height` is ignored.
     pub fn rows_available_for_prompt(params: AgentViewLayoutParams) -> u16 {
         let probe = Self::compute(AgentViewLayoutParams {
             prompt_height: 0,
@@ -455,8 +441,7 @@ impl AgentViewLayout {
     }
     /// Inner area width (for prompt height computation before full layout).
     ///
-    /// This computes just the inner width without the full layout split,
-    /// since prompt height is needed as input to `compute()`.
+    /// This computes just the inner width without the full layout split, since prompt height is needed as input to `compute()`.
     pub fn inner_width(area: Rect, layout_cfg: &LayoutConfig, compact: bool) -> u16 {
         let vpad = layout_cfg.eff_outer_vpad(compact);
         let outer_block = Block::default().padding(Padding::new(
@@ -499,19 +484,15 @@ pub fn fill_background(
         .style(Style::default().bg(theme.bg_base));
     outer_styled.render(area, buf);
 }
-/// Render follow-up suggestion chips into a single row, returning the
-/// clickable rect of each rendered chip.
+/// Render follow-up suggestion chips into a single row, returning the clickable rect of each rendered chip.
 ///
-/// Chips render left-to-right and rendering STOPS at the first chip that does
-/// not fit the row width — the result is a rendered prefix of `suggestions`
-/// (index-aligned), not a filtered subset. A transient, mouse-clickable
-/// affordance above the prompt — the same row slot family as the plugin CTA.
-/// Suggestion text is server-controlled and already sanitized at ingestion;
-/// here it is additionally length-clamped per chip and written through
-/// `set_span_safe`, so a label can neither overflow the row nor inject
-/// terminal escape sequences.
+/// Chips render left-to-right and rendering stops at the first chip that does not fit the row width.
+/// The result is therefore an index-aligned prefix of `suggestions`, not a filtered subset.
+/// The row is a transient, mouse-clickable strip above the prompt, in the same slot as the plugin CTA.
+/// Suggestion text is server-controlled and already sanitized at ingestion.
+/// Each label is also length-clamped and written through `set_span_safe`, so it can neither overflow the row nor inject terminal escape sequences.
 ///
-/// `hovered` highlights the chip under the mouse (`theme.bg_hover` + primary text).
+/// `hovered` highlights the chip under the mouse (`theme.bg_hover` and primary text).
 pub(crate) fn render_follow_ups(
     area: Rect,
     buf: &mut Buffer,
@@ -604,8 +585,7 @@ pub fn render_entry_hover(
         }
     }
 }
-/// Render a floating popup showing hook details when hovering over
-/// a collapsed tool call entry that has hooks.
+/// Render a floating popup showing hook details when hovering over a collapsed tool call entry that has hooks.
 pub fn render_hook_hover_popup(
     buf: &mut Buffer,
     scrollback_area: Rect,
@@ -733,7 +713,7 @@ pub fn render_hook_hover_popup(
         buf.set_line_safe_bidi(inner.x, y, &line.content, inner.width);
     }
 }
-/// Selection/hover chrome for a side pane (todo / queue / tasks). Focused panes get a dismiss control.
+/// Selection/hover chrome for a side pane (todo, queue, tasks). Focused panes get a dismiss control.
 pub fn render_todo_chrome(
     buf: &mut Buffer,
     todo_area: Rect,
@@ -787,9 +767,8 @@ pub fn render_todo_chrome_with_close_label(
 }
 /// Render the scrollbar track and thumb.
 ///
-/// When `is_following` is true, the scrollbar thumb is dimmed to indicate
-/// the viewport is locked to the bottom. This makes G / follow state
-/// immediately visible in the scrollbar.
+/// When `is_following` is true, the scrollbar thumb is dimmed to show the viewport is locked to the bottom.
+/// That makes follow mode (G) visible in the scrollbar itself.
 pub fn render_scrollbar(
     buf: &mut Buffer,
     scrollback_area: Rect,
@@ -836,8 +815,8 @@ pub fn render_scrollbar(
         );
     }
 }
-/// The scrollback's default focus hint: `Space` leaves for the prompt. A
-/// parked blocking card replaces it with its own (pinned) route back.
+/// The scrollback's default focus hint: `Space` leaves for the prompt.
+/// A parked blocking card replaces it with its own (pinned) route back.
 pub fn prompt_focus_hint() -> HintItem {
     use crate::input::key::KeyShortcut;
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -851,19 +830,15 @@ pub fn prompt_focus_hint() -> HintItem {
 }
 /// Build the hints list for the shortcuts bar based on current state.
 ///
-/// Each pane contributes its own hints dynamically. The registry provides
-/// the key bindings; the view decides which ones are visible.
+/// Each pane contributes its own hints dynamically.
+/// The registry provides the key bindings; the view decides which ones are visible.
 ///
-/// `fold_label` is the dynamic label for the fold action based on selected
-/// entry state: "expand", "collapse", or "fold" (no foldable entry selected).
+/// `fold_label` is the dynamic label for the fold action based on selected entry state: "expand", "collapse", or "fold" (no foldable entry selected).
 ///
-/// `group_header_label` ("expand"/"collapse") marks a selected group header;
-/// it replaces the fold and Enter:open hints with a single Enter toggle hint.
+/// `group_header_label` ("expand"/"collapse") marks a selected group header; it replaces the fold and Enter:open hints with a single Enter toggle hint.
 ///
-/// `focus_hint` is how the scrollback says the keyboard can leave it —
-/// [`prompt_focus_hint`], or a caller-supplied replacement. A pinned one
-/// leads the bar and is offered once; an unpinned one is offered only in the
-/// selection states where moving on is the useful next step.
+/// `focus_hint` is how the scrollback says the keyboard can leave it: [`prompt_focus_hint`], or a caller-supplied replacement.
+/// A pinned one leads the bar and is offered once; an unpinned one is offered only in the selection states where moving on is the useful next step.
 #[allow(clippy::too_many_arguments)]
 pub fn build_hints(
     active_pane: ActivePane,
@@ -1828,8 +1803,8 @@ mod tests {
             "mid-turn with composer text must advertise the send-now (interject) chord; got {labels:?}"
         );
     }
-    /// Empty composer + mid-turn queue: bare Enter is send-now in both normal
-    /// and multiline modes (multiline only inserts newline when there is text).
+    /// Empty composer with a mid-turn queue: bare Enter is send-now in both normal and multiline modes.
+    /// Multiline only inserts a newline when there is text.
     #[test]
     fn prompt_empty_mid_turn_queue_advertises_send_now_including_multiline() {
         for multiline in [false, true] {
@@ -1870,12 +1845,9 @@ mod tests {
             );
         }
     }
-    /// Running-turn cancel hint key tracks `esc_would_cancel_turn` — the
-    /// input-routing predicate computed by the caller: Esc when a bare press
-    /// would reach the policy's mid-turn cancel, the registry Ctrl+C binding
-    /// otherwise. (The predicate itself — gate, panes, and higher-priority
-    /// Esc consumers — is pinned by `esc_would_cancel_turn_tests` in
-    /// `agent_view::input`.)
+    /// The running-turn cancel hint key tracks `esc_would_cancel_turn`, the input-routing predicate computed by the caller.
+    /// The key is Esc when a bare press would reach the policy's mid-turn cancel, the registry Ctrl+C binding otherwise.
+    /// (The predicate itself, its gate, panes, and higher-priority Esc consumers, is pinned by `esc_would_cancel_turn_tests` in `agent_view::input`.)
     #[test]
     fn running_turn_cancel_hint_key_tracks_esc_predicate() {
         let prompt = PromptWidget::default();
@@ -1921,10 +1893,9 @@ mod tests {
             );
         }
     }
-    /// Running turn + open scrollback search: the search's own `Esc cancel`
-    /// hint stays the ONLY Esc hint — the CancelTurn hint keeps Ctrl+C (the
-    /// caller's predicate is false while the search would steal Esc), so the
-    /// bar never shows two different `Esc cancel` meanings at once.
+    /// Running turn with an open scrollback search: the search's own `Esc cancel` hint stays the only Esc hint.
+    /// The CancelTurn hint keeps Ctrl+C (the caller's predicate is false while the search would steal Esc).
+    /// The bar therefore never shows two different `Esc cancel` meanings at once.
     #[test]
     fn running_turn_with_scrollback_search_keeps_ctrl_c_cancel_hint() {
         let registry = ActionRegistry::defaults();
@@ -1972,10 +1943,9 @@ mod tests {
             "CancelTurn hint must stay on Ctrl+C while the search owns Esc"
         );
     }
-    /// Running turn + editing a queued prompt: the edit's own `Esc cancel`
-    /// (discard) hint is the ONLY Esc-keyed row — the CancelTurn hint keeps
-    /// Ctrl+C (the caller's predicate is false while the edit owns Esc), so
-    /// the bar never shows two contradictory `Esc cancel` rows.
+    /// Running turn while editing a queued prompt: the edit's own `Esc cancel` (discard) hint is the only Esc-keyed row.
+    /// The CancelTurn hint keeps Ctrl+C (the caller's predicate is false while the edit owns Esc).
+    /// The bar therefore never shows two contradictory `Esc cancel` rows.
     #[test]
     fn running_turn_editing_queued_keeps_ctrl_c_cancel_hint() {
         let registry = ActionRegistry::defaults();
@@ -2340,8 +2310,7 @@ mod tests {
         assert_eq!(layout.plugin_cta, Rect::default());
         assert!(layout.scrollback.height >= 5);
     }
-    /// Banner row (mode banner / ephemeral tip slot): height 1 reserves a
-    /// one-row rect directly above the prompt (gap row in between).
+    /// Banner row (mode banner / ephemeral tip slot): height 1 reserves a one-row rect directly above the prompt (gap row in between).
     #[test]
     fn banner_row_present_above_prompt() {
         let area = Rect::new(0, 0, 80, 40);

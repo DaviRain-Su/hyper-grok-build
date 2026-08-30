@@ -334,9 +334,9 @@ pub fn scan_importable_settings(cwd: &Path) -> ImportPlan {
     let mut plan = ImportPlan::default();
 
     let all_paths = find_claude_settings_paths(cwd);
-    // Use dirs::home_dir() to match the resolution in config.rs and
-    // claude_import_state.rs (consistent across platforms).
-    let home = dirs::home_dir();
+    // The home used for the is_global split must match the resolution in
+    // config.rs and claude_import_state.rs, or scan and hash tiers disagree.
+    let home = xai_dirs::home_dir();
 
     for path in &all_paths {
         let Some(settings) = load_claude_settings(path) else {
@@ -415,7 +415,7 @@ fn scan_claude_path_dirs(cwd: &Path, plan: &mut ImportPlan) {
     let mut global_added: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = xai_dirs::home_dir() {
         for (kind, sub) in [(PathKind::Skill, "skills"), (PathKind::Rule, "rules")] {
             let dir = home.join(".claude").join(sub);
             if dir.is_dir() {
@@ -2066,7 +2066,7 @@ extra_rule_dirs = ["/c/rules"]
 
         // Build a plan by directly invoking the scan with a synthetic plan
         // and a cwd whose `find_project_root` returns the same `home`. We can't
-        // easily mock `dirs::home_dir()`, so this test focuses on the dedup
+        // easily mock `xai_dirs::home_dir()`, so this test focuses on the dedup
         // *logic* by manually populating `global_items` first and then
         // asserting that calling the project-side branch with the same path
         // would skip. Direct end-to-end coverage of the home-collision case

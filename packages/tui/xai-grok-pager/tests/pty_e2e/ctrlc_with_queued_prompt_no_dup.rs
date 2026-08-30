@@ -2,10 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Rewind is SKIPPED when a queued prompt exists: Ctrl+C on the running turn
-/// is a standard cancel (visible marker, A never mixed into the composer),
-/// the queued B promotes as the next turn, and each of A/B renders exactly
-/// once.
+/// With a queued prompt, Ctrl+C skips the rewind: the running turn A gets a standard cancel with a visible marker and never returns to the composer.
+/// The queued B promotes as the next turn, and each of A and B renders exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn ctrlc_with_queued_prompt_no_dup() {
@@ -13,8 +11,7 @@ async fn ctrlc_with_queued_prompt_no_dup() {
     const PROMPT_B: &str = "bravo queued follow";
 
     let content = ContentController::start().await.expect("start content");
-    // Gate turn A's terminal event so the queue + Ctrl+C provably land
-    // mid-turn (the cancel abort beats the held completion).
+    // Gate turn A's terminal event so the queued B and the Ctrl+C provably land mid-turn (the cancel abort beats the held completion)
     let mut turn_a = content
         .expect_agent_turn_blocked("running turn A before cancel", slow_turn_text("ALPHARESP"));
     let _turn_b = content.expect_agent_turn(
@@ -50,25 +47,21 @@ async fn ctrlc_with_queued_prompt_no_dup() {
     harness.inject_keys(keys::CTRL_C).expect("Ctrl+C cancel A");
     turn_a.release();
 
-    // Standard cancel (queued prompts skip the rewind): A is cancelled and B
-    // promotes as the next turn. The "Turn cancelled by user" marker and the
-    // "❯ B" promotion scroll above the viewport once B's start-adoption pins
-    // its block to the head, so gate on B's reply (stable at the head) and
-    // prove correctness via the composer state + the recorded wire below.
+    // Standard cancel (queued prompts skip the rewind): A is cancelled and B promotes as the next turn
+    // When B's turn starts it pins its block to the head, so the "Turn cancelled by user" marker and the "❯ B" promotion scroll above the viewport
+    // Gate on B's reply, which stays at the head, and prove correctness via the composer state and the recorded wire below
     harness
         .wait_for_text("BRAVORESP", Duration::from_secs(90))
         .expect("B promoted and replied");
 
-    // A stayed a committed block — never mixed into the composer.
+    // A stayed a committed block; it never mixed into the composer
     assert!(
         !composer_holds(&harness, PROMPT_A),
         "cancel with a queued prompt must not restore A to the composer\nscreen:\n{}",
         harness.screen_contents()
     );
-    // No duplication: A (cancelled) and B (promoted) each reach the wire
-    // exactly once in the final request — A is not interrupt-dup'd and B is not
-    // double-sent. A visible-line count is unreliable here (A scrolls above the
-    // viewport on B's adoption), so assert against the wire.
+    // No duplication: A (cancelled) and B (promoted) each reach the wire exactly once in the final request
+    // Counting visible lines is unreliable here (A scrolls above the viewport when B's turn starts), so assert against the wire
     let bodies = content.request_bodies();
     let last = bodies.last().expect("final request recorded");
     let user_queries: Vec<String> = last["messages"]

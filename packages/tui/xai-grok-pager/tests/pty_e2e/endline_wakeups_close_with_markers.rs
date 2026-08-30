@@ -1,16 +1,14 @@
-//! PTY: a turn ends with three flag-gated background commands running; each
-//! released flag lands a completion chip, the auto-wake reply, and that wake
-//! turn's own closing marker. Asserts the positional chain marker < chip <
-//! reply per round — FOUR "Worked for" total — and the cue counting 3→2→1→gone.
+//! PTY: a turn ends with three flag-gated background commands running.
+//! Each released flag lands a completion chip, the auto-wake reply, and that wake turn's own closing marker.
+//! Asserts each round orders marker before chip before reply (FOUR "Worked for" total) and the cue counting down 3, 2, 1, gone.
 #[allow(unused_imports)]
 use super::common::*;
 
-/// One flag-gated background command per released flag file.
+/// Each task is one background command gated on its own flag file.
 #[cfg(unix)]
 const TASKS: usize = 3;
 
-/// Taller than [`DEFAULT_ROWS`]: the full chain (initial turn + three wake
-/// turns) must stay on screen at once for the positional asserts.
+/// Taller than [`DEFAULT_ROWS`]: the full chain (the initial turn and three wake turns) must stay on screen at once for the positional asserts.
 #[cfg(unix)]
 const ROWS: u16 = 70;
 
@@ -45,8 +43,7 @@ async fn endline_wakeups_close_with_markers() {
             )
         })
         .collect();
-    // …then a text response ends it with all three still running, followed by
-    // one response for each auto-wake.
+    // …then a text response ends it with all three still running, followed by one response for each auto-wake
     let _settled_turn = content.expect_agent_turn("initial settled turn", "STATUS_TURN_SETTLED");
     let _wake_one = content.expect_agent_turn("first completion wake", "WAKE_REPLY_ONE");
     let _wake_two = content.expect_agent_turn("second completion wake", "WAKE_REPLY_TWO");

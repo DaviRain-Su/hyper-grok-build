@@ -2,8 +2,8 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// A fullscreen⇄minimal round trip retains the committed frontier: the second
-/// minimal stint must not re-print blocks already committed by the first.
+/// A round trip from fullscreen to minimal and back retains the committed frontier.
+/// The second minimal stint must not re-print blocks already committed by the first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_switch_round_trip_no_reprint() {
@@ -87,8 +87,7 @@ async fn minimal_switch_round_trip_no_reprint() {
         .wait_for_full_text(&sentinel_two, Duration::from_secs(30))
         .expect("turn 2 committed in minimal stint 2");
 
-    // Alt-screen frames never enter emulator scrollback, so a second copy can
-    // only come from a duplicate commit.
+    // Alt-screen frames never enter emulator scrollback, so a second copy can only come from a duplicate commit
     let full = harness.full_text();
     let occurrences = full.matches(&sentinel_one).count();
     assert_eq!(

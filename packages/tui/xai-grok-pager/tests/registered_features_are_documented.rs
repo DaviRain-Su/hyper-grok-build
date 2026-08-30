@@ -1,6 +1,5 @@
-//! The registry is the source of truth and the operator tables are
-//! hand-maintained mirrors with no compile-time tripwire of their own. This test
-//! is theirs.
+//! `FEATURES` is the source of truth and the operator tables are hand-maintained mirrors with no compile-time check of their own.
+//! This test is that check.
 
 use xai_grok_shell::agent::config::FEATURES;
 

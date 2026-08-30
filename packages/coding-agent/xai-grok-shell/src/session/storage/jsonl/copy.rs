@@ -510,7 +510,9 @@ fn fork_summary(
     options: &CopySessionOptions,
     counters: ForkCounters,
 ) -> Summary {
-    Summary {
+    let target_worktree_identity =
+        crate::session::worktree::worktree_identity_for_cwd(&target_info.cwd);
+    let mut summary = Summary {
         info: target_info.clone(),
         cwd_generation: source.cwd_generation,
         previous_cwd: source.previous_cwd,
@@ -554,7 +556,11 @@ fn fork_summary(
         generated_title: source.generated_title,
         // A fork keeps the parent's title, so its manual-ness rides along.
         title_is_manual: source.title_is_manual,
-        worktree_label: source.worktree_label,
+        // Re-derived from the target path, never inherited: the source's
+        // label describes the parent's worktree, not this one.
+        worktree_label: target_worktree_identity
+            .as_ref()
+            .map(|identity| identity.label.clone()),
         agent_name: source.agent_name,
         sandbox_profile: source.sandbox_profile,
         reasoning_effort: source.reasoning_effort,
@@ -578,7 +584,17 @@ fn fork_summary(
         } else {
             source.last_recap
         },
+    };
+    if options.session_kind.is_none()
+        && let Some(identity) = &target_worktree_identity
+    {
+        summary.stamp_worktree_identity(identity);
+        // An explicitly provided source still wins over the derived one.
+        if let Some(source_workspace_dir) = &options.source_workspace_dir {
+            summary.source_workspace_dir = Some(source_workspace_dir.clone());
+        }
     }
+    summary
 }
 
 /// Remove `announced_failed_servers` from a copied `announcement_state.json`,

@@ -2,10 +2,9 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Esc policy (idle, empty prompt, NO user turns): **Esc is a swallowed
-/// no-op** — it must NOT focus the scrollback (the pre-port behavior) and must
-/// not panic or arm anything. Guards the `try_handle_esc_policy` final
-/// `Some(InputOutcome::Changed)` swallow branch on a fresh session.
+/// Esc policy (idle, empty prompt, NO user turns): **Esc is a swallowed no-op**.
+/// It must NOT focus the scrollback (the old behavior) and must not panic or arm anything.
+/// Guards the `try_handle_esc_policy` final `Some(InputOutcome::Changed)` swallow branch on a fresh session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn esc_idle_empty_no_messages_is_swallowed_noop() {
@@ -21,8 +20,8 @@ async fn esc_idle_empty_no_messages_is_swallowed_noop() {
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
 
-    // Promote the welcome screen into a real (idle) agent session by typing,
-    // then wipe the draft so the prompt is empty with NO submitted user turn.
+    // Promote the welcome screen into a real (idle) agent session by typing
+    // Then wipe the draft so the prompt is empty with NO submitted user turn
     harness
         .inject_keys(b"NOMSG")
         .expect("type to promote session");
@@ -39,10 +38,9 @@ async fn esc_idle_empty_no_messages_is_swallowed_noop() {
         harness.screen_contents()
     );
 
-    // Esc TWICE on idle + empty + no-messages: a true swallow stays a no-op on
-    // the second press. Pressing once and typing couldn't distinguish a swallow
-    // from a silently-armed rewind (the next keystroke clears any pending); a
-    // wrongly-armed rewind would instead OPEN the picker on the second Esc.
+    // Esc TWICE while idle with an empty prompt and no messages: a true swallow stays a no-op on the second press
+    // Pressing once and typing couldn't distinguish a swallow from a silently-armed rewind (the next keystroke clears any pending)
+    // A wrongly-armed rewind would instead OPEN the picker on the second Esc
     harness.inject_keys(keys::ESC).expect("press esc (1)");
     harness.update(Duration::from_millis(250));
     harness.inject_keys(keys::ESC).expect("press esc (2)");

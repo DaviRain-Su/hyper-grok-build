@@ -498,6 +498,40 @@ async fn max_tokens_with_tool_use_keeps_length_stop() {
     }
 }
 
+/// A tool_use block closed with zero argument deltas collects as an
+/// empty-arguments tool call — the zero-arg shape `LengthPolicy::verdict`
+/// salvages.
+#[tokio::test]
+async fn max_tokens_tool_use_without_arg_deltas_collects_empty_arguments() {
+    let tool_start = MessageStreamEvent::ContentBlockStart {
+        index: 0,
+        content_block: ContentBlock::ToolUse {
+            id: "call_no_args".into(),
+            name: "do_thing".into(),
+            input: serde_json::json!({}),
+            cache_control: None,
+        },
+    };
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(tool_start),
+        Ok(block_stop(0)),
+        Ok(message_delta_with_stop(messages::StopReason::MaxTokens)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    match evs.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            assert_eq!(response.stop_reason, Some(StopReason::Length));
+            assert_eq!(response.tool_calls().len(), 1);
+            assert_eq!(response.tool_calls()[0].arguments.as_ref(), "");
+        }
+        other => panic!("expected Completed(Length), got {other:?}"),
+    }
+}
+
 /// Pins the model_context_window_exceeded decision: maps to the Length stop
 /// class and COMPLETES with the partial preserved — fail-vs-salvage belongs
 /// to `drive_l2`, not this transform.

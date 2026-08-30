@@ -1,9 +1,5 @@
-//! Card state and transitions for the MCP elicitation card.
-//!
-//! The lifecycle is a data-carrying enum: [`ElicitationStage::Form`] and
-//! [`ElicitationStage::UrlConsent`] own the pending ACP responder;
-//! [`ElicitationStage::UrlWaiting`] exists only after the response was sent,
-//! so "still owes a response" is encoded by the stage itself.
+//! The stage is a data-carrying enum: [`ElicitationStage::Form`] and [`ElicitationStage::UrlConsent`] own the pending ACP responder.
+//! [`ElicitationStage::UrlWaiting`] exists only after the response was sent, so the stage itself encodes whether the card still owes a response.
 
 use agent_client_protocol as acp;
 use xai_acp_lib::AcpResult;
@@ -21,8 +17,7 @@ pub type ElicitResponseTx = tokio::sync::oneshot::Sender<AcpResult<acp::ExtRespo
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElicitationFocus {
     Fields,
-    /// Text-field editing, or option-walking inside an expanded
-    /// multi-select — both leave back to [`Self::Fields`] on Esc.
+    /// Text-field editing, or option-walking inside an expanded multi-select; both leave back to [`Self::Fields`] on Esc.
     Editing,
     Actions,
 }
@@ -36,20 +31,16 @@ pub enum ElicitationActionFocus {
 pub struct ElicitationViewState {
     pub tool_call_id: String,
     pub server_name: String,
-    /// Verbatim wire `serverName` for equality against later notifications
-    /// (the display `server_name` above is sanitized/truncated).
+    /// Verbatim wire `serverName` for equality against later notifications (the display `server_name` above is sanitized/truncated).
     pub server_name_wire: String,
     pub message: String,
     pub stage: ElicitationStage,
     pub focus: ElicitationFocus,
     pub action_focus: ElicitationActionFocus,
-    /// First visible body row; the renderer clamps it and keeps the cursor
-    /// row in view.
+    /// First visible body row; the renderer clamps it and keeps the cursor row in view.
     pub scroll: usize,
-    /// The composer draft this card displaced, or `None` when an earlier card
-    /// (permission / question / plan approval) already held the session draft —
-    /// then the live composer was not ours to stash, and closing must not
-    /// restore over whatever that card put back.
+    /// The composer draft this card displaced, or `None` when an earlier card (permission/question/plan approval) already held the session draft.
+    /// In that case the live composer was not ours to stash, and closing must not restore over whatever that card put back.
     pub stashed_prompt: Option<StashedPrompt>,
 }
 
@@ -68,9 +59,8 @@ pub struct FormStage {
 
 pub struct UrlConsentStage {
     pub display: UrlDisplay,
-    /// Why the URL cannot be opened (bad syntax, non-http(s) scheme,
-    /// embedded credentials). `Some` disables Accept — the server can then
-    /// only receive Decline or Cancel, never a false `accept`.
+    /// Why the URL cannot be opened (bad syntax, non-http(s) scheme, embedded credentials).
+    /// `Some` disables Accept, so the server can then only receive Decline or Cancel, never a false `accept`.
     pub invalid: Option<String>,
     pub elicitation_id: String,
     pub response_tx: Option<ElicitResponseTx>,
@@ -81,18 +71,17 @@ pub struct UrlWaitingStage {
     pub elicitation_id: String,
 }
 
-/// The URL as shown (and opened): normalized by the `url` crate when it
-/// parses, with the host split out for emphasis in the card.
+/// The URL as shown (and opened): normalized by the `url` crate when it parses, with the host split out for emphasis in the card.
 pub struct UrlDisplay {
     pub url: String,
     pub host: Option<String>,
-    /// Any host label is Punycode (`xn--`) — surfaced as a spoofing warning.
+    /// True when any host label is Punycode (`xn--`); the card paints it as a spoofing warning.
     pub punycode_host: bool,
 }
 
-/// The editable value of one form field. Exactly one shape is valid per
-/// [`ElicitFieldKind`], so the variant carries only that shape — a boolean
-/// cannot hold a draft, a text field cannot hold selections.
+/// The editable value of one form field.
+/// Exactly one shape is valid per [`ElicitFieldKind`], so the variant carries only that shape.
+/// A boolean cannot hold a draft, a text field cannot hold selections.
 pub enum FieldValueUi {
     /// String / Number / Integer: the raw text draft.
     Text {
@@ -105,8 +94,7 @@ pub enum FieldValueUi {
     Choice {
         index: Option<usize>,
     },
-    /// Multi-select: per-option toggles (aligned with the spec's options)
-    /// and the highlighted option while the field is expanded.
+    /// Multi-select: per-option toggles (aligned with the spec's options) and the highlighted option while the field is expanded.
     Multi {
         selected: Vec<bool>,
         cursor: usize,
@@ -147,8 +135,7 @@ impl FieldValueUi {
         }
     }
 
-    /// The submitted-value view of this field, borrowing `index_buf` for a
-    /// multi-select's selected indexes.
+    /// The submitted-value view of this field, borrowing `index_buf` for a multi-select's selected indexes.
     fn as_submission<'a>(&'a self, index_buf: &'a [usize]) -> ElicitFieldValue<'a> {
         match self {
             Self::Text { draft } => ElicitFieldValue::Draft(draft),
@@ -160,8 +147,7 @@ impl FieldValueUi {
     }
 }
 
-/// Per-field UI state over the immutable schema [`ElicitFieldSpec`]:
-/// the editable value and the last validation error shown.
+/// Per-field UI state over the immutable schema [`ElicitFieldSpec`]: the editable value and the last validation error shown.
 pub struct FormFieldUi {
     pub spec: ElicitFieldSpec,
     pub value: FieldValueUi,
@@ -244,9 +230,8 @@ impl FormFieldUi {
     }
 }
 
-/// Server-controlled text is painted straight into the terminal buffer:
-/// strip the shared unsafe set (escape/control injection, bidi spoofing)
-/// before capping length.
+/// Server-controlled text is painted straight into the terminal buffer.
+/// Strip the shared unsafe set (escape/control injection, bidi spoofing) before capping length.
 fn sanitize_server_text(raw: &str, max_chars: usize) -> String {
     let cleaned: String = raw
         .chars()
@@ -256,8 +241,7 @@ fn sanitize_server_text(raw: &str, max_chars: usize) -> String {
 }
 
 /// Sanitize every server-derived display string of a parsed field spec.
-/// Option `value`s are echoed back to the server verbatim and never painted
-/// (the display side is `label`), so they are left untouched.
+/// Option `value`s are echoed back to the server verbatim and never painted (the display side is `label`), so they are left untouched.
 fn sanitize_spec(spec: &mut ElicitFieldSpec) {
     spec.title = sanitize_server_text(&spec.title, MAX_ELICIT_TITLE_CHARS);
     if let Some(desc) = &spec.description {
@@ -285,10 +269,8 @@ fn sanitize_spec(spec: &mut ElicitFieldSpec) {
     }
 }
 
-/// Validate a URL elicitation target before it is ever offered for consent:
-/// it must parse, be plain http(s), and carry no embedded credentials. The
-/// returned URL is the parser's normalized form (Unicode hosts render as
-/// their Punycode labels, which the card then flags).
+/// Validate a URL elicitation target before it is ever offered for consent: it must parse, be plain http(s), and carry no embedded credentials.
+/// The returned URL is the parser's normalized form (Unicode hosts render as their Punycode labels, which the card then flags).
 pub(super) fn check_elicit_url(raw: &str) -> Result<UrlDisplay, String> {
     let parsed = url::Url::parse(raw.trim()).map_err(|_| "malformed URL".to_string())?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -481,11 +463,10 @@ impl ElicitationViewState {
         }
     }
 
-    /// Shared focus movement for the walk keys. `wrap` distinguishes
-    /// Tab/Shift+Tab (wrap between the field list and the action rows at both
-    /// ends) from Down/Up/j/k (clamp at the edges: Down stops on Decline, Up
-    /// stops on the first field). Editing focus never moves from here — the
-    /// key handler exits edit mode before dispatching a walk.
+    /// Shared focus movement for the walk keys.
+    /// `wrap` separates Tab/Shift+Tab (wrap at both ends between the field list and the action rows) from Down/Up/j/k (clamp at the edges).
+    /// At the clamped edges, Down stops on Decline and Up stops on the first field.
+    /// Editing focus never moves from here; the key handler exits edit mode before dispatching a walk.
     pub fn move_focus(&mut self, forward: bool, wrap: bool) {
         let n = self.field_count();
         match self.focus {
@@ -502,8 +483,7 @@ impl ElicitationViewState {
                     self.focus = ElicitationFocus::Actions;
                     self.action_focus = ElicitationActionFocus::Decline;
                 } else {
-                    // Clamps at the first field (and parks a zero-field form
-                    // on the actions).
+                    // Clamps at the first field (and parks a zero-field form on the actions)
                     self.move_field(-1);
                 }
             }
@@ -565,8 +545,8 @@ impl ElicitationViewState {
         }
     }
 
-    /// Enter text editing on a String / Number / Integer field, or expand a
-    /// multi-select into option-walking. Both use [`ElicitationFocus::Editing`].
+    /// Enter text editing on a String / Number / Integer field, or expand a multi-select into option-walking.
+    /// Both use [`ElicitationFocus::Editing`].
     pub fn enter_edit_or_options(&mut self) -> bool {
         let Some(field) = self.current_field() else {
             return false;
@@ -579,8 +559,7 @@ impl ElicitationViewState {
         }
     }
 
-    /// Enter text editing only (typing a character must not expand a
-    /// multi-select).
+    /// Enter text editing only (typing a character must not expand a multi-select).
     pub fn enter_edit_if_text(&mut self) -> bool {
         if self.current_field().is_some_and(|f| f.is_text()) {
             self.focus = ElicitationFocus::Editing;
@@ -591,8 +570,7 @@ impl ElicitationViewState {
     }
 
     pub fn append_char(&mut self, c: char) {
-        // Drafts echo back onto the terminal; reject pasted escapes and
-        // bidi/format characters at the single ingestion point.
+        // Drafts echo back onto the terminal; reject pasted escapes and bidi/format characters here, the one place characters enter
         if c.is_control() || crate::render::line_utils::is_unsafe_display_char(c) {
             return;
         }
@@ -617,8 +595,8 @@ impl ElicitationViewState {
         }
     }
 
-    /// Move the option cursor of the expanded multi-select. Returns false
-    /// when the current field is not an expanded multi-select.
+    /// Move the option cursor of the expanded multi-select.
+    /// Returns false when the current field is not an expanded multi-select.
     pub fn move_option_cursor(&mut self, delta: isize) -> bool {
         let Some(field) = self.current_field_mut() else {
             return false;
@@ -644,10 +622,9 @@ impl ElicitationViewState {
         field.toggle_option(cursor);
     }
 
-    /// Build the Accept response when the card is in an acceptable state:
-    /// a form that validates, or a consent-phase URL that passed the URL
-    /// checks. `None` leaves the card open (field errors are set on the
-    /// form). URL waiting has no response left to build.
+    /// Build the Accept response when the card is in an acceptable state: a form that validates, or a consent-phase URL that passed the checks.
+    /// `None` leaves the card open (field errors are set on the form).
+    /// URL waiting has no response left to build.
     pub fn try_accept(&mut self) -> Option<McpElicitExtResponse> {
         match &mut self.stage {
             ElicitationStage::UrlConsent(consent) => {
@@ -710,11 +687,9 @@ impl ElicitationViewState {
         }
     }
 
-    /// Send the response on the stage's pending responder. Returns whether
-    /// it was actually delivered to a live request — `false` means the MCP
-    /// side already abandoned it (server cancel / teardown), so callers must
-    /// not act as if the server heard the answer (e.g. must not open a URL
-    /// or enter the waiting stage).
+    /// Send the response on the stage's pending responder.
+    /// Returns whether it was actually delivered to a live request.
+    /// `false` means the MCP side already abandoned it (server cancel / teardown), so callers must not open a URL or enter the waiting stage.
     #[must_use]
     pub fn send_response(&mut self, response: McpElicitExtResponse) -> bool {
         let Some(tx) = self.take_response_tx() else {
@@ -726,7 +701,7 @@ impl ElicitationViewState {
         tx.send(Ok(acp::ExtResponse::new(raw.into()))).is_ok()
     }
 
-    /// Consent → waiting transition, after the Accept response was sent.
+    /// Move from the consent stage to the waiting stage, after the Accept response was sent.
     /// No-op for other stages.
     pub fn begin_url_waiting(&mut self) {
         if let ElicitationStage::UrlConsent(consent) = &mut self.stage {

@@ -1,7 +1,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Verifies path-free preview metadata appears and dismisses on a non-graphics PTY.
+/// Pasting a bare image path on a PTY without graphics support renders the chip without the path and shows the preview metadata.
+/// Typing afterwards dismisses the preview but keeps the chip.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn image_chip_preview_path_free_pty() {
@@ -22,7 +23,7 @@ async fn image_chip_preview_path_free_pty() {
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
 
-    // Bracketed-paste the bare path alone so drop-classifier turns it into a chip.
+    // Bracketed-paste the bare path alone so the drop classifier turns it into a chip
     harness
         .inject_keys(format!("\x1b[200~{}\x1b[201~", path_str).as_bytes())
         .expect("paste png path");
@@ -30,7 +31,7 @@ async fn image_chip_preview_path_free_pty() {
         .wait_for_text("Image #1", Duration::from_secs(15))
         .expect("image chip attached");
 
-    // Allow a frame for the preview overlay to paint (cursor is post-chip).
+    // Allow a frame for the preview overlay to paint (the cursor sits after the chip)
     harness.update(Duration::from_millis(400));
 
     let screen = harness.screen_contents();

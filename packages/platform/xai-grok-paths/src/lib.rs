@@ -25,15 +25,15 @@ pub enum RelPathError {
 
 /// Convert a path to absolute given a root directory.
 ///
-/// For absolute paths, the `root` is ignored. For relative paths, joins with `root`.
+/// For absolute paths, the `root` is ignored. Relative paths are joined with `root`.
 pub trait ToAbsPath {
     fn to_abs_path(&self, root: &Path) -> Cow<'_, Path>;
 }
 
 /// Convert an absolute path to relative by stripping the root prefix.
 ///
-/// Returns the path unchanged if not under `root`. For strict validation,
-/// use [`RelPathBuf::from_absolute`] instead.
+/// Returns the path unchanged if not under `root`.
+/// For strict validation, use [`RelPathBuf::from_absolute`] instead.
 pub fn to_relative_path(root: &Path, abs_path: &Path) -> PathBuf {
     abs_path
         .strip_prefix(root)
@@ -52,10 +52,9 @@ pub fn from_relative_path(root: &Path, rel_path: &Path) -> PathBuf {
 
 /// Resolve `.` and `..` components without touching the filesystem.
 ///
-/// Use only for lexical display or containment. If `b` is a symlink,
-/// normalizing `a/b/../c` can name a different filesystem target than the OS
-/// would resolve from the original spelling. Filesystem consumers must preserve
-/// the original path or deliberately canonicalize it before use.
+/// Use only for lexical display or containment.
+/// If `b` is a symlink, normalizing `a/b/../c` can name a different filesystem target than the OS would resolve from the original spelling.
+/// Filesystem consumers must preserve the original path or deliberately canonicalize it before use.
 pub fn normalize_lexically(path: &Path) -> PathBuf {
     use std::path::Component;
 
@@ -228,7 +227,7 @@ impl RelPathBuf {
         }
     }
 
-    /// Create by stripping root prefix. Errors if path not under root.
+    /// Create by stripping the root prefix. Errors if the path is not under root.
     pub fn from_absolute(root: &Path, abs_path: &Path) -> Result<Self, RelPathError> {
         let relative = abs_path
             .strip_prefix(root)
@@ -370,9 +369,9 @@ mod tests {
         assert!(!cwd.contains_path(&AbsPathBuf::new("/a/b/..".into()).unwrap()));
         assert!(!cwd.contains_path(&AbsPathBuf::new("/a/b/../c".into()).unwrap()));
 
-        // going above root and back should normalize to under cwd
+        // Going above root and back normalizes to a path under cwd
         assert!(cwd.contains_path(&AbsPathBuf::new("/a/b/../../../a/b".into()).unwrap()));
-        // excessive above root still normalizes to root level
+        // Extra `..` components above root still normalize to root level
         assert!(!cwd.contains_path(&AbsPathBuf::new("/a/b/../../../../../c".into()).unwrap()));
     }
 

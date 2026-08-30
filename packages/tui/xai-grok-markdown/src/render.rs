@@ -1,7 +1,6 @@
-//! Markdown renderer - transforms parsed markdown buffers into styled output.
+//! Markdown renderer: transforms parsed markdown buffers into styled output.
 //!
-//! After parsing with `MarkdownParser`, use `ParsedMarkdown` to render
-//! to either ratatui Lines or ANSI strings.
+//! After parsing with `MarkdownParser`, use `ParsedMarkdown` to render to either ratatui Lines or ANSI strings.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -12,7 +11,9 @@ use anstyle::{Effects, Reset, Style};
 use ratatui::text::{Line, Span};
 use syntect::highlighting::Style as SyntectStyle;
 
-use crate::buffers::{MarkdownBuffers, RenderEvent, RenderEventKind, unicode_display_width};
+use crate::buffers::{
+    MarkdownBuffers, RenderEvent, RenderEventKind, TableCopyMeta, unicode_display_width,
+};
 use crate::checkpoint::Checkpoint;
 use crate::colors::adapt_style;
 use crate::hyperlinks::{ChunkLinkRange, chunk_link_offsets, emit_segment_hyperlinks};
@@ -269,9 +270,8 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
     pub fn render_ansi(&mut self, pretty: bool) -> (String, SourceMap) {
         let events = self.build_render_events();
 
-        // Apply force transforms in place over a copy of `self.text` so
-        // the ANSI path picks them up without restructuring `push`. See
-        // `Transform::force` for the byte-length invariant.
+        // Apply force transforms in place over a copy of `self.text` so the ANSI path picks them up without restructuring `push`
+        // See `Transform::force` for the byte-length invariant
         let text_owned: Option<String> = if self.buffers.transforms.iter().any(|t| t.force) {
             let mut bytes = self.text.as_bytes().to_vec();
             for t in &self.buffers.transforms {
@@ -431,10 +431,8 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                         );
 
                         let trepl = &self.buffers.table_replaces[ev.index];
-                        // Block lines must start at a line boundary; a
-                        // display-math replacement can occur mid-paragraph.
-                        // Styled chunks end with a reset sequence after the
-                        // newline, so check both forms.
+                        // Block lines must start at a line boundary; a display-math replacement can occur mid-paragraph
+                        // Styled chunks end with a reset sequence after the newline, so check both forms
                         let at_line_start =
                             out.is_empty() || out.ends_with('\n') || out.ends_with("\n\x1b[0m");
                         if !at_line_start {
@@ -447,8 +445,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                             rendered_offset += line.len() + 1;
                         }
                         last_pos = trepl.range.end;
-                        // Advance `current` past the table so trailing text
-                        // doesn't merge back to the pre-table position.
+                        // Advance `current` past the table so trailing text doesn't merge back to the pre-table position
                         current.0 = trepl.range.end..trepl.range.end;
                     }
                 }
@@ -516,7 +513,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
     /// If `pretty` is true, syntax markers are hidden.
     /// Returns rendered lines, line source map, and optional checkpoint.
     pub fn render_ratatui(&mut self, pretty: bool) -> (MarkdownRenderOutput, Option<Checkpoint>) {
-        // Build render events
         let render_events = self.build_render_events();
 
         self.buffers.current_spans.clear();
@@ -525,6 +521,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut line_source_map: Vec<usize> = Vec::new();
         let mut hyperlinks: Vec<HyperlinkTarget> = Vec::new();
+        let mut tables: Vec<TableCopyMeta> = Vec::new();
 
         let mut last_pos = 0;
         let mut replace: Option<usize> = None;
@@ -539,7 +536,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
         let checkpoint_info = self.last_checkpoint;
         let mut checkpoint_output_lines: Option<usize> = None;
 
-        // Style already adapted - no need to call adapt_style again
+        // Style already adapted, no need to call adapt_style again
         let code_bg_style: ratatui::style::Style = self.ms.code_background.style_into();
 
         let in_untagged_code = |pos: usize, buffers: &MarkdownBuffers| -> bool {
@@ -560,8 +557,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
             let to = to.min(text.len());
             let from = from.min(to);
             // Use as_bytes() to avoid panicking on non-char-boundary offsets.
-            // This is safe because '\n' (0x0A) is a single-byte ASCII value
-            // that can never appear as a UTF-8 continuation byte (0x80..0xBF).
+            // This is safe because '\n' (0x0A) is a single-byte ASCII value that can never appear as a UTF-8 continuation byte (0x80..0xBF)
             text.as_bytes()[from..to]
                 .iter()
                 .filter(|&&b| b == b'\n')
@@ -574,9 +570,8 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                 && mermaid_replace.is_none()
                 && ev.pos > last_pos
             {
-                // Check if we need to split text processing at the checkpoint boundary.
-                // If last_pos < cp_byte <= ev.pos, we process in two parts:
-                // 1. Process [last_pos..cp_byte], capture lines.len(), process [cp_byte..ev.pos]
+                // Split text processing at the checkpoint boundary when last_pos < cp_byte <= ev.pos:
+                // process [last_pos..cp_byte], capture lines.len(), then process [cp_byte..ev.pos]
                 let split_at_checkpoint = checkpoint_output_lines.is_none()
                     && checkpoint_info
                         .map(|(_, cp_byte)| last_pos < cp_byte && cp_byte <= ev.pos)
@@ -584,14 +579,11 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
 
                 let cp_byte = checkpoint_info.map(|(_, cp)| cp).unwrap_or(0);
 
-                // Snap cp_byte to the nearest char boundary.  Checkpoint byte
-                // offsets come from pulldown-cmark event ranges which should
-                // always be char-aligned, but in edge cases (e.g., thematic
-                // breaks followed by headings with multi-byte chars) the
-                // position can land mid-character.  Snapping forward is safe
-                // because it only affects where we split the text for line
-                // counting — a few extra or fewer newlines in the first vs
-                // second range doesn't change the total count.
+                // Snap cp_byte to the nearest char boundary
+                // Checkpoint byte offsets come from pulldown-cmark event ranges, which should always be char-aligned
+                // In edge cases (e.g., thematic breaks followed by headings with multi-byte chars) the position can land mid-character
+                // Snapping forward is safe: it only affects where we split the text for line counting
+                // A few extra or fewer newlines in the first vs second range doesn't change the total count
                 let cp_byte = {
                     let mut b = cp_byte;
                     while b < self.text.len() && !self.text.is_char_boundary(b) {
@@ -600,7 +592,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                     b
                 };
 
-                // Determine ranges to process
                 let ranges: &[(usize, usize)] = if split_at_checkpoint {
                     // Process in two parts, capturing checkpoint between them
                     &[(last_pos, cp_byte), (cp_byte, ev.pos)]
@@ -611,10 +602,9 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
 
                 for (range_idx, &(range_start, range_end)) in ranges.iter().enumerate() {
                     // After processing the first range when splitting, capture checkpoint.
-                    // Flush any pending spans to `lines` first — content like a thematic
-                    // break (`───`) may sit in `current_spans` without a trailing newline
-                    // to flush it.  Without this flush, the checkpoint's `output_lines`
-                    // count would be too low, causing the line to vanish on re-render.
+                    // Flush any pending spans to `lines` first
+                    // Content like a thematic break (`───`) may sit in `current_spans` with no trailing newline to flush it
+                    // Without this flush, the checkpoint's `output_lines` count would be too low, causing the line to vanish on re-render
                     if split_at_checkpoint && range_idx == 1 {
                         if !self.buffers.current_spans.is_empty() {
                             line_source_map.push(current_source_line);
@@ -649,17 +639,14 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                             || self.text.as_bytes().get(range_start - 1) == Some(&b'\n');
                         if at_line_start {
                             // Check if this hidden block is a code fence (``` or ~~~).
-                            // Only code fences need separator handling — heading markers
-                            // (#) are also hidden at line start but are unpaired.
+                            // Only code fences need separator handling; heading markers (#) are also hidden at line start but are unpaired
                             let hidden_text = self.text[range_start..range_end].trim_start();
                             let is_code_fence =
                                 hidden_text.starts_with("```") || hidden_text.starts_with("~~~");
 
                             if is_code_fence {
-                                // Emit a blank separator before an OPENING fence (not
-                                // closing). Prevents adjacent blocks (e.g., list → code)
-                                // from collapsing their visual boundary when the hidden
-                                // fence markers are removed in pretty mode.
+                                // Emit a blank separator before an OPENING fence (not closing)
+                                // Otherwise adjacent blocks (a list then a code block) collapse together once pretty mode hides the fence markers
                                 if !in_hidden_code_block
                                     && lines.last().is_some_and(|l| l.width() > 0)
                                 {
@@ -695,11 +682,8 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                             let chunk_src_start = text_start;
                             let chunk_src_end = text_start + text.len();
 
-                            // Advance the cursor past links that ended before
-                            // this chunk starts, then check if any remaining
-                            // link overlaps the chunk.  Skip all hyperlink
-                            // bookkeeping when none does — keeps the no-link
-                            // hot path identical to the pre-feature renderer.
+                            // Advance the cursor past links that ended before this chunk starts, then check if any remaining link overlaps it
+                            // When none does, skip all hyperlink bookkeeping so the common no-link chunk does no extra work
                             while next_link_idx < self.buffers.link_targets.len()
                                 && self.buffers.link_targets[next_link_idx].source_range.end
                                     <= chunk_src_start
@@ -800,8 +784,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                                 let full_style = anstyle_syntect::to_anstyle(*syn_style);
                                 let with_bg =
                                     full_style.bg_color(self.ms.code_background.get_bg_color());
-                                // This is the only legitimate inline adapt_style call
-                                // for dynamically created syntect+background combo
+                                // This is the only legitimate inline adapt_style call for a dynamically created syntect+background combo
                                 let adapted = adapt_style(with_bg);
                                 let ratatui_style: ratatui::style::Style = adapted.style_into();
 
@@ -856,17 +839,14 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                         table_replace = Some(ev.index);
                         let trepl = &self.buffers.table_replaces[ev.index];
 
-                        // Flush any in-progress inline spans first. Tables
-                        // always start at a line boundary (no-op), but a
-                        // display-math block replacement can occur
-                        // mid-paragraph (`text $$x$$ more`): without the
-                        // flush, the pending "text " spans would be emitted
-                        // AFTER the block lines.
+                        // Flush any in-progress inline spans first
+                        // Tables always start at a line boundary, so for them this is a no-op
+                        // A display-math block replacement can occur mid-paragraph (`text $$x$$ more`)
+                        // Without the flush, the pending "text " spans would be emitted AFTER the block lines
                         if !self.buffers.current_spans.is_empty() {
                             line_source_map.push(current_source_line);
                             lines.push(Line::from(std::mem::take(&mut self.buffers.current_spans)));
-                            // cur_col_in_line is reset unconditionally after
-                            // the block lines are emitted below.
+                            // cur_col_in_line is reset unconditionally after the block lines are emitted below
                         }
 
                         // Update source line to table start
@@ -890,8 +870,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                             line_source_map.push(current_source_line);
                             lines.push(styled_line.clone());
                         }
-                        // Translate table-local hyperlink coordinates into
-                        // absolute line indices and append to the global list.
+                        // Translate table-local hyperlink coordinates into absolute line indices and append to the global list
                         for link in &trepl.hyperlinks {
                             hyperlinks.push(HyperlinkTarget {
                                 line_index: table_base_line + link.line_offset,
@@ -900,8 +879,15 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                                 id: link.id,
                             });
                         }
-                        // Table emits whole pre-rendered lines; reset col so
-                        // any subsequent inline content starts at column 0.
+                        if trepl.n_cols > 0 {
+                            tables.push(TableCopyMeta {
+                                line_index: table_base_line,
+                                line_count: trepl.styled_lines.len(),
+                                n_cols: trepl.n_cols,
+                                cells: trepl.cell_copies.clone(),
+                            });
+                        }
+                        // Table emits whole pre-rendered lines; reset col so any subsequent inline content starts at column 0
                         cur_col_in_line = 0;
 
                         last_pos = trepl.range.end;
@@ -967,10 +953,8 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
         // Handle remaining text
         let len = self.text.len();
         if last_pos < len {
-            // Apply force transforms only; non-force transforms have
-            // never been applied in this trailing path and force
-            // transforms preserve byte length so source offsets below
-            // stay valid.
+            // Apply force transforms only; non-force transforms have never been applied in this trailing path
+            // Force transforms preserve byte length, so source offsets below stay valid
             let raw = &self.text[last_pos..len];
             let transformed = self.apply_transforms(raw, last_pos, false);
             debug_assert_eq!(transformed.len(), raw.len());
@@ -986,8 +970,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                 let chunk_src_start = last_pos;
                 let chunk_src_end = last_pos + text.len();
 
-                // Same cursor-skip pattern as the main path: keep the no-link
-                // hot path identical to the pre-feature renderer.
+                // Same cursor-skip pattern as the main path: a no-link chunk skips all hyperlink bookkeeping
                 while next_link_idx < self.buffers.link_targets.len()
                     && self.buffers.link_targets[next_link_idx].source_range.end <= chunk_src_start
                 {
@@ -996,8 +979,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                 let chunk_has_links = next_link_idx < self.buffers.link_targets.len()
                     && self.buffers.link_targets[next_link_idx].source_range.start < chunk_src_end;
 
-                // Trailing text bypasses apply_transforms (it's emitted raw),
-                // so transformed offsets equal source offsets within the chunk.
+                // Trailing text bypasses apply_transforms (it's emitted raw), so transformed offsets equal source offsets within the chunk
                 let chunk_links: Vec<ChunkLinkRange> = if chunk_has_links {
                     chunk_link_offsets(
                         &self.buffers.link_targets,
@@ -1060,9 +1042,8 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
             }
         }
 
-        // Emit final line. Use the membership of the chunk that produced these spans:
-        // an unterminated bare fence ends its range exactly at last_pos (EOF) and the
-        // range check is end-exclusive, so recomputing here would drop the code bg.
+        // Emit final line. Use the code-block membership of the chunk that produced these spans, not a recomputed one.
+        // An unterminated bare fence ends its range exactly at last_pos (EOF); the end-exclusive range check there would drop the code bg
         if !self.buffers.current_spans.is_empty() {
             line_source_map.push(current_source_line);
             let final_is_code = pending_line_is_code;
@@ -1074,39 +1055,21 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
             });
         }
 
-        // If checkpoint wasn't captured during event processing, compute it based on
-        // the number of newlines in the text up to checkpoint byte.
+        // If checkpoint wasn't captured during event processing, compute it based on the number of newlines in the text up to checkpoint byte
         // This handles cases where there are no events past the checkpoint (e.g., incomplete list items).
         if checkpoint_output_lines.is_none()
             && let Some((_, cp_byte)) = checkpoint_info
         {
-            // Count newlines in text before the checkpoint byte.
-            // Each newline ENDS a line, so N newlines = N complete lines.
-            // However, we need to account for blank lines that are absorbed
-            // into the block separator. The checkpoint is at the start of
-            // the NEXT block, so lines from the frozen content should not
-            // include any content that starts at or after cp_byte.
-            //
-            // More precise approach: count how many output lines have their
-            // content entirely before cp_byte. This is tricky without tracking
-            // each line's byte range.
-            //
-            // Logic:
-            // - Each newline ENDS a line
-            // - Use line_source_map to find output lines before checkpoint
-            // - line_source_map[i] is the source line at which output line i was created
-            // - source_line_at_cp is the source line containing cp_byte
-            // - Output lines with source_line < source_line_at_cp are complete before checkpoint
+            // The checkpoint is at the start of the NEXT block, so the frozen content must not include anything at or after cp_byte
+            // line_source_map[i] is the source line at which output line i was created; source_line_at_cp is the source line containing cp_byte
 
             let source_line_at_cp = self.text[..cp_byte.min(self.text.len())]
                 .bytes()
                 .filter(|&b| b == b'\n')
                 .count();
 
-            // When the checkpoint is at or past the end of the text, ALL output
-            // lines belong to the frozen content (the entire input was consumed
-            // by the checkpointed block).  Otherwise, output lines created at
-            // source lines strictly before the checkpoint source line are frozen.
+            // When the checkpoint is at or past the end of the text, ALL output lines are frozen (the checkpointed block consumed the entire input)
+            // Otherwise, output lines created at source lines strictly before the checkpoint source line are frozen
             let complete_lines = if cp_byte >= self.text.len() {
                 lines.len()
             } else {
@@ -1128,8 +1091,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
             _ => None,
         };
 
-        // Now that `line_source_map` is final, map each parsed code block's
-        // body onto its rendered (pre-wrap) line range.
+        // Now that `line_source_map` is final, map each parsed code block's body onto its rendered (pre-wrap) line range
         let text = self.text;
         let code_blocks = crate::output::build_code_block_spans(
             text,
@@ -1143,6 +1105,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                 line_source_map,
                 hyperlinks,
                 code_blocks,
+                tables,
             },
             checkpoint,
         )
@@ -1202,8 +1165,7 @@ mod tests {
     }
 
     /// Pretty mode must remove the opening `[` from `[text](url)` links.
-    /// Regression test: apply_transforms treated replace-with-empty-string
-    /// as "no transform applied" because it checked `result.is_empty()`.
+    /// Regression test: apply_transforms treated replace-with-empty-string as "no transform applied" because it checked `result.is_empty()`.
     #[test]
     fn test_pretty_link_bracket_removed() {
         let text = "Here is a [link](https://example.com) in text.\n\n";
@@ -1266,9 +1228,8 @@ mod tests {
 
     #[test]
     fn test_emoji_after_thematic_break_does_not_panic() {
-        // "---\n\n## 📐 H\n\n" — 📐 is at bytes 8..12, checkpoint offset
-        // lands at byte 10 (inside the emoji), causing a panic in
-        // count_newlines_in_range which does text[from..to].
+        // In "---\n\n## 📐 H\n\n", 📐 is at bytes 8..12 and the checkpoint offset lands at byte 10 (inside the emoji)
+        // That panics in count_newlines_in_range, which does text[from..to]
         let md = "---\n\n## 📐 H\n\n";
         let (_output, _cp) = render_markdown_ratatui_full(md, test_style::STYLE, true, None);
     }
@@ -1285,7 +1246,6 @@ mod tests {
         let hello_idx = text.iter().position(|l| l.contains("Hello")).unwrap();
         let world_idx = text.iter().position(|l| l.contains("world")).unwrap();
 
-        // There should be at least one blank line between them
         assert!(
             world_idx - hello_idx >= 2,
             "Expected blank line between list item and code block. \
@@ -1319,8 +1279,7 @@ mod tests {
         }
     }
 
-    /// Regression: an unterminated bare fence with no trailing newline (the tail of a
-    /// streamed message) must keep code_background on its final line.
+    /// Regression: an unterminated bare fence with no trailing newline (the tail of a streamed message) must keep code_background on its final line.
     #[test]
     fn test_unterminated_untagged_fence_final_line_has_bg() {
         use ratatui::style::Color;
@@ -1355,7 +1314,7 @@ mod tests {
 
         let md = "| Column A | Column B | Column C |\n|----------|----------|----------|\n| value 1  | value 2  | value 3  |\n\n";
 
-        // Render without constraint — table uses natural widths
+        // Render without constraint: the table uses natural widths
         let (output_full, _) = render_markdown_ratatui_full(md, test_style::STYLE, true, None);
         let full_lines = lines_to_text(&output_full.lines);
         let full_max_width = full_lines.iter().map(|l| l.width()).max().unwrap_or(0);
@@ -1412,8 +1371,7 @@ mod tests {
         let text = lines_to_text(&output.lines);
         eprintln!("Wrapped table: {text:#?}");
 
-        // The header "Very Long Column Name" should be wrapped across multiple lines
-        // since it doesn't fit in the constrained column width.
+        // The header "Very Long Column Name" should be wrapped across multiple lines since it doesn't fit in the constrained column width
         // All content should still be present (no truncation).
         let all_text: String = text.join("");
         assert!(
@@ -1447,7 +1405,7 @@ mod tests {
         assert_eq!(words("a-b-c"), vec!["[a-|]", "[b-|]", "[c|]"]);
 
         // Unequal sides: punct attaches to shorter side to minimize max
-        // ABCD-EFG: left gives max(5,3)=5, right gives max(4,4)=4 → right
+        // ABCD-EFG: left gives max(5,3)=5, right gives max(4,4)=4, so right wins
         assert_eq!(words("ABCD-EFG"), vec!["[ABCD|]", "[-EFG|]"]);
 
         // Comma and dot between digits stay together (number formatting)
@@ -1457,25 +1415,22 @@ mod tests {
 
         // Hyphens between digits are breakable (phones, dates, IDs)
         // Attachment is chosen to minimize max segment width.
-        // 2019-03-15: right gives max(4,3,3)=4 < left max(5,3,2)=5
+        // 2019-03-15: right gives max(4,3,3)=4, left gives max(5,3,2)=5, so right wins
         assert_eq!(words("2019-03-15"), vec!["[2019|]", "[-03|]", "[-15|]"]);
-        // 555-0101: right gives max(3,5)=5 vs left max(4,4)=4 → left
+        // 555-0101: right gives max(3,5)=5 vs left max(4,4)=4, so left wins
         assert_eq!(words("555-0101"), vec!["[555-|]", "[0101|]"]);
         // Verify a full phone number breaks correctly
         let phone = words("+44-20-7555-0118");
-        // All segments should be present, phone is breakable
         assert!(phone.len() > 1, "phone number should be breakable");
         assert_eq!(
             words("(415) 555-0101"),
             vec!["[(415)| ]", "[555-|]", "[0101|]"]
         );
-        // EMP-1001: no digit before `-`, and `1` after is not alphabetic →
-        // stays together (it's an ID, not digit-punct-digit)
+        // EMP-1001: no digit before `-` and `1` after is not alphabetic, so it stays together (an ID, not digit-punct-digit)
         assert_eq!(words("EMP-1001"), vec!["[EMP-1001|]"]);
     }
 
-    /// URLs should be treated as unbreakable words so that terminal
-    /// Cmd+Click detection works when table cells wrap.
+    /// URLs should be treated as unbreakable words so that terminal Cmd+Click detection works when table cells wrap.
     #[test]
     fn test_table_cell_url_not_broken() {
         use crate::parse::cell_word_separator;
@@ -1532,8 +1487,7 @@ mod tests {
         );
     }
 
-    /// Inline formatting (bold, italic, code) should be preserved per-span
-    /// when table cells are wrapped across multiple visual lines.
+    /// Inline formatting (bold, italic, code) should be preserved per-span when table cells are wrapped across multiple visual lines.
     #[test]
     fn test_table_preserves_inline_formatting() {
         // Table with inline code in a cell
@@ -1549,8 +1503,7 @@ mod tests {
             Some(30), // narrow enough to force wrapping in column B
         );
 
-        // Find the lines that contain "abc" — they should have a styled span
-        // with the code style, not just plain text.
+        // Find the lines that contain "abc"; they should have a styled span with the code style, not just plain text
         let mut found_code_span = false;
         for line in &output.lines {
             for span in &line.spans {
@@ -1571,14 +1524,12 @@ mod tests {
         );
     }
 
-    /// Regression: table cells containing multi-byte UTF-8 characters (em-dash '—',
-    /// CJK, emoji, etc.) could panic with "byte index N is not a char boundary"
-    /// when cell wrapping causes `prev_len` (sum of wrapped-line byte lengths) to
-    /// land inside a multi-byte character sequence.
+    /// Regression: table cells with multi-byte UTF-8 characters (em-dash '—', CJK, emoji) could panic with "byte index N is not a char boundary".
+    /// Cell wrapping can make `prev_len` (the sum of wrapped-line byte lengths) land inside a multi-byte character sequence.
     #[test]
     fn test_table_cell_with_multibyte_chars_does_not_panic() {
-        // Em-dash '—' is 3 bytes (0xE2 0x80 0x94). Force wrapping so the
-        // prev_len calculation for the second visual line can land mid-char.
+        // Em-dash '—' is 3 bytes (0xE2 0x80 0x94)
+        // Force wrapping so the prev_len calculation for the second visual line can land mid-char
         let md = "| A |\n|---|\n| hello world — goodbye world |\n\n";
         let mut buffers = crate::MarkdownBuffers::new();
         let (output, _) = crate::render_markdown_ratatui_with_buffers_width(
@@ -1620,9 +1571,8 @@ mod tests {
         );
     }
 
-    /// Split rendered table lines into logical rows of per-column cell text,
-    /// concatenating wrapped fragments *without* inserting spaces so that
-    /// hard-split tokens reconstruct exactly.
+    /// Split rendered table lines into logical rows of per-column cell text.
+    /// Wrapped fragments are concatenated *without* inserting spaces so that hard-split tokens reconstruct exactly.
     fn reconstruct_table_cells(lines: &[String]) -> Vec<Vec<String>> {
         let mut rows: Vec<Vec<String>> = Vec::new();
         let mut current: Option<Vec<String>> = None;
@@ -1644,8 +1594,8 @@ mod tests {
         rows
     }
 
-    /// A six-column table of unbreakable tokens must reflow inside cells and
-    /// grow taller — never exceed the width budget or lose the right border.
+    /// A six-column table of unbreakable tokens must reflow inside cells and grow taller.
+    /// It must never exceed the width budget or lose the right border.
     #[test]
     fn test_table_six_col_unbreakable_tokens_fit_width_50_40_30() {
         use unicode_width::UnicodeWidthStr;
@@ -1704,8 +1654,7 @@ mod tests {
                 full_lines.len()
             );
 
-            // Every token must survive the reflow in its own column — each
-            // body cell is a single token, so reconstruction is exact.
+            // Every token must survive the reflow in its own column; each body cell is a single token, so reconstruction is exact
             let rows = reconstruct_table_cells(&lines);
             assert_eq!(rows.len(), 2, "header + one body row, got {rows:#?}");
             assert_eq!(
@@ -1723,10 +1672,8 @@ mod tests {
         }
     }
 
-    /// Hard splits must fall on grapheme boundaries — CJK, VS16 emoji, and
-    /// ZWJ clusters stay intact and every line fits the assigned width.
-    /// Fixtures are single unbreakable words so the word separator never
-    /// contributes break points of its own.
+    /// Hard splits must fall on grapheme boundaries: CJK, VS16 emoji, and ZWJ clusters stay intact and every line fits the assigned width.
+    /// Fixtures are single unbreakable words so the word separator never contributes break points of its own.
     #[test]
     fn test_wrap_cell_text_grapheme_hard_split_stays_within_width() {
         use unicode_segmentation::UnicodeSegmentation;
@@ -1741,7 +1688,7 @@ mod tests {
             // Representable width: at least the widest single grapheme.
             let width = widest.max(4);
 
-            let lines = crate::parse::MarkdownParser::wrap_cell_text(text, width);
+            let lines = crate::parse::MarkdownParser::wrap_cell_text_joins(text, width).0;
             assert!(!lines.is_empty(), "wrap must never return an empty vec");
             assert!(
                 lines.len() > 1,
@@ -1776,9 +1723,8 @@ mod tests {
         }
     }
 
-    /// A markdown link hard-wrapped across visual lines keeps one shared
-    /// hyperlink id + url, in-bounds column ranges, and link styling on
-    /// every fragment.
+    /// A markdown link hard-wrapped across visual lines keeps one shared hyperlink id and url.
+    /// Every fragment keeps in-bounds column ranges and link styling.
     #[test]
     fn test_table_hard_wrapped_styled_link_keeps_id_and_bounds() {
         use unicode_width::UnicodeWidthStr;
@@ -1852,14 +1798,12 @@ mod tests {
         );
     }
 
-    /// Hard-split fragments must project source spans from a monotonic
-    /// cursor: a linked run followed by a plain run of the same substring
-    /// ("aa") must not re-match earlier bytes — that leaks link style and
-    /// hyperlink ranges into the plain fragment.
+    /// Hard-split fragments must project source spans from a monotonic cursor.
+    /// A linked run followed by a plain run of the same substring ("aa") must not re-match earlier bytes.
+    /// Re-matching leaks link style and hyperlink ranges into the plain fragment.
     #[test]
     fn test_table_hard_split_adjacent_link_and_plain_spans_stay_separate() {
-        // Cell "x aaaaaa" wraps at content width 2 into fragments
-        // "x" / "aa" / "aa" / "aa": two linked, then one plain.
+        // Cell "x aaaaaa" wraps at content width 2 into fragments "x" / "aa" / "aa" / "aa": two linked, then one plain
         let md = "| A |\n|---|\n| x [aaaa](https://example.com)aa |\n\n";
 
         let mut buffers = crate::MarkdownBuffers::new();
@@ -1873,8 +1817,7 @@ mod tests {
         );
         let lines = lines_to_text(&output.lines);
 
-        // Each content line renders its fragment as exactly one span — a
-        // mis-projected fragment straddles two source spans and splits.
+        // Each content line renders its fragment as exactly one span; a mis-projected fragment straddles two source spans and splits
         let fragment_spans: Vec<Vec<&str>> = output
             .lines
             .iter()
@@ -1894,8 +1837,7 @@ mod tests {
             "fragments must not straddle span boundaries: {lines:#?}"
         );
 
-        // Only the two linked fragments carry hyperlinks, sharing one id and
-        // covering exactly the linked text on their lines.
+        // Only the two linked fragments carry hyperlinks, sharing one id and covering exactly the linked text on their lines
         let links: Vec<_> = output
             .hyperlinks
             .iter()
@@ -1933,8 +1875,7 @@ mod tests {
         }
     }
 
-    /// Table source map: rendered line numbers must not exceed the table's
-    /// actual source line count, and must map to the correct source lines.
+    /// Table source map: rendered line numbers must not exceed the table's actual source line count, and must map to the correct source lines.
     #[test]
     fn test_table_source_map_stays_within_bounds() {
         // 4 source lines: header (0), separator (1), row1 (2), row2 (3)
@@ -1991,8 +1932,7 @@ mod tests {
         }
     }
 
-    /// Table source map with cell wrapping: wrapped continuation lines must
-    /// map to the same source line as the first visual line of that row.
+    /// Table source map with cell wrapping: wrapped continuation lines must map to the same source line as the first visual line of that row.
     #[test]
     fn test_table_source_map_with_cell_wrapping() {
         let md = "| Name | Description |\n|------|-------------|\n| short | A very long description that will wrap |\n\n";
@@ -2018,8 +1958,7 @@ mod tests {
         }
     }
 
-    /// Fenced block with `lineStart:lineEnd:path` (citation-style) uses the file
-    /// extension for syntect, same as a ` ```rust` block.
+    /// Fenced block with `lineStart:lineEnd:path` (citation-style) uses the file extension for syntect, same as a ` ```rust` block.
     #[test]
     fn test_citation_code_fence_highlights_as_rust() {
         let syntect = crate::syntax::test_syntect();
@@ -2053,8 +1992,8 @@ mod tests {
         );
     }
 
-    /// InlineHtml (e.g. `<PathBuf>`) inside a table cell must not leak raw
-    /// text below the rendered table. Regression for the Replace-inside-table bug.
+    /// InlineHtml (e.g. `<PathBuf>`) inside a table cell must not leak raw text below the rendered table.
+    /// Regression for the Replace-inside-table bug.
     #[test]
     fn test_table_inline_html_no_raw_text_leak_ratatui() {
         let md = "| Col A | Col B |\n|-------|-------|\n| Arc<PathBuf> | optimization |\n| normal | row |\n\n";
@@ -2074,8 +2013,7 @@ mod tests {
         );
     }
 
-    /// ANSI render path: same regression — InlineHtml Replace must not
-    /// corrupt `last_pos` and re-emit table content as raw text.
+    /// ANSI render path: same regression; InlineHtml Replace must not corrupt `last_pos` and re-emit table content as raw text.
     #[test]
     fn test_table_inline_html_no_raw_text_leak_ansi() {
         let md = "| Col A | Col B |\n|-------|-------|\n| Arc<PathBuf> | optimization |\n| normal | row |\n\n";
@@ -2092,8 +2030,7 @@ mod tests {
         );
     }
 
-    /// InlineHtml content must be captured into table cells so it appears
-    /// in the formatted table, not silently dropped.
+    /// InlineHtml content must be captured into table cells so it appears in the formatted table, not silently dropped.
     #[test]
     fn test_table_inline_html_captured_in_cell() {
         let md = "| Type |\n|------|\n| Arc<PathBuf> |\n\n";
@@ -2112,8 +2049,7 @@ mod tests {
         );
     }
 
-    /// Multiple HTML-like tags across different cells and rows must all
-    /// render correctly without leaking.
+    /// Multiple HTML-like tags across different cells and rows must all render correctly without leaking.
     #[test]
     fn test_table_multiple_inline_html_tags() {
         let md = "| Input | Output |\n|-------|--------|\n| Vec<String> | Option<i32> |\n| Box<dyn Trait> | Result<T> |\n\n";
@@ -2144,8 +2080,7 @@ mod tests {
         );
     }
 
-    /// ANSI render path: multiple HTML-like tags across cells and rows
-    /// must not leak raw text via the `current` accumulator merge logic.
+    /// ANSI render path: multiple HTML-like tags across cells and rows must not leak raw text via the `current` accumulator merge logic.
     #[test]
     fn test_table_multiple_inline_html_tags_ansi() {
         let md = "| Input | Output |\n|-------|--------|\n| Vec<String> | Option<i32> |\n| Box<dyn Trait> | Result<T> |\n\n";
@@ -2162,8 +2097,7 @@ mod tests {
         );
     }
 
-    /// Leading content before a table exercises the `push` flush at the
-    /// Table Start event followed by the `current.0` reset after rendering.
+    /// Leading content before a table exercises the `push` flush at the Table Start event followed by the `current.0` reset after rendering.
     #[test]
     fn test_table_with_leading_text_ansi() {
         let md = "Hello world\n\n| Col |\n|-----|\n| Arc<PathBuf> |\n\n";
@@ -2245,9 +2179,8 @@ mod tests {
         );
     }
 
-    // CommonMark soft breaks collapse to a single space inside a plain
-    // paragraph; hard breaks and block-container continuations (list
-    // items, blockquotes) still split into separate visual lines.
+    // CommonMark soft breaks collapse to a single space inside a plain paragraph
+    // Hard breaks and block-container continuations (list items, blockquotes) still split into separate visual lines
 
     #[test]
     fn test_soft_break_plain_paragraph_collapses_to_space() {
@@ -2291,7 +2224,7 @@ mod tests {
 
     #[test]
     fn test_soft_break_ansi_render_path_no_mid_sentence_newline() {
-        // render_ansi has its own `split('\n')` loop; verify the parser fix reaches it.
+        // render_ansi has its own `split('\n')` loop; verify the soft-break collapse reaches it
         let md = "Foo bar\nbaz qux.";
         let (output, _) = crate::render_markdown(md, test_style::STYLE, false, None);
         let body = output.trim_end_matches('\n');
@@ -2344,8 +2277,7 @@ mod tests {
 
     #[test]
     fn test_inline_code_with_real_newline_still_splits() {
-        // Inline code's `\n` is part of the Event::Code source slice; no
-        // SoftBreak fires, so the fix must not over-collapse it.
+        // Inline code's `\n` is part of the Event::Code source slice; no SoftBreak fires, so soft-break collapsing must not touch it
         let md = "foo `bar\nbaz` qux";
         let (output, _) = render_markdown_ratatui_full(md, test_style::STYLE, false, None);
         let text = lines_to_text(&output.lines);
@@ -2360,9 +2292,8 @@ mod tests {
 
     #[test]
     fn test_soft_break_in_bullet_list_item_preserves_lines() {
-        // Lazy continuation inside a list item is a soft break, but the
-        // continuation indent belongs to a new visual line; collapsing
-        // would leave stray indent whitespace mid-line.
+        // Lazy continuation inside a list item is a soft break, but the continuation indent belongs to a new visual line
+        // Collapsing would leave stray indent whitespace mid-line
         let md = "- first line\n  second line\n";
         let (output, _) = render_markdown_ratatui_full(md, test_style::STYLE, true, None);
         let text = lines_to_text(&output.lines);
@@ -2373,8 +2304,7 @@ mod tests {
 
     #[test]
     fn test_soft_break_in_blockquote_preserves_lines() {
-        // Continuation `>` markers belong to new visual lines; collapsing
-        // would leak a stray `│` (pretty) or `>` (raw) mid-paragraph.
+        // Continuation `>` markers belong to new visual lines; collapsing would leak a stray `│` (pretty) or `>` (raw) mid-paragraph
         let md = "> first line\n> second line\n";
         let (output, _) = render_markdown_ratatui_full(md, test_style::STYLE, true, None);
         let text = lines_to_text(&output.lines);
@@ -2389,9 +2319,8 @@ mod tests {
 
     #[test]
     fn test_soft_break_crlf_range_preserves_length() {
-        // pulldown emits SoftBreak with a 2-byte range for CRLF; the
-        // transform must replace both bytes to keep the byte-length
-        // invariant force transforms rely on in render_ansi.
+        // pulldown emits SoftBreak with a 2-byte range for CRLF
+        // The transform must replace both bytes to keep the byte-length invariant force transforms rely on in render_ansi
         let md = "Foo bar\r\nbaz qux.";
         let (output, _) = render_markdown_ratatui_full(md, test_style::STYLE, false, None);
         let text = lines_to_text(&output.lines);
@@ -2423,16 +2352,11 @@ mod tests {
         assert_eq!(output.line_source_map, vec![0, 1]);
     }
 
-    // Soft-break inside a markdown link is covered by
-    // `hyperlinks::hyperlink_tests::soft_break_inside_link_text_preserves_column_range`.
+    // Soft-break inside a markdown link is covered by `hyperlinks::hyperlink_tests::soft_break_inside_link_text_preserves_column_range`
 
-    /// An indented fenced code block (common when an LLM nests code under a
-    /// list, or simply indents the fence) must render the same as a
-    /// non-indented one: pulldown-cmark strips the indentation from the
-    /// content, and the renderer must hide the indentation on the opening
-    /// fence line too. Regression test for the bug where the first content
-    /// line kept its leading indentation and a spurious blank line was
-    /// appended.
+    /// An indented fenced code block, common when an LLM nests code under a list, must render the same as a non-indented one.
+    /// pulldown-cmark strips the indentation from the content, and the renderer must hide the indentation on the opening fence line too.
+    /// Regression test for the bug where the first content line kept its leading indentation and a spurious blank line was appended.
     #[test]
     fn test_indented_fenced_code_block_strips_indentation() {
         let syn = crate::syntax::test_syntect();
@@ -2452,8 +2376,7 @@ mod tests {
         );
     }
 
-    /// Indented and non-indented code blocks must produce identical pretty
-    /// output (the indentation is purely structural).
+    /// Indented and non-indented code blocks must produce identical pretty output (the indentation is purely structural).
     #[test]
     fn test_indented_code_block_matches_non_indented() {
         let syn = crate::syntax::test_syntect();
@@ -2472,9 +2395,8 @@ mod tests {
         );
     }
 
-    /// A fenced code block nested inside a list item renders dedented, with a
-    /// single blank separator before the code and no leading indentation
-    /// leaking onto the first code line.
+    /// A fenced code block nested inside a list item renders dedented, with a single blank separator before the code.
+    /// No leading indentation leaks onto the first code line.
     #[test]
     fn test_code_block_in_list_strips_indentation() {
         let syn = crate::syntax::test_syntect();
@@ -2495,8 +2417,7 @@ mod tests {
     }
 }
 
-/// Integration tests for LaTeX math rendering across all four delimiter
-/// forms (`$...$`, `$$...$$`, `\(...\)`, `\[...\]`).
+/// Integration tests for LaTeX math rendering across all four delimiter forms (`$...$`, `$$...$$`, `\(...\)`, `\[...\]`).
 #[cfg(test)]
 mod math_tests {
     use crate::style::test_style;
@@ -2543,9 +2464,8 @@ mod math_tests {
 
     #[test]
     fn padded_paren_inline_math_renders_unicode() {
-        // Regression: whitespace just inside `\( … \)` made the normalized
-        // `$ … $` violate pulldown's dollar-math flanking rule, so it used to
-        // render as raw `$ … $`. The normalizer now trims that padding.
+        // Regression: whitespace just inside `\( … \)` made the normalized `$ … $` violate pulldown's dollar-math flanking rule
+        // It used to render as raw `$ … $`; the normalizer now trims that padding
         let lines = pretty_lines("Sum \\( x+y \\) end.\n\n");
         assert_eq!(lines[0], "Sum x+y end.", "got: {lines:#?}");
         assert!(
@@ -2582,10 +2502,9 @@ mod math_tests {
 
     #[test]
     fn bracket_display_math_in_heading() {
-        // pulldown-cmark keeps heading content inside a `Heading` block (no
-        // wrapping paragraph), so the `\[...\]` source scan must also run on
-        // heading end. `$$...$$` in the same position already converts via
-        // `Event::DisplayMath`.
+        // pulldown-cmark keeps heading content inside a `Heading` block with no wrapping paragraph
+        // So the `\[...\]` source scan must also run on heading end
+        // `$$...$$` in the same position already converts via `Event::DisplayMath`
         let lines = pretty_lines("## Identity \\[x^2 + y^2 = z^2\\]\n\nAfter.\n\n");
         let joined = lines.join("\n");
         assert!(joined.contains("x² + y² = z²"), "got: {lines:#?}");
@@ -2594,18 +2513,16 @@ mod math_tests {
 
     #[test]
     fn escaped_backslash_paren_is_not_math() {
-        // `\\(` is a literal backslash followed by a paren — not a math open.
+        // `\\(` is a literal backslash followed by a paren, not a math open
         let lines = pretty_lines("Literal \\\\(x\\\\) here.\n\n");
         let joined = lines.join("\n");
-        // Pulldown renders the escapes; no Unicode conversion should occur
-        // and the parens must survive.
+        // Pulldown renders the escapes; no Unicode conversion should occur and the parens must survive
         assert!(joined.contains("(x"), "got: {lines:#?}");
     }
 
     #[test]
     fn emphasis_inside_paren_math_falls_back() {
-        // `*nope*` becomes emphasis, splitting the text events, so the span
-        // is not converted; content must still render.
+        // `*nope*` becomes emphasis, splitting the text events, so the span is not converted; content must still render
         let lines = pretty_lines("a \\(*nope*\\) b\n\n");
         let joined = lines.join("\n");
         assert!(joined.contains("nope"), "got: {lines:#?}");
@@ -2659,9 +2576,8 @@ mod math_tests {
 
     #[test]
     fn display_math_bracket_in_raw_mode_shows_canonical_dollars() {
-        // The delimiter normalizer rewrites `\[…\]` → `$$…$$` before parsing, so
-        // raw mode shows the canonical `$$` form (the math→Unicode conversion is
-        // still a pretty-only overlay, so the TeX body itself is preserved).
+        // The delimiter normalizer rewrites `\[…\]` to `$$…$$` before parsing, so raw mode shows the canonical `$$` form
+        // The math-to-Unicode conversion is still a pretty-only overlay, so the TeX body itself is preserved
         let text = "\\[E = mc^2\\]\n\n";
         let (output, _) = render_markdown_ratatui_full(text, test_style::STYLE, false, None);
         let joined = lines_to_text(&output.lines).join("\n");
@@ -2671,9 +2587,8 @@ mod math_tests {
 
     #[test]
     fn display_math_with_lone_equals_line_renders_block() {
-        // Symptom 1: a lone `=` line inside a display span is a
-        // CommonMark setext underline; unjoined, the first line became an H1
-        // and the math rendered as raw TeX.
+        // Symptom 1: a lone `=` line inside a display span is a CommonMark setext underline
+        // Unjoined, the first line became an H1 and the math rendered as raw TeX
         let text = "The loss:\n\n\\[\n\\boxed{\n\\mathcal{L}_{\\text{MTP}}\n=\n\\sum_{i=0}^{2}\n\\gamma^{i}\\,\n\\mathbb{E}_{\\text{positions, mask}}\n\\Big[\n\\mathrm{KL}\\big(\n  \\mathrm{softmax}(z_{\\text{torso}}^{(s_i)})\n  \\;\\big\\|\\;\n  \\mathrm{softmax}(z_{\\text{draft}}^{(i)})\n\\big)\n\\Big]\n}\n\\]\n\nAfter.\n\n";
         let lines = pretty_lines(text);
         let joined = lines.join("\n");
@@ -2701,9 +2616,8 @@ mod math_tests {
 
     #[test]
     fn text_subscript_in_table_cell_renders_readable() {
-        // Symptom 2: `p_{\text{torso}}` in a table cell became the
-        // modifier-letter run `pₜₒᵣₛₒ`, which renders with visible gaps in
-        // fonts lacking those glyphs.
+        // Symptom 2: `p_{\text{torso}}` in a table cell became the modifier-letter run `pₜₒᵣₛₒ`
+        // That run renders with visible gaps in fonts lacking those glyphs
         let text = "| Who | Soft-teacher |\n|-----|--------------|\n| **Torso** | \\(p_{\\text{torso}}(\\cdot \\mid T_0,\\ldots,T_i)\\) |\n\n";
         let lines = pretty_lines(text);
         let joined = lines.join("\n");
@@ -2741,10 +2655,9 @@ mod math_tests {
 
     #[test]
     fn paren_inline_math_in_table_cell_renders_unicode() {
-        // `\(…\)` inside a table cell must convert. Previously the
-        // backslash-form scanner was disabled inside tables, leaving raw TeX.
-        // Normalization rewrites `\(…\)` → `$…$` before parsing, so the existing
-        // in-cell `$` path converts it.
+        // `\(…\)` inside a table cell must convert
+        // Previously the backslash-form scanner was disabled inside tables, leaving raw TeX
+        // Normalization rewrites `\(…\)` to `$…$` before parsing, so the existing in-cell `$` path converts it
         let text = "| Mode | Metric |\n|------|--------|\n| Rate | \\(\\alpha + \\beta\\) |\n\n";
         let lines = pretty_lines(text);
         let joined = lines.join("\n");
@@ -2804,18 +2717,14 @@ mod math_tests {
         let text = format!("Big ${body}$ end.\n\n");
         let lines = pretty_lines(&text);
         let joined = lines.join("\n");
-        // Content is preserved verbatim (code-style fallback), delimiters
-        // hidden in pretty mode.
+        // Content is preserved verbatim (code-style fallback), and the delimiters are hidden in pretty mode
         assert!(joined.contains(&body), "fallback must keep raw content");
     }
 
     #[test]
     fn bracket_math_inside_link_label_keeps_link_target() {
-        // Option A normalizes `\[x\]` → `$$x$$` everywhere outside code, so (like
-        // a literal `$$…$$`) display math inside a link label now converts. This
-        // construct — display math inside a link label — is degenerate and
-        // exceedingly rare in model output; the invariant we keep is that the
-        // link target survives.
+        // The normalizer rewrites `\[x\]` to `$$x$$` outside code, so display math inside a link label now converts (like a literal `$$…$$`)
+        // That construct is degenerate and exceedingly rare in model output; the invariant we keep is that the link target survives
         let lines = pretty_lines("See [\\[x\\] notes](https://example.com) now.\n\n");
         let joined = lines.join("\n");
         assert!(
@@ -2871,7 +2780,7 @@ mod math_tests {
     }
 }
 
-/// Tests for HTML character-entity decoding in prose (`&lt;` → `<`, etc.).
+/// Tests for HTML character-entity decoding in prose (`&lt;` decodes to `<`, etc.).
 #[cfg(test)]
 mod entity_tests {
     use crate::style::test_style;
@@ -2921,8 +2830,7 @@ mod entity_tests {
 
     #[test]
     fn full_html5_named_entities_decoded() {
-        // Beyond the XML core set: these must decode in prose just like they
-        // already do in table cells (via pulldown), keeping the two consistent.
+        // Beyond the XML core set: these must decode in prose just like they already do in table cells (via pulldown), keeping the two consistent
         let lines = pretty_lines("&mdash; &copy; &hellip; &rarr; &times;\n\n");
         assert_eq!(lines[0], "— © … → ×", "got: {lines:#?}");
     }
@@ -2935,8 +2843,7 @@ mod entity_tests {
 
     #[test]
     fn control_char_entities_are_not_injected() {
-        // ESC / BEL / NUL / CR must never be substituted into terminal output;
-        // the source stays literal instead.
+        // ESC / BEL / NUL / CR must never be substituted into terminal output; the source stays literal instead
         for (src, literal) in [
             ("x &#27; y\n\n", "&#27;"),
             ("x &#x1b; y\n\n", "&#x1b;"),
@@ -2970,8 +2877,8 @@ mod entity_tests {
 
     #[test]
     fn entity_inside_inline_math_does_not_corrupt() {
-        // The entity sits inside a `\(...\)` math span; the math transform owns
-        // those bytes, so the entity scan must not add an overlapping transform.
+        // The entity sits inside a `\(...\)` math span
+        // The math transform owns those bytes, so the entity scan must not add an overlapping transform
         let lines = pretty_lines("eq \\(a &lt; b\\) end\n\n");
         let joined = lines.join("\n");
         assert!(joined.contains("end"), "trailing text intact: {lines:#?}");
@@ -3026,8 +2933,7 @@ mod entity_tests {
 
     #[test]
     fn entity_in_table_cell_still_decodes() {
-        // Regression guard: the table cell path already decoded entities; this
-        // must keep working alongside the new prose path.
+        // Regression guard: the table cell path already decoded entities; this must keep working alongside the new prose path
         let lines = pretty_lines("| H |\n|---|\n| a &lt; b |\n\n");
         let joined = lines.join("\n");
         assert!(joined.contains("a < b"), "got: {lines:#?}");
@@ -3047,9 +2953,8 @@ mod entity_tests {
             "&lt;&gt;&amp;",
             "&#xZZ;\n\n",
             "&CounterClockwiseContourIntegral;\n\n",
-            // Multi-byte UTF-8 mixed with `&` in various positions: the inner
-            // loop only advances over ASCII bytes, so it must not slice
-            // through a multi-byte sequence.
+            // Multi-byte UTF-8 mixed with `&` in various positions
+            // The inner loop only advances over ASCII bytes, so it must not slice through a multi-byte sequence
             "& é &lt; ñ\n\n",
             "café &lt; thé\n\n",
             "🦀 & 🦀\n\n",

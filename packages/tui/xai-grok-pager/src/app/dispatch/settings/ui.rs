@@ -8,13 +8,13 @@ use super::setters::{
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
     set_follow_up_behavior_inner, set_fork_secondary_model_inner, set_group_tool_verbs_inner,
     set_hunk_tracker_mode_inner, set_invert_scroll_inner, set_keep_text_selection_inner,
-    set_language_inner, set_max_thoughts_width_inner, set_multiline_mode,
-    set_page_flip_on_send_inner, set_prompt_suggestions_inner,
-    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
-    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
-    set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
-    set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
-    set_voice_capture_mode_inner, set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
+    set_max_thoughts_width_inner, set_multiline_mode, set_page_flip_on_send_inner,
+    set_prompt_suggestions_inner, set_remember_tool_approvals_inner, set_render_mermaid_inner,
+    set_respect_manual_folds_inner, set_screen_mode_inner, set_scroll_lines_inner,
+    set_scroll_mode_inner, set_scroll_speed_inner, set_show_thinking_blocks_inner,
+    set_show_tips_inner, set_simple_mode_inner, set_theme_inner, set_timeline_inner,
+    set_timestamps, set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
+    set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::{ActiveView, AppView};
@@ -27,49 +27,12 @@ use agent_client_protocol as acp;
 
 /// Format a "✓ Label: value" success toast.
 pub(in crate::app::dispatch) fn save_success_toast(label: &str, on: bool) -> String {
-    let value = if on {
-        rust_i18n::t!("settings_modal.value_on")
-    } else {
-        rust_i18n::t!("settings_modal.value_off")
-    };
-    rust_i18n::t!("toast.saved", label = label, value = value).into_owned()
+    let value = if on { "on" } else { "off" };
+    format!("\u{2713} {label}: {value}")
 }
 
-/// Format a "✓ Label: value" toast with an arbitrary (already localized or
-/// canonical) value — enum settings commit path.
-pub(in crate::app::dispatch) fn save_value_toast(label: &str, value: &str) -> String {
-    rust_i18n::t!("toast.saved", label = label, value = value).into_owned()
-}
-
-/// Format a "✓ Label: value (restart to apply)" toast — restart-required
-/// settings commit path.
-pub(in crate::app::dispatch) fn save_restart_toast(label: &str, value: &str) -> String {
-    rust_i18n::t!("toast.saved_restart", label = label, value = value).into_owned()
-}
-
-/// Bool variant of [`save_restart_toast`] using the localized on/off value.
-pub(in crate::app::dispatch) fn save_restart_bool_toast(label: &str, on: bool) -> String {
-    let value = if on {
-        rust_i18n::t!("settings_modal.value_on")
-    } else {
-        rust_i18n::t!("settings_modal.value_off")
-    };
-    rust_i18n::t!("toast.saved_restart", label = label, value = value).into_owned()
-}
-
-/// Translated settings-catalog label for toasts (`settings.{key}.label`),
-/// falling back to the English source. Keeps toast wording in sync with the
-/// settings row the user just toggled.
-pub(in crate::app::dispatch) fn setting_label_l10n(
-    key: &str,
-    fallback: &'static str,
-) -> std::borrow::Cow<'static, str> {
-    crate::i18n::tr_or(&format!("settings.{key}.label"), fallback)
-}
-
-/// Refresh every open settings modal's `ui_snapshot` + `pager_snapshot`
-/// so the next render reads the latest live state. The modal stores
-/// snapshots by value; without this, toggles would appear stuck.
+/// Refresh every open settings modal's `ui_snapshot` and `pager_snapshot` so the next render reads the latest live state.
+/// The modal stores snapshots by value; without this, toggles would appear stuck.
 pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     use crate::views::modal::ActiveModal;
     // Early exit when no settings modal is open (common case).
@@ -93,9 +56,8 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     for agent in app.agents.values_mut() {
-        // Walk both `Settings` and `ResetSettingsConfirm` — the
-        // confirm dialog embeds settings state that must stay fresh
-        // through async persist failures.
+        // Walk both `Settings` and `ResetSettingsConfirm`
+        // The confirm dialog embeds settings state that must stay fresh through async persist failures
         let state_opt = match agent.active_modal.as_mut() {
             Some(ActiveModal::Settings { state }) => Some(state.as_mut()),
             Some(ActiveModal::ResetSettingsConfirm { settings_state, .. }) => {
@@ -138,9 +100,9 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     }
 }
 
-/// Open the command palette (the `/help` slash command path). Mirrors the
-/// keybinding handler (`ActionId::CommandPalette`); toggles closed if already
-/// open. Hosted inline in minimal mode by the overlay app-modal host.
+/// Open the command palette (the `/help` slash command path).
+/// Mirrors the keybinding handler (`ActionId::CommandPalette`); toggles closed if already open.
+/// In minimal mode the overlay app-modal host renders it inline.
 pub(in crate::app::dispatch) fn dispatch_open_command_palette(app: &mut AppView) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;
     let ActiveView::Agent(id) = app.active_view else {
@@ -185,12 +147,11 @@ pub(in crate::app::dispatch) fn dispatch_open_howto_guides(app: &mut AppView) ->
     vec![]
 }
 
-/// Open the settings modal. Reads the live `UiConfig` snapshot
-/// (sans-IO). Single-instance: `debug_assert!` catches routing bugs.
+/// Open the settings modal. Reads the live `UiConfig` snapshot (sans-IO).
+/// Only one settings modal can be open; `debug_assert!` catches routing bugs.
 ///
 /// `focus_key` selects a settings row after open (e.g. `coding_data_sharing`).
-/// When not on an agent view, switches to an existing agent or creates a
-/// placeholder session so the modal can mount.
+/// When not on an agent view, switches to an existing agent or creates a placeholder session so the modal can mount.
 pub(in crate::app::dispatch) fn dispatch_open_settings(
     app: &mut AppView,
     focus_key: Option<&'static str>,
@@ -219,8 +180,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
             }
         }
     };
-    // Snapshot the registry + UiConfig + pager-local state BEFORE the
-    // mutable borrow on `agent` so the borrow checker is happy.
+    // Snapshot the registry, UiConfig, and pager-local state before the mutable borrow on `agent` so the borrow checker is happy
     let registry = app.settings_registry.clone();
     let ui_snapshot = app.current_ui.clone();
     // Capture app-level fields before the mut-borrow on the agent.
@@ -244,10 +204,8 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
                 false,
                 "OpenSettings dispatched while settings modal is already open — input routing bug"
             );
-            // Defensive close in release builds: silent no-op risk is higher
-            // than the cost of a single extra branch on a hot path that isn't
-            // hot. Mirrors the shortcuts-cheatsheet precedent at
-            // `views/shortcuts_help.rs:336-340`.
+            // Defensive close in release builds: a silent no-op is worse than one extra branch here
+            // Mirrors the same guard in `views/shortcuts_help.rs`
             agent.active_modal = None;
             return effects;
         }
@@ -292,8 +250,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     if let Some(key) = focus_key
         && state.focus_key(key)
     {
-        // Try the chooser; a locked row keeps Browse (`try_enter_picking_enum`
-        // refuses when `row_lock` is set).
+        // Try the chooser; a locked row keeps Browse (`try_enter_picking_enum` refuses when `row_lock` is set)
         if state.try_enter_picking_enum() {
             state.close_on_picker_exit = true;
         }
@@ -304,21 +261,10 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
 
 /// Open the reset-settings confirmation modal.
 ///
-/// **Modal stack contract.** The current `ActiveModal::Settings`
-/// state is moved out and stored inside the new
-/// `ActiveModal::ResetSettingsConfirm { settings_state, key, .. }`
-/// variant — preserving the user's filter, scroll position, and
-/// selection across the confirm dialog. Both `ConfirmResetSetting`
-/// branches (Reset / Cancel) move the state back out, restoring
-/// `ActiveModal::Settings`. The box keeps the move a pointer swap.
-///
-/// **Routing precondition.** This action is only emitted from the
-/// settings modal's `d` keystroke (`views/settings_modal.rs::handle_browse`),
-/// which guarantees the active modal IS `ActiveModal::Settings` at
-/// this point. We `debug_assert!` to catch a routing regression in
-/// debug builds; in release we treat the mismatch as a no-op (a
-/// foreign caller dispatching `OpenResetConfirm` without an open
-/// Settings modal would otherwise crash).
+/// The `ActiveModal::Settings` state moves into `ResetSettingsConfirm { settings_state, .. }` and moves back on either `ConfirmResetSetting` branch.
+/// That preserves the user's filter, scroll position, and selection; the box keeps each move a pointer swap.
+/// Only the settings modal's `d` key (`views/settings_modal.rs::handle_browse`) emits this, so any other active modal is a routing bug.
+/// `debug_assert!` catches it in debug builds; release degrades to a no-op instead of crashing.
 pub(in crate::app::dispatch) fn dispatch_open_reset_confirm(
     app: &mut AppView,
     key: crate::settings::SettingKey,
@@ -332,11 +278,9 @@ pub(in crate::app::dispatch) fn dispatch_open_reset_confirm(
         return vec![];
     };
 
-    // Take the Settings modal state out so we can move it into the
-    // confirmation variant. If the active modal is anything else
-    // (routing bug), restore the original modal and bail. The
-    // debug_assert surfaces the bug in tests; release builds degrade
-    // to a silent no-op rather than a panic.
+    // Take the Settings modal state out so it can move into the confirmation variant
+    // If the active modal is anything else (routing bug), restore the original modal and bail
+    // The debug_assert surfaces the bug in tests; release builds degrade to a silent no-op rather than a panic
     let prior = agent.active_modal.take();
     let settings_state = match prior {
         Some(ActiveModal::Settings { state }) => state,
@@ -350,7 +294,7 @@ pub(in crate::app::dispatch) fn dispatch_open_reset_confirm(
         }
     };
 
-    // debug! level — per-keystroke logging would flood production.
+    // debug! level: per-keystroke logging would flood production
     tracing::debug!(target: "settings", key, "opened reset-confirm modal");
     agent.active_modal = Some(ActiveModal::ResetSettingsConfirm {
         modal: ModalConfirmation::reset_settings(),
@@ -362,34 +306,11 @@ pub(in crate::app::dispatch) fn dispatch_open_reset_confirm(
 
 /// Resolve the reset-settings confirmation modal.
 ///
-/// Both Reset and Cancel branches:
-///   1. Take the `ResetSettingsConfirm` variant out of `active_modal`.
-///   2. Restore `ActiveModal::Settings { state }` from the
-///      preserved `settings_state` so the underlying modal is
-///      visible again with its filter/scroll/selection intact.
-///
-/// Reset additionally:
-///   3. Looks up the registered default for the target setting via
-///      `crate::settings::default_value_for(meta)`.
-///   4. If the current value already equals the default (idempotent
-///      reset), shows an "Already at default" toast and skips dispatch.
-///   5. Otherwise maps the default value to the matching typed
-///      `Action::SetX(default)` via `action_for_reset` and dispatches
-///      it recursively. The recursive dispatch runs the full set_X
-///      pipeline (persist → toast → refresh open modal snapshots),
-///      so the modal indicator reflects the new value on the next
-///      frame.
-///
-/// **Why dispatch recursively rather than call `set_X(app, default)`
-/// directly?** Each typed setter's `set_X(app, new)` function is
-/// `fn` (not `pub fn`) — they're internal to dispatch.rs. The
-/// alternative would be to either (a) expose every setter publicly,
-/// or (b) duplicate the routing match here. Recursive dispatch is
-/// the lowest-coupling option: when a new setting lands, the
-/// `Action::SetX → set_X(app, v)` arm is added to dispatch's top-
-/// level match (one line) AND an `action_for_reset` arm is added
-/// (one line); no new public API surface. The recursion depth is
-/// at most 2 `dispatch` frames.
+/// Both branches restore `ActiveModal::Settings` from the preserved `settings_state`, keeping the filter, scroll, and selection.
+/// Reset looks up the registered default and shows an "Already at default" toast when the value would not change.
+/// Otherwise it maps the default to the typed `Action::SetX(default)` via `action_for_reset` and dispatches it recursively.
+/// The recursive dispatch runs the full setter pipeline (persist, toast, snapshot refresh) and is at most 2 frames deep.
+/// The setters are private to dispatch, so recursion reuses their routing match instead of duplicating it.
 pub(in crate::app::dispatch) fn dispatch_confirm_reset_setting(
     app: &mut AppView,
     choice: crate::views::modal::ResetSettingsResult,
@@ -403,11 +324,8 @@ pub(in crate::app::dispatch) fn dispatch_confirm_reset_setting(
         return vec![];
     };
 
-    // Take the ResetSettingsConfirm modal out and restore Settings.
-    // Take the ResetSettingsConfirm modal out and capture the
-    // target key from the variant (single source of truth — the
-    // Action does NOT carry the key, eliminating the desync risk
-    // a future emitter could introduce).
+    // Take the ResetSettingsConfirm modal out, capturing the target key from the variant
+    // The variant is the single source of truth: the Action does not carry the key, so a future emitter cannot desync it
     let prior = agent.active_modal.take();
     let (key, settings_state) = match prior {
         Some(ActiveModal::ResetSettingsConfirm {
@@ -446,7 +364,7 @@ pub(in crate::app::dispatch) fn dispatch_confirm_reset_setting(
             };
             let default_value = crate::settings::default_value_for(meta);
 
-            // Gate idempotent reset: already-at-default → toast only.
+            // Gate idempotent reset: a value already at its default only shows a toast
             let pager_snapshot = build_pager_snapshot(app);
             let current_value =
                 crate::settings::current_value_for(key, &app.current_ui, &pager_snapshot);
@@ -478,16 +396,14 @@ pub(in crate::app::dispatch) fn dispatch_confirm_reset_setting(
                 ?default_value,
                 "resetting setting to default",
             );
-            // Recursive dispatch — runs the full set_X pipeline.
-            // See the docstring above for why recursion is the
-            // right tool here. Max depth: 2 dispatch frames.
+            // Recursive dispatch runs the full set_X pipeline (see the doc comment above); max depth is 2 frames
             dispatch(action, app)
         }
     }
 }
 
-/// Toggle multiline input mode (Ctrl+M keybinding path). Delegates
-/// to `set_multiline_mode` (PAGER-OWNED, per-agent ephemeral).
+/// Toggle multiline input mode (Ctrl+M keybinding path).
+/// Delegates to `set_multiline_mode`; the mode is pager-owned, per-agent, and never persisted.
 pub(in crate::app::dispatch) fn dispatch_toggle_multiline(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -499,41 +415,28 @@ pub(in crate::app::dispatch) fn dispatch_toggle_multiline(app: &mut AppView) -> 
     set_multiline_mode(app, new)
 }
 
-/// Toggle compact mode (keybinding path). Delegates to the
-/// registry-driven `set_compact_mode` so the cache, modal snapshot,
-/// and `Effect::PersistSetting` all flow through one path.
+/// Toggle compact mode (keybinding path).
+/// Delegates to the registry-driven `set_compact_mode` so the cache, modal snapshot, and `Effect::PersistSetting` all flow through one path.
 pub(in crate::app::dispatch) fn dispatch_toggle_compact_mode(app: &mut AppView) -> Vec<Effect> {
-    // Toggle the USER value: `appearance.prompt.compact` is the derived render
-    // value, which auto-compact forces on short terminals regardless of it.
+    // Toggle the user value: `appearance.prompt.compact` is the derived render value, which auto-compact forces on short terminals regardless of it
     let new = !app.current_ui.compact_mode;
     set_compact_mode(app, new)
 }
 
 /// Toggle vim-style scrollback keybindings (`/vim-mode` slash command path).
 ///
-/// When OFF (default): bare-letter and Shift+letter scrollback bindings
-/// (j/k/h/l/g/G/y/Y/o/O/r/x/e/E/L/H plus the `i` FocusPrompt alt) are
-/// suppressed; users get a "letter pressed in scrollback jumps to prompt
-/// and types the character" behaviour instead. Arrow/Tab/Esc/Space/PgUp/
-/// PgDn and all Ctrl+letter bindings remain active in both modes.
+/// Off is the default: bare-letter and Shift+letter scrollback bindings (j/k/h/l/g/G/y/Y/o/O/r/x/e/E/L/H and the `i` FocusPrompt alt) are suppressed.
+/// A letter pressed in scrollback then jumps to the prompt and types the character.
+/// Arrow/Tab/Esc/Space/PgUp/PgDn and all Ctrl+letter bindings remain active in both modes.
 ///
-/// Delegates to the registry-driven `set_vim_mode` so the cache, modal
-/// snapshot, toast, and `Effect::PersistSetting` (which writes
-/// `[ui].vim_mode` to config.toml) all flow through one path — matching
-/// the `dispatch_toggle_multiline` / `dispatch_toggle_compact_mode` /
-/// `dispatch_toggle_timestamps` pattern.
+/// Delegates to the registry-driven `set_vim_mode` so the cache, modal snapshot, toast, and `Effect::PersistSetting` all flow through one path.
+/// The persist effect writes `[ui].vim_mode` to config.toml.
 pub(in crate::app::dispatch) fn dispatch_toggle_vim_mode(app: &mut AppView) -> Vec<Effect> {
-    // Toggle the EFFECTIVE value (the pager cache) so `/vim-mode` works
-    // from ANY view — including the session-less dashboard. Previously
-    // this early-returned unless an agent was active, so running
-    // `/vim-mode` on the dashboard was a silent no-op and the overview's
-    // j/k navigation (which is gated on vim-mode) never turned on.
+    // Toggle the effective value (the pager cache) so `/vim-mode` works from any view, including the session-less dashboard
     let prev = crate::appearance::cache::load_vim_mode();
     let enabled = !prev;
-    // Propagate to every agent AND every nested subagent view (so
-    // background + open subagent views pick up the change without a
-    // restart) and mirror the pager cache. Shares `set_vim_mode_inner`
-    // with the `SetVimMode` settings path.
+    // Propagate to every agent and nested subagent view and mirror the pager cache
+    // Background and open subagent views pick up the change without a restart; `set_vim_mode_inner` is shared with the `SetVimMode` settings path
     set_vim_mode_inner(app, enabled);
     refresh_open_settings_modals(app);
     let msg = if enabled {
@@ -551,14 +454,11 @@ pub(in crate::app::dispatch) fn dispatch_toggle_vim_mode(app: &mut AppView) -> V
             }
         }
         ActiveView::AgentDashboard => {
-            // On the dashboard, j/k navigate the overview only when it
-            // holds focus. Turning vim ON focuses the overview so the
-            // user can navigate immediately (mirroring the agent view's
-            // "normal mode"); turning it OFF returns focus to the input.
-            // No agents → nothing to navigate, so stay on the input. The
-            // focus shift (overview highlighted, input dimmed, footer
-            // flips to nav hints) is the feedback — a toast would route
-            // to the dashboard's red error slot.
+            // On the dashboard, j/k navigate the overview only when it holds focus
+            // Turning vim on focuses the overview so the user can navigate immediately, mirroring the agent view's "normal mode"
+            // Turning it off returns focus to the input; with no agents there is nothing to navigate, so focus stays on the input too
+            // The focus shift (overview highlighted, input dimmed, footer flips to nav hints) is the feedback
+            // A toast would route to the dashboard's red error slot
             let has_agents = !app.agents.is_empty();
             if let Some(d) = app.dashboard.as_mut() {
                 d.list_focused = enabled && has_agents;
@@ -568,8 +468,7 @@ pub(in crate::app::dispatch) fn dispatch_toggle_vim_mode(app: &mut AppView) -> V
             app.show_toast(msg);
         }
     }
-    // Persist like the shared setter so `/vim-mode` survives a restart
-    // (writes `[ui].vim_mode` to config.toml).
+    // Persist like the shared setter so `/vim-mode` survives a restart (writes `[ui].vim_mode` to config.toml)
     vec![Effect::PersistSetting {
         key: "vim_mode",
         value: crate::settings::SettingValue::Bool(enabled),
@@ -577,22 +476,19 @@ pub(in crate::app::dispatch) fn dispatch_toggle_vim_mode(app: &mut AppView) -> V
     }]
 }
 
-/// Toggle timestamps (Ctrl+? keybinding path). Delegates to the
-/// registry-driven `set_timestamps` so persistence + cache + UI
-/// reconciliation all flow through a single code path.
+/// Toggle timestamps (Ctrl+? keybinding path).
+/// Delegates to the registry-driven `set_timestamps` so persistence, the cache, and UI reconciliation all flow through a single code path.
 pub(in crate::app::dispatch) fn dispatch_toggle_timestamps(app: &mut AppView) -> Vec<Effect> {
     let show = !app.appearance.show_timestamps;
     set_timestamps(app, show)
 }
 
-/// Toggle terminal mouse reporting (crossterm mouse capture) at the user's
-/// discretion. Disabling it lets the terminal handle native click-drag text
-/// selection and copy/paste; re-enabling restores in-app mouse handling
-/// (click-to-focus, scrollback selection, scrollbar drag, etc.).
+/// Toggle terminal mouse reporting (crossterm mouse capture) at the user's discretion.
+/// Disabling it lets the terminal handle native click-drag text selection and copy/paste.
+/// Re-enabling restores in-app mouse handling (click-to-focus, scrollback selection, scrollbar drag, etc.).
 ///
-/// The on-wire enable/disable sequences match [`AppView`]'s native-select hold;
-/// the process-wide [`MOUSE_CAPTURE_ENABLED`] atomic is the source of truth that
-/// teardown / panic paths read to decide whether to emit the reset.
+/// The on-wire enable/disable sequences match [`AppView`]'s native-select hold.
+/// The process-wide [`MOUSE_CAPTURE_ENABLED`] atomic is the source of truth that teardown / panic paths read to decide whether to emit the reset.
 ///
 /// [`MOUSE_CAPTURE_ENABLED`]: crate::app::MOUSE_CAPTURE_ENABLED
 pub(in crate::app::dispatch) fn dispatch_toggle_mouse_capture(app: &mut AppView) {
@@ -618,25 +514,22 @@ pub(in crate::app::dispatch) fn dispatch_toggle_mouse_capture(app: &mut AppView)
             crossterm::execute!(stderr, crossterm::event::DisableMouseCapture)
         };
     });
-    // On legacy conhost, DisableMouseCapture restores the *pre-capture* stdin
-    // mode, which may itself have QuickEdit off (per-window profile or a
-    // stale mode from a crashed run) — assert it so "mouse off" actually
-    // hands the terminal native drag-select, the whole point of the toggle.
+    // On legacy conhost, DisableMouseCapture restores the *pre-capture* stdin mode
+    // That mode may itself have QuickEdit off (a per-window profile or a stale mode from a crashed run)
+    // Assert it so "mouse off" actually hands the terminal native drag-select, the whole point of the toggle
     #[cfg(windows)]
     if !enable {
         crate::app::win_native_selection::enable_native_selection();
     }
     crate::app::MOUSE_CAPTURE_ENABLED.store(enable, Ordering::Release);
-    // Use with_active_agent (not app.show_toast) so the toast lands on the
-    // visible surface — same path as copy-to-clipboard toasts, including
-    // when a subagent view is active.
+    // Use with_active_agent (not app.show_toast) so the toast lands on the view the user is looking at
+    // Copy-to-clipboard toasts take the same path, including when a subagent view is active
     //
-    // Off state: sticky banner on every agent/subagent view (capture is
-    // process-wide; toast must survive subagent open/close and copy toasts).
-    // On state: clear sticky everywhere + transient confirmation on active view.
-    // Stored in the scrollback form; `AgentView::active_toast_message` swaps it
-    // to the `/toggle-mouse-reporting` form at render time when the prompt is
-    // focused (Ctrl+R only re-enables from scrollback).
+    // Off state: sticky banner on every agent/subagent view (capture is process-wide; the toast must survive subagent open/close and copy toasts)
+    // On state: clear the sticky everywhere and show a transient confirmation on the active view
+    // The message is stored in its scrollback form
+    // `AgentView::active_toast_message` swaps it to the `/toggle-mouse-reporting` form at render time when the prompt is focused
+    // Ctrl+R only re-enables from scrollback
     let mut toast_applied = false;
     if enable {
         for agent in app.agents.values_mut() {
@@ -644,7 +537,7 @@ pub(in crate::app::dispatch) fn dispatch_toggle_mouse_capture(app: &mut AppView)
         }
         with_active_agent(app, |agent| {
             toast_applied = true;
-            agent.show_toast(&rust_i18n::t!("notices.mouse_reporting_on"));
+            agent.show_toast("Mouse reporting on");
         });
     } else {
         for agent in app.agents.values_mut() {
@@ -662,11 +555,8 @@ pub(in crate::app::dispatch) fn dispatch_toggle_mouse_capture(app: &mut AppView)
     );
 }
 
-/// Helper to read the active agent's `multiline_mode` for the
-/// pager-local snapshot used in idempotent-reset detection. Returns
-/// `false` if no active agent (no Settings modal would be open in
-/// that state, so the value doesn't matter — but the helper has to
-/// return SOMETHING).
+/// Read the active agent's `multiline_mode` for the pager-local snapshot used in idempotent-reset detection.
+/// Returns `false` with no active agent: no Settings modal is open in that state, so the value does not matter.
 fn agent_multiline_mode(app: &AppView) -> bool {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
@@ -676,8 +566,7 @@ fn agent_multiline_mode(app: &AppView) -> bool {
     false
 }
 
-/// Helper to read the active agent's `yolo_mode`. See
-/// [`agent_multiline_mode`] for the no-agent fallback rationale.
+/// Read the active agent's `yolo_mode`. See [`agent_multiline_mode`] for the no-agent fallback rationale.
 fn agent_yolo_mode(app: &AppView) -> bool {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
@@ -687,8 +576,7 @@ fn agent_yolo_mode(app: &AppView) -> bool {
     false
 }
 
-/// Helper to read the active agent's `auto_mode`. See
-/// [`agent_multiline_mode`] for the no-agent fallback rationale.
+/// Read the active agent's `auto_mode`. See [`agent_multiline_mode`] for the no-agent fallback rationale.
 fn agent_auto_mode(app: &AppView) -> bool {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
@@ -698,10 +586,9 @@ fn agent_auto_mode(app: &AppView) -> bool {
     false
 }
 
-/// Effective `scheduler_background_loops` for the active agent: the value the
-/// shell pinned for that session, falling back to the startup seed while the
-/// session response is still in flight (or with no agent at all). See
-/// [`agent_multiline_mode`] for the no-agent fallback rationale.
+/// Effective `scheduler_background_loops` for the active agent: the value the shell pinned for that session.
+/// Falls back to the startup seed while the session response is still in flight (or with no agent at all).
+/// See [`agent_multiline_mode`] for the no-agent fallback rationale.
 fn agent_scheduler_background_loops(app: &AppView) -> bool {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
@@ -712,8 +599,7 @@ fn agent_scheduler_background_loops(app: &AppView) -> bool {
     app.scheduler_background_loops_seed
 }
 
-/// Effective `plan_mode` for the active agent
-/// (`pending.unwrap_or(active)`).
+/// Effective `plan_mode` for the active agent (`pending.unwrap_or(active)`).
 fn agent_plan_mode(app: &AppView) -> bool {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
@@ -723,12 +609,9 @@ fn agent_plan_mode(app: &AppView) -> bool {
     false
 }
 
-/// Helper to read the active agent's currently-selected model
-/// display name. Returns `None` when no agent is active OR when the
-/// catalog hasn't loaded yet (e.g. early startup). See
-/// [`agent_multiline_mode`] for the no-agent fallback rationale.
-///
-/// Used by the `default_model` row's `current_value_for`.
+/// Read the active agent's currently-selected model display name; the `default_model` row's `current_value_for` uses it.
+/// Returns `None` when no agent is active or the catalog hasn't loaded yet (e.g. early startup).
+/// See [`agent_multiline_mode`] for the no-agent fallback rationale.
 fn agent_current_model_name(app: &AppView) -> Option<String> {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
@@ -738,12 +621,9 @@ fn agent_current_model_name(app: &AppView) -> Option<String> {
     None
 }
 
-/// Helper to clone the `(display_name, ModelId)` pairs from the
-/// active agent's catalog. Returns an empty `Vec` when no agent is
-/// active OR when the catalog is empty.
-///
-/// Used by the `KnownModel` validator and "resolve user input to
-/// ModelId" path.
+/// Clone the `(display_name, ModelId)` pairs from the active agent's catalog.
+/// Returns an empty `Vec` when no agent is active or the catalog is empty.
+/// The `KnownModel` validator and the "resolve user input to ModelId" path use it.
 fn agent_available_models(app: &AppView) -> Vec<(String, acp::ModelId)> {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
@@ -759,7 +639,6 @@ fn agent_available_models(app: &AppView) -> Vec<(String, acp::ModelId)> {
     Vec::new()
 }
 
-/// Build a `PagerLocalSnapshot` from the current `AppView`.
 pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocalSnapshot {
     crate::settings::PagerLocalSnapshot {
         multiline_mode: agent_multiline_mode(app),
@@ -782,10 +661,9 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
     }
 }
 
-/// Map a `(SettingKey, SettingValue)` to the matching typed
-/// `Action::SetX(value)`. Used by the reset path to turn the
-/// registered default into a dispatchable Action. CI test
-/// `every_setting_has_action_for_reset_arm` pins correctness.
+/// Map a `(SettingKey, SettingValue)` to the matching typed `Action::SetX(value)`.
+/// The reset path uses it to turn the registered default into a dispatchable Action.
+/// The CI test `every_setting_has_action_for_reset_arm` pins that every setting has an arm.
 pub(in crate::app::dispatch) fn action_for_reset(
     key: crate::settings::SettingKey,
     value: &crate::settings::SettingValue,
@@ -862,34 +740,17 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("auto_light_theme", SettingValue::Enum(s)) => {
             Some(Action::SetAutoLightTheme((*s).to_owned()))
         }
-        // Three explicit arms, one per
-        // canonical, all dispatched through the typed
-        // `Action::SetPermissionMode(kind)` (NOT the legacy
-        // `Action::SetYoloMode(bool)`). The reset path IS modal-
-        // initiated (the `d` reset key is part of the
-        // settings modal), so it falls under the same "modal commit
-        // ↦ typed setter" rule as the picker Enter path.
+        // One arm per canonical, all dispatched through the typed `Action::SetPermissionMode(kind)`, not the legacy `Action::SetYoloMode(bool)`
+        // The reset path is modal-initiated (the `d` reset key is part of the settings modal)
+        // It follows the same "modal commit uses the typed setter" rule as the picker Enter path
         //
-        // **Why all three arms (not just "ask").** The registered
-        // default is "ask" today (defs.rs:`SettingKind::Enum { default:
-        // "ask", ... }`), so only the "ask" arm is reachable in
-        // production through the normal reset flow. The other two
-        // arms exist as forcing functions:
-        //   - If the registered default changes to
-        //     "default" or "always-approve", the matching arm fires
-        //     correctly — no silent collapse onto SetYoloMode.
-        //   - The arms exercise the same canonical→kind mapping that
-        //     `action_for_enum_commit` uses, so the dispatch surface
-        //     stays consistent across modal entry points.
+        // The registered default is "ask" today (defs.rs: `SettingKind::Enum { default: "ask", ... }`).
+        // Only that arm is reachable through the normal reset flow
+        // The other arms are there so a changed registered default fires its matching arm rather than silently collapsing onto SetYoloMode
+        // They also keep the canonical-to-kind mapping the same one `action_for_enum_commit` uses across modal entry points
         //
-        // The drift guard
-        // `pr11_permission_mode_kind_canonical_strings_match_choices_catalog`
-        // pins `len == 3` on `PERMISSION_MODE_CHOICES`, so a future
-        // 4th canonical without a matching arm here would fail the
-        // catalog drift test (the registered default would still be
-        // one of the existing arms — but a fresh test
-        // `pr11_action_for_reset_covers_every_permission_mode_canonical`
-        // pins exhaustivity directly).
+        // The drift guard `pr11_permission_mode_kind_canonical_strings_match_choices_catalog` pins the `PERMISSION_MODE_CHOICES` length
+        // `pr11_action_for_reset_covers_every_permission_mode_canonical` pins that every canonical has an arm here
         ("permission_mode", SettingValue::Enum("always-approve")) => Some(
             Action::SetPermissionMode(crate::app::actions::PermissionModeKind::AlwaysApprove),
         ),
@@ -902,8 +763,7 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("permission_mode", SettingValue::Enum("default")) => Some(Action::SetPermissionMode(
             crate::app::actions::PermissionModeKind::Default,
         )),
-        // default_model: empty string → ClearDefaultModel; non-empty
-        // is a registry/dispatch skew guard.
+        // default_model: an empty string becomes ClearDefaultModel; non-empty is a registry/dispatch skew guard
         ("default_model", SettingValue::String(s)) => {
             if s.is_empty() {
                 Some(Action::ClearDefaultModel)
@@ -919,16 +779,14 @@ pub(in crate::app::dispatch) fn action_for_reset(
         }
         // max_thoughts_width: direct round-trip.
         ("max_thoughts_width", SettingValue::Int(i)) => Some(Action::SetMaxThoughtsWidth(*i)),
-        // coding_data_sharing: "opt-in" / "opt-out" → bool.
-        // Both arms needed (registry default is "opt-out").
+        // coding_data_sharing: "opt-in" / "opt-out" map to bool; both arms are needed (registry default is "opt-out")
         ("coding_data_sharing", SettingValue::Enum("opt-in")) => {
             Some(Action::SetCodingDataSharing { opted_in: true })
         }
         ("coding_data_sharing", SettingValue::Enum("opt-out")) => {
             Some(Action::SetCodingDataSharing { opted_in: false })
         }
-        // plan_mode: "on" / "off" → PlanModeKind.
-        // "on" arm is a skew guard (default is "off").
+        // plan_mode: "on" / "off" map to PlanModeKind; the "on" arm is a skew guard (default is "off")
         ("plan_mode", SettingValue::Enum("off")) => {
             Some(Action::SetPlanMode(crate::app::actions::PlanModeKind::Off))
         }
@@ -946,7 +804,6 @@ pub(in crate::app::dispatch) fn action_for_reset(
             Some(Action::SetHunkTrackerMode((*s).to_string()))
         }
         ("screen_mode", SettingValue::Enum(s)) => Some(Action::SetScreenMode((*s).to_string())),
-        ("language", SettingValue::Enum(s)) => Some(Action::SetLanguage((*s).to_string())),
         ("voice_keybind_enabled", SettingValue::Bool(b)) => {
             Some(Action::SetVoiceKeybindEnabled(*b))
         }
@@ -956,7 +813,7 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("voice_stt_language", SettingValue::Enum(s)) => {
             Some(Action::SetVoiceSttLanguage((*s).to_string()))
         }
-        // fork_secondary_model: empty → Clear, non-empty is skew guard.
+        // fork_secondary_model: empty becomes Clear, non-empty is a skew guard
         ("fork_secondary_model", SettingValue::String(s)) => {
             if s.is_empty() {
                 Some(Action::ClearForkSecondaryModel)
@@ -975,19 +832,16 @@ pub(in crate::app::dispatch) fn action_for_reset(
     }
 }
 
-/// English source text of the `toast.rollback_no_arm` bundle entry (en.yml),
-/// shown by the [`apply_setting_rollback`] catch-all when a persisted setting
-/// has no rollback arm. Kept as a const so `every_persisting_setting_has_rollback_arm`
-/// can't be silently defeated by a wording edit — it MUST match en.yml.
+/// Toast shown by the [`apply_setting_rollback`] catch-all when a persisted setting has no rollback arm.
+/// Shared with `every_persisting_setting_has_rollback_arm` so the guard can't be silently defeated by a wording edit.
 pub(crate) const ROLLBACK_NO_ARM_TOAST: &str =
     "Settings rolled back, but local state may be out of sync: restart to reload";
 
-/// Apply a rollback `SettingValue` to the in-memory cache. Does NOT
-/// re-emit `PersistSetting` (avoids infinite loop on persistent
-/// failure). Can emit companion effects (e.g. reverse `SwitchModel`).
+/// Apply a rollback `SettingValue` to the in-memory cache.
+/// Does not re-emit `PersistSetting` (that would loop forever on a persistent failure); can emit companion effects (e.g. a reverse `SwitchModel`).
 ///
-/// New settings MUST add an arm here. Unknown keys log `error!` — the
-/// silent data-vs-disk inconsistency is visible to the user.
+/// New settings must add an arm here.
+/// Unknown keys log `error!`, so the inconsistency between the in-memory cache and disk is visible to the user.
 pub(in crate::app::dispatch) fn apply_setting_rollback(
     app: &mut AppView,
     key: crate::settings::SettingKey,
@@ -1055,7 +909,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("cancel_subagents_on_turn_cancel", SettingValue::Enum("always_continue")) => {
             apply_cancel_subagents_preference_global(app, false);
         }
-        // Rollback for corrupted auto-* = "auto" — clear to None.
+        // Rollback for a corrupted auto-* value of "auto": clear to None
         ("auto_dark_theme", SettingValue::Enum("auto")) => {
             app.current_ui.auto_dark_theme = None;
             crate::theme::cache::invalidate_auto_theme_config();
@@ -1076,8 +930,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("auto_dark_theme", SettingValue::Enum(s)) => set_auto_dark_theme_inner(app, s),
         ("auto_light_theme", SettingValue::Enum(s)) => set_auto_light_theme_inner(app, s),
-        // permission_mode rollback: recover kind from canonical,
-        // run inner, then restore the canonical the inner collapsed.
+        // permission_mode rollback: recover the kind from the canonical, run the inner, then restore the canonical the inner collapsed
         ("permission_mode", SettingValue::Enum(s)) => {
             use crate::app::actions::PermissionModeKind;
             let kind = match PermissionModeKind::from_canonical(s) {
@@ -1093,14 +946,13 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 }
             };
             set_yolo_mode_inner(app, kind.is_always_approve());
-            // Restore canonical (meaningful for `Default`).
+            // Restore the canonical (meaningful for `Default`)
             app.current_ui.permission_mode = Some(kind.as_canonical().to_string());
-            // Sync the per-session auto flag ONLY for a permission_mode rollback;
-            // other rollback arms must not clobber it from the global canonical.
+            // Sync the per-session auto flag only for a permission_mode rollback
+            // Other rollback arms must not clobber it from the global canonical
             sync_active_auto_flag(app);
         }
-        // default_model: best-effort rollback. If the prior model no
-        // longer resolves, leave optimistic value + log.
+        // default_model: best-effort rollback. If the prior model no longer resolves, leave the optimistic value and log.
         ("default_model", SettingValue::String(s)) => {
             if s.is_empty() {
                 tracing::warn!(
@@ -1112,10 +964,8 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                      will resolve via shell default-resolution chain)",
                 );
             } else {
-                // Resolve the prior model ID back to a ModelId
-                // and call the typed inner. If resolution fails
-                // (catalog changed mid-flight), log + leave
-                // optimistic.
+                // Resolve the prior model ID back to a ModelId and call the typed inner
+                // If resolution fails (the catalog changed mid-flight), log and leave the optimistic value
                 let (resolved, session_id) = if let ActiveView::Agent(aid) = app.active_view
                     && let Some(agent) = app.agents.get(&aid)
                 {
@@ -1129,8 +979,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 match resolved {
                     Some(id) => {
                         let _ = set_default_model_inner(app, &id);
-                        // Emit reverse SwitchModel so the ACP session
-                        // matches the rolled-back pager mirror.
+                        // Emit a reverse SwitchModel so the ACP session matches the rolled-back pager mirror
                         if let ActiveView::Agent(aid) = app.active_view
                             && let Some(sid) = session_id
                         {
@@ -1171,12 +1020,11 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         // No pager-side mirror to roll back; the failure toast is the whole story.
         ("trace_upload", SettingValue::Bool(_)) => {}
-        // The in-session suppression latch deliberately stays set even when
-        // the disk write fails.
+        // The in-session suppression latch deliberately stays set even when the disk write fails
         ("feedback_trace_card", SettingValue::Bool(_)) => {}
         // invert_scroll / scroll_lines: direct inner calls (clamp in inner).
         ("invert_scroll", SettingValue::Bool(b)) => set_invert_scroll_inner(app, *b),
-        // Effective default is false → restore None (mirror stays disk-synced).
+        // The effective default is false, so a false rollback restores None (the mirror stays disk-synced)
         ("display_refresh_auto_cadence", SettingValue::Bool(b)) => {
             if !*b {
                 app.current_ui.display_refresh.auto_cadence_enabled = None;
@@ -1190,8 +1038,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("remember_tool_approvals", SettingValue::Bool(b)) => {
             set_remember_tool_approvals_inner(app, *b)
         }
-        // ask_user_question timeout: if rollback equals the effective
-        // default, restore to None (keeps mirror in sync with disk).
+        // ask_user_question timeout: if the rollback equals the effective default, restore to None (keeps the mirror in sync with disk)
         ("toolset.ask_user_question.timeout_enabled", SettingValue::Bool(b)) => {
             if Some(*b) == pr13_effective_default("toolset.ask_user_question.timeout_enabled") {
                 app.ask_user_question_timeout_enabled = None;
@@ -1224,9 +1071,6 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("screen_mode", SettingValue::Enum(s)) => {
             set_screen_mode_inner(app, crate::settings::canonical_screen_mode(Some(s)));
         }
-        ("language", SettingValue::Enum(s)) => {
-            set_language_inner(app, crate::i18n::canonical_language(Some(s)));
-        }
         ("voice_keybind_enabled", SettingValue::Bool(b)) => {
             set_voice_keybind_enabled_inner(app, *b)
         }
@@ -1242,8 +1086,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 crate::settings::canonical_voice_stt_language(Some(s)),
             );
         }
-        // show_tips / auto_update: if rollback equals the effective
-        // default, restore to None (keeps mirror in sync with disk).
+        // show_tips / auto_update: if the rollback equals the effective default, restore to None (keeps the mirror in sync with disk)
         ("show_tips", SettingValue::Bool(b)) => {
             if Some(*b) == pr13_effective_default("show_tips") {
                 app.show_tips = None;
@@ -1276,14 +1119,10 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 "rollback path has no arm for this setting key; in-memory cache is now \
                  inconsistent with the on-disk state (which already failed to write)"
             );
-            app.show_toast(&crate::i18n::tr_or(
-                "toast.rollback_no_arm",
-                ROLLBACK_NO_ARM_TOAST,
-            ));
+            app.show_toast(ROLLBACK_NO_ARM_TOAST);
             return companion_effects;
         }
     }
-    // Refresh modal snapshots after rollback.
     refresh_open_settings_modals(app);
     companion_effects
 }

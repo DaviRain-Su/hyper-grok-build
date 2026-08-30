@@ -1,18 +1,16 @@
-//! `ListPane<'a, T>` — the rendering widget for a scrollable list pane.
+//! `ListPane<'a, T>`: the rendering widget for a scrollable list pane.
 //!
-//! This is a [`StatefulWidget`] that borrows item data and renders the visible
-//! portion based on [`ListPaneState`]'s layout cache, scroll position, and
-//! selection.  Includes an optional scrollbar when content overflows.
+//! This [`StatefulWidget`] borrows item data and renders the visible portion.
+//! It follows [`ListPaneState`]'s layout cache, scroll position, and selection.
+//! An optional scrollbar renders when content overflows.
 //!
 //! ## Rendering Pipeline
 //!
-//! 1. Caller calls `state.prepare_layout(items, width, viewport_height)` once per
-//!    frame (computes layout cache, resolves selection IDs → indices, clamps scroll).
-//! 2. Caller constructs `ListPane::new(items, &state)` and calls
-//!    `StatefulWidget::render(...)` or `render_ref(...)`.
-//! 3. This module iterates only the visible range (from `state.visible_range()`),
-//!    maps visible → physical indices, and delegates to `ListItem::render()`.
-//! 4. Scrollbar is rendered when content overflows the viewport.
+//! 1. The caller calls `state.prepare_layout(items, width, viewport_height)` once per frame.
+//!    It computes the layout cache, resolves selection IDs to indices, and clamps scroll.
+//! 2. The caller constructs `ListPane::new(items, &state)` and calls `StatefulWidget::render(...)` or `render_ref(...)`.
+//! 3. This module iterates the visible range (`state.visible_range()`), maps visible to physical indices, and delegates to `ListItem::render()`.
+//! 4. A scrollbar is rendered when content overflows the viewport.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -34,10 +32,10 @@ use crate::render::scrollbar::{maybe_split_for_scrollbar, render_scrollbar_style
 /// ## Rendering Pipeline (post-passes)
 ///
 /// For each visible item, the framework applies overlays in order:
-/// 1. **Item content** — `ListItem::render()` paints text/chrome.
-/// 2. **Selection bg** — framework overlays `selection_bg` on the selected row(s).
-/// 3. **Match highlight** — inverts fg/bg on matched cells (style inversion).
-/// 4. **Truncation ellipsis** — `…` on the last row if the item was truncated.
+/// 1. **Item content**: `ListItem::render()` paints text and chrome.
+/// 2. **Selection bg**: the framework overlays `selection_bg` on the selected row(s).
+/// 3. **Match highlight**: inverts fg and bg on matched cells.
+/// 4. **Truncation ellipsis**: `…` on the last row if the item was truncated.
 ///
 /// Items do **not** paint selection or match backgrounds themselves.
 ///
@@ -91,9 +89,8 @@ impl<T: ListItem> StatefulWidget for ListPane<'_, T> {
             return;
         }
 
-        // Split off bottom row(s) when the input bar is open or a matcher is
-        // active. `bottom_bar_height` returns 0 when no bar is shown, and the
-        // bar height (1, or up to 5 for multi-line comment mode) otherwise.
+        // Split off bottom row(s) when the input bar is open or a matcher is active
+        // `bottom_bar_height` returns 0 when no bar is shown, and the bar height (1, or up to 5 for multi-line comment mode) otherwise
         let bar_height = state.bottom_bar_height(area.height);
         let (list_area, bottom_bar_area) = if bar_height > 0 {
             let list = Rect {
@@ -113,9 +110,8 @@ impl<T: ListItem> StatefulWidget for ListPane<'_, T> {
         let total_height = state.total_height();
         let viewport_height = list_area.height;
 
-        // Scale down for scrollbar when total_height exceeds u16::MAX.
-        // Both total and offset are divided by the same factor so the thumb
-        // position remains proportionally correct.
+        // Scale down for the scrollbar when total_height exceeds u16::MAX
+        // Both total and offset are divided by the same factor so the thumb position remains proportionally correct
         let scale = if total_height > u16::MAX as usize {
             (total_height / u16::MAX as usize) + 1
         } else {
@@ -136,15 +132,13 @@ impl<T: ListItem> StatefulWidget for ListPane<'_, T> {
         // Render corner overlay indicators.
         render_corner_indicators(content_area, buf, state, &self.style);
 
-        // Render "Copied!" toast (bottom-right corner, briefly after y-copy).
-        // Rendered AFTER indicators so we can skip the bottom-right indicator
-        // to avoid overlapping.
+        // Render the "Copied!" toast (bottom-right corner, briefly after y-copy)
+        // Rendered after the indicators so it can replace the bottom-right indicator instead of overlapping it
         if state.copy_toast_active() && content_area.height > 0 && content_area.width > 8 {
             let toast_text = " Copied!";
             let x = content_area.right().saturating_sub(toast_text.len() as u16);
             let y = content_area.bottom().saturating_sub(1);
-            // Write each char, keeping bg (selection highlight) but
-            // overriding fg + modifiers so content styles don't leak.
+            // Write each char, keeping bg (selection highlight) but overriding fg and modifiers so content styles don't leak
             for (i, ch) in toast_text.chars().enumerate() {
                 let cell = &mut buf[(x + i as u16, y)];
                 cell.set_char(ch);
@@ -178,8 +172,7 @@ impl<T: ListItem> StatefulWidget for ListPane<'_, T> {
 impl<T: ListItem> ListPane<'_, T> {
     /// Render a single item using the content/prefix framework.
     ///
-    /// Handles both NoWrap (single row, truncated) and Wrap (word-wrapped
-    /// with prefix indentation on continuation lines).
+    /// Handles both NoWrap (single row, truncated) and Wrap (word-wrapped with prefix indentation on continuation lines).
     fn render_item_framework(
         item: &T,
         area: Rect,
@@ -234,8 +227,7 @@ impl<T: ListItem> ListPane<'_, T> {
                     break;
                 }
                 buf.set_line_safe_bidi(content_x, y, wl, content_w as u16);
-                // On continuation lines (i > 0), the prefix area is left
-                // blank — indentation happens via the column offset.
+                // On continuation lines (i > 0), the prefix area is left blank; indentation happens via the column offset
             }
         }
     }
@@ -262,7 +254,7 @@ impl<T: ListItem> ListPane<'_, T> {
             }
 
             let pi = state.to_physical(vi);
-            // After prepare_layout refilter; skip rather than panic in release.
+            // prepare_layout's refilter should keep pi in range; in release, skip a stale index rather than panic
             debug_assert!(pi < self.items.len());
             let Some(item) = self.items.get(pi) else {
                 continue;
@@ -293,8 +285,7 @@ impl<T: ListItem> ListPane<'_, T> {
             let uses_framework = !item.content().spans.is_empty();
 
             // If the item is fully visible (no clipping), render directly.
-            // If partially visible (skip > 0 or truncated at bottom), render
-            // into a scratch area and blit the visible portion.
+            // If partially visible (skip > 0 or truncated at bottom), render into a scratch area and blit the visible portion
             if skip == 0 && rows_to_render == item_h {
                 // Fast path: render directly into buf.
                 let item_area = Rect {
@@ -338,10 +329,8 @@ impl<T: ListItem> ListPane<'_, T> {
                 }
 
                 // Copy visible rows from scratch to buf.
-                // Preserve the destination's bg when the source cell has
-                // the default (Reset) background — the parent (e.g., a popup
-                // overlay) may have set a specific bg on the area, and
-                // Buffer::empty starts with Reset which would erase it.
+                // Preserve the destination's bg when the source cell has the default (Reset) background
+                // The parent (e.g., a popup overlay) may have set a specific bg on the area, and Buffer::empty starts with Reset, which would erase it
                 for row in 0..rows_to_render {
                     let src_y = skip + row;
                     let dst_y = cursor_y + row;
@@ -358,15 +347,13 @@ impl<T: ListItem> ListPane<'_, T> {
             }
 
             // --- Post-pass 1: Selection background overlay ---
-            // Patches only the bg of each cell, preserving fg, content, and
-            // modifiers.  Applied after item render so items don't need to
-            // know about selection colors.
+            // Patches only the bg of each cell, preserving fg, content, and modifiers
+            // Applied after item render so items don't need to know about selection colors
             // Shown when focused, or when `show_selection_when_unfocused` is set.
             let show_sel = self.focused || state.show_selection_when_unfocused();
             if is_selected && show_sel {
-                // Use different bg for visual range vs cursor line.
-                // When `uniform_visual_bg` is set, the cursor line blends
-                // into the visual range (distinguished by prefix only).
+                // Use a different bg for the visual range vs the cursor line
+                // When `uniform_visual_bg` is set, the cursor line blends into the visual range (distinguished by prefix only)
                 let in_visual = state.visual_mode;
                 let bg = if is_cursor && !(in_visual && self.style.uniform_visual_bg) {
                     self.style.selection_bg
@@ -383,17 +370,15 @@ impl<T: ListItem> ListPane<'_, T> {
             }
 
             // --- Post-pass 2: Match highlight overlay ---
-            // Invert (REVERSED) the cells covering each match of the active
-            // query.  Gated on `show_highlights` so callers can suppress the
-            // overlay (e.g. after accepting a filter, where every line matches).
+            // Invert (REVERSED) the cells covering each match of the active query
+            // Gated on `show_highlights` so callers can suppress the overlay (e.g. after accepting a filter, where every line matches).
             if state.show_highlights
                 && let Some(matcher) = state.matcher()
             {
                 let single_row = wrap_mode == WrapMode::NoWrap || item_h == 1;
-                // Highlights must map the painted string. Framework items paint
-                // `content()` reordered, so highlight over it (not `search_text()`,
-                // which can differ in base direction / chrome). Custom `render()`
-                // items paint logically and keep logical columns.
+                // Highlights must map the painted string
+                // Framework items paint `content()` reordered, so highlight over it; `search_text()` can differ in base direction or chrome
+                // Custom `render()` items paint logically and keep logical columns
                 let content_plain = (uses_framework && crate::render::bidi::is_enabled())
                     .then(|| crate::scrollback::types::line_plain_text(item.content()));
                 let (hl_text, map_visual) = match &content_plain {
@@ -415,10 +400,9 @@ impl<T: ListItem> ListPane<'_, T> {
             }
 
             // --- Post-pass 3: Truncation ellipsis ---
-            // If the item's full wrapped height exceeds its allocated layout
-            // height, place "…" on the last rendered row.  This only triggers
-            // in NoWrap mode (where item_h == 1 regardless of content length).
-            // Viewport clipping does NOT trigger this — only true text truncation.
+            // If the item's full wrapped height exceeds its allocated layout height, place "…" on the last rendered row
+            // This only triggers in NoWrap mode (where item_h == 1 regardless of content length)
+            // Viewport clipping does not trigger this; only true text truncation does
             if item.desired_height(area.width) > item_h && rows_to_render > 0 {
                 let last_y = cursor_y + rows_to_render - 1;
                 render_truncation_ellipsis(buf, last_y, area.x, area.width);
@@ -435,10 +419,9 @@ impl<T: ListItem> ListPane<'_, T> {
 
 /// Place a `…` at the end of text on row `y` to indicate truncation.
 ///
-/// Scans from right to left for the rightmost non-space cell.  If there is
-/// room after it (text doesn't fill the full width), the `…` is appended.
-/// If the text fills the exact width, the last character is replaced — this
-/// matches the convention in VS Code, `less`, `bat`, and Vim.
+/// Scans from right to left for the rightmost non-space cell.
+/// If there is room after it (text doesn't fill the full width), the `…` is appended.
+/// If the text fills the exact width, the last character is replaced; this matches the convention in VS Code, `less`, `bat`, and Vim.
 ///
 /// The `…` inherits the `fg` color from the adjacent text cell and preserves
 /// the cell's existing `bg` (e.g., selection highlight).
@@ -475,7 +458,7 @@ fn render_truncation_ellipsis(buf: &mut Buffer, y: u16, x_start: u16, width: u16
 // Corner overlay indicators
 // ---------------------------------------------------------------------------
 
-/// Render single-character corner indicators for scroll position / follow mode.
+/// Render single-character corner indicators for scroll position and follow mode.
 ///
 /// - Top-right: `▲` (dim) when content is scrolled down (more above).
 /// - Bottom-right: `◆` (dim) in follow mode, `▼` (dim) when more content below,
@@ -496,15 +479,14 @@ fn render_corner_indicators(
     let bottom_right = (area.x + area.width - 1, area.y + area.height - 1);
 
     // Helper: place an indicator with `… ` padding if it overwrites content.
-    // Result: `content… ▼` — truncation ellipsis + space + indicator.
+    // The result looks like `content… ▼`: truncation ellipsis, a space, then the indicator
     //
-    // Preserves each cell's bg (e.g., selection highlight). The `…` inherits
-    // the overwritten content's fg color; the indicator uses the given fg.
+    // Preserves each cell's bg (e.g., selection highlight)
+    // The `…` inherits the overwritten content's fg color; the indicator uses the given fg
     let place_indicator =
         |buf: &mut Buffer, pos: (u16, u16), symbol: &str, fg: ratatui::style::Color| {
             // Check if the indicator or the cell just before it has content.
-            // If so, insert `… ` padding to avoid the indicator visually
-            // merging with text (e.g., `count=3▶` → `count… ▶`).
+            // If so, insert `… ` padding so the indicator doesn't visually merge with text (e.g., `count=3▶` becomes `count… ▶`)
             if area.width >= 3 && pos.0 >= area.x + 2 {
                 let at_pos = buf[pos].symbol().to_string();
                 let before_pos = buf[(pos.0 - 1, pos.1)].symbol().to_string();
@@ -517,7 +499,7 @@ fn render_corner_indicators(
                     buf[(pos.0 - 1, pos.1)].set_symbol(" ");
                 }
             }
-            // Indicator: set symbol + fg, preserve bg
+            // Indicator: set symbol and fg, preserve bg
             buf[pos].set_symbol(symbol);
             buf[pos].fg = fg;
             buf[pos].modifier = ratatui::style::Modifier::empty();
@@ -546,7 +528,7 @@ fn render_corner_indicators(
 
 /// Render the bottom bar: active input bar or accepted matcher status.
 ///
-/// When the input bar is open: left-aligned editable `search: ` or `filter: ` + textarea.
+/// When the input bar is open: a left-aligned editable `search: ` or `filter: ` label and the textarea.
 /// When a matcher is accepted (bar closed): right-aligned dim status.
 fn render_bottom_bar(
     area: Rect,
@@ -565,7 +547,7 @@ fn render_bottom_bar(
     buf.set_style(area, Style::default().bg(style.input_bar_bg));
 
     if let Some(mode) = state.input_mode() {
-        // Active input bar — left-aligned, editable.
+        // Active input bar: left-aligned, editable
         let label = match mode {
             super::state::InputBarMode::Search => "search: ",
             super::state::InputBarMode::Filter => "filter: ",
@@ -590,7 +572,7 @@ fn render_bottom_bar(
             state.render_input_textarea(ta_area, buf);
         }
     } else if let Some(matcher) = state.matcher() {
-        // Accepted matcher — right-aligned, dim.
+        // Accepted matcher: right-aligned, dim
         let mode_word = match matcher.mode {
             super::state::MatchMode::Filter => "filter",
             super::state::MatchMode::Search => "search",
@@ -720,7 +702,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 5);
         state.prepare_layout(&items, area.width, area.height);
 
-        // Auto-selected item 0. One select_next → item 1.
+        // Auto-selected item 0. One select_next moves to item 1.
         state.select_next(&items);
         state.prepare_layout(&items, area.width, area.height);
 
@@ -728,7 +710,7 @@ mod tests {
         let pane = ListPane::new(&items);
         StatefulWidget::render(pane, area, &mut buf, &mut state);
 
-        // Item 1 should have ">" prefix, others have " " prefix.
+        // Item 1 gets the ">" prefix, the others " "
         assert_eq!(row_text(&buf, 0, 0, 20), " alpha");
         assert_eq!(row_text(&buf, 1, 0, 20), ">beta");
         assert_eq!(row_text(&buf, 2, 0, 20), " gamma");
@@ -744,14 +726,13 @@ mod tests {
         let area = Rect::new(0, 0, 20, 3);
         state.prepare_layout(&items, area.width, area.height);
 
-        // Scroll down by 5.
         state.scroll_down(5);
 
         let mut buf = Buffer::empty(area);
         let pane = ListPane::new(&items);
         StatefulWidget::render(pane, area, &mut buf, &mut state);
 
-        // Should show items 5, 6, 7 (with scrollbar taking 2 cols).
+        // Rows show items 5, 6, 7 (the scrollbar takes 2 cols)
         let text_0 = row_text(&buf, 0, 0, 18);
         let text_1 = row_text(&buf, 1, 0, 18);
         let text_2 = row_text(&buf, 2, 0, 18);
@@ -780,7 +761,7 @@ mod tests {
         let pane = ListPane::new(&items);
         StatefulWidget::render(pane, area, &mut buf, &mut state);
 
-        // Should not crash, all rows empty.
+        // No crash; all rows stay empty
         assert_eq!(row_text(&buf, 0, 0, 20), "");
     }
 
@@ -803,7 +784,7 @@ mod tests {
         let pane = ListPane::new(&items);
         StatefulWidget::render(pane, area, &mut buf, &mut state);
 
-        // Should show "alpha" (auto-selected) and "alphabet".
+        // Shows "alpha" (auto-selected) and "alphabet"
         assert_eq!(row_text(&buf, 0, 0, 20), ">alpha");
         assert_eq!(row_text(&buf, 1, 0, 20), " alphabet");
         assert_eq!(row_text(&buf, 2, 0, 20), "");
@@ -811,9 +792,8 @@ mod tests {
 
     #[test]
     fn truncation_ellipsis_appended_after_text() {
-        // Item with desired_height > 1 in NoWrap mode → gets truncation "…".
-        // Text "hello" (6 chars with prefix " ") in a 20-char-wide area,
-        // so the "…" should be appended at position 6.
+        // An item with desired_height > 1 in NoWrap mode gets the truncation "…"
+        // The text "hello" (6 chars with prefix " ") sits in a 20-char-wide area, so the "…" is appended at position 6
         let items = vec![
             RenderTestItem::new(0, "hello").with_height(3), // would be 3 lines tall
         ];
@@ -825,7 +805,7 @@ mod tests {
         let pane = ListPane::new(&items);
         StatefulWidget::render(pane, area, &mut buf, &mut state);
 
-        // ">hello…" — "…" appended after text since there's trailing space.
+        // ">hello…": the "…" is appended after the text since there's trailing space
         let row = row_text(&buf, 0, 0, 20);
         assert!(
             row.contains("…"),
@@ -836,9 +816,8 @@ mod tests {
 
     #[test]
     fn truncation_ellipsis_replaces_last_char_at_full_width() {
-        // Text fills the exact width → "…" replaces the last character.
-        // Width 7, prefix " " = 1 char, so text area = 6 chars.
-        // "abcdef" fills all 7 columns (1 prefix + 6 text).
+        // The text fills the exact width, so "…" replaces the last character
+        // Width 7 with a 1-char prefix leaves 6 text columns; "abcdef" fills all 7 columns
         let items = vec![RenderTestItem::new(0, "abcdef").with_height(2)];
         let mut state = ListPaneState::new(WrapMode::NoWrap, false);
         let area = Rect::new(0, 0, 7, 5);
@@ -848,7 +827,7 @@ mod tests {
         let pane = ListPane::new(&items);
         StatefulWidget::render(pane, area, &mut buf, &mut state);
 
-        // " abcde…" — last char 'f' replaced by "…".
+        // " abcde…": the last char 'f' is replaced by "…"
         let row = row_text(&buf, 0, 0, 7);
         assert!(row.ends_with('…'), "expected trailing …, got: {row}");
         assert_eq!(row, ">abcde…");
@@ -856,7 +835,7 @@ mod tests {
 
     #[test]
     fn no_truncation_ellipsis_for_short_items() {
-        // Item with desired_height == 1 → no truncation, no ellipsis.
+        // An item with desired_height == 1 gets no truncation and no ellipsis
         let items = vec![RenderTestItem::new(0, "short")];
         let mut state = ListPaneState::new(WrapMode::NoWrap, false);
         let area = Rect::new(0, 0, 20, 5);
@@ -879,14 +858,14 @@ mod tests {
     #[test]
     fn highlight_match_inverts_correct_cells() {
         // Items: "alpha", "beta", "alphabet"
-        // Search for "alph" → should invert fg/bg on match cells in items 0 and 2.
+        // Searching "alph" inverts fg and bg on the match cells in items 0 and 2
         let items = vec![
             RenderTestItem::new(0, "alpha"),
             RenderTestItem::new(1, "beta"),
             RenderTestItem::new(2, "alphabet"),
         ];
 
-        // Render WITHOUT search to capture baseline colors.
+        // Render without search to capture baseline colors
         let area = Rect::new(0, 0, 20, 5);
         let mut state_base = ListPaneState::new(WrapMode::NoWrap, false);
         state_base.prepare_layout(&items, area.width, area.height);
@@ -894,7 +873,7 @@ mod tests {
         let pane_base = ListPane::new(&items);
         StatefulWidget::render(pane_base, area, &mut buf_base, &mut state_base);
 
-        // Render WITH search.
+        // Render with search
         let mut state = ListPaneState::new(WrapMode::NoWrap, false);
         state.set_matcher(Some(ListMatcher::new(
             "alph",
@@ -906,8 +885,7 @@ mod tests {
         let pane = ListPane::new(&items);
         StatefulWidget::render(pane, area, &mut buf, &mut state);
 
-        // Item 0: ">alpha" — "alph" is at columns 1..5 (after ">" prefix).
-        // Match cells should have the REVERSED modifier set.
+        // Item 0: ">alpha", "alph" at columns 1..5 (after the ">" prefix)
         for col in 1..5u16 {
             let cell = &buf[(col, 0)];
             assert!(
@@ -915,7 +893,7 @@ mod tests {
                 "col {col}: should have REVERSED modifier",
             );
         }
-        // Column 5 ('a' of "alpha") should NOT be reversed.
+        // Column 5 ('a' of "alpha") is outside the match
         assert!(
             !buf[(5, 0)]
                 .modifier
@@ -923,7 +901,7 @@ mod tests {
             "col 5 should not be reversed"
         );
 
-        // Item 1: " beta" — no match, no REVERSED.
+        // Item 1: " beta" has no match, so no REVERSED
         for col in 0..5u16 {
             assert!(
                 !buf[(col, 1)]
@@ -933,7 +911,7 @@ mod tests {
             );
         }
 
-        // Item 2: " alphabet" — "alph" at columns 1..5.
+        // Item 2: " alphabet", "alph" at columns 1..5
         for col in 1..5u16 {
             assert!(
                 buf[(col, 2)]
@@ -946,8 +924,7 @@ mod tests {
 
     #[test]
     fn selection_bg_and_highlight_inversion_both_applied() {
-        // Selected item with a match: non-match cells get selection_bg,
-        // match cells get REVERSED modifier (on top of selection_bg).
+        // Selected item with a match: non-match cells get selection_bg, match cells get REVERSED (on top of selection_bg)
         let items = vec![RenderTestItem::new(0, "hello world")];
         let mut state = ListPaneState::new(WrapMode::NoWrap, false);
         state.set_matcher(Some(ListMatcher::new(
@@ -963,7 +940,7 @@ mod tests {
         let pane = ListPane::new(&items).style(style);
         StatefulWidget::render(pane, area, &mut buf, &mut state);
 
-        // Non-match cells should have selection_bg but NOT REVERSED.
+        // Non-match cells get selection_bg but not REVERSED
         let sel_bg = style.selection_bg;
         assert_eq!(buf[(0, 0)].bg, sel_bg, "selection bg at col 0");
         assert_eq!(buf[(6, 0)].bg, sel_bg, "selection bg at col 6");
@@ -974,7 +951,7 @@ mod tests {
             "non-match col 0 should not be reversed"
         );
 
-        // Match cells ("world" at columns 7..12) should have REVERSED.
+        // Match cells ("world" at columns 7..12) get REVERSED
         for col in 7..12u16 {
             assert!(
                 buf[(col, 0)]
@@ -985,13 +962,12 @@ mod tests {
         }
     }
 
-    /// Regression: search highlight in Wrap mode should highlight the correct
-    /// cells even when text wraps across multiple rows.
+    /// Regression: search highlight in Wrap mode must land on the correct cells even when text wraps across multiple rows.
     ///
     /// Uses a realistic tracing line that wraps, with a search for "tool".
     #[test]
     fn highlight_match_wrap_mode_correct_positions() {
-        // A long line that wraps at width 40. Contains "tool" near the end.
+        // A long line that wraps at width 40; it contains "tool" near the end
         let text = "abcdefghij klmnopqrst uvwxyz0123 tool_call foo bar baz qux";
         let items = vec![RenderTestItem::new(0, text)];
 
@@ -1016,7 +992,7 @@ mod tests {
         let byte_pos = text.find("tool").unwrap();
         assert_eq!(byte_pos, 33);
 
-        // Find which cells have REVERSED modifier (= highlighted).
+        // Find which cells have the REVERSED modifier (the highlighted ones)
         let mut reversed_cells: Vec<(u16, u16)> = Vec::new();
         for row in 0..height {
             for col in 0..width {
@@ -1029,8 +1005,6 @@ mod tests {
             }
         }
 
-        // The highlighted cells should spell "tool" — verify by checking
-        // that the symbols at those positions form "tool".
         let highlighted_text: String = reversed_cells
             .iter()
             .map(|&(c, r)| buf[(c, r)].symbol().to_string())
@@ -1043,7 +1017,7 @@ mod tests {
     }
 
     /// Regression: long synthetic tracing line at terminal width 159.
-    /// Search for "tool" highlights wrong positions due to wrap mismatch.
+    /// Searching "tool" used to highlight wrong positions due to a wrap mismatch.
     #[test]
     fn highlight_match_wrap_mode_real_tracing_line() {
         use ratatui::style::{Color, Modifier};
@@ -1165,9 +1139,8 @@ mod tests {
             .map(|&(c, r)| buf[(c, r)].symbol().to_string())
             .collect();
 
-        // "tool" appears multiple times in the text. Each occurrence should
-        // highlight exactly "tool" (4 chars). Check that the highlighted text
-        // is a concatenation of "tool" instances.
+        // "tool" appears multiple times in the text; each occurrence highlights exactly "tool" (4 chars)
+        // The highlighted text is therefore a concatenation of "tool" instances
         let tool_count = plain.matches("tool").count();
         let expected = "tool".repeat(tool_count);
         assert_eq!(
@@ -1180,15 +1153,14 @@ mod tests {
 
     /// Regression: search highlight in Wrap mode with multi-span styled content.
     ///
-    /// Tracing entries have ANSI-parsed styled spans. The search_text() is
-    /// plain (ANSI-stripped), but the content() has multiple styled spans.
+    /// Tracing entries have ANSI-parsed styled spans.
+    /// The search_text() is plain (ANSI-stripped), but the content() has multiple styled spans.
     /// Wrap positions and highlight byte offsets must stay in sync.
     #[test]
     fn highlight_match_wrap_mode_styled_spans() {
         use ratatui::style::Color;
         use ratatui::text::{Line, Span};
-        // Simulate a styled tracing line: "INFO " (green) + long message
-        // containing "tool" after a wrap boundary.
+        // Simulate a styled tracing line: "INFO " (green) and a long message containing "tool" after a wrap boundary
         let prefix_part = "INFO ";
         let msg_part = "session.handle_prompt request_id=abc model_name=test: tool_execute command";
         let full_plain = format!("{prefix_part}{msg_part}");
@@ -1326,7 +1298,7 @@ mod tests {
         let item = ContentTestItem::new(0, LONG_LINE);
         let height = item.desired_height(width);
 
-        // ~800 chars at width 112 should need ~7-8 lines
+        // About 800 chars at width 112 need at least 7 lines
         assert!(
             height >= 7,
             "Long line should need at least 7 rows at width {}",
@@ -1387,14 +1359,14 @@ mod tests {
 
     #[test]
     fn escaped_newlines_not_split() {
-        // \n in JSON strings should NOT be interpreted as actual newlines
+        // \n in JSON strings must not be interpreted as actual newlines
         let width: u16 = 112;
         let line = r#"INFO prompt_preview="<user_query>\ncheck weather\n</user_query>" arguments={"timeout": 15000}"#;
 
         let item = ContentTestItem::new(0, line);
         let items = [item];
 
-        // Content should equal original text
+        // The flattened content equals the original text
         let flattened: String = items[0]
             .content()
             .spans
@@ -1422,7 +1394,6 @@ mod tests {
 
     #[test]
     fn tracing_entry_renders_complete_content() {
-        // Test TracingEntry with ANSI codes renders completely.
         let width: u16 = 112;
 
         let ansi_line = format!(
@@ -1463,7 +1434,7 @@ mod tests {
 
     #[test]
     fn long_line_constrained_viewport_clips_correctly() {
-        // Constrained viewport should clip item, not corrupt layout.
+        // A constrained viewport clips the item; it must not corrupt the layout
         let width: u16 = 112;
         let item = ContentTestItem::new(0, LONG_LINE);
         let items = [item];
@@ -1475,7 +1446,6 @@ mod tests {
         let area = Rect::new(0, 0, width, viewport_height);
         state.prepare_layout(&items, area.width, area.height);
 
-        // Layout height should match desired height (not be clipped)
         assert_eq!(
             state.layout().item_height(0),
             full_height,
@@ -1485,7 +1455,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         StatefulWidget::render(ListPane::new(&items), area, &mut buf, &mut state);
 
-        // Count rendered rows - should fill viewport
+        // Count rendered rows; they fill the viewport
         let non_empty_rows = (0..viewport_height)
             .filter(|&y| (0..width).any(|x| buf[(x, y)].symbol().trim() != ""))
             .count() as u16;
@@ -1498,7 +1468,6 @@ mod tests {
 
     #[test]
     fn multiple_long_items_layout_integrity() {
-        // Test layout cache integrity with multiple long items.
         let width: u16 = 112;
 
         let items = [
@@ -1541,7 +1510,6 @@ mod tests {
 
     #[test]
     fn scrolled_long_item_shows_end_content() {
-        // Scrolled view should show end of long item.
         let width: u16 = 112;
         let item = ContentTestItem::new(0, LONG_LINE);
         let items = [item];
@@ -1569,7 +1537,6 @@ mod tests {
 
     #[test]
     fn wrap_line_count_matches_desired_height() {
-        // word_wrap_line output count must match desired_height.
         use crate::render::wrapping::word_wrap_line;
 
         let width: u16 = 112;
@@ -1598,21 +1565,21 @@ mod tests {
     }
 
     // =========================================================================
-    // Scrollbar width mismatch bug (regression tests for the fix)
+    // Scrollbar width mismatch bug (regression tests)
     // =========================================================================
 
     #[test]
     fn scrollbar_width_mismatch_bug_repro() {
-        // BUG REPRODUCTION: Documents the scrollbar width mismatch issue.
+        // Documents the scrollbar width mismatch issue
         //
-        // Root cause (without fix):
+        // Root cause (without the fix):
         // 1. prepare_layout() computes heights at width W (114)
-        // 2. Scrollbar reduces render width to W-2 (112)
-        // 3. Item needs MORE lines at narrower width
-        // 4. Layout allocates fewer rows than needed → truncation
+        // 2. The scrollbar reduces the render width to W-2 (112)
+        // 3. The item needs more lines at the narrower width
+        // 4. The layout allocates fewer rows than needed, so lines are truncated
         //
-        // This test verifies the bug EXISTS at the item level.
-        // The fix in prepare_layout prevents this by computing at narrow width.
+        // This test verifies the bug exists at the item level
+        // The fix in prepare_layout computes at the narrow width instead
         use crate::render::wrapping::word_wrap_line;
 
         let layout_width: u16 = 114;
@@ -1622,7 +1589,7 @@ mod tests {
         let height_at_layout = item.desired_height(layout_width);
         let height_at_render = item.desired_height(render_width);
 
-        // Critical bug condition: narrower width needs MORE lines
+        // The bug condition: the narrower width needs more lines
         assert!(
             height_at_render > height_at_layout,
             "Bug trigger: narrower width needs more lines ({} > {})",
@@ -1630,7 +1597,7 @@ mod tests {
             height_at_layout
         );
 
-        // Without fix: allocated = 7, needed = 8 → 1 line truncated
+        // Without the fix: 7 rows allocated, 8 needed, so 1 line is truncated
         let wrapped = word_wrap_line(item.content(), render_width as usize);
         let lines_truncated = (wrapped.len() as u16).saturating_sub(height_at_layout);
 
@@ -1645,13 +1612,13 @@ mod tests {
     fn scrollbar_width_fix_verified() {
         // Verifies the prepare_layout fix works end-to-end.
         //
-        // The fix (Option B): compute at narrow width when scrollbar is needed.
-        // Phase 1: vis_count > viewport → scrollbar definite → width-2
-        // Phase 2: total_height > viewport → fallback recompute at width-2
+        // The fix: compute at the narrow width when a scrollbar is needed
+        // Phase 1: vis_count > viewport means the scrollbar is definite, so compute at width-2
+        // Phase 2: total_height > viewport triggers a fallback recompute at width-2
         let full_width: u16 = 114;
         let narrow_width: u16 = 112;
 
-        // 2 items guarantee scrollbar (Phase 1)
+        // 2 items guarantee a scrollbar (Phase 1)
         let items: Vec<ContentTestItem> = vec![
             ContentTestItem::new(0, LONG_LINE),
             ContentTestItem::new(1, LONG_LINE),
@@ -1663,7 +1630,6 @@ mod tests {
         let mut state = ListPaneState::new(WrapMode::Wrap, false);
         state.prepare_layout(&items, full_width, viewport_height);
 
-        // Fix should compute at narrow width
         assert_eq!(
             state.layout().item_height(0),
             height_narrow,
@@ -1688,7 +1654,7 @@ mod tests {
 
     #[test]
     fn scrollbar_fix_phase1_many_items() {
-        // Phase 1: vis_count > viewport → scrollbar definite → compute at width-2
+        // Phase 1: vis_count > viewport means the scrollbar is definite, so compute at width-2
         let full_width: u16 = 114;
         let viewport_height: u16 = 5;
 
@@ -1712,16 +1678,15 @@ mod tests {
 
     #[test]
     fn scrollbar_fix_phase2_few_heavy_items() {
-        // Phase 2: vis_count <= viewport but total_height > viewport
-        // → fallback recompute at width-2
+        // Phase 2: vis_count <= viewport but total_height > viewport triggers the fallback recompute at width-2
         let full_width: u16 = 114;
         let narrow_width: u16 = 112;
 
         let items = [ContentTestItem::new(0, LONG_LINE)];
         let height_narrow = items[0].desired_height(narrow_width);
 
-        // Viewport = 6 < height at full width (7) → scrollbar needed
-        // But vis_count (1) <= viewport (6) → Phase 1 skips, Phase 2 catches it
+        // Viewport 6 is below the height at full width (7), so a scrollbar is needed
+        // But vis_count (1) <= viewport (6), so Phase 1 skips and Phase 2 catches it
         let viewport_height: u16 = 6;
 
         let mut state = ListPaneState::new(WrapMode::Wrap, false);
@@ -1734,7 +1699,7 @@ mod tests {
         );
     }
 
-    /// Filter + item shrink must refilter vis_map; paint must not OOB.
+    /// Filtering plus an item shrink must refilter vis_map; painting must not go out of bounds.
     #[test]
     fn render_does_not_panic_when_filter_active_and_items_shrink() {
         let mut items = vec![

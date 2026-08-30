@@ -2,20 +2,16 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Env var under test; the TestSandbox `env_clear` guarantees it is unset
-/// unless a case sets it explicitly.
+/// Env var under test; the TestSandbox `env_clear` guarantees it is unset unless a case sets it explicitly.
 const CONNECT_UI_TIMEOUT_ENV: &str = "GROK_CONNECT_UI_TIMEOUT_SECS";
 
-/// Unified-log message the pager writes directly (pre-connect, bypassing the
-/// ACP forwarder) whenever the env var is set — including rejected values,
-/// so the resolution is observable on the startups that fail inside it.
+/// Unified-log message the pager writes directly (pre-connect, bypassing the ACP forwarder) whenever the env var is set.
+/// Rejected values log too, so the resolution is observable on the startups that fail inside it.
 const ENV_BUDGET_LOG_MSG: &str = "startup connect budget from env";
 
-/// Poll the sandbox unified log until it contains `needle` or `timeout`
-/// elapses, returning the last read. The pager's write is immediate, but
-/// this test races the child process's startup, and a read can catch a line
-/// mid-append — so poll on a needle from the entry's LAST field (`ctx`), not
-/// its first.
+/// Poll the sandbox unified log until it contains `needle` or `timeout` elapses, returning the last read.
+/// The pager's write is immediate, but this test races the child process's startup, and a read can catch a line mid-append.
+/// So poll on a needle from the entry's LAST field (`ctx`), not its first.
 fn read_unified_log_until(
     harness: &mut PtyHarness,
     path: &Path,
@@ -32,9 +28,8 @@ fn read_unified_log_until(
     }
 }
 
-/// Spawn the pager with the env var set, wait for the welcome screen, then
-/// return the unified-log line recording the budget resolution (polled on
-/// `ctx_needle`, a fragment of the entry's last-serialized field).
+/// Spawn the pager with the env var set, wait for the welcome screen, then return the unified-log line recording the budget resolution.
+/// The poll keys on `ctx_needle`, a fragment of the entry's last-serialized field.
 async fn boot_and_read_budget_line(env_value: &str, ctx_needle: &str) -> String {
     let content = ContentController::start().await.expect("start content");
 
@@ -71,10 +66,9 @@ async fn boot_and_read_budget_line(env_value: &str, ctx_needle: &str) -> String 
     line
 }
 
-/// **Valid override boots and is observable.** With the env set to `45`,
-/// startup completes under the raised budget and the pager records the raw
-/// value plus what it resolved to — proof the override resolved from the env
-/// end-to-end, durable even though this run happened to succeed.
+/// **Valid override boots and is observable.**
+/// With the env set to `45`, startup completes under the raised budget and the pager records the raw value plus what it resolved to.
+/// That proves the override resolved from the env end-to-end, durable even though this run happened to succeed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn connect_ui_timeout_env_override_logs_and_boots() {
@@ -89,10 +83,9 @@ async fn connect_ui_timeout_env_override_logs_and_boots() {
     );
 }
 
-/// **Garbage falls back loudly.** An unparsable value resolves to the default
-/// 30s (startup still completes) and the entry records the rejected input
-/// next to the default it resolved to — a presence check, with no ordering
-/// argument about shared buffers.
+/// **Garbage falls back loudly.**
+/// An unparsable value resolves to the default 30s and startup still completes.
+/// The entry records the rejected input next to the default it resolved to; a presence check, with no ordering argument about shared buffers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn connect_ui_timeout_env_garbage_logs_default_and_boots() {

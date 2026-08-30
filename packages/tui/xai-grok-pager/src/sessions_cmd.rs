@@ -34,12 +34,10 @@ enum SessionsCommand {
 }
 
 pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
-    // Best-effort only. Do not force an interactive public login for enterprise
-    // deployments that only configure a deployment_key + custom xai_api_base_url.
-    // If the user has previously run the interactive `grok` TUI (which succeeds
-    // for these setups), any cached credential will be used. Otherwise we still
-    // proceed so the SessionRegistryClient can use the deployment_key when
-    // talking to the custom proxy.
+    // Best-effort only: never force an interactive public login here
+    // Enterprise deployments may configure only a deployment_key and a custom xai_api_base_url
+    // If the user has previously run the interactive `grok` TUI (which succeeds for these setups), any cached credential is used
+    // Otherwise we still proceed so the SessionRegistryClient can use the deployment_key when talking to the custom proxy
     let auth = try_ensure_fresh_auth(&agent_config.grok_com_config).await;
 
     let auth_manager = std::sync::Arc::new(AuthManager::new(
@@ -78,7 +76,7 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                 IndexDecision, SessionSearchRequest, execute_search,
             };
 
-            // The only subcommand that reads the index, so the only one to start one.
+            // Search is the only subcommand that reads the index, so it is the only one to start one
             let search = xai_grok_shell::session::storage::search::start_if_enabled(agent_config);
 
             let req = SessionSearchRequest {
@@ -180,20 +178,15 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
             println!("\nTotal: {}", resp.results.len() + remote_shown);
         }
         SessionsCommand::Delete { id } => {
-            // Always attempt the remote delete when authenticated and not
-            // ZDR — `list` / `search` likewise query remote unconditionally
-            // rather than gating on storage mode (which the CLI cannot
-            // resolve here: it builds config without remote settings). The
-            // backend delete is idempotent (a `404` is treated as success),
-            // so this is safe for local-only sessions with no remote copy.
+            // Always attempt the remote delete when authenticated and not ZDR; `list` and `search` likewise query remote unconditionally
+            // Gating on storage mode is impossible here: the CLI builds config without remote settings
+            // The backend delete is idempotent (a `404` is treated as success), so local-only sessions with no remote copy are safe
             // ZDR teams never upload, so there is nothing remote to delete.
             let needs_remote = auth.as_ref().is_some_and(|a| !a.is_zdr_team());
 
-            // Pass `cwd = None` so the session is found by id regardless of
-            // which workspace it was created in; the local delete still uses
-            // the resolved per-session cwd.
-            // No handle: the eviction inside prunes the row from another
-            // process's index, so a delete never needs one of its own.
+            // Pass `cwd = None` so the session is found by id regardless of which workspace it was created in
+            // The local delete still uses the resolved per-session cwd
+            // No search handle: the eviction inside prunes the row from another process's index, so a delete never needs one of its own
             let deletion = xai_grok_shell::session::persistence::delete_session_history(
                 &id,
                 None,
@@ -214,8 +207,7 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
     Ok(())
 }
 
-/// Print sessions grouped by worktree label, preserving the original table
-/// format with a `Label: <label>` header before each group.
+/// Print sessions grouped by worktree label, preserving the original table format with a `Label: <label>` header before each group.
 fn print_sessions_grouped(sessions: &[MergedSession]) {
     if sessions.is_empty() {
         println!("No sessions found.");

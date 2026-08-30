@@ -29,34 +29,6 @@ pub trait Renderable {
     fn desired_height(&self, width: u16) -> u16;
 }
 
-/// Owned or borrowed renderable item for composition.
-pub enum RenderableItem<'a> {
-    Owned(Box<dyn Renderable + 'a>),
-    Borrowed(&'a dyn Renderable),
-}
-
-impl<'a> Renderable for RenderableItem<'a> {
-    fn render(&self, area: Rect, buf: &mut Buffer) {
-        match self {
-            RenderableItem::Owned(child) => child.render(area, buf),
-            RenderableItem::Borrowed(child) => child.render(area, buf),
-        }
-    }
-
-    fn desired_height(&self, width: u16) -> u16 {
-        match self {
-            RenderableItem::Owned(child) => child.desired_height(width),
-            RenderableItem::Borrowed(child) => child.desired_height(width),
-        }
-    }
-}
-
-impl<'a> From<Box<dyn Renderable + 'a>> for RenderableItem<'a> {
-    fn from(value: Box<dyn Renderable + 'a>) -> Self {
-        RenderableItem::Owned(value)
-    }
-}
-
 // ============================================================================
 // Standard Implementations
 // ============================================================================
@@ -191,19 +163,5 @@ mod tests {
     fn option_some_delegates_height() {
         let opt: Option<&str> = Some("hello");
         assert_eq!(opt.desired_height(80), 1);
-    }
-
-    #[test]
-    fn renderable_item_owned_delegates() {
-        let boxed: Box<dyn Renderable> = Box::new("hello");
-        let item = RenderableItem::Owned(boxed);
-        assert_eq!(item.desired_height(80), 1);
-    }
-
-    #[test]
-    fn renderable_item_borrowed_delegates() {
-        let s = "hello";
-        let item = RenderableItem::Borrowed(&s as &dyn Renderable);
-        assert_eq!(item.desired_height(80), 1);
     }
 }

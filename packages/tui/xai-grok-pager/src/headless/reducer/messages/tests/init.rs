@@ -1,4 +1,4 @@
-//! Init / available-commands / skills projection.
+//! Tests for the init system message, available-commands updates, and the skills list derived from them.
 
 use super::*;
 use pretty_assertions::assert_eq;

@@ -1,13 +1,10 @@
 //! User-facing formatting for terminal request / API errors.
 //!
-//! Turns raw ACP / `RetryState` dumps (`API error (status 500): {"error":…}`)
-//! into the same kind of short warning banner used for 401 re-auth.
+//! Turns raw ACP / `RetryState` dumps (`API error (status 500): {"error":…}`) into the same kind of short warning banner used for 401 re-auth.
 
-/// Wire `RetryState::Failed.error_type` values the pager understands: the
-/// shell's `SamplingErrorKind::as_str` tags plus its special-cased tags
-/// (`context_length`, `legacy_auth`, …). Unknown strings map to
-/// [`WireErrorType::Other`] rather than being matched as raw `&str` at call
-/// sites.
+/// Wire `RetryState::Failed.error_type` values the pager understands.
+/// The vocabulary is the shell's `SamplingErrorKind::as_str` tags plus its special-cased tags (`context_length`, `legacy_auth`, …).
+/// Unknown strings map to [`WireErrorType::Other`] rather than being matched as raw `&str` at call sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WireErrorType {
     Auth,
@@ -27,24 +24,48 @@ pub(crate) enum WireErrorType {
 }
 
 impl WireErrorType {
+    /// Only the pager-special tags are matched here; the shared vocabulary routes through `SamplingErrorKind`'s `FromStr`.
+    /// That keeps a single string table, so a kind added there classifies here automatically.
     pub(crate) fn parse(raw: Option<&str>) -> Self {
-        match raw {
-            Some("auth") => Self::Auth,
-            Some("auth_transient") => Self::AuthTransient,
-            Some("legacy_auth") => Self::LegacyAuth,
-            Some("context_length") => Self::ContextLength,
-            Some("encrypted_content_mismatch") => Self::EncryptedContentMismatch,
-            Some(s) if s == xai_grok_shell::extensions::notification::DISK_FULL_ERROR_TYPE => {
+        let Some(s) = raw else {
+            return Self::Other;
+        };
+        match s {
+            "auth_transient" => Self::AuthTransient,
+            "legacy_auth" => Self::LegacyAuth,
+            "context_length" => Self::ContextLength,
+            "encrypted_content_mismatch" => Self::EncryptedContentMismatch,
+            s if s == xai_grok_shell::extensions::notification::DISK_FULL_ERROR_TYPE => {
                 Self::DiskFull
             }
-            Some("api") => Self::Api,
-            Some("http") => Self::Http,
-            Some("idle_timeout") => Self::IdleTimeout,
-            Some("empty_response") => Self::EmptyResponse,
-            Some("serialization") => Self::Serialization,
-            Some("rate_limited") => Self::RateLimited,
-            Some("max_tokens_truncation") => Self::MaxTokensTruncation,
-            _ => Self::Other,
+            s => s
+                .parse::<xai_grok_shell::sampling::error::SamplingErrorKind>()
+                .map(Into::into)
+                .unwrap_or(Self::Other),
+        }
+    }
+}
+
+/// Absent stays `None`, which keeps the untyped-text recovery available; every place a kind comes off the wire uses this mapping.
+/// An unknown kind (a newer shell's) parses to `Some(Other)`, so it is never text-sniffed into a different classification.
+pub(crate) fn wire_error_kind(raw: Option<&str>) -> Option<WireErrorType> {
+    raw.map(|s| WireErrorType::parse(Some(s)))
+}
+
+/// The shared vocabulary maps 1:1 onto the pager's wire types; kinds without their own copy render as [`Self::Other`].
+impl From<xai_grok_shell::sampling::error::SamplingErrorKind> for WireErrorType {
+    fn from(kind: xai_grok_shell::sampling::error::SamplingErrorKind) -> Self {
+        use xai_grok_shell::sampling::error::SamplingErrorKind as K;
+        match kind {
+            K::Auth => Self::Auth,
+            K::Http => Self::Http,
+            K::Api => Self::Api,
+            K::Serialization => Self::Serialization,
+            K::IdleTimeout => Self::IdleTimeout,
+            K::RateLimited => Self::RateLimited,
+            K::EmptyResponse => Self::EmptyResponse,
+            K::MaxTokensTruncation => Self::MaxTokensTruncation,
+            K::DoomLoopDetected => Self::Other,
         }
     }
 }
@@ -57,8 +78,8 @@ pub(crate) struct FormattedRequestFailure {
     pub detail: String,
 }
 
-/// `Headline: detail` (headline alone when there is no detail). Shared with
-/// the scrollback block so the two renderings can't drift.
+/// `Headline: detail` (headline alone when there is no detail).
+/// Shared with the scrollback block so the two renderings can't drift.
 pub(crate) fn banner_message(headline: &str, detail: &str) -> String {
     if detail.is_empty() {
         headline.to_string()
@@ -83,22 +104,25 @@ impl FormattedRequestFailure {
 
 /// Format a terminal request / API error for the TUI.
 ///
-/// `status` is preferred when the caller already parsed it (ACP `http_status`
-/// field). Otherwise the status is recovered from the message text.
+/// `status` is preferred when the caller already parsed it (ACP `http_status` field).
+/// Otherwise the status is recovered from the message text.
 ///
-/// Shape: `Headline (code): optional why. What to do.` Server text is kept
-/// only when it adds information: never for server faults (5xx bodies are
-/// internal detail like "upstream exploded") and never as a headline echo.
+/// Shape: `Headline (code): optional why. What to do.`
+/// Server text is kept only when it adds information.
+/// It is dropped for server faults (5xx bodies are internal detail like "upstream exploded") and when it echoes the headline.
 /// A status-level next step is always kept when we have one.
 pub(crate) fn format_request_failure(
     status: Option<u16>,
-    error_type: Option<&str>,
+    error_type: Option<WireErrorType>,
     raw: &str,
 ) -> FormattedRequestFailure {
-    let wire = WireErrorType::parse(error_type);
-    // Text-sniffed status must not demote a dedicated wire-type headline to
-    // generic status copy (an `auth_transient` message contains
-    // "Unauthorized (401)"); only the untyped rails recover it from the text.
+    let wire = if truncation_recovered_from_untyped_raw(error_type, raw) {
+        WireErrorType::MaxTokensTruncation
+    } else {
+        error_type.unwrap_or(WireErrorType::Other)
+    };
+    // A sniffed status must not demote a dedicated wire-type headline to generic status copy
+    // An `auth_transient` message contains "Unauthorized (401)", so only `Api` and `Other` recover a status from the text
     let status = status.or_else(|| {
         matches!(wire, WireErrorType::Api | WireErrorType::Other)
             .then(|| parse_http_status(raw))
@@ -115,6 +139,20 @@ pub(crate) fn format_request_failure(
         headline: class.headline,
         detail,
     }
+}
+
+/// Whether a fully untyped raw is `SamplingError::MaxTokensTruncation`'s flattened text.
+/// A present-but-unknown error type is a newer shell's kind and is never reclassified.
+/// An embedded HTTP status also disqualifies: an upstream body may quote the truncation phrase, and status copy wins.
+///
+/// TODO: error-kind-fallback-removal — this recovery is a version shim for terminals that predate the typed `errorKind`/`error_kind` fields.
+/// Those are old shells, and `updates.jsonl` replays they recorded.
+/// It is also the only truncation classifier for the exhausted-retry path, which passes no error type at all.
+/// Removing it once fleets converge would silently regress that path; type the `RetryState::Exhausted` reason first.
+fn truncation_recovered_from_untyped_raw(error_type: Option<WireErrorType>, raw: &str) -> bool {
+    error_type.is_none()
+        && parse_http_status(raw).is_none()
+        && raw.contains(xai_grok_shell::sampling::error::MAX_TOKENS_TRUNCATION_MESSAGE)
 }
 
 struct Classified {
@@ -213,7 +251,7 @@ fn classify(status: Option<u16>, wire: WireErrorType) -> Classified {
         ),
         WireErrorType::MaxTokensTruncation => (
             "Response truncated",
-            Some("Try asking for a shorter answer."),
+            None,
             Some("The model hit its output limit."),
         ),
         WireErrorType::RateLimited => (
@@ -244,8 +282,7 @@ fn classify(status: Option<u16>, wire: WireErrorType) -> Classified {
     }
 }
 
-/// `why. action`, deduplicating (ignoring case/punctuation) when one already
-/// contains the other.
+/// `why. action`, deduplicating (ignoring case/punctuation) when one already contains the other.
 fn compose_detail(why: Option<&str>, action: Option<&str>) -> String {
     match (why, action) {
         (None, None) => String::new(),
@@ -263,8 +300,7 @@ fn compose_detail(why: Option<&str>, action: Option<&str>) -> String {
     }
 }
 
-/// Server-fault responses (5xx and their wire equivalents) carry internal
-/// detail ("upstream exploded") users can't act on — always use our copy.
+/// Server-fault responses (5xx and their wire equivalents) carry internal detail ("upstream exploded") users can't act on, so always use our copy.
 /// 429 stays client-side: its body may explain plan limits.
 fn is_server_fault(status: Option<u16>, wire: WireErrorType) -> bool {
     match status {
@@ -292,13 +328,10 @@ fn normalize_phrase(s: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Pull an HTTP error status (4xx/5xx only — prose like "status 200" or a
-/// year must never classify a failure) out of a raw dump
-/// (`API error (status 500): …`, `Unauthorized (401)`, or an
-/// already-formatted `Server error (500): …`).
+/// Pull an HTTP error status out of a raw dump: `API error (status 500): …`, `Unauthorized (401)`, or our own formatted `Server error (500): …`.
+/// 4xx/5xx only: prose like "status 200" or a year must never classify a failure.
 pub(crate) fn parse_http_status(raw: &str) -> Option<u16> {
-    // Every "status " occurrence, so "status unknown; … status 503" still
-    // finds the code.
+    // Every "status " occurrence, so "status unknown; … status 503" still finds the code
     let mut from = 0;
     while let Some(i) = find_ignore_ascii_case(&raw[from..], "status ") {
         let after = from + i + "status ".len();
@@ -341,8 +374,7 @@ pub(crate) fn parse_http_status(raw: &str) -> Option<u16> {
     None
 }
 
-/// Exactly three digits in 400..600. `require_close_paren` for the
-/// `"… ("` markers, so prose like "merge conflict (300 files" can't match.
+/// Exactly three digits in 400..600. `require_close_paren` for the `"… ("` markers, so prose like "merge conflict (300 files" can't match.
 fn parse_status_digits(s: &str, require_close_paren: bool) -> Option<u16> {
     let bytes = s.as_bytes();
     if bytes.len() < 3 || !bytes[..3].iter().all(u8::is_ascii_digit) {
@@ -379,8 +411,7 @@ fn extract_error_detail(raw: &str) -> Option<String> {
         s = rest;
     }
 
-    // JSON before the URL-clause strip: a URL inside a JSON string would
-    // otherwise split the body at its own ": " and leave garbage.
+    // JSON before the URL-clause strip: a URL inside a JSON string would otherwise split the body at its own ": " and leave garbage
     if let Some(json_start) = s.find('{')
         && let Some(extracted) = extract_from_json(&s[json_start..])
     {
@@ -389,8 +420,7 @@ fn extract_error_detail(raw: &str) -> Option<String> {
 
     s = strip_from_url_clause(&s);
 
-    // Prefer the "X is not in your available models" sentence when present
-    // (before dropping the Model/Auth/Version dump that contains it).
+    // Prefer the "X is not in your available models" sentence when present (before dropping the Model/Auth/Version dump that contains it)
     if let Some(idx) = s.find("is not in your available models") {
         let line_start = s[..idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
         let line_end = s[idx..].find('\n').map(|i| idx + i).unwrap_or(s.len());
@@ -424,8 +454,7 @@ fn strip_api_error_prefix(s: &str) -> Option<String> {
 }
 
 fn strip_from_url_clause(s: &str) -> String {
-    // "Unauthorized (401) from https://…: body" → keep body when present,
-    // otherwise drop the URL clause.
+    // For "Unauthorized (401) from https://…: body", keep the body when present, otherwise drop the URL clause
     if let Some(from) = find_ignore_ascii_case(s, " from http") {
         let after_from = &s[from + " from ".len()..];
         if let Some(colon) = after_from.find(": ") {
@@ -470,8 +499,7 @@ fn clean_detail(s: &str) -> Option<String> {
     Some(t.to_string())
 }
 
-/// Remove `http(s)://…` tokens so no endpoint leaks into a banner —
-/// `sanitize_user_error` only rewrites known service names, not URLs.
+/// Remove `http(s)://…` tokens so no endpoint leaks into a banner; `sanitize_user_error` only rewrites known service names, not URLs.
 /// Also drops the `for url (…)` clause reqwest wraps its URL in.
 fn strip_urls(s: &str) -> String {
     if !s.contains("http://") && !s.contains("https://") {
@@ -505,8 +533,7 @@ fn strip_urls(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Bodies that just restate an HTTP reason phrase or generic filler add
-/// nothing over the headline + canned copy.
+/// Bodies that just restate an HTTP reason phrase or generic filler add nothing over the headline and canned copy.
 fn is_noise_detail(s: &str) -> bool {
     let lower = s.to_ascii_lowercase();
     matches!(
@@ -549,7 +576,7 @@ mod tests {
     fn formats_500_json_dump() {
         let formatted = format_request_failure(
             None,
-            Some("api"),
+            Some(WireErrorType::Api),
             r#"API error (status 500 Internal Server Error): {"error":"upstream exploded","request_id":"abc"}"#,
         );
         assert_eq!(formatted.status, Some(500));
@@ -565,15 +592,14 @@ mod tests {
         assert!(!formatted.message().contains("exploded"));
     }
 
-    /// A parsed provider reason on a 4xx survives the banner formatting
-    /// end-to-end. The message shape is what `user_facing_api_error_message`
-    /// produces (via `SamplingError::Api` Display) now that the sampler's
-    /// body parser recovers double-encoded relay bodies.
+    /// A parsed provider reason on a 4xx survives the banner formatting end-to-end.
+    /// The message shape is what `user_facing_api_error_message` produces via `SamplingError::Api`'s Display.
+    /// The sampler's body parser recovers double-encoded relay bodies, so the reason arrives already parsed.
     #[test]
     fn keeps_parsed_provider_reason_on_4xx() {
         let formatted = format_request_failure(
             Some(400),
-            Some("api"),
+            Some(WireErrorType::Api),
             "API error (status 400 Bad Request): invalid_request_error: \
              Values detected in request that violate rules: JWT Token",
         );
@@ -588,12 +614,58 @@ mod tests {
     }
 
     #[test]
-    fn dedups_action_already_in_client_error_detail() {
-        // 4xx bodies are kept (unlike 5xx), and the canned action is dropped
-        // when the server text already says it.
+    fn untyped_truncation_text_recovers_truncation_copy() {
+        // Pre-`errorKind` terminals deliver only the raw string; the literal (not the const) pins the historical wire bytes
+        let formatted = format_request_failure(None, None, "response truncated by max_tokens");
+        assert_eq!(
+            formatted.message(),
+            "Response truncated: The model hit its output limit."
+        );
+    }
+
+    #[test]
+    fn untyped_other_errors_keep_generic_fallback() {
+        let formatted = format_request_failure(None, None, "connection reset by peer");
+        assert_eq!(
+            formatted.message(),
+            "Request failed: connection reset by peer. Try sending again."
+        );
+    }
+
+    #[test]
+    fn untyped_unknown_kind_is_not_sniff_reclassified() {
+        // A genuinely unknown kind (a newer shell's) enters as `Some(Other)` via `wire_error_kind`, not `None`
+        // Quoting the truncation phrase must not steal its classification
+        let kind = wire_error_kind(Some("a_future_kind"));
+        assert_eq!(kind, Some(WireErrorType::Other));
         let formatted = format_request_failure(
             None,
-            Some("api"),
+            kind,
+            "a future failure quoting: response truncated by max_tokens",
+        );
+        assert_eq!(formatted.headline, "Request failed");
+        assert!(formatted.detail.contains("Try sending again."));
+    }
+
+    #[test]
+    fn untyped_status_bearing_raw_prefers_status_copy() {
+        // An upstream body may quote the client's truncation phrase; a raw carrying a parseable HTTP status keeps its status classification
+        let formatted = format_request_failure(
+            None,
+            None,
+            "API error (status 400 Bad Request): response truncated by max_tokens is not \
+             acceptable input",
+        );
+        assert_eq!(formatted.headline, "Bad request (400)");
+        assert!(!formatted.message().contains("output limit"));
+    }
+
+    #[test]
+    fn dedups_action_already_in_client_error_detail() {
+        // 4xx bodies are kept (unlike 5xx), and the canned action is dropped when the server text already says it
+        let formatted = format_request_failure(
+            None,
+            Some(WireErrorType::Api),
             "API error (status 429 Too Many Requests): Plan limit reached, try again later",
         );
         assert_eq!(
@@ -606,7 +678,7 @@ mod tests {
     fn formats_403_with_server_message() {
         let formatted = format_request_failure(
             None,
-            Some("api"),
+            Some(WireErrorType::Api),
             "API error (status 403 Forbidden): Access to the chat endpoint is denied",
         );
         assert_eq!(
@@ -620,7 +692,7 @@ mod tests {
         // Re-auth is a dedicated banner; this helper only pretty-prints.
         let formatted = format_request_failure(
             Some(401),
-            Some("api"),
+            Some(WireErrorType::Api),
             r#"Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: {"error":"Invalid or expired credentials (auth_kind=bearer)"}"#,
         );
         assert_eq!(formatted.status, Some(401));
@@ -633,7 +705,7 @@ mod tests {
     fn formats_413() {
         let formatted = format_request_failure(
             None,
-            Some("api"),
+            Some(WireErrorType::Api),
             "API error (status 413 Payload Too Large): request too large",
         );
         assert_eq!(
@@ -646,7 +718,7 @@ mod tests {
     fn formats_openai_shaped_json() {
         let formatted = format_request_failure(
             None,
-            Some("api"),
+            Some(WireErrorType::Api),
             r#"API error (status 400 Bad Request): {"error":{"message":"model does not support tools","type":"invalid_request_error"}}"#,
         );
         assert_eq!(
@@ -659,7 +731,7 @@ mod tests {
     fn formats_idle_timeout_without_status() {
         let formatted = format_request_failure(
             None,
-            Some("idle_timeout"),
+            Some(WireErrorType::IdleTimeout),
             "inference idle timeout after 90s with no chunks",
         );
         assert_eq!(formatted.status, None);
@@ -672,19 +744,19 @@ mod tests {
 
     #[test]
     fn typed_headline_survives_status_in_message_text() {
-        // `auth_transient` copy routinely embeds "Unauthorized (401)"; the
-        // sniffed status must not demote the dedicated headline to generic
-        // "Request failed (401)" copy.
+        // `auth_transient` copy routinely embeds "Unauthorized (401)"
+        // The sniffed status must not demote the dedicated headline to generic "Request failed (401)" copy
         let formatted = format_request_failure(
             None,
-            Some("auth_transient"),
+            Some(WireErrorType::AuthTransient),
             "Unauthorized (401): token refresh already in progress",
         );
         assert_eq!(formatted.status, None);
         assert_eq!(formatted.headline, "Authentication temporarily unavailable");
 
         // An explicit caller-parsed status still wins over the wire type.
-        let formatted = format_request_failure(Some(503), Some("idle_timeout"), "whatever");
+        let formatted =
+            format_request_failure(Some(503), Some(WireErrorType::IdleTimeout), "whatever");
         assert_eq!(formatted.headline, "Service unavailable (503)");
     }
 
@@ -705,7 +777,7 @@ mod tests {
     fn formats_404_short_body_tells_user_to_switch_model() {
         let formatted = format_request_failure(
             None,
-            Some("api"),
+            Some(WireErrorType::Api),
             r#"API error (status 404 Not Found): {"error":"model does not exist"}"#,
         );
         assert_eq!(
@@ -718,7 +790,7 @@ mod tests {
     fn drops_model_catalog_dump() {
         let formatted = format_request_failure(
             None,
-            Some("api"),
+            Some(WireErrorType::Api),
             "API error (status 404 Not Found): model does not exist\n\n  Model:     grok-foo\n  Auth:      ApiKey\n  Version:   0.1.0\n  Available: grok-build\n\n  'grok-foo' is not in your available models.\n  Switch models with /model or start a new session.",
         );
         assert_eq!(formatted.status, Some(404));
@@ -733,9 +805,8 @@ mod tests {
 
     #[test]
     fn recovers_status_from_own_banner_text() {
-        // PromptResponse race fallbacks (401 re-auth, 402 credit limit) sniff
-        // the already-formatted error text when the http_status field is
-        // absent — our own headlines must parse.
+        // PromptResponse race fallbacks (401 re-auth, 402 credit limit) sniff the already-formatted error text when http_status is absent
+        // Our own headlines must parse
         assert_eq!(
             parse_http_status("Request failed (402): usage balance exhausted"),
             Some(402)
@@ -750,7 +821,7 @@ mod tests {
     fn strips_reqwest_url_from_connection_error() {
         let formatted = format_request_failure(
             None,
-            Some("http"),
+            Some(WireErrorType::Http),
             "error sending request for url (https://server.grok.com/v1/responses)",
         );
         assert!(
@@ -769,7 +840,7 @@ mod tests {
     fn url_inside_json_body_does_not_mangle_detail() {
         let formatted = format_request_failure(
             None,
-            Some("api"),
+            Some(WireErrorType::Api),
             r#"API error (status 400 Bad Request): {"error":"fetch from https://example.com: connection refused"}"#,
         );
         assert_eq!(formatted.message(), "Bad request (400): connection refused");

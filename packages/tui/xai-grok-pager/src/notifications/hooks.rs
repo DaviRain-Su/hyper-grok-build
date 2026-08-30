@@ -27,7 +27,7 @@ fn execute_hook(
     xai_tty_utils::detach_std_command(&mut cmd);
     xai_grok_sandbox::child_net::restrict_child_network_std(&mut cmd);
 
-    #[allow(clippy::disallowed_methods)] // enrolled below, once the child exists
+    #[allow(clippy::disallowed_methods)] // Enrolled below, once the child exists
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -61,7 +61,7 @@ fn execute_hook(
         }
         Err(error) if xai_tty_utils::is_child_wait_identity_uncertain(&error) => {
             tracing::error!(error = %error, command, "hook wait lost child identity; numeric cleanup forbidden");
-            // ECHILD makes this group unsafe for this and later numeric cleanup.
+            // After ECHILD the child may already be reaped and its pid or group id reused, so killing by id now or later is unsafe
             drop(group);
             abandon_child(child, None, command);
         }
@@ -261,21 +261,18 @@ mod tests {
             command: format!("sleep 100; touch {}", marker.display()),
             events: vec![],
             only_unfocused: false,
-            timeout_secs: 0, // exercises the .max(1) clamp inside run_hook
+            timeout_secs: 0, // Exercises the .max(1) clamp inside run_hook
         };
         let start = Instant::now();
         run_hook(&hook, &test_event());
-        // Wait for the spawned thread to finish (clamp turns 0 -> 1s timeout)
+        // Wait for the spawned thread to finish (the clamp turns 0 into a 1s timeout)
         std::thread::sleep(Duration::from_millis(2500));
         let elapsed = start.elapsed();
-        // The hook should have been killed by the 1s timeout, so the marker
-        // file should NOT exist (sleep 100 never completes).
         assert!(
             !marker.exists(),
             "hook should have been killed by timeout before creating marker"
         );
-        // Sanity: the whole thing completed well under 10s, confirming the
-        // timeout was ~1s (clamped) not 0s (instant) or unbounded.
+        // Sanity: the whole thing completed well under 10s, confirming the timeout was ~1s (clamped) not 0s (instant) or unbounded
         assert!(
             elapsed < Duration::from_secs(5),
             "should complete within a few seconds, took {elapsed:?}"
@@ -299,8 +296,7 @@ mod tests {
         let event = test_event();
         run_hook(&hook, &event);
 
-        // Poll for the output file instead of a fixed sleep — the spawned
-        // thread + fork/exec may take variable time on loaded systems.
+        // Poll for the output file instead of a fixed sleep: the spawned thread and the fork/exec may take variable time on loaded systems
         let deadline = Instant::now() + Duration::from_secs(5);
         let content = loop {
             if let Ok(c) = std::fs::read_to_string(&out) {

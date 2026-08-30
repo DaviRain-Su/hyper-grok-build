@@ -299,9 +299,6 @@ pub fn merge(
             .and_then(|p| std::path::Path::new(p).file_name())
             .and_then(|n| n.to_str())
             .map(String::from);
-        let worktree_label = s
-            .worktree_label
-            .or_else(|| crate::session::worktree::lookup_worktree_label(&s.info.cwd));
         by_id.insert(
             id.clone(),
             MergedSession {
@@ -318,7 +315,7 @@ pub fn merge(
                 last_active_at: s.last_active_at.map(|t| t.to_rfc3339()),
                 branch: s.head_branch,
                 repo_name,
-                worktree_label,
+                worktree_label: s.worktree_label,
                 git_root_dir: s.git_root_dir,
                 git_remotes: s.git_remotes,
                 source_workspace_dir: s.source_workspace_dir,

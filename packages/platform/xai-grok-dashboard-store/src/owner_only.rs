@@ -1,18 +1,15 @@
 //! Owner-only enforcement for the database file and its journal siblings.
 //!
-//! SQLite creates files at umask defaults, so the store pre-creates the
-//! database 0600 before SQLite's first open and re-tightens modes on every
-//! load (Unix; Windows keeps the default profile ACLs). Every check here is
-//! non-following: a symlink planted at the store path would otherwise
-//! redirect both SQLite's create and the chmod to an attacker-chosen
-//! target.
+//! SQLite creates files at umask defaults, so the store pre-creates the database 0600 before SQLite's first open and re-tightens modes on every load.
+//! On Windows the files keep the default profile ACLs.
+//! Nothing here follows a symlink.
+//! A link planted at the store path would otherwise redirect both SQLite's create and the chmod to an attacker-chosen target.
 
 use std::path::{Path, PathBuf};
 
 /// Refuse to operate through anything but a regular file (or nothing yet).
-/// `O_CREAT|O_EXCL` alone is not enough: it fails `EEXIST` on a symlink —
-/// even a dangling one — and a link-following open would then create the
-/// database at the link's target.
+/// `O_CREAT|O_EXCL` alone is not enough: it fails `EEXIST` on a symlink, even a dangling one.
+/// An open that then follows the link would create the database at the link's target.
 pub(crate) fn require_regular_file(path: &Path) -> std::io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => Ok(()),
@@ -31,10 +28,9 @@ pub(crate) fn require_regular_file(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Create the file 0600 via `O_CREAT|O_EXCL`. A concurrent creator winning
-/// the race is fine — it used the same mode and the tighten pass follows —
-/// but only when what exists is a regular file (see
-/// [`require_regular_file`]).
+/// Create the file 0600 via `O_CREAT|O_EXCL`.
+/// A concurrent creator winning the race is fine: it used the same mode, and the tighten pass follows.
+/// What exists must still be a regular file (see [`require_regular_file`]).
 pub(crate) fn create_owner_only(path: &Path) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -50,11 +46,10 @@ pub(crate) fn create_owner_only(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Re-assert owner-only mode on an existing file (a restored or hand-copied
-/// 0644 database is tightened on load). Missing files are fine; a
-/// non-regular file or any other failure is a hard error — fail closed on a
-/// private store. Windows keeps the default profile ACLs. Pattern from
-/// `xai_grok_shell_base::util::secure_file` (crate dep too heavy to link).
+/// Re-assert owner-only mode on an existing file (a restored or hand-copied 0644 database is tightened on load).
+/// Missing files are fine; a non-regular file or any other failure is a hard error, failing closed on a private store.
+/// Windows keeps the default profile ACLs.
+/// Same pattern as `xai_grok_shell_base::util::secure_file`; depending on that crate is too heavy.
 pub(crate) fn tighten_owner_only(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -90,8 +85,7 @@ pub(crate) fn tighten_owner_only(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Journal sibling path (`workspace.db` → `workspace.db-wal`), derived from
-/// the effective per-host path.
+/// Journal sibling path, derived from the effective per-host path: `workspace.db` becomes `workspace.db-wal`.
 pub(crate) fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);

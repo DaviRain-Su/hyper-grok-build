@@ -2,14 +2,11 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Idle-input regression (enterprise deploy report): after a turn completes and the
-/// session goes idle, a keystroke must echo promptly. The pager used to rely on
-/// an always-on `tracing_rx` animation tick to wake the parked event loop;
-/// removing it exposed that crossterm's
-/// `EventStream` strands its waker when its `next()` future is dropped by a
-/// losing `select!` arm (crossterm #936), so idle input was not serviced until
-/// an unrelated poll timer fired. Reading input on a dedicated thread behind a
-/// cancellation-safe channel fixes the wake; this test FAILS without that fix.
+/// Idle-input regression: after a turn completes and the session goes idle, a keystroke must echo promptly.
+/// The pager used to rely on an always-on `tracing_rx` animation tick to wake the parked event loop.
+/// Removing it exposed that crossterm's `EventStream` strands its waker when its `next()` future is dropped by a losing `select!` arm.
+/// Idle input was then not serviced until an unrelated poll timer fired (crossterm #936).
+/// Reading input on a dedicated thread behind a cancellation-safe channel fixes the wake; this test FAILS without that fix.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn input_echoes_at_idle_prompt() {
@@ -32,9 +29,8 @@ async fn input_echoes_at_idle_prompt() {
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("response on screen");
 
-    // Let the turn finish and post-turn animation settle so the loop goes fully
-    // idle (needs_animation() == false) and parks. 3s reliably reaches true idle
-    // here — the guard was empirically red->green at this settle.
+    // Let the turn finish and post-turn animation settle so the loop goes fully idle (needs_animation() == false) and parks
+    // 3s reliably reaches true idle here; the echo check below flipped from failing to passing at this settle time
     harness.update(Duration::from_secs(3));
 
     // Type a distinctive marker at the idle prompt (no Enter): it must echo.

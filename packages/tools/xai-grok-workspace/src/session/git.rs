@@ -539,9 +539,8 @@ pub async fn get_worktree_info(cwd: &Path) -> Option<(bool, Option<String>)> {
     let cwd = cwd.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let repo = Repository::discover(&cwd).ok()?;
-        let display = |path: &Path| -> String {
-            collapse_home_path(path, std::env::var("HOME").ok().as_deref().map(Path::new))
-        };
+        let home = xai_dirs::home_dir();
+        let display = |path: &Path| -> String { collapse_home_path(path, home.as_deref()) };
         let mut marker_main = None;
         for ancestor in cwd.ancestors() {
             let git = ancestor.join(".git");

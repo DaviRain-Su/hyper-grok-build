@@ -41,7 +41,7 @@ pub async fn collect_recent_dirs(limit: usize) -> Vec<(PathBuf, DateTime<Utc>)> 
 }
 
 pub fn display_path(path: &Path) -> String {
-    if let Some(home) = dirs::home_dir()
+    if let Some(home) = xai_dirs::home_dir()
         && let Ok(rel) = path.strip_prefix(&home)
     {
         return format!("~/{}", rel.display());

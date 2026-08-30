@@ -38,7 +38,7 @@ xai-grok-config = { workspace = true }
 xai-grok-extra-ca = { workspace = true }
 xai-grok-sampler = { workspace = true }
 xai-token-estimation = { workspace = true }
-dirs = { workspace = true }
+xai-dirs = { workspace = true }
 sentry = { version = "0.42.0", default-features = false, features = [
     "panic",
     "anyhow",

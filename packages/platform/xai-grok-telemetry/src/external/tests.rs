@@ -122,6 +122,7 @@ fn external_allowed_keys_are_pinned() {
         "status_code",
         "tool_name",
         "success",
+        "hook_rewrote",
         "file_extension",
         "tool_parameters",
         "file_path",
@@ -550,6 +551,28 @@ fn turn_error_increments_error_count() {
 }
 
 #[test]
+fn tool_result_hook_rewrote_is_content_free() {
+    use xai_grok_session_events::types::ToolOutcome;
+    for (hook_rewrote, want) in [(true, "true"), (false, "false")] {
+        let stream = build(gates_off());
+        emit_event_into(
+            &stream,
+            &events::ToolCallCompleted {
+                tool_name: "run_terminal_cmd".into(),
+                outcome: ToolOutcome::Success,
+                hook_rewrote,
+                duration_ms: 5,
+                tool_result_size_bytes: None,
+                file_path: None,
+                parameters: None,
+            },
+        );
+        let events = exported_events(&stream);
+        assert_eq!(attr(&events[0], "hook_rewrote").as_deref(), Some(want));
+    }
+}
+
+#[test]
 fn tool_result_gates_off_collapses_and_reduces() {
     let stream = build(gates_off());
     emit_event_into(
@@ -557,6 +580,7 @@ fn tool_result_gates_off_collapses_and_reduces() {
         &events::ToolCallCompleted {
             tool_name: "nebula__post_message".into(),
             outcome: xai_grok_session_events::types::ToolOutcome::Success,
+            hook_rewrote: false,
             duration_ms: 42,
             tool_result_size_bytes: None,
             file_path: Some("/Users/alice/secret-project/main.rs".into()),
@@ -587,7 +611,7 @@ fn tool_result_details_gate_exposes_verbatim_scrubbed() {
     let stream = build(gates_all_on());
     // Use the *real* home dir: `redact_user_paths` collapses the current
     // user's home (env-derived), not arbitrary foreign paths.
-    let home = dirs::home_dir()
+    let home = xai_dirs::home_dir()
         .map(|h| h.to_string_lossy().into_owned())
         .unwrap_or_else(|| "/home/testuser".into());
     let path = format!("{home}/proj/main.rs");
@@ -596,6 +620,7 @@ fn tool_result_details_gate_exposes_verbatim_scrubbed() {
         &events::ToolCallCompleted {
             tool_name: "nebula__post_message".into(),
             outcome: xai_grok_session_events::types::ToolOutcome::Success,
+            hook_rewrote: false,
             duration_ms: 42,
             tool_result_size_bytes: None,
             file_path: Some(path.clone()),

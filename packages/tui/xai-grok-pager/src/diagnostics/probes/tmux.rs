@@ -9,8 +9,8 @@ pub trait TmuxOptionQuery {
 
     fn control_mode(&self) -> TmuxProbeResult<bool>;
 
-    /// The attached client's resolved terminal features, which decide whether
-    /// tmux forwards 24-bit color or reduces it to the client terminfo palette.
+    /// The attached client's resolved terminal features.
+    /// They decide whether tmux forwards 24-bit color or reduces it to the client terminfo palette.
     fn client_features(&self) -> TmuxProbeResult<String>;
 }
 

@@ -1,16 +1,12 @@
 //! Query expansion for FTS-only search mode.
 //!
-//! When users ask conversational queries like *"that thing we discussed about the API"*,
-//! FTS5 matches every word equally — articles, pronouns, and vague references dilute
-//! precision. This module extracts meaningful keywords by removing stop words.
+//! FTS5 matches every word of a conversational query like *"that thing we discussed about the API"* equally.
+//! Articles, pronouns, and vague references dilute precision, so this module strips them as stop words to leave the meaningful keywords.
 //!
 //! The pipeline:
 //! ```text
 //! query → lowercase → split on non-alphanumeric → remove stop words → dedup → keywords
 //! ```
-//!
-//! When all words are stop words (e.g. "what is that?"), returns an empty vec.
-//! The caller (hybrid search) falls back to the vector path in that case.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -157,14 +153,10 @@ static STOP_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 });
 
 /// Extract meaningful keywords from a conversational query by removing stop words.
-///
-/// Returns keywords in order of appearance, deduplicated. Words shorter than
-/// 2 characters and pure-numeric tokens are filtered out. The 2-char minimum
-/// preserves meaningful short terms like "go", "js", "ui", "db", "ai", "ml"
-/// while stop words handle the common 2-letter noise ("is", "it", "do", "we").
-///
-/// Returns an empty vec when all words are stop words or the query contains
-/// no meaningful content — the caller should fall back to vector search.
+/// Keywords are deduplicated and kept in order of first appearance.
+/// The 2-char minimum preserves meaningful short terms like "go", "js", "ui", "db", "ai", "ml".
+/// The stop-word list catches the common 2-letter noise ("is", "it", "do", "we").
+/// When every word is filtered out (e.g. "what is that?"), the result is empty and the caller (hybrid search) falls back to the vector path.
 pub fn extract_keywords(query: &str) -> Vec<String> {
     let lowered = query.to_lowercase();
     let mut seen = HashSet::new();
@@ -203,7 +195,7 @@ mod tests {
     #[test]
     fn test_filters_single_char_words() {
         let kw = extract_keywords("I a x language");
-        // "i" = 1 char, "a" = 1 char, "x" = 1 char → all filtered by length
+        // "i", "a", and "x" are each one char, so the length filter removes them all
         assert_eq!(kw, vec!["language"]);
     }
 

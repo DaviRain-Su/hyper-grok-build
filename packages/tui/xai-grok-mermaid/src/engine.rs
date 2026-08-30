@@ -1,5 +1,4 @@
-//! The [`MermaidEngine`] trait, error type, resource limits, and the
-//! panic-isolating [`render_checked`] entry point.
+//! The [`MermaidEngine`] trait, error type, resource limits, and the panic-isolating [`render_checked`] entry point.
 
 use std::panic::AssertUnwindSafe;
 
@@ -7,10 +6,7 @@ use crate::{RenderParams, RenderedDiagram};
 
 /// Why a diagram failed to render.
 ///
-/// Every variant maps to the same user-facing outcome (fall back to the source
-/// code block); they differ only for observability. [`Panic`](Self::Panic)
-/// carries the message of an engine panic isolated by [`render_checked`] (see
-/// its docs for the `panic = "unwind"` requirement).
+/// Every variant degrades to the same user-facing fallback (show the source as a code block); the split only matters for what gets logged.
 #[derive(thiserror::Error, Debug)]
 pub enum MermaidError {
     /// The source could not be parsed into a diagram.
@@ -25,37 +21,29 @@ pub enum MermaidError {
     /// An external engine exceeded its wall-clock budget.
     #[error("mermaid render timed out")]
     Timeout,
-    /// The engine cannot render this input (unknown/exotic diagram, disabled
-    /// engine, or a breached resource limit such as oversized source).
+    /// The engine cannot render this input (unknown/exotic diagram, disabled engine, or a breached resource limit such as oversized source).
     #[error("mermaid render unsupported: {0}")]
     Unsupported(String),
-    /// The engine panicked and [`render_checked`] caught it and converted it to
-    /// this error. **Only intercepted when the binary is built with
-    /// `panic = "unwind"`**; under `panic = "abort"` the process aborts instead
-    /// (see [`render_checked`]). Carries the panic message.
+    /// The engine panicked; [`render_checked`] caught it and carries the panic message here.
+    /// Only intercepted under `panic = "unwind"`; under `panic = "abort"` the process aborts instead (see [`render_checked`]).
     #[error("mermaid engine panicked: {0}")]
     Panic(String),
 }
 
-/// Caps applied by [`render_checked`] before the engine so untrusted source
-/// can't trivially exhaust memory via an oversized payload.
+/// Caps [`render_checked`] applies before the engine runs, so untrusted source can't trivially exhaust memory via an oversized payload.
 ///
-/// This enforces `max_source_bytes`. A wall-clock timeout for a runaway render
-/// is enforced *out of process* by the caller (the pager renders each diagram in
-/// a short-lived child via [`crate::run_with_timeout`], which a synchronous
-/// in-process call could not self-impose). The output pixmap area/height are
-/// separately capped inside [`crate::rasterize`] ([`crate::MAX_OUTPUT_MEGAPIXELS`]
-/// + [`RenderParams::max_height_px`]).
+/// A synchronous render cannot time itself out, so the pager enforces the wall-clock budget out of process via [`crate::run_with_timeout`].
+/// Output area and height are capped inside [`crate::rasterize`] by [`crate::MAX_OUTPUT_MEGAPIXELS`] and [`RenderParams::max_height_px`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderLimits {
-    /// Maximum accepted source length in bytes. Larger input is rejected with
-    /// [`MermaidError::Unsupported`] *before* the engine runs.
+    /// Maximum accepted source length in bytes.
+    /// Larger input is rejected with [`MermaidError::Unsupported`] *before* the engine runs.
     pub max_source_bytes: usize,
 }
 
 impl Default for RenderLimits {
     fn default() -> Self {
-        // 64 KiB — comfortably larger than any hand-authored diagram.
+        // 64 KiB, comfortably larger than any hand-authored diagram
         Self {
             max_source_bytes: 64 * 1024,
         }
@@ -64,39 +52,31 @@ impl Default for RenderLimits {
 
 /// A pluggable Mermaid rendering backend.
 ///
-/// Implementations turn Mermaid source into a rasterized [`RenderedDiagram`].
-/// Prefer calling [`render_checked`] over this method directly: it applies
-/// [`RenderLimits`] and isolates panics. Implementations must be cheap to share
-/// (`Send + Sync`) so a worker pool can hold one behind an `Arc`.
+/// Prefer calling [`render_checked`] over [`MermaidEngine::render`] directly: it applies [`RenderLimits`] and isolates panics.
+/// Implementations must be cheap to share (`Send + Sync`) so a worker pool can hold one behind an `Arc`.
 pub trait MermaidEngine: Send + Sync {
     /// Render `source` to a PNG using `params`.
     ///
-    /// Implementations may panic on pathological input; callers are expected to
-    /// wrap this via [`render_checked`].
+    /// Implementations may panic on pathological input; callers are expected to wrap this via [`render_checked`].
     fn render(&self, source: &str, params: &RenderParams) -> Result<RenderedDiagram, MermaidError>;
 }
 
 /// Render `source` with `engine`, enforcing `limits` and isolating panics.
 ///
-/// This is the entry point a caller (e.g. a render worker) should use over
-/// [`MermaidEngine::render`]:
+/// This is the entry point a caller (e.g. a render worker) should use over [`MermaidEngine::render`]:
 ///
-/// - Source larger than [`RenderLimits::max_source_bytes`] is rejected with
-///   [`MermaidError::Unsupported`] **without invoking the engine**.
+/// - Source larger than [`RenderLimits::max_source_bytes`] is rejected with [`MermaidError::Unsupported`] **without invoking the engine**.
 /// - An engine panic is caught and returned as [`MermaidError::Panic`].
 ///
 /// # Panic isolation is conditional on the unwind strategy
 ///
-/// `catch_unwind` only intercepts panics under `panic = "unwind"`. The shipped
-/// Release CLI profiles build with `panic = "abort"`,
-/// under which a panicking engine aborts the **whole process** and this guard is
-/// a no-op. True crash-isolation over untrusted source therefore comes from
-/// running the engine *out of process*: the pager spawns a short-lived child per
-/// diagram (see [`crate::run_with_timeout`] and the pager's `mermaid_worker`), so
-/// a child abort is contained and the timeout is a real process kill. Within a
-/// single process this guard still upgrades a (test/unwind-profile) panic to a
-/// clean error. `catch_unwind` cannot catch aborts from stack overflow or
-/// allocation failure even under unwind.
+/// `catch_unwind` only intercepts panics under `panic = "unwind"`.
+/// The shipped release CLI profiles build with `panic = "abort"`, under which a panicking engine aborts the whole process and this guard is a no-op.
+/// True crash isolation over untrusted source therefore comes from running the engine *out of process*.
+/// The pager spawns a short-lived child per diagram (see [`crate::run_with_timeout`] and the pager's `mermaid_worker`).
+/// A child abort is contained, and the timeout is a real process kill.
+/// Within a single process this guard still upgrades a panic under an unwind profile (e.g. tests) to a clean error.
+/// Even under unwind, `catch_unwind` cannot catch aborts from stack overflow or allocation failure.
 pub fn render_checked(
     engine: &dyn MermaidEngine,
     source: &str,
@@ -111,14 +91,12 @@ pub fn render_checked(
         )));
     }
 
-    // AssertUnwindSafe: a panic aborts this render and is converted to an error;
-    // no observable state from the engine is reused afterward.
+    // AssertUnwindSafe: a panic aborts this render and is converted to an error; no observable state from the engine is reused afterward
     match std::panic::catch_unwind(AssertUnwindSafe(|| engine.render(source, params))) {
         Ok(result) => result,
         Err(payload) => {
             let msg = panic_message(payload);
-            // The panic message can embed untrusted source fragments, so keep its
-            // content out of the default `warn` stream and behind `debug`.
+            // The panic message can embed untrusted source fragments, so keep its content out of the default `warn` stream and behind `debug`
             tracing::warn!(target: "mermaid", panic_len = msg.len(), "engine panicked; converted to error");
             tracing::debug!(target: "mermaid", panic = %msg, "engine panic message");
             Err(MermaidError::Panic(msg))
@@ -141,8 +119,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 mod tests {
     use super::*;
 
-    /// Records whether `render` was invoked, to prove the early limit check
-    /// short-circuits before the engine runs.
+    /// Records whether `render` was invoked, to prove the early limit check short-circuits before the engine runs.
     struct SpyEngine {
         called: std::sync::atomic::AtomicBool,
         outcome: fn() -> Result<RenderedDiagram, MermaidError>,
@@ -188,8 +165,7 @@ mod tests {
     fn oversized_source_rejected_before_engine_runs() {
         let engine = SpyEngine {
             called: Default::default(),
-            // If the engine were ever called for oversized input, this panic
-            // would surface as `Panic`, not `Unsupported`, failing the assert.
+            // If the engine were ever called for oversized input, this panic would come back as `Panic`, not `Unsupported`, failing the assert
             outcome: || panic!("engine must not be called for oversized source"),
         };
         let limits = RenderLimits {
@@ -251,8 +227,7 @@ mod tests {
                 Err((self.0)())
             }
         }
-        // The wrapper must return the exact same variant *and* payload the engine
-        // produced — not merely "not Panic".
+        // The wrapper must return the exact same variant and payload the engine produced, not merely "not Panic"
         for make in [
             (|| MermaidError::Parse("p-payload".into())) as fn() -> MermaidError,
             || MermaidError::Layout("l-payload".into()),
@@ -280,8 +255,7 @@ mod tests {
 
     #[test]
     fn error_display_is_descriptive() {
-        // Each variant's Display carries a distinguishing word, and payload
-        // variants interpolate their carried message.
+        // Each variant's Display carries a distinguishing word, and payload variants interpolate their carried message
         assert!(MermaidError::Timeout.to_string().contains("timed out"));
         for (err, word) in [
             (MermaidError::Parse("PL".into()), "parse"),

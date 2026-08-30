@@ -1,8 +1,7 @@
 //! Deduplication for persisted subagent spawn/finish notifications.
 //!
-//! Lifecycle transitions are unique per child but are not delivery-ordered
-//! with other xAI updates, or necessarily with each other. Classification,
-//! delivery, deferred-finish buffering, and re-dispatch all live here.
+//! Each transition happens once per child, but transitions can arrive out of order with other xAI updates and even with each other.
+//! Classification, delivery, deferred-finish buffering, and re-dispatch all live here.
 
 use super::*;
 use crate::app::agent_view::DeferredSubagentFinish;
@@ -33,7 +32,6 @@ impl std::fmt::Display for SubagentLifecycle {
     }
 }
 
-/// Who asked the lifecycle rail to consider this update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LifecycleOrigin {
     Stream,
@@ -90,11 +88,9 @@ pub(super) fn decide_subagent_lifecycle_delivery(
             SubagentLifecycle::Finished => LifecycleDelivery::AwaitSpawn,
         };
     };
-    // Workflow children deliberately have no per-child parent row. Their
-    // retained domain state is therefore the spawn source of truth across
-    // replay, while standalone replay may rebuild a row discarded with a
-    // failed/superseded reload. Live duplicate spawns must never replace
-    // retained child state merely because the row is temporarily absent.
+    // Workflow children deliberately have no row of their own, so a replayed spawn never overwrites their retained state
+    // A standalone child's replayed spawn may apply, rebuilding a row that a failed or superseded reload discarded
+    // A live duplicate spawn must never replace retained child state merely because the row is temporarily absent
     let child_row_still_rendered = info.workflow_run_id.is_some()
         || info
             .scrollback_entry_id
@@ -115,8 +111,8 @@ pub(super) fn decide_subagent_lifecycle_delivery(
 
 /// Classify, decide, and (when needed) buffer a lifecycle update.
 ///
-/// `Apply` means the handler should keep going. The other two outcomes
-/// have already been logged and must stop the handler.
+/// `Apply` means the handler should keep going.
+/// The other two outcomes have already been logged and must stop the handler.
 pub(super) fn gate_subagent_lifecycle(
     subagent_sessions: &std::collections::HashMap<String, SubagentInfo>,
     scrollback: &crate::scrollback::state::ScrollbackState,
@@ -189,8 +185,8 @@ pub(super) fn defer_subagent_finish(
     LifecycleDelivery::AwaitSpawn
 }
 
-/// Take a deferred finish, enforcing the TTL at observe time so an entry is
-/// not applied after expiry merely because nothing else deferred in between.
+/// Take a deferred finish, enforcing the TTL at observe time.
+/// An entry must not apply after expiry merely because nothing else deferred in between.
 pub(super) fn take_deferred_subagent_finish(
     deferred: &mut HashMap<String, DeferredSubagentFinish>,
     child_session_id: &str,

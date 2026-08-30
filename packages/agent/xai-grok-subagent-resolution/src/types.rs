@@ -1,5 +1,3 @@
-//! Public API types for subagent resolution.
-
 use std::path::PathBuf;
 
 use crate::resume::ResumeValidationError;
@@ -9,33 +7,23 @@ use crate::resume::ResumeValidationError;
 pub enum ContextSource {
     /// Fresh session with no inherited history.
     New,
-    /// Resumed from a previously completed peer subagent. The child inherits
-    /// the source's raw transcript, tool state, and model. System prompt and
-    /// prompt context are freshly rendered.
+    /// Resumed from a previously completed peer subagent.
+    /// The child inherits the source's raw transcript, tool state, and model.
+    /// System prompt and prompt context are freshly rendered.
     Resumed,
-}
-
-/// Agent-definition defaults applied after explicit, role, and persona layers.
-/// Keeping these values in one typed input prevents the shell from reopening a
-/// supposedly resolved runtime config with ad-hoc string fallbacks.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DefinitionRuntimeDefaults {
-    pub reasoning_effort: Option<xai_tool_types::SubagentReasoningEffort>,
-    pub capability_mode: Option<xai_tool_types::SubagentCapabilityMode>,
-    pub isolation: Option<xai_tool_types::SubagentIsolationMode>,
 }
 
 /// Resolved effective runtime configuration for a child agent.
 ///
-/// Model, effort, and isolation use explicit > role > persona > definition >
-/// parent inheritance. Capability mode is the safe intersection of the
-/// explicit request, role ceiling, and definition ceiling.
+/// Precedence: explicit spawn-time override > role default > persona default > parent inheritance (None).
 #[derive(Debug, Clone, Default)]
 pub struct EffectiveRuntimeConfig {
     /// Resolved model ID override (if any).
     pub model: Option<String>,
-    /// Resolved, validated reasoning effort.
-    pub reasoning_effort: Option<xai_tool_types::SubagentReasoningEffort>,
+    /// Resolved reasoning effort (e.g. "low", "medium", "high").
+    // TODO: consider a typed `ReasoningEffort` enum to prevent typos
+    // It stays a plain string for compatibility with the shell's existing API
+    pub reasoning_effort: Option<String>,
     /// Resolved capability mode controlling tool access.
     pub capability_mode: Option<xai_tool_types::SubagentCapabilityMode>,
     /// Resolved persona name (for metadata/observability).
@@ -55,8 +43,7 @@ pub struct EffectiveRuntimeConfig {
     pub isolation: xai_tool_types::SubagentIsolationMode,
 }
 
-/// Data about a completed source subagent, needed for resume validation
-/// and downstream spawn orchestration.
+/// Data about a completed source subagent, needed to validate a resume and to spawn the resumed child.
 #[derive(Debug, Clone)]
 pub struct ResumeSourceData {
     /// Source subagent ID.
@@ -68,28 +55,22 @@ pub struct ResumeSourceData {
     /// Used by `validate_resume_identity` to check persona match.
     pub persona: Option<String>,
     /// Effective model ID used by the source child session.
-    /// Used by the shell for resume model pinning (model overrides on
-    /// resume are soft-ignored, not identity-gated).
+    /// The shell pins this model on resume; a model override on resume is silently ignored rather than rejected.
     pub model_id: Option<String>,
-    /// Effective cwd the source child used. Consumed by the shell's
-    /// spawn orchestration to reconstruct `SessionInfo` for raw
-    /// transcript continuation and worktree reuse.
+    /// Effective cwd the source child used.
+    /// The shell uses it to reconstruct `SessionInfo` so the raw transcript continues and the worktree can be reused.
     pub child_cwd: String,
-    /// Worktree path if the source used `isolation=worktree`. Consumed
-    /// by the shell to reuse the source's isolated workspace directory
-    /// when resuming a worktree-isolated child.
+    /// Worktree path if the source used `isolation=worktree`.
+    /// The shell reuses this directory when resuming a worktree-isolated child.
     pub worktree_path: Option<PathBuf>,
-    /// Durable git ref holding a snapshot of the source worktree's working
-    /// state, set when the worktree was snapshotted at completion. Consumed
-    /// by the shell to rehydrate a deleted worktree directory on resume.
+    /// Durable git ref holding a snapshot of the source worktree's working state, set when the worktree was snapshotted at completion.
+    /// The shell uses it to recreate a deleted worktree directory on resume.
     pub snapshot_ref: Option<String>,
-    /// The child session ID of the source subagent. Consumed by the
-    /// shell to locate the source's session directory for raw transcript
-    /// copying (`copy_session_data_sync`).
+    /// The child session ID of the source subagent.
+    /// The shell uses it to locate the source's session directory and copy the raw transcript (`copy_session_data_sync`).
     pub child_session_id: String,
 }
 
-/// Errors that can occur during subagent resolution.
 #[derive(Debug, thiserror::Error)]
 pub enum ResolutionError {
     /// No production or session CLI definition has this name.

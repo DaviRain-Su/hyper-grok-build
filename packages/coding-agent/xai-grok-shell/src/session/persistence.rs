@@ -1,3 +1,26 @@
+//! Session persistence actor: every session-file write for a session flows
+//! through one FIFO channel, drained by [`SessionPersistence::run`].
+//!
+//! # Loss contract on hard power loss
+//!
+//! - Fire-and-forget writes (streamed chunks, mid-turn tool records,
+//!   feedback / btw_history appends) are buffered: anything since the last
+//!   barrier may be lost, bounded to the actively-running turn's tail.
+//! - Anything a caller awaits an ack for (`FlushAndAck`,
+//!   `AppendUpdateDurablyAndAck`, `AppendCwdSwitchAndAck`) is on stable media
+//!   when the ack fires. A barrier syncs only the files dirtied since the
+//!   last one. A failed buffered write (chat append, streamed update, …)
+//!   latches until the next barrier, which then returns that error instead
+//!   of acking a sync of stale or missing bytes.
+//! - Atomic-rename writes fsync the temp file before the rename, so
+//!   replacing a file yields the old or the new content, never garbage. A
+//!   create additionally syncs the containing directory, and session-dir
+//!   creation syncs every directory the new chain is created into, so a
+//!   first-time create (a session's first `summary.json`, and the session
+//!   directory holding it) is durable once the write returns. Windows has
+//!   no directory fsync; there NTFS metadata journaling can roll a very
+//!   recent create back to absent, never to garbage.
+
 use chrono::{DateTime, Utc};
 use std::borrow::Cow;
 use std::io;
@@ -329,9 +352,10 @@ pub enum PersistenceMsg {
         auth_manager: Arc<crate::auth::AuthManager>,
     },
     Flush,
-    /// Flush all pending writes, then signal the caller once the flush is complete.
-    /// Unlike `Flush` (fire-and-forget), this is a **sync barrier**: the caller's
-    /// oneshot only resolves after `flush_pending()` finishes writing to disk.
+    /// Flush all pending writes AND fsync the session files, then signal the
+    /// caller. Unlike `Flush` (fire-and-forget, page-cache only), this is a
+    /// **sync barrier**: the caller's oneshot resolves only after all prior
+    /// writes are on stable media.
     FlushAndAck {
         respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
     },
@@ -677,17 +701,6 @@ impl SessionKindIndex {
     }
 }
 
-#[cfg(test)]
-fn authoritative_summaries_in_root(sessions_root: &Path) -> io::Result<Vec<Summary>> {
-    let view = storage_view(sessions_root).map_err(io::Error::other)?;
-    Ok(view
-        .session_dirs(None)
-        .map_err(io::Error::other)?
-        .into_iter()
-        .filter_map(|dir| read_summary_from_dir(&dir).ok())
-        .collect())
-}
-
 /// Which local rows may satisfy a most-recent startup selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecentSessionSelection {
@@ -853,20 +866,45 @@ fn resumed_session_sandbox_profile_in_root(
     None
 }
 
-/// Get file path for storing a large prompt.
-/// Creates the prompts subdirectory if it doesn't exist.
-/// Path format: `{session_dir}/prompts/prompt_{prompt_index}.txt`
-/// Owner-only session dir + `<encoded-cwd>` shield, for writers that bypass
-/// a storage adapter's `init_session` (e.g. chat-kind sessions).
+/// Owner-only + durable session dir for writers that bypass `init_session`
+/// (chat-kind, pre-init fork stamp). A later occupied `init_session` will
+/// not re-sync the encoded-cwd direntry.
 pub(crate) fn ensure_owner_only_session_dir(info: &Info) -> std::io::Result<PathBuf> {
     ensure_owner_only_session_dir_in(&grok_home(), info)
 }
 
 /// Inner implementation with an injectable grok home for tests.
 fn ensure_owner_only_session_dir_in(grok_home: &Path, info: &Info) -> std::io::Result<PathBuf> {
-    let _ = crate::util::grok_home::ensure_sessions_cwd_dir_in(grok_home, &info.cwd);
+    ensure_owner_only_session_dir_in_with(
+        grok_home,
+        info,
+        crate::session::storage::sync_dir_durable,
+        crate::session::storage::sync_file_durable,
+    )
+}
+
+fn ensure_owner_only_session_dir_in_with(
+    grok_home: &Path,
+    info: &Info,
+    sync_dir: impl Fn(&Path) -> std::io::Result<()>,
+    sync_file: impl Fn(&std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<PathBuf> {
     let dir = session_dir_in(grok_home, info);
-    crate::util::grok_home::create_dir_all_owner_only(&dir)?;
+    crate::session::storage::create_dir_all_durable_with(
+        &dir,
+        |dir| {
+            // Keep swallowing ensure errors (pre-existing: other failures
+            // must not block session-dir create) but fsync `.cwd` on Ok so
+            // a later parent-dir sync cannot freeze a torn marker.
+            if let Ok(cwd_dir) =
+                crate::util::grok_home::ensure_sessions_cwd_dir_in(grok_home, &info.cwd)
+            {
+                crate::session::storage::sync_cwd_marker_if_present_with(&cwd_dir, &sync_file)?;
+            }
+            crate::util::grok_home::create_dir_all_owner_only(dir)
+        },
+        sync_dir,
+    )?;
     Ok(dir)
 }
 
@@ -875,6 +913,9 @@ fn session_dir_in(grok_home: &Path, info: &Info) -> PathBuf {
     crate::util::grok_home::sessions_cwd_dir_in(grok_home, &info.cwd).join(info.id.to_string())
 }
 
+/// Get file path for storing a large prompt.
+/// Creates the prompts subdirectory if it doesn't exist.
+/// Path format: `{session_dir}/prompts/prompt_{prompt_index}.txt`
 pub(crate) fn get_prompt_file_path(info: &Info, prompt_index: usize) -> PathBuf {
     get_prompt_file_path_in(&grok_home(), info, prompt_index)
 }
@@ -1040,6 +1081,10 @@ pub struct Summary {
     pub last_recap: Option<String>,
 }
 
+/// `Summary::session_kind` for sessions whose cwd is inside a grok-managed
+/// worktree. `source_workspace_dir` is only ever set alongside this kind.
+pub(crate) const WORKTREE_SESSION_KIND: &str = "worktree";
+
 /// Current `grok_home` as a UTF-8 string, or `None` if the path isn't valid UTF-8.
 pub(crate) fn grok_home_string() -> Option<String> {
     crate::util::grok_home::grok_home()
@@ -1057,7 +1102,7 @@ impl Summary {
             xai_grok_workspace::session::git::resolve_persisted_session_git_metadata_sync(
                 std::path::Path::new(&info.cwd),
             );
-        Ok(Self {
+        let mut summary = Self {
             info: info.clone(),
             cwd_generation: 0,
             previous_cwd: None,
@@ -1090,14 +1135,29 @@ impl Summary {
             last_active_at: None,
             generated_title: None,
             title_is_manual: false,
-            worktree_label: crate::session::worktree::lookup_worktree_label(&info.cwd),
+            worktree_label: None,
             agent_name: None,
             sandbox_profile: None,
             reasoning_effort: None,
             last_turn_summary: None,
             last_turn_summary_prompt_id: None,
             last_recap: None,
-        })
+        };
+        if let Some(identity) = crate::session::worktree::worktree_identity_for_cwd(&info.cwd) {
+            summary.stamp_worktree_identity(&identity);
+        }
+        Ok(summary)
+    }
+
+    /// Mark this summary as a worktree session: kind, label, and source
+    /// workspace all come from the path-derived `identity`.
+    pub(crate) fn stamp_worktree_identity(
+        &mut self,
+        identity: &crate::session::worktree::WorktreeIdentity,
+    ) {
+        self.session_kind = Some(WORKTREE_SESSION_KIND.to_string());
+        self.worktree_label = Some(identity.label.clone());
+        self.source_workspace_dir = identity.source_workspace_dir.clone();
     }
 
     /// Whether this session should be excluded from history listings.
@@ -1331,6 +1391,13 @@ struct SessionPersistence {
     search_index: crate::session::storage::search::SharedSearchIndex,
     disk_full_tx: watch::Sender<bool>,
     disk_full_notified: bool,
+    /// Files that took buffered writes since the last successful sync barrier;
+    /// atomic-rename writes are durable at write time and never enter the set.
+    dirty_files: crate::session::storage::SessionFileSet,
+    /// First buffered-write failure since the last barrier. `FlushAndAck`
+    /// must not return `Ok` after a chat/update append that never reached
+    /// disk — fsyncing the previous bytes is not durability for that write.
+    pending_write_error: Option<io::Error>,
 }
 
 impl SessionPersistence {
@@ -1429,7 +1496,28 @@ impl SessionPersistence {
             .append_update_commit_aware(&self.info, update)
             .await;
         self.observe_append_update(&result);
+        match &result {
+            Ok(()) | Err(crate::session::storage::AppendUpdateError::Committed(_)) => {
+                self.dirty_files.updates = true;
+            }
+            Err(crate::session::storage::AppendUpdateError::NotCommitted(error)) => {
+                self.note_write_failure(error);
+            }
+        }
         result
+    }
+
+    fn note_write_failure(&mut self, error: &io::Error) {
+        if self.pending_write_error.is_none() {
+            self.pending_write_error = Some(io::Error::new(error.kind(), error.to_string()));
+        }
+    }
+
+    fn take_pending_write_error(&mut self) -> io::Result<()> {
+        match self.pending_write_error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn observe_io<T>(&mut self, result: &io::Result<T>) {
@@ -1449,6 +1537,20 @@ impl SessionPersistence {
             Err(
                 crate::session::storage::AppendUpdateError::NotCommitted(error)
                 | crate::session::storage::AppendUpdateError::Committed(error),
+            ) if is_disk_full_io_error(error) => self.mark_disk_full(),
+            Err(_) => {}
+        }
+    }
+
+    fn observe_append_chat(
+        &mut self,
+        result: &Result<(), crate::session::storage::AppendChatError>,
+    ) {
+        match result {
+            Ok(()) => self.clear_disk_full(),
+            Err(
+                crate::session::storage::AppendChatError::NotCommitted(error)
+                | crate::session::storage::AppendChatError::Committed(error),
             ) if is_disk_full_io_error(error) => self.mark_disk_full(),
             Err(_) => {}
         }
@@ -1588,6 +1690,13 @@ impl SessionPersistence {
     /// Restore uncommitted failures; sync committed records before returning errors.
     async fn drain_pending(&mut self) -> Result<(), crate::session::storage::AppendUpdateError> {
         if let Some(notification) = self.pending_notification.take() {
+            // `write_update` latches NotCommitted. This record is restored
+            // below for retry, so a latch from *this* miss is stale: a
+            // fire-and-forget durable append (TurnCompleted drops its ack)
+            // would otherwise make the next FlushAndAck fail after a
+            // successful redrain and prompt-byte sync. A prior latch from a
+            // dropped buffered write is left in place.
+            let had_prior_latch = self.pending_write_error.is_some();
             let result = self
                 .write_update(&SessionUpdate::Acp(Box::new(notification.clone())))
                 .await;
@@ -1601,6 +1710,9 @@ impl SessionPersistence {
                 }
                 PendingAppendOutcome::NotCommittedErr(notification, error) => {
                     self.pending_notification = Some(notification);
+                    if !had_prior_latch {
+                        self.pending_write_error = None;
+                    }
                     return Err(crate::session::storage::AppendUpdateError::NotCommitted(
                         error,
                     ));
@@ -1614,12 +1726,36 @@ impl SessionPersistence {
         &mut self,
         update: SessionUpdate,
     ) -> Result<(), crate::session::storage::AppendUpdateError> {
-        self.drain_pending().await?;
+        match self.drain_pending().await {
+            Ok(()) => {}
+            // Pending is already in the file / page cache. Aborting here
+            // would drop a fire-and-forget TurnCompleted (the ack is
+            // dropped after the turn pre-flush) with no retry.
+            Err(crate::session::storage::AppendUpdateError::Committed(_)) => {}
+            Err(error) => return Err(error),
+        }
         let result = self
             .storage
             .append_update_durable_commit_aware(&self.info, &update)
             .await;
         self.observe_append_update(&result);
+        match &result {
+            // Already fsynced at write time; stay off the dirty set.
+            Ok(()) => {}
+            // `write_all` reached the page cache (file barrier or
+            // bookkeeping failed). A later idle FlushAndAck must retry
+            // the fsync — TurnCompleted drops the ack after the turn's
+            // pre-flush, so this is the only retry path.
+            Err(crate::session::storage::AppendUpdateError::Committed(_)) => {
+                self.dirty_files.updates = true;
+            }
+            // The latch is for buffered chat/update/rewind misses.
+            // This path already reports via AppendUpdateDurablyAndAck;
+            // latching would make the next FlushAndAck fail after it
+            // has already synced later prompt bytes (TurnCompleted
+            // drops its ack).
+            Err(crate::session::storage::AppendUpdateError::NotCommitted(_)) => {}
+        }
         match (&update, &result) {
             (SessionUpdate::Acp(notification), Ok(()))
             | (
@@ -1634,10 +1770,18 @@ impl SessionPersistence {
     /// Flush any pending merged ACP notification to disk and remote sync.
     /// A no-op drain must not clear the disk-full latch.
     async fn flush_pending(&mut self) -> io::Result<()> {
-        let result = self
-            .drain_pending()
-            .await
-            .map_err(crate::session::storage::AppendUpdateError::into_io_error);
+        let result = match self.drain_pending().await {
+            Ok(()) => Ok(()),
+            // JSONL reached the page cache; `write_update` already dirtied
+            // updates so the barrier sync retries fsync. Returning Err here
+            // would withhold persist_ack after a successful prompt-byte
+            // sync — the same contract as chat Committed misses.
+            Err(crate::session::storage::AppendUpdateError::Committed(error)) => {
+                tracing::warn!(%error, "failed to write pending update");
+                Ok(())
+            }
+            Err(error) => Err(error.into_io_error()),
+        };
         if let Err(error) = &result {
             tracing::warn!(%error, "failed to write pending update");
         }
@@ -1650,13 +1794,15 @@ impl SessionPersistence {
         result
     }
 
-    /// Flush pending writes and sync all session files to disk.
-    /// Called before CopyFile to ensure all data is persisted.
-    async fn flush_and_sync(&mut self) {
-        let _ = self.flush_pending().await;
-        if let Err(e) = self.storage.sync_session_files(&self.info).await {
-            tracing::warn!(?e, "Failed to sync session files to disk");
-        }
+    /// Flush pending writes and sync the files dirtied since the last
+    /// successful barrier to stable media; an idle barrier syncs nothing.
+    /// First error wins: a NotCommitted drain outranks a failed sync.
+    /// A Committed drain is already on the dirty set and does not fail the ack.
+    async fn flush_and_sync(&mut self) -> io::Result<()> {
+        let flushed = self.flush_pending().await;
+        let prior_write = self.take_pending_write_error();
+        let synced = self.sync_files_and_clear(self.dirty_files).await;
+        flushed.and(prior_write).and(synced)
     }
 
     /// Announce a newly adopted auto title (first generation or refresh) to the
@@ -1692,6 +1838,37 @@ impl SessionPersistence {
         }
     }
 
+    /// [`Self::flush_and_sync`] over the full barrier file set: `CopyFile`
+    /// snapshots the whole session directory regardless of dirtiness.
+    /// Does not consume `pending_write_error` — CopyFile is not the
+    /// durability barrier; stealing the latch would let a later
+    /// FlushAndAck ack after a buffered write never reached disk.
+    async fn flush_and_sync_all(&mut self) -> io::Result<()> {
+        let flushed = self.flush_pending().await;
+        let synced = self
+            .sync_files_and_clear(crate::session::storage::SessionFileSet::ALL)
+            .await;
+        flushed.and(synced)
+    }
+
+    async fn sync_files_and_clear(
+        &mut self,
+        files: crate::session::storage::SessionFileSet,
+    ) -> io::Result<()> {
+        if files.is_empty() {
+            return Ok(());
+        }
+        let synced = self
+            .storage
+            .sync_session_files_selected(&self.info, files)
+            .await;
+        match &synced {
+            Ok(()) => self.dirty_files = Default::default(),
+            Err(e) => tracing::warn!(?e, "Failed to sync session files to disk"),
+        }
+        synced
+    }
+
     async fn run(mut self) {
         // Persistence traffic counts as worktree activity; debounced so
         // long-resident sessions (leader/remote, active for days without a
@@ -1712,7 +1889,7 @@ impl SessionPersistence {
                     let _ = self.flush_pending().await;
                 }
                 PersistenceMsg::FlushAndAck { respond_to } => {
-                    let result = self.flush_pending().await;
+                    let result = self.flush_and_sync().await;
                     let _ = respond_to.send(result);
                 }
                 PersistenceMsg::ProbeWritable { respond_to } => {
@@ -1749,16 +1926,32 @@ impl SessionPersistence {
                 }
                 PersistenceMsg::AppendUpdateDurablyAndAck { update, respond_to } => {
                     let result = self.handle_durable_append(update).await;
-                    let _ = respond_to.send(result);
+                    // A dropped receiver is a fire-and-forget durable append
+                    // (e.g. the TurnCompleted terminal); its errors would
+                    // otherwise vanish with the unread ack.
+                    if let Err(Err(error)) = respond_to.send(result) {
+                        tracing::warn!(%error, "failed to write durable update");
+                    }
                 }
                 PersistenceMsg::Chat(chat_msg) => {
                     let result = self
                         .storage
-                        .append_chat_message(&self.info, &chat_msg)
+                        .append_chat_message_commit_aware(&self.info, &chat_msg)
                         .await;
-                    self.observe_io(&result);
-                    if let Err(e) = result {
-                        tracing::warn!(?e, "failed to write chat message");
+                    self.observe_append_chat(&result);
+                    match &result {
+                        Ok(()) => self.dirty_files.chat = true,
+                        Err(crate::session::storage::AppendChatError::Committed(error)) => {
+                            tracing::warn!(
+                                %error,
+                                "failed to write chat bookkeeping after append"
+                            );
+                            self.dirty_files.chat = true;
+                        }
+                        Err(crate::session::storage::AppendChatError::NotCommitted(error)) => {
+                            tracing::warn!(%error, "failed to write chat message");
+                            self.note_write_failure(error);
+                        }
                     }
                 }
                 PersistenceMsg::AppendCwdSwitchAndAck { item, respond_to } => {
@@ -1833,7 +2026,14 @@ impl SessionPersistence {
                     }
                 }
                 PersistenceMsg::PlanState(state) => {
-                    if let Err(e) = self.storage.write_plan_state(&self.info, &state).await {
+                    // Atomic-rename: durable at write time, never on the dirty
+                    // set. A failed plan write must not latch into
+                    // `pending_write_error` — that latch is for buffered
+                    // chat/update/rewind misses, and would make the next
+                    // FlushAndAck fail after it has already synced those bytes.
+                    let result = self.storage.write_plan_state(&self.info, &state).await;
+                    self.observe_io(&result);
+                    if let Err(e) = result {
                         tracing::warn!(?e, "failed to write plan state");
                     }
                 }
@@ -1973,8 +2173,12 @@ impl SessionPersistence {
                 PersistenceMsg::RewindPoint(point) => {
                     let result = self.storage.append_rewind_point(&self.info, &point).await;
                     self.observe_io(&result);
-                    if let Err(e) = result {
-                        tracing::warn!(?e, "failed to write rewind point");
+                    match result {
+                        Ok(()) => self.dirty_files.rewind_points = true,
+                        Err(e) => {
+                            tracing::warn!(?e, "failed to write rewind point");
+                            self.note_write_failure(&e);
+                        }
                     }
                 }
                 PersistenceMsg::TruncateRewindPoints { from_index } => {
@@ -2082,8 +2286,9 @@ impl SessionPersistence {
                     }
                 }
                 PersistenceMsg::CopyFile { one_shot } => {
-                    // Flush pending writes and sync all session files to disk before copying.
-                    self.flush_and_sync().await;
+                    // Snapshot is best-effort. Leave the write-failure latch
+                    // for FlushAndAck so persist_ack cannot fire after a miss.
+                    let _ = self.flush_and_sync_all().await;
 
                     let result = self.copy_session_dir_to_memory().await;
                     let _ = one_shot.send(result);
@@ -2436,6 +2641,8 @@ pub(crate) async fn new(
             search_index,
             disk_full_tx,
             disk_full_notified: false,
+            dirty_files: Default::default(),
+            pending_write_error: None,
         };
         persistence.run().await;
     });
@@ -2467,8 +2674,16 @@ pub(crate) async fn new_with_explicit_dir(
     // Initialize session in storage (creates summary.json, etc.)
     let mut summary = storage.init_session(info, model_id.clone()).await?;
     touch_worktree_for_session(info).await;
-    if summary.session_kind.is_none() {
+    // A worktree cwd pre-stamps `"worktree"` in `Summary::new`; without the
+    // override here the subagent would surface in user session listings
+    // (`is_hidden` only hides `subagent*` kinds).
+    if summary
+        .session_kind
+        .as_deref()
+        .is_none_or(|kind| kind == WORKTREE_SESSION_KIND)
+    {
         summary.session_kind = Some("subagent".to_string());
+        summary.source_workspace_dir = None;
     }
     let summary_json = serde_json::to_vec_pretty(&summary)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -2506,6 +2721,8 @@ pub(crate) async fn new_with_explicit_dir(
             search_index: crate::session::storage::search::SharedSearchIndex::never_indexed(),
             disk_full_tx,
             disk_full_notified: false,
+            dirty_files: Default::default(),
+            pending_write_error: None,
         };
         persistence.run().await;
     });
@@ -2630,6 +2847,8 @@ pub(crate) async fn load_light(
             search_index,
             disk_full_tx,
             disk_full_notified: false,
+            dirty_files: Default::default(),
+            pending_write_error: None,
         };
         persistence.run().await;
     });
@@ -2639,17 +2858,8 @@ pub(crate) async fn load_light(
 
 /// List session summaries, optionally filtered by cwd (absolute path string).
 /// Returns summaries sorted by `last_active_at` (else `updated_at`) descending.
-fn recover_session_relocations_in(root: &Path) -> crate::session::storage::relocation::Result<()> {
-    crate::session::storage::relocation::RelocationStorage::new(root.into()).recover_all()
-}
-
 pub async fn list_summaries(cwd: Option<&str>) -> io::Result<Vec<Summary>> {
     let root_dir = crate::util::grok_home::grok_home();
-    let recovery_root = root_dir.clone();
-    tokio::task::spawn_blocking(move || recover_session_relocations_in(&recovery_root))
-        .await
-        .map_err(io::Error::other)?
-        .map_err(io::Error::other)?;
     let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
     storage.list_sessions(cwd).await
 }
@@ -2807,16 +3017,15 @@ mod durable_update_tests;
 #[path = "persistence_delete_session_history_tests.rs"]
 mod delete_session_history_tests;
 
+#[cfg(test)]
+#[path = "persistence_worktree_stamp_tests.rs"]
+mod worktree_stamp_tests;
+
 /// List the `limit` most recently modified session summaries across all
 /// workspaces. Uses stat-based mtime sorting to avoid reading every
 /// summary file on disk; final order uses `last_active_at` else `updated_at`.
 pub async fn list_recent_summaries(limit: usize) -> io::Result<Vec<Summary>> {
     let root_dir = crate::util::grok_home::grok_home();
-    let recovery_root = root_dir.clone();
-    tokio::task::spawn_blocking(move || recover_session_relocations_in(&recovery_root))
-        .await
-        .map_err(io::Error::other)?
-        .map_err(io::Error::other)?;
     let storage = JsonlStorageAdapter::with_root(root_dir);
     storage.list_sessions_recent(limit).await
 }
@@ -2840,19 +3049,7 @@ const DEFAULT_CLEANUP_TTL_DAYS: u32 = 30;
 pub(crate) fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
     CLEANUP_SESSIONS_ONCE.call_once(|| {
         let ttl_days = resolve_cleanup_ttl_days();
-        let root = grok_home();
-        if let Err(error) = recover_session_relocations_in(&root) {
-            tracing::error!(%error, "session relocation recovery failed before TTL cleanup");
-            return;
-        }
-        let sessions_root = root.join("sessions");
-        let relocation_view = match storage_view(&sessions_root) {
-            Ok(view) => view,
-            Err(error) => {
-                tracing::error!(%error, "session relocation snapshot failed before TTL cleanup");
-                return;
-            }
-        };
+        let sessions_root = grok_home().join("sessions");
 
         tracing::info!(
             target: "xai_grok_shell::session::persistence",
@@ -2866,8 +3063,6 @@ pub(crate) fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
             &sessions_root,
             ttl_days,
             skip_session_dir,
-            &relocation_view,
-            &root,
             CleanupLevel::SessionsRoot,
         );
 
@@ -2917,8 +3112,6 @@ fn cleanup_stale_sessions_inner(
     root: &Path,
     ttl_days: u32,
     skip: Option<&Path>,
-    relocation_view: &crate::session::storage::relocation::RelocationView,
-    grok_home: &Path,
     level: CleanupLevel,
 ) -> CleanupStats {
     let mut stats = CleanupStats::default();
@@ -2968,22 +3161,18 @@ fn cleanup_stale_sessions_inner(
             }
         };
         if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
-            if matches!(level, CleanupLevel::SessionsRoot)
-                && relocation_view.protects_cwd_dir(&path)
-            {
-                continue;
-            }
-            let lease = if matches!(level, CleanupLevel::Cwd) {
+            if matches!(level, CleanupLevel::Cwd) {
                 let summary = path.join("summary.json");
-                let summary_type = match std::fs::symlink_metadata(&summary) {
-                    Ok(metadata) => metadata,
+                match std::fs::symlink_metadata(&summary) {
+                    Ok(metadata)
+                        if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+                    }
+                    Ok(_) => continue,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {
                         let child_stats = cleanup_stale_sessions_inner(
                             &path,
                             ttl_days,
                             skip,
-                            relocation_view,
-                            grok_home,
                             CleanupLevel::Session,
                         );
                         stats.files_deleted += child_stats.files_deleted;
@@ -3004,40 +3193,13 @@ fn cleanup_stale_sessions_inner(
                         );
                         continue;
                     }
-                };
-                if !summary_type.file_type().is_file() || summary_type.file_type().is_symlink() {
-                    continue;
                 }
-                let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
-                    continue;
-                };
-                let storage = crate::session::storage::relocation::RelocationStorage::new(
-                    grok_home.to_path_buf(),
-                );
-                let Ok(lease) = storage.acquire(id) else {
-                    continue;
-                };
-                match storage.read_journal(id) {
-                    Err(crate::session::storage::relocation::RelocationError::JournalMissing(
-                        _,
-                    )) => Some(lease),
-                    _ => continue,
-                }
-            } else {
-                None
-            };
+            }
             let next = match level {
                 CleanupLevel::SessionsRoot => CleanupLevel::Cwd,
                 CleanupLevel::Cwd | CleanupLevel::Session => CleanupLevel::Session,
             };
-            let child_stats = cleanup_stale_sessions_inner(
-                &path,
-                ttl_days,
-                skip,
-                relocation_view,
-                grok_home,
-                next,
-            );
+            let child_stats = cleanup_stale_sessions_inner(&path, ttl_days, skip, next);
             stats.files_deleted += child_stats.files_deleted;
             stats.dirs_removed += child_stats.dirs_removed;
             stats.errors += child_stats.errors;
@@ -3053,7 +3215,6 @@ fn cleanup_stale_sessions_inner(
                     "SESSION_CLEANUP_RMDIR"
                 );
             }
-            drop(lease);
         } else if let Ok(mtime) = metadata.modified()
             && is_stale(mtime, ttl_days)
         {

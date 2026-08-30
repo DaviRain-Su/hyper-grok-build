@@ -3,20 +3,19 @@ use xai_grok_tools::implementations::grok_build::{
     LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message,
 };
 
-use crate::slash::command::{CommandExecCtx, CommandResult, ScheduledTaskPreview, SlashCommand};
+use crate::slash::command::{
+    CommandExecCtx, CommandResult, ScheduledTaskPreview, SlashCommand, slash_meta,
+};
 
-/// Pre-built slice for `LoopCommand::required_tools()`. Lifted to a
-/// module-level constant so the trait method can return a `'static`
-/// slice; the constant pulls the canonical name from `xai-grok-tools`
-/// so a tool rename surfaces here at compile time.
+/// `LoopCommand::required_tools()` returns this; a module-level constant lets the trait method return a `'static` slice.
+/// The name comes from `xai-grok-tools`, so a tool rename shows up here as a compile error.
 const LOOP_REQUIRED_TOOLS: &[&str] = &[SCHEDULER_CREATE_TOOL_NAME];
 
 pub struct LoopCommand;
 
-/// Split `/loop` args into an optional leading compact interval token (only for
-/// seeding the provisional preview) and the prompt. Returns `Some(token)` only
-/// for a `^\d+[smhd]$` first token followed by prompt text; otherwise `None`,
-/// leaving the model to derive the real interval. There is no host-side default.
+/// Split `/loop` args into an optional leading compact interval token (only for seeding the provisional preview) and the prompt.
+/// Returns `Some(token)` only for a `^\d+[smhd]$` first token followed by prompt text.
+/// Otherwise returns `None` and the model derives the real interval; there is no host-side default.
 fn parse_loop_args(args: &str) -> (Option<&str>, &str) {
     let trimmed = args.trim();
     if let Some(space) = trimmed.find(char::is_whitespace) {
@@ -29,9 +28,8 @@ fn parse_loop_args(args: &str) -> (Option<&str>, &str) {
     (None, trimmed)
 }
 
-/// Whether a token is a schedulable interval: non-zero digits followed by one
-/// of s/m/h/d. Zero is rejected so the preview never shows a cadence the tool
-/// would reject (`parse_interval` errors on zero).
+/// Whether a token is a schedulable interval: non-zero digits followed by one of s/m/h/d.
+/// Zero is rejected so the preview never shows a cadence the tool would reject (`parse_interval` errors on zero).
 fn is_interval_token(s: &str) -> bool {
     if s.len() < 2 {
         return false;
@@ -80,32 +78,14 @@ fn interval_to_human(token: &str) -> String {
 }
 
 impl SlashCommand for LoopCommand {
-    fn name(&self) -> &str {
-        "loop"
-    }
-
-    fn description(&self) -> &str {
-        "Run a prompt on a recurring interval"
-    }
-
-    fn usage(&self) -> &str {
-        "/loop [interval] <prompt>"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn args_required(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("[interval] <prompt>")
-    }
-
-    fn required_tools(&self) -> &[&str] {
-        LOOP_REQUIRED_TOOLS
+    slash_meta! {
+        name: "loop",
+        description: "Run a prompt on a recurring interval",
+        usage: "/loop [interval] <prompt>",
+        takes_args: true,
+        args_required: true,
+        arg_placeholder: "[interval] <prompt>",
+        required_tools: LOOP_REQUIRED_TOOLS,
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -120,10 +100,8 @@ impl SlashCommand for LoopCommand {
             LoopFireMode::InSession
         };
 
-        // Show a concrete cadence only for an unambiguous leading token;
-        // otherwise a neutral placeholder, since the authoritative schedule
-        // arrives via the model's scheduler_create -> ScheduledTaskCreated and
-        // replaces this provisional entry.
+        // Show a concrete cadence only for an unambiguous leading token; otherwise show a neutral placeholder
+        // The authoritative schedule arrives when the model calls scheduler_create, whose ScheduledTaskCreated replaces this provisional entry
         let human_schedule = match interval_token {
             Some(token) => interval_to_human(token),
             None => "scheduling…".to_string(),
@@ -189,8 +167,7 @@ mod tests {
 
     #[test]
     fn parse_interval_token_without_prompt_yields_none() {
-        // A bare interval token with no prompt text is treated as the prompt;
-        // there is no interval to extract for the preview.
+        // A bare interval token with no prompt text is treated as the prompt; there is no interval to extract for the preview
         let (interval, prompt) = parse_loop_args("5m");
         assert_eq!(interval, None);
         assert_eq!(prompt, "5m");
@@ -211,10 +188,8 @@ mod tests {
 
     #[test]
     fn malformed_leading_tokens_yield_none() {
-        // Exercises every rejecting branch of `is_interval_token` via
-        // `parse_loop_args`: bad suffix, missing suffix, too short, multi-char
-        // suffix, and zero-valued tokens. Each must fall through to the model
-        // with no host-side cadence.
+        // Exercises every rejecting branch of `is_interval_token` via `parse_loop_args`
+        // Each malformed token must fall through to the model with no host-side cadence
         for input in [
             "5x do x",                    // bad suffix
             "5 do x",                     // no suffix
@@ -223,7 +198,7 @@ mod tests {
             "0m do x",                    // zero value (tool would reject)
             "0s do x",                    // zero value
             "abc do x",                   // alphabetic
-            "99999999999999999999m do x", // overflows u64 -> parse Err branch
+            "99999999999999999999m do x", // overflows u64, hits the parse Err branch
         ] {
             let (interval, prompt) = parse_loop_args(input);
             assert_eq!(interval, None, "input {input:?} must not yield a token");
@@ -233,8 +208,7 @@ mod tests {
 
     #[test]
     fn natural_language_intervals_are_not_defaulted_host_side() {
-        // The host no longer parses natural-language intervals or substitutes a
-        // default — these all fall through to the model with no interval token.
+        // The host does not parse natural-language intervals or substitute a default; these all fall through to the model with no interval token
         for input in [
             "every 30 minutes do x",
             "30 min check deploy",
@@ -301,7 +275,7 @@ mod tests {
                 scheduled_task_preview: Some(preview),
                 ..
             } => {
-                // No fabricated cadence — the model fills in the real schedule.
+                // No fabricated cadence; the model fills in the real schedule
                 assert_eq!(preview.human_schedule, "scheduling…");
                 assert_ne!(preview.human_schedule, "every 10 minutes");
                 assert_eq!(preview.prompt, "check deploy status every 30 minutes");
@@ -312,8 +286,7 @@ mod tests {
 
     #[test]
     fn run_bare_leading_token_shows_placeholder() {
-        // "/loop 5m" with no prompt text: nothing to extract, so the preview
-        // shows the placeholder and the whole input becomes the prompt.
+        // "/loop 5m" with no prompt text: nothing to extract, so the preview shows the placeholder and the whole input becomes the prompt
         match run_loop("5m") {
             CommandResult::InjectSkill {
                 scheduled_task_preview: Some(preview),
@@ -338,7 +311,7 @@ mod tests {
                     !instruction.contains("10m"),
                     "instruction must not advertise a 10m default: {instruction}"
                 );
-                // Stable, behaviour-bearing tokens, not incidental example text.
+                // The asserted tokens are stable and carry behaviour, not incidental example text
                 assert!(instruction.contains("30 minutes"));
                 assert!(instruction.contains("<number><unit>"));
             }
@@ -360,8 +333,8 @@ mod tests {
         }
     }
 
-    // Drift guard (pager end): pager text == shared helper. With the shell's
-    // `loop_prompt_matches_pager_wording`, this pins full shell↔pager parity.
+    // Drift guard (pager end): the pager text must equal the shared helper's
+    // With the shell's `loop_prompt_matches_pager_wording`, this pins full parity between shell and pager
     #[test]
     fn run_instruction_matches_shared_helper() {
         let args = "2h run tests";

@@ -1,8 +1,7 @@
-//! `[ui.status_line]`, the half of the contract a user writes.
+//! This module parses `[ui.status_line]`, the half of the contract a user writes.
 //!
-//! Parsing never fails here. A parse error anywhere in `[ui]` discards the
-//! whole table, so a value this module cannot read is recorded as a problem
-//! rather than rejected.
+//! Parsing never fails here.
+//! A parse error anywhere in `[ui]` discards the whole table, so a value this module cannot read is recorded as a problem rather than rejected.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -34,7 +33,7 @@ pub struct StatusLineConfig {
     unknown_keys: Vec<String>,
 }
 
-/// Destructured so a new field is a compile error rather than a silent hole.
+/// `eq` destructures `Self` so a new field is a compile error rather than a field the comparison silently skips.
 impl PartialEq for StatusLineConfig {
     fn eq(&self, other: &Self) -> bool {
         let Self {
@@ -63,8 +62,7 @@ struct RawStatusLineConfig {
     items: Option<Lenient<Vec<Lenient<String>>>>,
     padding: Option<Lenient<u16>>,
     refresh_interval: Option<Lenient<u64>>,
-    /// `#[serde(untagged)]` replays the table through a fresh deserializer,
-    /// so a typo here is reported through `serde_ignored` rather than dropped.
+    /// `#[serde(untagged)]` replays the table through a fresh deserializer, so a typo here is reported through `serde_ignored` rather than dropped.
     #[serde(flatten)]
     unknown: BTreeMap<String, serde::de::IgnoredAny>,
 }
@@ -152,7 +150,7 @@ impl StatusLineConfig {
 
     pub const MIN_REFRESH_INTERVAL_SECS: u64 = 1;
 
-    /// Capped: unbounded seconds panic `Instant::now() + interval`.
+    /// Capped: an unbounded interval makes `Instant::now() + interval` panic.
     pub const MAX_REFRESH_INTERVAL_SECS: u64 = 86_400;
 
     const MAX_PADDING_PER_SIDE: u16 = 16;
@@ -236,19 +234,18 @@ impl StatusLineConfig {
                 StatusLineType::Builtin => {
                     Some("[ui.status_line] type = \"builtin\" needs at least one item")
                 }
-                // A stray key under `disabled` stays silent, like a stray
-                // `command`: the off switch outranks its neighbours.
+                // A stray key under `disabled` stays silent, like a stray `command`: the off switch outranks its neighbours
                 StatusLineType::Disabled => None,
             };
         }
-        // A timer under `builtin` schedules nothing, so it is reported rather
+        // A timer under `builtin` schedules nothing
         if self.refresh_interval.is_some() && self.kind == Some(StatusLineType::Builtin) {
             return Some("[ui.status_line] refresh_interval needs type = \"command\"");
         }
         None
     }
 
-    /// `None` under `type = "disabled"`, so a typo cannot switch the row back on.
+    /// Returns `None` under `type = "disabled"`, so a typo cannot switch the row back on.
     pub fn problem_to_paint(&self) -> Option<&str> {
         if self.kind == Some(StatusLineType::Disabled) || self.resolve().is_some() {
             return None;

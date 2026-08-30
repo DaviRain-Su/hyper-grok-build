@@ -1,9 +1,7 @@
 //! Onboarding tutorial content (embedded markdown).
 //!
-//! Short, curated topics shown by the `/tutorial` overlay (strictly opt-in —
-//! nothing auto-shows). Deliberately separate from [`crate::docs`] (the full how-to
-//! guides): these pages are bite-size intros that point at the guides for
-//! depth.
+//! Short, curated topics shown by the `/tutorial` overlay (strictly opt-in; nothing auto-shows).
+//! Deliberately separate from [`crate::docs`] (the full how-to guides): these pages are bite-size intros that point at the guides for depth.
 
 /// A compile-time tutorial topic. All fields are `&'static str`.
 #[derive(Debug)]
@@ -14,8 +12,7 @@ pub struct TutorialTopic {
     pub blurb: &'static str,
     /// Embedded markdown page content.
     pub content: &'static str,
-    /// Title of the primary how-to guide this page's "Go deeper" points at
-    /// (must match a [`crate::docs`] title); `d` opens it in the overlay.
+    /// Title of the primary how-to guide this page's "Go deeper" points at (must match a [`crate::docs`] title); `d` opens it in the overlay.
     pub go_deeper: Option<&'static str>,
 }
 
@@ -30,10 +27,8 @@ macro_rules! topic {
     };
 }
 
-/// The tutorial topics, in display order. Ordered as a linear flow (the
-/// topic screen's `→` advances through them): what carries over from other
-/// tools, send a prompt, feed it context, learn the screen, then the
-/// bigger features.
+/// The tutorial topics, in display order, as a linear flow (the topic screen's `→` advances through them).
+/// The flow: what carries over from other tools, send a prompt, feed it context, learn the screen, then the bigger features.
 pub static TUTORIAL_TOPICS: &[TutorialTopic] = &[
     topic!(
         "01-coming-from-another-tool.md",
@@ -111,8 +106,7 @@ mod tests {
 
     #[test]
     fn go_deeper_titles_resolve_to_real_guides() {
-        // `d` on a topic page opens this guide; a typo'd title would turn
-        // the shortcut into a silent no-op.
+        // `d` on a topic page opens this guide; a typo'd title would turn the shortcut into a silent no-op
         for t in TUTORIAL_TOPICS {
             if let Some(title) = t.go_deeper {
                 assert!(
@@ -134,8 +128,8 @@ mod tests {
 
     #[test]
     fn topics_stay_bite_size() {
-        // The tutorial promises quick reads — keep each page short. Bump this
-        // limit only after re-checking a page still reads in under a minute.
+        // The tutorial promises quick reads; keep each page short
+        // Bump this limit only after re-checking a page still reads in under a minute
         for t in TUTORIAL_TOPICS {
             let lines = t.content.lines().count();
             assert!(

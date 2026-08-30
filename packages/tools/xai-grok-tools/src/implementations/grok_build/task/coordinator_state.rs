@@ -856,6 +856,7 @@ pub fn completion_summary(
         subagent_id: request.id.clone(),
         subagent_type: request.subagent_type.clone(),
         description: request.description.clone(),
+        loop_task_id: request.runtime_overrides.loop_task_id.clone(),
         success: result.success && !result.cancelled,
         duration_ms: result.duration_ms,
         tool_calls: result.tool_calls,

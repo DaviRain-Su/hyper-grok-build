@@ -7,11 +7,9 @@ const CHROMEHOLD_TOP: &str = "CHROMEHOLD_TOP";
 
 const CHROMEHOLD_BOTTOM: &str = "CHROMEHOLD_BOTTOM";
 
-/// PTY: a mouse-down on a blank row INSIDE a block's area whose drag never
-/// touches selectable text stays a whole-block drag: release copies the
-/// whole message (both paragraphs), exactly as before the deferred-anchor
-/// latch existed. Covers the never-enter branch the anchor-on-entry
-/// conversion must not disturb.
+/// PTY: a mouse-down on a blank row INSIDE a block's area whose drag never touches selectable text stays a whole-block drag.
+/// Release copies the whole message (both paragraphs).
+/// Text-drag anchoring waits until the pointer enters selectable text; this pins the case where the pointer never does.
 ///
 /// `SSH_CONNECTION` forces the OSC 52 clipboard route for readback.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -77,9 +75,8 @@ async fn drag_from_chrome_stays_block_pty() {
         "setup: the in-block row must be blank at the drag columns; line: {chrome_line:?}"
     );
 
-    // PRESS on the blank in-block row and drag sideways along it — the
-    // pointer never enters selectable text, so the gesture stays a block
-    // drag — then release.
+    // PRESS on the blank in-block row, drag sideways along it, then release
+    // The pointer never enters selectable text, so the gesture stays a block drag
     let mut drag = String::new();
     drag.push_str(&sgr_mouse(0, chrome_row, col_top, 'M'));
     drag.push_str(&sgr_mouse(32, chrome_row, col_top + 3, 'M'));

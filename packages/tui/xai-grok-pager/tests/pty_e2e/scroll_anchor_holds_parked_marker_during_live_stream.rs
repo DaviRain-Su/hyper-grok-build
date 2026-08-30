@@ -4,30 +4,27 @@ use super::common::*;
 #[allow(unused_imports)]
 use super::scroll::*;
 
-// Diagnostic: after a forced 1-line wheel-up parks a visible marker mid-stream,
-// the parked marker must stay put with no further input while the turn is still
-// live. The up-burst proves input was delivered; the no-input observation
-// isolates drift from extra wheel/key delivery.
+// Diagnostic: a forced 1-line wheel-up parks a visible marker mid-stream
+// With no further input, the parked marker must stay put while the turn is still live
+// The up-burst proves input was delivered; the no-input observation isolates drift from extra wheel/key delivery
 //
-// Scope limit: the paced tail appends *below* the parked markers in the same
-// agent entry. This does not reproduce upstream height growth/removal (unit
-// tests cover that). It only pins below-tail + no-input stability.
+// Scope limit: the paced tail appends *below* the parked markers in the same agent entry
+// This does not reproduce upstream height growth/removal (unit tests cover that). It only pins below-tail and no-input stability.
 
-/// 240 one-row markers ≫ the 50-row PTY: the up-burst cannot clamp at the top.
+/// 240 one-row markers far exceed the 50-row PTY: the up-burst cannot clamp at the top.
 const MARKER_COUNT: usize = 240;
 
 /// Rows wheeled up to exit follow (1 row per event under the forced env).
 const UP_EVENTS: usize = 12;
 
-/// Space-separated tail words after the marker block keep ACP traffic in flight.
+/// Space-separated tail words after the marker block keep ACP traffic flowing.
 const TAIL_WORDS: usize = 200;
 
 /// Per-SSE-event pacing so deltas keep arriving after the wheel-up parks.
 const CHUNK_DELAY: Duration = Duration::from_millis(30);
 
-/// **No-input stability after wheel-up.** Mid-stream: exact wheel pricing,
-/// wheel up, then observe with no further input. The parked marker's screen
-/// row must not move while the turn is still live (tail continues below).
+/// Mid-stream: exact wheel pacing, wheel up, then observe with no further input.
+/// The parked marker's screen row must not move while the turn is still live (tail continues below).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn parked_marker_does_not_jolt_during_live_stream_after_wheel_up() {

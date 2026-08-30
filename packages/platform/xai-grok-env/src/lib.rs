@@ -5,11 +5,10 @@
     unreachable_code,
     dead_code
 )]
-//! Backend environment presets for the Grok CLI crate family: endpoint URL
-//! defaults, environment selection, and env-var test support.
+//! Backend environment presets for the Grok CLI crate family: endpoint URL defaults, environment selection, and env-var test support.
 //!
-//! Public builds expose production endpoints. Values resolve as a `GROK_*`
-//! env-var override when set, else the compiled production default.
+//! Public builds expose production endpoints.
+//! Values resolve as a `GROK_*` env-var override when set, else the compiled production default.
 /// The endpoint set for one backend environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GrokBuildEndpoints {
@@ -77,9 +76,8 @@ impl GrokBuildEnvironment {
     pub fn asset_server_url(&self) -> String {
         self.resolve("_ASSET_SERVER_URL", self.endpoints().asset_server_url)
     }
-    /// The relay WebSocket URL (Web Frontend at `grok.com/code` driving a
-    /// local agent). Not the cloud-sandbox gateway ([`Self::gateway_ws_url`]);
-    /// the two speak different protocols.
+    /// The relay WebSocket URL (Web Frontend at `grok.com/code` driving a local agent).
+    /// Not the cloud-sandbox gateway ([`Self::gateway_ws_url`]); the two speak different protocols.
     pub fn relay_ws_url(&self) -> String {
         self.resolve("_WS_URL", self.endpoints().relay_ws_url)
     }
@@ -101,9 +99,8 @@ impl std::fmt::Display for GrokBuildEnvironment {
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    /// Set while this thread owns [`ENV_LOCK`]. `ENV_LOCK` is a plain
-    /// `std::sync::Mutex` and is therefore not reentrant, so without this a
-    /// second guard on one thread blocks forever on the first guard's lock.
+    /// Set while this thread owns [`ENV_LOCK`].
+    /// `ENV_LOCK` is not reentrant, so without this a second guard on one thread blocks forever on the first guard's lock.
     static ENV_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 #[cfg(any(test, feature = "test-support"))]
@@ -118,12 +115,10 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_LOCK_HELD.set(true);
     lock
 }
-/// RAII env-var override for tests: constructors snapshot the prior value
-/// under [`ENV_LOCK`], `Drop` restores it, panics included.
+/// RAII env-var override for tests: constructors snapshot the prior value under [`ENV_LOCK`], `Drop` restores it, panics included.
 ///
-/// A guard owns [`ENV_LOCK`] for its whole lifetime, so one thread can only
-/// ever hold one. To override several keys at once, chain
-/// [`Self::and_set`] / [`Self::and_remove`] onto a single guard.
+/// A guard owns [`ENV_LOCK`] for its whole lifetime, so one thread can only ever hold one.
+/// To override several keys at once, chain [`Self::and_set`] / [`Self::and_remove`] onto a single guard.
 #[cfg(any(test, feature = "test-support"))]
 pub struct EnvVarGuard {
     /// The constructor's key; [`Self::set_value`] targets it.
@@ -231,8 +226,7 @@ mod tests {
         );
         assert!(std::env::var(B).is_err());
     }
-    /// Stacking two guards on one thread used to block forever on the
-    /// non-reentrant `ENV_LOCK`, which surfaced only as a CI test timeout.
+    /// Stacking two guards on one thread used to block forever on the non-reentrant `ENV_LOCK`, which surfaced only as a CI test timeout.
     #[test]
     #[should_panic(expected = "this thread already holds a live guard")]
     fn env_var_guard_rejects_a_second_guard_on_the_same_thread() {
@@ -240,8 +234,7 @@ mod tests {
         let _first = EnvVarGuard::set(KEY, "first");
         let _second = EnvVarGuard::set(KEY, "second");
     }
-    /// Guards against conflating the relay and gateway endpoints (a relay
-    /// loop mistakenly connecting to `wss://grok.com/ws/gw/`).
+    /// Guards against conflating the relay and gateway endpoints (a relay loop mistakenly connecting to `wss://grok.com/ws/gw/`).
     #[test]
     fn relay_and_gateway_urls_are_distinct() {
         assert_ne!(

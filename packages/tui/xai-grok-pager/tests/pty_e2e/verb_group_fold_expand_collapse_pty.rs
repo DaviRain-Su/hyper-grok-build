@@ -4,17 +4,15 @@ use super::common::*;
 
 const DONE_SENTINEL: &str = "VERB_GROUP_DONE";
 
-/// PTY: runs of consecutive reads/searches fold into one "Verb N noun" header
-/// row and an Edit stays a standalone separator. Double-click expands the
-/// group to individual rows — including member 0 below the header — where the
-/// selected slot acts as member 0: Right (Expand; `l` is its vim-mode alias)
-/// opens the member's own block, Left (Collapse; `h` in vim mode) closes it
-/// and then collapses the whole group.
+/// PTY: runs of consecutive reads/searches fold into one "Verb N noun" header row and an Edit stays a standalone separator.
+/// Double-click expands the group to individual rows, including member 0 below the header, with the selected slot acting as member 0.
+/// Right (Expand; `l` is its vim-mode alias) opens the member's own block.
+/// Left (Collapse; `h` in vim mode) closes it and then collapses the whole group.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn verb_group_fold_expand_collapse_pty() {
     let content = ContentController::start().await.expect("start content");
-    // Pin ON via the config tier so the test doesn't ride the client default.
+    // Pin ON via the config tier so the test doesn't depend on the client default
     seed_ui_config(&content, "group_tool_verbs = true");
 
     // Seed real files under the isolated HOME so the reads/edit succeed.
@@ -28,9 +26,8 @@ async fn verb_group_fold_expand_collapse_pty() {
         "b2.txt",
     ] {
         let path = content.home().join(name);
-        // a1's body is unique so opening MEMBER 0's block below has an
-        // unambiguous sentinel (the edit diff already shows "hello verb
-        // group" on screen).
+        // a1's body is unique so opening MEMBER 0's block below has an unambiguous sentinel
+        // The edit diff already shows "hello verb group" on screen
         let body = if name == "a1.txt" {
             "first member body a1\n"
         } else {
@@ -44,7 +41,7 @@ async fn verb_group_fold_expand_collapse_pty() {
     }
     let home_str = content.home().to_string_lossy().into_owned();
 
-    // read x3 → grep x2 → edit → read x2, then a plain completion to settle.
+    // Three reads, two greps, an edit, two more reads, then a plain completion to settle
     let _tool_turns = [
         expect_tool_turn(&content, "call_r1", "read_file", read_args(&paths[0])),
         expect_tool_turn(&content, "call_r2", "read_file", read_args(&paths[1])),
@@ -78,8 +75,7 @@ async fn verb_group_fold_expand_collapse_pty() {
     content.set_response(DONE_SENTINEL);
 
     let binary = pager_binary().expect("resolve pager binary");
-    // --yolo auto-approves the scripted write tool (mirrors the background-task
-    // e2e, the other tool-running PTY test).
+    // --yolo auto-approves the scripted write tool (mirrors the background-task e2e, the other tool-running PTY test)
     let mut harness = PtyHarness::spawn_with_content_in_dir(
         &binary,
         DEFAULT_ROWS,
@@ -107,7 +103,7 @@ async fn verb_group_fold_expand_collapse_pty() {
             )
         });
 
-    // First run folds reads + greps into one header ("· N failed" may follow).
+    // First run folds reads and greps into one header ("· N failed" may follow)
     harness
         .wait_for_text("Read 3 files, Searched 2 patterns", Duration::from_secs(20))
         .unwrap_or_else(|_| {
@@ -127,19 +123,16 @@ async fn verb_group_fold_expand_collapse_pty() {
         "edit must stay a standalone separator row\nscreen:\n{}",
         harness.screen_contents()
     );
-    // Members of a folded run are hidden.
     assert!(
         !harness.contains_text("a2.txt"),
         "folded member must be hidden\nscreen:\n{}",
         harness.screen_contents()
     );
 
-    // Focus scrollback with a single Tab, then wait for a scrollback-only
-    // footer hint to prove the scrollback owns keys (Tab TOGGLES focus;
-    // polling the render avoids racing turn-finish redraws). The thinking
-    // fold chord renders whenever the scrollback is focused, regardless of
-    // which row type is selected — unlike "Space:prompt", which higher
-    // priority selection hints can crowd out.
+    // Focus scrollback with a single Tab, then wait for a scrollback-only footer hint to prove the scrollback owns keys
+    // Tab TOGGLES focus; polling the render avoids racing turn-finish redraws
+    // The thinking fold chord renders whenever the scrollback is focused, regardless of which row type is selected
+    // "Space:prompt" can instead be crowded out by higher-priority selection hints
     harness.inject_keys(b"\t").expect("focus scrollback");
     harness
         .wait_for_text("Ctrl+e:", Duration::from_secs(10))
@@ -153,8 +146,7 @@ async fn verb_group_fold_expand_collapse_pty() {
     let (row, col) = locate_screen_text(&screen, "Read 3 files").unwrap_or_else(|| {
         panic!("could not locate verb-group header; screen:\n{screen}");
     });
-    // The transcript is short (fits the viewport), so expanding must grow
-    // members downward in place: the header's screen row may not move.
+    // The transcript is short (fits the viewport), so expanding must grow members downward in place: the header's screen row may not move
     let header_row_before = row;
     let click = format!(
         "{}{}{}{}",
@@ -166,10 +158,8 @@ async fn verb_group_fold_expand_collapse_pty() {
     harness
         .inject_keys(click.as_bytes())
         .expect("double-click header");
-    // Expanded shape: the header line sits ABOVE the members and every
-    // member — including the first — renders as its own row. The slot stays
-    // selected and acts as MEMBER 0: the caret sits on the member row
-    // pointing right, and the header row wears no caret.
+    // Expanded shape: the header line sits ABOVE the members and every member (including the first) renders as its own row
+    // The slot stays selected and acts as MEMBER 0: the caret sits on the member row pointing right, and the header row wears no caret
     harness
         .wait_for_text("a1.txt", Duration::from_secs(10))
         .unwrap_or_else(|_| {
@@ -198,17 +188,15 @@ async fn verb_group_fold_expand_collapse_pty() {
         expanded_row, header_row_before,
         "expanding must not move the header's screen row\nscreen:\n{screen}"
     );
-    // Caret on member 0. Collapsed Read headers show basename only, so the
-    // path may be `a1.txt` rather than an absolute `/…` prefix.
+    // Collapsed Read headers show basename only, so the path may be `a1.txt` rather than an absolute `/…` prefix
     assert!(
         harness.contains_text("› Read a1.txt") || harness.contains_text("› Read /"),
         "member 0's row must carry the selection caret\nscreen:\n{}",
         harness.screen_contents()
     );
 
-    // Prove the scrollback owns keys, then Right: it must open MEMBER 0's
-    // own block (not re-toggle the group). Opening drops member 0 from the
-    // run, so the group dissolves while its body is on show.
+    // Prove the scrollback owns keys, then Right: it must open MEMBER 0's own block (not re-toggle the group)
+    // Opening drops member 0 from the run, so the group dissolves while its body is on show
     harness
         .wait_for_text("Ctrl+e:", Duration::from_secs(10))
         .unwrap_or_else(|_| {
@@ -253,8 +241,7 @@ async fn verb_group_fold_expand_collapse_pty() {
             harness.screen_contents()
         );
     }
-    // Collapse re-selects the header: the caret overdraws the diamond (not
-    // the label) and points right again in the collapsed state.
+    // Collapse re-selects the header: the caret overdraws the diamond (not the label) and points right again in the collapsed state
     assert!(
         harness.contains_text("› Read 3 files, Searched 2 patterns"),
         "collapsed header must return with the right-pointing caret\nscreen:\n{}",

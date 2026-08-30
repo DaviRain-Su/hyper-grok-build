@@ -2,23 +2,18 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 23. **Leader mode — N clients share one session.**
-/// Scales the multi-client fan-out to N = 1 driver + `VIEWERS` viewers (bump
-/// `VIEWERS` to widen it). The driver spawns the leader and runs a turn; every
-/// viewer attaches through the SAME leader and must replay that turn exactly
-/// once (duplicated replay history and an empty/stuck pane both fail); a later
-/// turn driven from the driver must stream live into ALL viewers exactly once;
-/// and the leader + viewers must survive the spawning client's exit.
-/// Deliberately NOT a superset of `leader_two_clients_shared_session`: the
-/// driver/viewer role-flip (a turn driven from a viewer back to the driver)
-/// and the multi-turn scrollback exactly-once integrity stay unique to that
-/// test, so it must not be deleted as redundant.
+/// **Leader mode: N clients share one session.**
+/// Scales the multi-client fan-out to one driver plus `VIEWERS` viewers; bump `VIEWERS` to widen it.
+/// The driver spawns the leader and runs a turn; every viewer attaches through the SAME leader and must replay that turn exactly once.
+/// A later turn driven from the driver must stream live into ALL viewers exactly once.
+/// The leader and the viewers must survive the spawning client's exit.
+/// NOT a superset of `leader_two_clients_shared_session`, so that test must not be deleted as redundant.
+/// Only it drives a turn from a viewer back to the driver, and only it checks that every turn of a multi-turn scrollback appears exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 #[ignore = "PTY e2e; run with cargo test -p xai-grok-pager --test leader_pty_e2e -- --ignored --test-threads=1"]
 async fn leader_n_clients_shared_session() {
-    // N = 1 driver + VIEWERS viewers; bump to scale the live fan-out. Keep N
-    // small: worker_threads above and the per-viewer survival pump below are
-    // sized for it — raise them together if you scale VIEWERS up.
+    // One driver plus VIEWERS viewers; bump to scale the live fan-out
+    // Keep it small: worker_threads above and the per-viewer survival pump below are sized for it, so raise them together if you scale VIEWERS up
     const VIEWERS: usize = 2;
 
     let cluster = LeaderCluster::start(DEFAULT_ROWS, DEFAULT_COLS)
@@ -37,9 +32,8 @@ async fn leader_n_clients_shared_session() {
     a.wait_for_text(&turn_sentinel(1), STREAM_TIMEOUT)
         .expect("driver turn 1");
 
-    // Every viewer attaches through the shared leader and must replay the
-    // driver's transcript exactly once (duplicated replay or an empty pane
-    // both fail).
+    // Every viewer attaches through the shared leader and must replay the driver's transcript exactly once
+    // A duplicated replay or an empty pane both fail
     let mut viewers: Vec<PtyHarness> = Vec::new();
     for i in 0..VIEWERS {
         let mut v = cluster
@@ -47,9 +41,8 @@ async fn leader_n_clients_shared_session() {
             .unwrap_or_else(|e| panic!("spawn viewer {i}: {e}"));
         v.wait_for_text(&turn_sentinel(1), LEADER_TIMEOUT)
             .unwrap_or_else(|e| panic!("viewer {i} replayed driver's transcript: {e}"));
-        // Settle the PTY before counting: wait_for_text returns on first match,
-        // so a duplicate replay arriving in a later batch would slip past an
-        // immediate count. A pump can only reveal a duplicate, never hide one.
+        // Settle the PTY before counting: wait_for_text returns on first match, so a duplicate in a later batch slips past an immediate count
+        // A pump can only reveal a duplicate, never hide one
         v.update(Duration::from_millis(500));
         let screen = v.screen_contents();
         assert_eq!(
@@ -70,8 +63,7 @@ async fn leader_n_clients_shared_session() {
     for (i, v) in viewers.iter_mut().enumerate() {
         v.wait_for_text(&turn_sentinel(2), STREAM_TIMEOUT)
             .unwrap_or_else(|e| panic!("viewer {i} received driver's live turn: {e}"));
-        // Same settle-then-count guard as the replay check, now for the LIVE
-        // stream: a duplicated fan-out frame must fail too.
+        // Same settle-then-count guard as the replay check, now for the LIVE stream: a duplicated fan-out frame must fail too
         v.update(Duration::from_millis(500));
         let screen = v.screen_contents();
         assert_eq!(
@@ -81,8 +73,7 @@ async fn leader_n_clients_shared_session() {
         );
     }
 
-    // The spawning client's exit must not take the leader (or the viewers)
-    // down: each viewer keeps its transcript and stays attached.
+    // The spawning client's exit must not take the leader (or the viewers) down: each viewer keeps its transcript and stays attached
     drop(a);
     for (i, v) in viewers.iter_mut().enumerate() {
         v.update(Duration::from_secs(3));

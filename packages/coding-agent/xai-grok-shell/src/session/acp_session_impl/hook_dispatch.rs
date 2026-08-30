@@ -34,7 +34,8 @@ pub(super) fn cancellation_category_to_wire_string(
 
 /// Map shell-internal `ToolOutcome` to the hub protocol's `ToolCallOutcome`.
 ///
-/// The shell tracks 9 granular outcome variants; the hub protocol has 3:
+/// The shell's granular `ToolOutcome` variants collapse to the hub protocol's
+/// three:
 /// - `Success` → tool executed and returned a result
 /// - `Error` → tool failed to execute or was invalid
 /// - `Cancelled` → tool never ran (permission, doom-loop, hook, followup)
@@ -192,6 +193,18 @@ impl SessionActor {
             runs,
         })
         .await;
+
+        for r in results {
+            let system_message = match r {
+                HookRunResult::Success { system_message, .. }
+                | HookRunResult::Blocked { system_message, .. }
+                | HookRunResult::Failed { system_message, .. } => system_message.as_deref(),
+                HookRunResult::Skipped { .. } => None,
+            };
+            if let Some(message) = system_message.map(str::trim).filter(|m| !m.is_empty()) {
+                self.send_hook_annotation(message).await;
+            }
+        }
     }
 
     /// Returns the resolved workspace root for hook envelopes.

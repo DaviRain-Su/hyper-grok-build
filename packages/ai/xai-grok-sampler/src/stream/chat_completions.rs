@@ -256,7 +256,7 @@ pub fn stream_chat_completions<'a>(
 
         // Tool calls override the stop reason, even an explicit `length`.
         // NOTE: opposite precedence from the Messages backend, where Length
-        // wins so `drive_l2` can refuse to salvage a possibly
+        // wins so the `LengthPolicy` gate can refuse a possibly
         // argument-truncated trailing call. Load-bearing; don't "fix" here.
         if !tool_calls.is_empty() {
             if finish_reason == Some(StopReason::Length) {

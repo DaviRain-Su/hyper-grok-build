@@ -383,6 +383,28 @@ fn managed_config_stale_when_served_artifact_deleted() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Empty/whitespace placeholders are not served artifacts (write-deny first-run slots).
+#[test]
+fn cache_missing_required_artifact_treats_empty_placeholder_as_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let cache = ManagedConfigCache {
+        had_requirements: true,
+        had_managed_config: true,
+        ..Default::default()
+    };
+    assert!(cache_missing_required_artifact(&cache, home));
+    std::fs::write(home.join("requirements.toml"), "").unwrap();
+    std::fs::write(home.join("managed_config.toml"), "  \n").unwrap();
+    assert!(
+        cache_missing_required_artifact(&cache, home),
+        "empty/whitespace placeholders must not count as served artifacts"
+    );
+    std::fs::write(home.join("requirements.toml"), "[features]\n").unwrap();
+    std::fs::write(home.join("managed_config.toml"), "model = \"x\"\n").unwrap();
+    assert!(!cache_missing_required_artifact(&cache, home));
+}
+
 /// A config-less principal that served nothing is never misread as stale.
 #[test]
 fn managed_config_not_stale_when_nothing_served() {

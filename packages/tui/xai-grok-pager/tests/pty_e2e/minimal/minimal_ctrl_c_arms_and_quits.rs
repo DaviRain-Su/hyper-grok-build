@@ -2,11 +2,10 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// Minimal mode has no shortcuts bar, so the double-press quit confirmation must
-/// surface under the prompt instead: a first Ctrl+C on an empty, idle prompt
-/// arms the quit confirmation and shows "press Ctrl+c again to quit", and a
-/// second Ctrl+C within the window exits. (Ctrl+Q / Ctrl+D arm the same way; the
-/// hint is rendered by `minimal::live::render_exit_hint`.)
+/// Minimal mode has no shortcuts bar, so the double-press quit confirmation must show under the prompt instead.
+/// A first Ctrl+C on an empty, idle prompt arms the quit confirmation and shows "press Ctrl+c again to quit".
+/// A second Ctrl+C within the window exits.
+/// (Ctrl+Q / Ctrl+D arm the same way; the hint is rendered by `minimal::live::render_exit_hint`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_ctrl_c_arms_and_quits() {
@@ -14,7 +13,7 @@ async fn minimal_ctrl_c_arms_and_quits() {
     let mut harness = spawn_minimal(&content);
     wait_minimal_ready(&mut harness);
 
-    // First Ctrl+C (CSI legacy ETX). Arms quit + shows the hint under the prompt.
+    // First Ctrl+C (CSI legacy ETX): arms quit and shows the hint under the prompt
     harness.inject_keys(b"\x03").expect("inject Ctrl+C");
     harness
         .wait_for_text("again to quit", Duration::from_secs(5))

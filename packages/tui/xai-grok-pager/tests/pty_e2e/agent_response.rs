@@ -2,10 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 2. **Agent response.**
 /// Submitting a prompt produces the mock server's response text on screen.
-/// This is the full loop: pager → shell agent → mock inference → streamed
-/// chunks → pager render.
+/// This is the full loop: the pager sends to the shell agent, which hits mock inference, streams chunks back, and the pager renders them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn agent_response() {

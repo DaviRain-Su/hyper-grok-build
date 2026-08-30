@@ -2,9 +2,8 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// CLI `--minimal` / `--fullscreen` must not write `[ui] screen_mode` to
-/// config.toml. Mode flags are session-scoped; only a manual config.toml edit
-/// should make a mode sticky across plain `grok` launches.
+/// CLI `--minimal` / `--fullscreen` must not write `[ui] screen_mode` to config.toml.
+/// Mode flags last for one session; only a manual config.toml edit should make a mode stick across plain `grok` launches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_cli_screen_mode_does_not_persist() {
@@ -15,12 +14,11 @@ async fn minimal_cli_screen_mode_does_not_persist() {
     let project = tempfile::tempdir().expect("create project dir");
     std::fs::create_dir_all(project.path().join(".git")).expect("create .git");
 
-    // First run: explicit `--minimal` — must open minimal but not write config.
+    // First run: explicit `--minimal` must open minimal but not write config
     let mut first = spawn_minimal_in_dir(&content, DEFAULT_ROWS, DEFAULT_COLS, &[], project.path());
     wait_minimal_ready(&mut first);
 
-    // Give any fire-and-forget persist path time to have written if it still
-    // existed, pumping the PTY so the pager never blocks on a full buffer.
+    // If a background config write still existed it gets time to land here; pump the PTY so the pager never blocks on a full buffer
     let config_path = content.home().join(".grok").join("config.toml");
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
@@ -33,8 +31,7 @@ async fn minimal_cli_screen_mode_does_not_persist() {
     );
     quit_minimal(&mut first);
 
-    // Second run: NO mode flag. Without a manual config preference the plain
-    // launch must open fullscreen (welcome screen), not minimal.
+    // Second run: no mode flag. Without a manual config preference the plain launch must open fullscreen (welcome screen), not minimal.
     let binary = pager_binary().expect("resolve pager binary");
     let mut second = PtyHarness::spawn_with_content_in_dir(
         &binary,

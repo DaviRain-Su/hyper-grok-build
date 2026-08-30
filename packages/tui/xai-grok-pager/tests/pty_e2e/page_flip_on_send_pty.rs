@@ -18,7 +18,7 @@ fn tall_first_response() -> String {
     s
 }
 
-/// Welcome → tall turn 1 → submit turn 2 while holding turn 2 open.
+/// Welcome, then a tall turn 1, then submit turn 2 while holding turn 2 open.
 async fn drive_to_second_send(content: &ContentController) -> (PtyHarness, AgentTurnExpectation) {
     let mut first_turn =
         content.expect_agent_turn("page-flip tall first turn", tall_first_response());

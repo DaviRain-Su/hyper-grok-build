@@ -1,17 +1,8 @@
 //! Tool usage statistics aggregation for the pager.
 //!
-//! This module provides:
-//!
-//! - [`ToolCategory`] — categories for tool calls (Execute, Read, Edit, Search, ListDir, Other)
-//! - [`BlockStatus`] — status of a tool block (Success, Failed, Running)
-//! - [`CategoryStats`] — per-category statistics (counts, failures, positions)
-//! - [`ToolUsageStats`] — aggregated stats with scope (Session / SelectedTurn)
-//!
-//! ## Phase 1 MVP
-//!
 //! Stats are computed over visible scrollback blocks only (ToolCallBlock variants).
 //! Thinking blocks and non-tool RenderBlock variants are excluded.
-//! Time tracking is deferred to Phase 2.
+//! Time tracking is deferred.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
@@ -24,11 +15,10 @@ use crate::scrollback::state::ScrollbackState;
 use crate::theme::Theme;
 
 // ---------------------------------------------------------------------------
-// ToolCategory — categories derived from ToolCallBlock variants only
+// ToolCategory: categories derived from ToolCallBlock variants only
 // ---------------------------------------------------------------------------
 
 /// Block category for stats aggregation.
-/// Maps scrollback block variants to semantic groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ToolCategory {
     /// Shell command execution (run_terminal_cmd, bash).
@@ -56,7 +46,6 @@ pub enum ToolCategory {
 }
 
 impl ToolCategory {
-    /// Display name for UI.
     pub fn label(&self) -> &'static str {
         match self {
             Self::Execute => "Execute",
@@ -90,7 +79,6 @@ impl ToolCategory {
         }
     }
 
-    /// Category color from theme.
     pub fn color(&self, theme: &Theme) -> Color {
         match self {
             Self::Execute => theme.command,
@@ -107,8 +95,6 @@ impl ToolCategory {
         }
     }
 
-    /// Map from ToolCallBlock to category.
-    /// Only ToolCallBlock variants are supported; other blocks are excluded.
     pub fn from_tool_block(tc: &ToolCallBlock) -> Self {
         match tc {
             ToolCallBlock::Execute(_) => Self::Execute,
@@ -129,7 +115,7 @@ impl ToolCategory {
 }
 
 // ---------------------------------------------------------------------------
-// BlockStatus — status dimension (not category)
+// BlockStatus: status dimension (not category)
 // ---------------------------------------------------------------------------
 
 /// Status of a tool block at aggregation time.
@@ -149,34 +135,28 @@ pub enum BlockStatus {
 /// A single entry in the activity lineage (ordered timeline).
 #[derive(Debug, Clone)]
 pub struct LineageEntry {
-    /// What kind of block this is.
     pub category: ToolCategory,
     /// Duration in ms (None if unknown/pre-completed).
     pub duration_ms: Option<i64>,
-    /// Whether this block is still running.
     pub running: bool,
 }
 
 // ---------------------------------------------------------------------------
-// CategoryStats — per-category aggregation
+// CategoryStats: per-category aggregation
 // ---------------------------------------------------------------------------
 
-/// Statistics for a single tool category.
 #[derive(Debug, Clone, Default)]
 pub struct CategoryStats {
     /// Number of operations in this category (all statuses).
     pub count: usize,
-    /// Count by status.
     pub by_status: HashMap<BlockStatus, usize>,
-    /// Sequence positions where this category appeared.
-    /// Used for building the sequence strip.
+    /// Scrollback entry indices where this category appeared, used to build the sequence strip.
     pub sequence_positions: Vec<usize>,
-    /// Total elapsed time in ms for this category (Phase 2).
+    /// Total elapsed time in ms for this category.
     pub total_time_ms: i64,
 }
 
 impl CategoryStats {
-    /// Number of failed operations.
     pub fn failed_count(&self) -> usize {
         *self.by_status.get(&BlockStatus::Failed).unwrap_or(&0)
     }
@@ -186,12 +166,10 @@ impl CategoryStats {
         *self.by_status.get(&BlockStatus::Unconfirmed).unwrap_or(&0)
     }
 
-    /// Number of running operations.
     pub fn running_count(&self) -> usize {
         *self.by_status.get(&BlockStatus::Running).unwrap_or(&0)
     }
 
-    /// Percentage of total operations.
     pub fn percent_of(&self, total: usize) -> f64 {
         if total == 0 {
             return 0.0;
@@ -199,7 +177,6 @@ impl CategoryStats {
         (self.count as f64 / total as f64) * 100.0
     }
 
-    /// Format total time as human-readable string (Phase 2).
     pub fn format_time(&self) -> String {
         if self.total_time_ms == 0 {
             return "-".to_string();
@@ -219,34 +196,29 @@ impl CategoryStats {
 }
 
 // ---------------------------------------------------------------------------
-// StatsScope — aggregation scope
+// StatsScope: aggregation scope
 // ---------------------------------------------------------------------------
 
-/// Aggregation scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StatsScope {
     /// All visible scrollback entries for the current agent session.
     #[default]
     Session,
-    /// The turn returned by `ScrollbackState::current_turn()`,
-    /// with fallback to the latest turn if no current turn exists.
+    /// The turn returned by `ScrollbackState::current_turn()`, with fallback to the latest turn if no current turn exists.
     SelectedTurn,
 }
 
 // ---------------------------------------------------------------------------
-// ToolUsageStats — full aggregation
+// ToolUsageStats: full aggregation
 // ---------------------------------------------------------------------------
 
-/// Aggregated tool usage statistics.
 #[derive(Debug, Clone)]
 pub struct ToolUsageStats {
     /// Per-category stats (includes Thinking and Message).
     pub categories: BTreeMap<ToolCategory, CategoryStats>,
     /// Total operations across all categories.
     pub total_operations: usize,
-    /// When stats were last computed.
     pub computed_at: Instant,
-    /// Scope of aggregation.
     pub scope: StatsScope,
     /// Ordered timeline of all blocks with category and duration.
     pub lineage: Vec<LineageEntry>,
@@ -271,9 +243,7 @@ impl ToolUsageStats {
         Self::from_range(scrollback, 0..n, StatsScope::Session)
     }
 
-    /// Aggregate stats from a specific turn.
-    ///
-    /// If turn_index is out of range, returns empty stats.
+    /// Aggregate stats from a specific turn; an out-of-range `turn_index` returns empty stats.
     pub fn from_turn(scrollback: &ScrollbackState, turn_index: usize) -> Self {
         match scrollback.turn(turn_index) {
             Some(turn) => Self::from_range(scrollback, turn.range(), StatsScope::SelectedTurn),
@@ -285,11 +255,8 @@ impl ToolUsageStats {
         }
     }
 
-    /// Aggregate stats from selected turn if any, otherwise latest turn.
-    ///
-    /// Returns empty stats if no turns exist.
+    /// Aggregate stats from the selected turn if any, otherwise the latest turn; empty stats if no turns exist.
     pub fn from_selected_or_latest(scrollback: &ScrollbackState) -> Self {
-        // Prefer selected turn; fall back to latest turn.
         let turn_idx = scrollback.current_turn().or_else(|| {
             let count = scrollback.turns().len();
             if count > 0 { Some(count - 1) } else { None }
@@ -306,10 +273,6 @@ impl ToolUsageStats {
     }
 
     /// Core aggregation logic over a range of entry indices.
-    ///
-    /// Uses real ScrollbackState/Entry APIs:
-    /// - scrollback.len() / scrollback.entry(i)
-    /// - scrollback.turns() / scrollback.turn(i) / scrollback.current_turn()
     fn from_range(scrollback: &ScrollbackState, range: Range<usize>, scope: StatsScope) -> Self {
         let mut stats = ToolUsageStats {
             scope,
@@ -418,7 +381,6 @@ impl ToolUsageStats {
         }
     }
 
-    /// Get elapsed time from a tool block (Phase 2).
     fn tool_block_elapsed_ms(tc: &ToolCallBlock) -> Option<i64> {
         match tc {
             ToolCallBlock::Execute(b) => b.elapsed_ms(),
@@ -473,12 +435,6 @@ mod tests {
         };
         assert_eq!(stats.percent_of(100), 10.0);
         assert_eq!(stats.percent_of(0), 0.0);
-    }
-
-    #[test]
-    fn test_block_status_default() {
-        let status = BlockStatus::default();
-        assert_eq!(status, BlockStatus::Success);
     }
 
     #[test]
@@ -552,7 +508,7 @@ mod tests {
     fn test_from_scrollback_failed_blocks() {
         let mut scrollback = ScrollbackState::new();
 
-        // Push execute blocks - one with error, one without
+        // Push execute blocks: one with error, one without
         let mut success_block = ExecuteToolCallBlock::new("echo hello");
         success_block.finish();
         scrollback.push_block(RenderBlock::ToolCall(ToolCallBlock::Execute(success_block)));
@@ -591,8 +547,7 @@ mod tests {
 
         let stats = ToolUsageStats::from_selected_or_latest(&scrollback);
 
-        // No turns exist, so it falls back to latest turn (which is empty)
-        // or returns empty stats
+        // No turns exist, so it falls back to the latest turn (which is empty) or returns empty stats
         assert_eq!(stats.scope, StatsScope::SelectedTurn);
     }
 
@@ -615,7 +570,6 @@ mod tests {
         let stats = ToolUsageStats::from_selected_or_latest(&scrollback);
 
         assert_eq!(stats.scope, StatsScope::SelectedTurn);
-        // Should have aggregated the tool blocks in the turn
         // Verify it computed without panicking
         let _ = stats.total_operations;
     }

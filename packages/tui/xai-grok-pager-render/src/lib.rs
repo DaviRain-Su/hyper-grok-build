@@ -1,12 +1,13 @@
 pub mod appearance;
 pub mod clipboard;
-pub mod gboom;
 pub mod glyphs;
 pub mod host;
+pub mod input;
 pub mod link_opener;
 pub mod modal_window_state;
 pub mod prompt_images;
 pub mod render;
+pub mod search;
 pub mod syntax;
 pub mod terminal;
 pub mod theme;

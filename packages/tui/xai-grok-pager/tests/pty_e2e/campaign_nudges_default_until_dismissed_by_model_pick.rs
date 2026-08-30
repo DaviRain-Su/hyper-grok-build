@@ -2,16 +2,13 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// **Campaign soft default-model nudge — overrides the config default for new
-/// sessions, and an explicit `/model` pick dismisses it (the user wins).**
+/// **A campaign nudges a soft default model that overrides the config default for new sessions; an explicit `/model` pick dismisses it (the user wins).**
 ///
-/// - boot with a `[models].default` in config.toml plus a campaign (via the
-///   override env, the remote-equivalent injection) nudging a *different* model
-///   → the welcome screen shows the **campaign** model;
-/// - start a session and pick the config model via `/model` → the campaign id is
-///   recorded dismissed in `campaigns_state.json`;
-/// - reboot with the *same* campaign env → the welcome shows the **config**
-///   model, proving the dismissal persisted (an explicit pick beats the nudge).
+/// - Boot with a `[models].default` in config.toml plus a campaign nudging a *different* model (the override env stands in for the remote feed).
+///   The welcome screen shows the **campaign** model.
+/// - Start a session and pick the config model via `/model`; the campaign id is recorded dismissed in `campaigns_state.json`.
+/// - Reboot with the *same* campaign env; the welcome shows the **config** model.
+///   This proves the dismissal persisted (an explicit pick beats the nudge).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn campaign_nudges_default_until_dismissed_by_model_pick() {
@@ -36,7 +33,7 @@ async fn campaign_nudges_default_until_dismissed_by_model_pick() {
     )
     .expect("write config.toml");
 
-    // The campaign (remote-equivalent) nudges new sessions to CAMPAIGN_MODEL.
+    // The env var stands in for a remotely served campaign; it nudges new sessions to CAMPAIGN_MODEL
     let campaign_env = (
         "GROK_CAMPAIGNS_OVERRIDE".to_string(),
         format!(r#"[{{"id":"{CAMPAIGN_ID}","models":{{"default":"{CAMPAIGN_MODEL}"}}}}]"#),
@@ -78,7 +75,7 @@ async fn campaign_nudges_default_until_dismissed_by_model_pick() {
         h.quit().expect("clean quit");
     }
 
-    // ── Phase 2: a session + explicit `/model` pick dismisses the campaign. ──
+    // ── Phase 2: a session and an explicit `/model` pick dismiss the campaign. ──
     {
         let mut h = spawn(&campaign_env);
         h.wait_for_text(CAMPAIGN_MODEL, WELCOME_TIMEOUT)
@@ -87,7 +84,7 @@ async fn campaign_nudges_default_until_dismissed_by_model_pick() {
             .expect("submit prompt");
         h.wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
             .expect("response rendered");
-        // Explicit pick of the config model -> persists default + dismisses campaign.
+        // Picking the config model explicitly persists the default and dismisses the campaign
         h.inject_keys(format!("/model {CONFIG_MODEL}\r").as_bytes())
             .expect("pick model");
 
@@ -111,7 +108,7 @@ async fn campaign_nudges_default_until_dismissed_by_model_pick() {
         h.quit().expect("clean quit");
     }
 
-    // ── Phase 3: reboot with the SAME campaign env -> the config model wins. ──
+    // ── Phase 3: reboot with the SAME campaign env; the config model wins. ──
     {
         let mut h = spawn(&campaign_env);
         h.wait_for_text(CONFIG_MODEL, WELCOME_TIMEOUT)

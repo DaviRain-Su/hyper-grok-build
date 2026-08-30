@@ -1,49 +1,41 @@
 //! Subagent role and persona configuration types.
 //!
-//! These are the canonical definitions for `SubagentRole`, `SubagentPersona`,
-//! and `PersonaIOField`. The shell re-exports them via
-//! `xai_grok_shell::config::{SubagentRole, SubagentPersona, PersonaIOField}`.
+//! These are the canonical definitions for `SubagentRole`, `SubagentPersona`, and `PersonaIOField`.
+//! The shell re-exports them via `xai_grok_shell::config::{SubagentRole, SubagentPersona, PersonaIOField}`.
 //!
 //! Methods that remain in `xai-grok-shell` (on `SubagentsConfig`):
-//! - `discover_personas()` / `discover_roles()` — filesystem discovery
-//!   coupled to the shell's config resolution pipeline.
-//! - `resolve()` — config layering (CLI > env > TOML > remote) is
-//!   shell-specific. This crate receives already-resolved maps.
+//! - `discover_personas()` / `discover_roles()`: filesystem discovery coupled to how the shell resolves its config.
+//! - `resolve()`: config layering (CLI > env > TOML > remote) is shell-specific; this crate receives already-resolved maps.
 
 use std::path::PathBuf;
 use xai_grok_tools::implementations::skills::discovery::extract_first_paragraph;
-use xai_tool_types::SubagentReasoningEffort;
 
 use serde::Deserialize;
 
 /// A declarative subagent role definition from config.
 ///
-/// Roles provide named presets that callers can reference via the
-/// `subagent_type` field in the task tool. Each role can specify
-/// a default capability mode, model override, and custom prompt.
+/// Roles provide named presets that callers can reference via the `subagent_type` field in the task tool.
+/// Each role can specify a default capability mode, model override, and custom prompt.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SubagentRole {
     /// Human-readable description of what this role does.
     pub description: String,
-    /// Capability ceiling for agents using this role.
+    /// Default capability mode for agents using this role.
     /// One of: "read-only", "read-write", "execute", "all".
-    /// Not a model-facing spawn argument; `general-purpose` stays `all`.
-    /// A per-spawn `capability_mode` can narrow this, but cannot widen it.
+    /// This is a config default, not an argument the model passes at spawn; `general-purpose` stays `all`.
     #[serde(default)]
     pub default_capability_mode: Option<String>,
-    /// Model override for this role. If set, agents using this role
-    /// default to this model unless the spawn-time `model` override
-    /// is provided.
+    /// Model override for this role.
+    /// If set, agents using this role default to this model unless the spawn-time `model` override is provided.
     #[serde(default)]
     pub model: Option<String>,
-    /// Default reasoning effort for this role.
+    /// Default reasoning effort for this role (e.g. "low", "medium", "high").
     /// Can be overridden per-spawn via `reasoning_effort` in the task tool.
     #[serde(default)]
-    pub reasoning_effort: Option<SubagentReasoningEffort>,
+    pub reasoning_effort: Option<String>,
     /// Path to a prompt/instruction file (relative to workspace root).
-    /// Loaded at spawn time and prepended to the child's prompt as a
-    /// `<role-instructions>` block.
+    /// Content is loaded at spawn time and prepended to the child's prompt as a `<role-instructions>` block.
     #[serde(default)]
     pub prompt_file: Option<String>,
     /// Default isolation mode ("none" or "worktree").
@@ -58,26 +50,25 @@ pub struct SubagentRole {
 /// A named persona/SOUL definition controlling tone, style, and behavior.
 ///
 /// Personas are referenced by name via the `persona` field in the task tool.
-/// Their instructions are prepended to the child's prompt as a `<persona>`
-/// XML block.
+/// Their instructions are prepended to the child's prompt as a `<persona>` XML block.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SubagentPersona {
     /// Inline instruction text applied as a persona layer.
     pub instructions: Option<String>,
     /// Optional short description shown in persona summaries.
-    /// Falls back to first-paragraph extraction from `instructions`.
+    /// An empty or missing value falls back to the first paragraph of `instructions`.
     pub description: Option<String>,
     /// Path to an instruction file (relative to workspace root).
     /// Content is loaded at spawn time and merged with `instructions`.
     /// If both are set, `instructions` is prepended before file content.
     pub instructions_file: Option<String>,
-    /// Declared inputs this persona expects. The parent agent reads these
-    /// to know what file paths or context to provide in the prompt.
+    /// Declared inputs this persona expects.
+    /// The parent agent reads these to know what file paths or context to provide in the prompt.
     #[serde(default)]
     pub inputs: Vec<PersonaIOField>,
-    /// Declared outputs this persona produces. The parent agent reads
-    /// these to know what artifacts to expect and pass to the next agent.
+    /// Declared outputs this persona produces.
+    /// The parent agent reads these to know what artifacts to expect and pass to the next agent.
     #[serde(default)]
     pub outputs: Vec<PersonaIOField>,
     /// Default isolation mode when this persona is used.
@@ -86,9 +77,9 @@ pub struct SubagentPersona {
     /// Model override when this persona is used.
     #[serde(default)]
     pub model: Option<String>,
-    /// Default reasoning effort for this persona.
+    /// Default reasoning effort for this persona (e.g. "low", "medium", "high").
     #[serde(default)]
-    pub reasoning_effort: Option<SubagentReasoningEffort>,
+    pub reasoning_effort: Option<String>,
     /// Base directory for resolving relative file references.
     /// Set to the parent dir of the source `.toml` file during discovery.
     /// When `None`, relative paths resolve against the workspace cwd.
@@ -102,9 +93,7 @@ pub struct SubagentPersona {
 
 /// A declared input or output for a persona.
 ///
-/// Enables the parent agent to discover what a persona needs (inputs)
-/// and what it produces (outputs) without hardcoded knowledge of the
-/// persona's protocol.
+/// Enables the parent agent to discover what a persona needs (inputs) and produces (outputs) without hardcoding the persona's protocol.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersonaIOField {
@@ -127,8 +116,7 @@ impl PersonaIOField {
 }
 
 impl SubagentPersona {
-    /// Render a human-readable summary of this persona's IO contract
-    /// for inclusion in the task tool description.
+    /// Render a human-readable summary of this persona's IO contract for inclusion in the task tool description.
     pub fn render_io_summary(&self, name: &str) -> String {
         let fallback;
         let desc = if let Some(d) = self.description.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -200,7 +188,7 @@ default_isolation = "worktree"
         assert_eq!(role.description, "Research agent");
         assert_eq!(role.default_capability_mode.as_deref(), Some("read-only"));
         assert_eq!(role.model.as_deref(), Some("grok-3"));
-        assert_eq!(role.reasoning_effort, Some(SubagentReasoningEffort::High));
+        assert_eq!(role.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(
             role.prompt_file.as_deref(),
             Some(".grok/prompts/researcher.md")
@@ -250,7 +238,7 @@ description = "Path to write the summary"
             Some(".grok/personas/concise.md")
         );
         assert_eq!(persona.model.as_deref(), Some("grok-3-fast"));
-        assert_eq!(persona.reasoning_effort, Some(SubagentReasoningEffort::Low));
+        assert_eq!(persona.reasoning_effort.as_deref(), Some("low"));
         assert_eq!(persona.inputs.len(), 1);
         assert_eq!(persona.inputs[0].name, "review_file");
         assert!(persona.inputs[0].required);

@@ -1,8 +1,7 @@
 //! Bridge a leader IPC connection into an `AcpClientChannel`.
 //!
-//! Adapts the leader's raw JSON string channels into the typed ACP channel
-//! interface, reusing `ClientSideConnection` from `agent_client_protocol`
-//! for JSON-RPC ser/deser.
+//! Adapts the leader's raw JSON string channels into the typed ACP channel interface.
+//! Reuses `ClientSideConnection` from `agent_client_protocol` for JSON-RPC ser/deser.
 
 use std::sync::Arc;
 use std::thread;
@@ -32,25 +31,21 @@ pub struct LeaderBridge {
 #[derive(Debug, PartialEq, Eq)]
 enum ForwardOutcome {
     Sent,
-    /// The connection the line was composed for died and a new one replaced
-    /// it; the line was dropped.
+    /// The connection the line was composed for died and a new one replaced it; the line was dropped.
     DroppedStale,
     Cancelled,
 }
 
 /// Send one outbound line to the (swappable) leader tx.
 ///
-/// A failed send means the connection is dead; the line is held — blocking
-/// the lines queued behind it — until the reader task installs a fresh tx,
-/// then dropped. Replaying it would be worse: a stale `session/load`
-/// re-delivered on the new connection triggers a second full replay into the
-/// same reload window (duplicated transcript); the reconnect re-init
-/// re-establishes state explicitly instead.
+/// A failed send means the connection is dead.
+/// The line is held (blocking the lines queued behind it) until the reader task installs a fresh tx, then dropped.
+/// Replaying it would be worse: a stale `session/load` re-delivered on the new connection triggers a second full replay into the same reload window.
+/// That duplicates the transcript; the reconnect re-init re-establishes state explicitly instead.
 ///
-/// Scoping is by FIRST OBSERVED send failure, a best-effort heuristic: a
-/// pre-disconnect line whose first send happens after the swap never fails
-/// and goes out on the new connection, and lines queued behind a held one
-/// are forwarded post-swap regardless of when they were composed.
+/// Scoping is by FIRST OBSERVED send failure, a best-effort heuristic.
+/// A pre-disconnect line whose first send happens after the swap never fails and goes out on the new connection.
+/// Lines queued behind a held one are forwarded post-swap regardless of when they were composed.
 async fn forward_outbound_line(
     leader_tx: &TokioMutex<mpsc::UnboundedSender<String>>,
     cancel: &CancellationToken,
@@ -84,9 +79,8 @@ async fn forward_outbound_line(
 
 /// Bridge a `LeaderConnection` into an `AcpClientChannel`.
 ///
-/// When `reconnector` is `Some`, the bridge automatically attempts to reconnect
-/// on leader disconnect using the given `policy`. On reconnection failure (or if
-/// `reconnector` is `None`), the cancel token fires so the caller can exit.
+/// When `reconnector` is `Some`, the bridge automatically attempts to reconnect on leader disconnect using the given `policy`.
+/// On reconnection failure (or if `reconnector` is `None`), the cancel token fires so the caller can exit.
 pub fn bridge_leader_connection(
     conn: LeaderConnection,
     cancel: CancellationToken,
@@ -99,9 +93,8 @@ pub fn bridge_leader_connection(
 
 /// Bridge raw IPC channels into an `AcpClientChannel`.
 ///
-/// Spawns a dedicated thread with a `LocalSet` because `ClientSideConnection`
-/// uses `spawn_local` internally. On leader disconnect, reconnects via
-/// `reconnector` (if provided) or fires the cancel token.
+/// Spawns a dedicated thread with a `LocalSet` because `ClientSideConnection` uses `spawn_local` internally.
+/// On leader disconnect, reconnects via `reconnector` (if provided) or fires the cancel token.
 pub(crate) fn bridge_channels(
     leader_tx: mpsc::UnboundedSender<String>,
     leader_rx: mpsc::UnboundedReceiver<String>,
@@ -124,7 +117,7 @@ pub(crate) fn bridge_channels(
             local.block_on(&rt, async move {
                 let leader_tx_shared = Arc::new(TokioMutex::new(leader_tx));
 
-                // Reader: leader IPC -> incoming simplex pipe -> ClientSideConnection
+                // Reader: forwards leader IPC lines into the incoming simplex pipe read by ClientSideConnection
                 let cancel_r = bridge_cancel.clone();
                 let leader_tx_for_reader = leader_tx_shared.clone();
                 let reader_task = tokio::task::spawn_local(async move {
@@ -153,8 +146,7 @@ pub(crate) fn bridge_channels(
                                                     tracing::info!("Reconnected to leader IPC");
                                                     leader_rx = new_rx;
                                                     *leader_tx_for_reader.lock().await = new_tx;
-                                                    // Swap first, notify second — see
-                                                    // `LeaderReconnector::notify_connected`.
+                                                    // Swap first, notify second; see `LeaderReconnector::notify_connected`
                                                     reconnector.notify_connected();
                                                     continue;
                                                 }
@@ -175,7 +167,7 @@ pub(crate) fn bridge_channels(
                     }
                 });
 
-                // Writer: ClientSideConnection -> outgoing simplex pipe -> leader IPC
+                // Writer: forwards ClientSideConnection output from the outgoing simplex pipe to leader IPC
                 let cancel_w = bridge_cancel.clone();
                 let leader_tx_for_writer = leader_tx_shared;
                 let writer_task = tokio::task::spawn_local(async move {
@@ -204,12 +196,9 @@ pub(crate) fn bridge_channels(
                                             ForwardOutcome::Sent => {}
                                             ForwardOutcome::DroppedStale => {
                                                 // Unified-log marker: this drop is deliberate
-                                                // (replaying a stale `session/load` would
-                                                // double-replay the transcript), but it can eat
-                                                // one-shot notifications like `session/cancel`, a
-                                                // known stuck-cancel failure mode. Record WHAT was
-                                                // dropped so the next
-                                                // investigation sees it in the unified log.
+                                                // Replaying a stale `session/load` would double-replay the transcript
+                                                // But the drop can eat one-shot notifications like `session/cancel`, a known stuck-cancel failure
+                                                // Record WHAT was dropped so the next investigation sees it in the unified log
                                                 let method = serde_json::from_str::<serde_json::Value>(pending)
                                                     .ok()
                                                     .and_then(|j| {
@@ -283,12 +272,10 @@ mod tests {
         assert_eq!(rx.recv().await.as_deref(), Some("hello"));
     }
 
-    /// Connection-scoped redelivery semantics: a line whose send failed is
-    /// HELD (blocking later lines) until the reader swaps in a fresh tx, then
-    /// DROPPED — neither discarded at first failure (silent outbound loss)
-    /// nor replayed onto the new connection (a stale `session/load` would
-    /// double-replay the transcript). Lines queued behind it flow onto the
-    /// new connection.
+    /// A line whose send failed is HELD (blocking later lines) until the reader swaps in a fresh tx, then DROPPED.
+    /// It is neither discarded at first failure (silent outbound loss) nor replayed onto the new connection.
+    /// Replaying a stale `session/load` would double-replay the transcript.
+    /// Lines queued behind it flow onto the new connection.
     #[tokio::test]
     async fn forward_outbound_line_drops_stale_line_after_swap_and_sends_next() {
         let (dead_tx, dead_rx) = mpsc::unbounded_channel::<String>();
@@ -302,8 +289,7 @@ mod tests {
         let swapper_swapped = swapped.clone();
         let swapper = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            // Flag BEFORE the swap: a `DroppedStale` return implies the new
-            // tx was observed, which happens-after this store.
+            // Flag BEFORE the swap: a `DroppedStale` return implies the new tx was observed, which happens-after this store
             swapper_swapped.store(true, std::sync::atomic::Ordering::SeqCst);
             *swapper_shared.lock().await = new_tx;
         });
@@ -443,9 +429,8 @@ mod tests {
         drop(leader_outbound_rx);
 
         // Spawn a background task that pushes an outbound ACP request.
-        // acp_send blocks for a response that will never arrive (the outbound
-        // receiver is dropped), but the writer task should survive the failed
-        // send rather than breaking the simplex pipe.
+        // acp_send blocks for a response that will never arrive (the outbound receiver is dropped)
+        // The writer task should survive the failed send rather than breaking the simplex pipe
         let tx = bridge.channel.tx.clone();
         tokio::spawn(async move {
             let _ = acp_send(
@@ -462,8 +447,7 @@ mod tests {
         // Give the writer time to hit the send failure and sleep/retry.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-        // The bridge should still be alive — the writer must not have broken
-        // the pipe by exiting.
+        // The bridge should still be alive; the writer must not have broken the pipe by exiting
         assert!(
             !cancel.is_cancelled(),
             "writer should survive send failures (reader not disconnected yet)"

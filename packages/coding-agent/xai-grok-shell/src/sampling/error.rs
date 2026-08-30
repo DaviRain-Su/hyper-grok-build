@@ -7,6 +7,10 @@
 // Re-export everything from the standalone crate.
 pub use xai_grok_sampling_types::error::*;
 
+// The typed kind clients carry between the wire ingress parse and the copy
+// decision; re-exported so the pager shares the exact type.
+pub use xai_grok_sampler::SamplingErrorKind;
+
 use agent_client_protocol as acp;
 
 /// ACP error code for rate-limited requests (HTTP 429).
@@ -198,35 +202,105 @@ pub(crate) fn error_data_with_status(
     }
 }
 
-/// Terminal-failure `acp::Error.data`: max-tokens truncation carries an `error_kind` marker (the kind's stable `as_str` name); other kinds keep the legacy shape.
+/// `acp::Error.data` key of the typed terminal-error kind marker
+/// (stamped by [`terminal_error_data`]). Snake_case like its shipped `data`
+/// siblings (`http_status`); frozen wire format. The notification rails
+/// carry the kind under their own keys/fields (see
+/// `extensions::notification::PROMPT_COMPLETE_ERROR_KIND_KEY`).
+const ERROR_KIND_DATA_KEY: &str = "error_kind";
+
+/// Terminal-failure `acp::Error.data`. Only max-tokens truncation opts into
+/// the object shape with an `error_kind` marker; every other kind keeps the
+/// legacy string/status shape because old clients render `data` via
+/// `Display` and would show the raw JSON object otherwise.
 pub(crate) fn terminal_error_data(
     message: String,
     http_status: Option<u16>,
-    kind: xai_grok_sampler::SamplingErrorKind,
+    kind: SamplingErrorKind,
 ) -> serde_json::Value {
-    if kind != xai_grok_sampler::SamplingErrorKind::MaxTokensTruncation {
+    if kind != SamplingErrorKind::MaxTokensTruncation {
         return error_data_with_status(message, http_status);
     }
-    let mut data = serde_json::json!({ "message": message, "error_kind": kind.as_str() });
+    let mut data = serde_json::json!({ "message": message });
+    data[ERROR_KIND_DATA_KEY] = serde_json::json!(kind.as_str());
     if let Some(sc) = http_status {
         data["http_status"] = serde_json::json!(sc);
     }
     data
 }
 
+/// The raw `error_kind` marker string from `acp::Error.data`, unparsed — for
+/// readers with their own vocabulary (the pager maps an unknown kind to its
+/// `Other`, keeping it immune to text recovery).
+pub fn error_kind_str_from_error(err: &acp::Error) -> Option<&str> {
+    err.data.as_ref()?.get(ERROR_KIND_DATA_KEY)?.as_str()
+}
+
+/// Typed view of [`error_kind_str_from_error`] for the shell's own
+/// classification, where an unknown kind degrading to `None` (generic) is
+/// correct.
+pub fn error_kind_from_error(err: &acp::Error) -> Option<SamplingErrorKind> {
+    error_kind_str_from_error(err)?.parse().ok()
+}
+
 /// `turn_result.json` stop_reason for a failed turn: "MaxTokens" when the marker is present, else "Error" (matches the success path's `acp::StopReason` names).
 pub fn stop_reason_for_turn_error(err: &acp::Error) -> &'static str {
-    let is_max_tokens = err
-        .data
-        .as_ref()
-        .and_then(|d| d.get("error_kind"))
-        .and_then(|v| v.as_str())
-        .is_some_and(|k| k == xai_grok_sampler::SamplingErrorKind::MaxTokensTruncation.as_str());
-    if is_max_tokens { "MaxTokens" } else { "Error" }
+    match error_kind_from_error(err) {
+        Some(SamplingErrorKind::MaxTokensTruncation) => "MaxTokens",
+        _ => "Error",
+    }
 }
 
 fn error_message_from_data(data: &serde_json::Value) -> serde_json::Value {
     data.get("message").cloned().unwrap_or_else(|| data.clone())
+}
+
+/// Internal service names that upstream error bodies echo, rewritten to
+/// distinct sentence-friendly backend labels before display (a user paste
+/// keeps the failing hop). Shared by shell and pager so the redaction cannot
+/// drift; apply via [`rewrite_service_names`] (case-insensitive — no cased
+/// variants here). No replacement value may re-match a pattern (pinned by test).
+pub const SERVICE_NAME_REWRITES: &[(&str, &str)] = &[
+    ("cli-chat-proxy", "build backend"),
+    ("cli_chat_proxy", "build backend"),
+    ("inference-api", "inference backend"),
+    ("inference_api", "inference backend"),
+    ("research-api", "research backend"),
+    ("research_api", "research backend"),
+    ("grok-code-backend", "code backend"),
+    ("grok_code_backend", "code backend"),
+];
+
+/// Scrub every [`SERVICE_NAME_REWRITES`] entry out of `text`,
+/// ASCII-case-insensitively (upstream bodies title-case service names),
+/// keeping each replacement's own casing.
+pub fn rewrite_service_names(text: &str) -> String {
+    let mut result = text.to_owned();
+    for (pattern, replacement) in SERVICE_NAME_REWRITES {
+        result = replace_ascii_case_insensitive(&result, pattern, replacement);
+    }
+    result
+}
+
+/// ASCII-case-insensitive `replace`. Indices found on the lowercased copy map
+/// 1:1 onto `text`: `to_ascii_lowercase` never changes byte lengths.
+fn replace_ascii_case_insensitive(text: &str, pattern: &str, replacement: &str) -> String {
+    // An empty pattern would never advance `idx`; fail safe in release too.
+    if pattern.is_empty() {
+        return text.to_owned();
+    }
+    let lower_text = text.to_ascii_lowercase();
+    let lower_pattern = pattern.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut idx = 0;
+    while let Some(pos) = lower_text[idx..].find(&lower_pattern) {
+        let start = idx + pos;
+        out.push_str(&text[idx..start]);
+        out.push_str(replacement);
+        idx = start + pattern.len();
+    }
+    out.push_str(&text[idx..]);
+    out
 }
 
 pub fn error_detail_from_data(data: &serde_json::Value) -> Option<String> {
@@ -239,6 +313,15 @@ pub fn error_detail_from_data(data: &serde_json::Value) -> Option<String> {
     data.get("detail")
         .and_then(|v| v.as_str())
         .map(str::to_owned)
+}
+
+/// Detail an ACP error carries: `data` via [`error_detail_from_data`], else
+/// the JSON-RPC `message` — so foreign shapes classify as the safe `Other`.
+pub(crate) fn acp_error_message(err: &acp::Error) -> String {
+    err.data
+        .as_ref()
+        .and_then(error_detail_from_data)
+        .unwrap_or_else(|| err.message.clone())
 }
 
 pub fn http_status_from_error(err: &acp::Error) -> Option<u16> {
@@ -297,15 +380,21 @@ pub fn prompt_usage_from_error(
     serde_json::from_value(raw.clone()).ok()
 }
 
-/// Derive `(stopReason, agentResult)` JSON values for the `prompt_complete`
-/// notification from a prompt result. Rate-limit errors produce
-/// `("rate_limit", null)` so the client shows its own upgrade message;
-/// other errors produce `("error", <detail>)`.
+/// Derive `(stop reason, agent result, error kind)` values for the
+/// turn-terminal rails (`prompt_complete` payload, durable `TurnCompleted`)
+/// from a prompt result. Rate-limit errors produce `("rate_limit", null)` so
+/// the client shows its own upgrade message; other errors produce
+/// `("error", <detail>)`. The error kind ([`error_kind_from_error`]) is
+/// `None` for successes and errors without a kind marker.
 pub(crate) fn prompt_complete_fields(
     result: &std::result::Result<acp::StopReason, acp::Error>,
-) -> (serde_json::Value, serde_json::Value) {
+) -> (
+    serde_json::Value,
+    serde_json::Value,
+    Option<SamplingErrorKind>,
+) {
     match result {
-        Ok(reason) => (serde_json::json!(*reason), serde_json::Value::Null),
+        Ok(reason) => (serde_json::json!(*reason), serde_json::Value::Null, None),
         Err(err) => {
             let is_rate_limit = i32::from(err.code) == RATE_LIMITED_ERROR_CODE;
             let stop = if is_rate_limit { "rate_limit" } else { "error" };
@@ -317,7 +406,7 @@ pub(crate) fn prompt_complete_fields(
                     .map(error_message_from_data)
                     .unwrap_or_else(|| serde_json::Value::String(err.message.clone()))
             };
-            (serde_json::json!(stop), result)
+            (serde_json::json!(stop), result, error_kind_from_error(err))
         }
     }
 }
@@ -326,6 +415,43 @@ pub(crate) fn prompt_complete_fields(
 mod tests {
     use super::*;
     use reqwest::StatusCode;
+
+    #[test]
+    fn rewrite_service_names_is_ascii_case_insensitive() {
+        // Idempotency: no replacement value may re-match any pattern.
+        for (_, replacement) in SERVICE_NAME_REWRITES {
+            for (pattern, _) in SERVICE_NAME_REWRITES {
+                assert!(
+                    !replacement
+                        .to_ascii_lowercase()
+                        .contains(&pattern.to_ascii_lowercase()),
+                    "value {replacement:?} re-matches pattern {pattern:?}"
+                );
+            }
+        }
+        // Derive cased variants from the table so fixtures never respell a name.
+        for (pattern, replacement) in SERVICE_NAME_REWRITES {
+            let upper = pattern.to_ascii_uppercase();
+            let title: String = pattern
+                .split_inclusive(['-', '_'])
+                .map(|seg| {
+                    let mut chars = seg.chars();
+                    chars
+                        .next()
+                        .map(|f| f.to_ascii_uppercase().to_string() + chars.as_str())
+                        .unwrap_or_default()
+                })
+                .collect();
+            for variant in [pattern.to_string(), upper, title] {
+                let out = rewrite_service_names(&format!("error from {variant} upstream"));
+                assert_eq!(
+                    out,
+                    format!("error from {replacement} upstream"),
+                    "variant {variant:?} must scrub to the replacement's own casing"
+                );
+            }
+        }
+    }
 
     #[test]
     fn attach_prompt_usage_preserves_error_kind_and_round_trips() {
@@ -760,28 +886,36 @@ mod tests {
     #[test]
     fn prompt_complete_fields_ok_passes_through_stop_reason() {
         let result: std::result::Result<acp::StopReason, acp::Error> = Ok(acp::StopReason::EndTurn);
-        let (stop, agent_result) = prompt_complete_fields(&result);
+        let (stop, agent_result, error_kind) = prompt_complete_fields(&result);
         assert_eq!(stop, serde_json::json!("end_turn"));
         assert_eq!(agent_result, serde_json::Value::Null);
+        assert_eq!(error_kind, None);
     }
 
     #[test]
     fn prompt_complete_fields_rate_limit_omits_detail() {
         let err = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited".to_string())
             .data("Rate limit exceeded");
-        let (stop, agent_result) = prompt_complete_fields(&Err(err));
+        let result = Err(err);
+        let (stop, agent_result, error_kind) = prompt_complete_fields(&result);
         assert_eq!(stop, serde_json::json!("rate_limit"));
         assert_eq!(agent_result, serde_json::Value::Null);
+        assert_eq!(error_kind, None);
     }
 
     #[test]
     fn prompt_complete_fields_generic_error_includes_detail() {
         let err = acp::Error::internal_error().data("connection reset");
-        let (stop, agent_result) = prompt_complete_fields(&Err(err));
+        let result = Err(err);
+        let (stop, agent_result, error_kind) = prompt_complete_fields(&result);
         assert_eq!(stop, serde_json::json!("error"));
         assert_eq!(
             agent_result,
             serde_json::Value::String("connection reset".into())
+        );
+        assert_eq!(
+            error_kind, None,
+            "errors without a kind marker carry no errorKind"
         );
     }
 
@@ -789,12 +923,32 @@ mod tests {
     fn prompt_complete_fields_error_without_data_falls_back_to_message() {
         let err = acp::Error::new(-32000, "something broke".to_string());
         assert!(err.data.is_none());
-        let (stop, agent_result) = prompt_complete_fields(&Err(err));
+        let result = Err(err);
+        let (stop, agent_result, error_kind) = prompt_complete_fields(&result);
         assert_eq!(stop, serde_json::json!("error"));
         assert_eq!(
             agent_result,
             serde_json::Value::String("something broke".into())
         );
+        assert_eq!(error_kind, None);
+    }
+
+    #[test]
+    fn error_kind_from_error_reads_typed_marker_only() {
+        let truncation = map_sampling_err_to_acp(SamplingError::MaxTokensTruncation);
+        assert_eq!(
+            error_kind_from_error(&truncation),
+            Some(SamplingErrorKind::MaxTokensTruncation)
+        );
+        // No data, string data, and object data without the marker all yield None.
+        assert_eq!(error_kind_from_error(&acp::Error::internal_error()), None);
+        assert_eq!(
+            error_kind_from_error(&acp::Error::internal_error().data("boom")),
+            None
+        );
+        let with_status = acp::Error::internal_error()
+            .data(error_data_with_status("bad gateway".into(), Some(502)));
+        assert_eq!(error_kind_from_error(&with_status), None);
     }
 
     #[test]
@@ -819,11 +973,13 @@ mod tests {
     fn prompt_complete_fields_extracts_message_from_status_data() {
         let err = acp::Error::internal_error()
             .data(error_data_with_status("model not found".into(), Some(404)));
-        let (stop, agent_result) = prompt_complete_fields(&Err(err));
+        let result = Err(err);
+        let (stop, agent_result, error_kind) = prompt_complete_fields(&result);
         assert_eq!(stop, serde_json::json!("error"));
         assert_eq!(
             agent_result,
             serde_json::Value::String("model not found".into())
         );
+        assert_eq!(error_kind, None);
     }
 }

@@ -1770,6 +1770,17 @@ async fn fake_handle_get() -> axum::response::Response {
         .into_response()
 }
 
+async fn spawn_test_http_server(app: axum::Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("test server addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}/mcp")
+}
+
 async fn spawn_fake_mcp(behavior: CallToolBehavior) -> (String, FakeMcpHandles) {
     let handles = FakeMcpHandles {
         inits: Arc::new(AtomicUsize::new(0)),
@@ -1786,14 +1797,7 @@ async fn spawn_fake_mcp(behavior: CallToolBehavior) -> (String, FakeMcpHandles) 
             behavior,
             handles: handles.clone(),
         });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    (format!("http://{addr}/mcp"), handles)
+    (spawn_test_http_server(app).await, handles)
 }
 
 fn fake_http_client(url: &str, tool_timeout_sec: u64) -> Arc<McpClient> {
@@ -3108,26 +3112,31 @@ async fn spawn_fake_streamable_http(
             },
         ),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind fake server");
-    let addr = listener.local_addr().expect("fake server addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    (format!("http://{addr}/mcp"), handles)
+    (spawn_test_http_server(app).await, handles)
 }
 
 fn probe_ctx<'a>(
     event_writer: &'a xai_grok_session_events::EventWriter,
     mode: OauthInteractivity,
 ) -> McpSpawnCtx<'a> {
+    crate::isolate_grok_home_for_tests();
     McpSpawnCtx {
         session_id: None,
         event_writer,
         mode,
         scope: None,
+        discovery: McpOauthDiscovery::Network,
     }
+}
+
+fn session_test_ctx(event_writer: &xai_grok_session_events::EventWriter) -> McpSpawnCtx<'_> {
+    crate::isolate_grok_home_for_tests();
+    McpSpawnCtx::for_session(
+        "sess",
+        event_writer,
+        OauthInteractivity::NonInteractive,
+        None,
+    )
 }
 
 const TEST_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
@@ -3136,22 +3145,22 @@ async fn resolve_tokenless_with_headers(
     url: &str,
     headers: &[(String, String)],
     mode: OauthInteractivity,
-) -> HttpOauthPrep {
+) -> HttpAuthDecision {
     let event_writer = xai_grok_session_events::EventWriter::noop();
     let ctx = probe_ctx(&event_writer, mode);
-    resolve_http_oauth_prep("fake", url, headers, &ctx, TEST_DISCOVERY_TIMEOUT).await
+    decide_http_auth_over_network("fake", url, headers, &ctx, TEST_DISCOVERY_TIMEOUT).await
 }
 
-async fn resolve_tokenless(url: &str, mode: OauthInteractivity) -> HttpOauthPrep {
+async fn resolve_tokenless(url: &str, mode: OauthInteractivity) -> HttpAuthDecision {
     resolve_tokenless_with_headers(url, &[], mode).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn inconclusive_oauth_probe_connects_tokenless_streamable_http_headless() {
     let (url, _handles) = spawn_fake_streamable_http(axum::http::StatusCode::OK).await;
-    let prep = resolve_tokenless(&url, OauthInteractivity::NonInteractive).await;
+    let decision = resolve_tokenless(&url, OauthInteractivity::NonInteractive).await;
     assert!(
-        matches!(prep, HttpOauthPrep::NoOauthSupport),
+        matches!(decision, HttpAuthDecision::NoOauthSupport),
         "tokenless streamable-http server must connect plain in non-interactive mode"
     );
 }
@@ -3159,8 +3168,8 @@ async fn inconclusive_oauth_probe_connects_tokenless_streamable_http_headless() 
 #[tokio::test(flavor = "multi_thread")]
 async fn anonymous_access_probe_sends_default_user_agent() {
     let (url, handles) = spawn_fake_streamable_http(axum::http::StatusCode::OK).await;
-    let prep = resolve_tokenless(&url, OauthInteractivity::NonInteractive).await;
-    assert!(matches!(prep, HttpOauthPrep::NoOauthSupport));
+    let decision = resolve_tokenless(&url, OauthInteractivity::NonInteractive).await;
+    assert!(matches!(decision, HttpAuthDecision::NoOauthSupport));
 
     let captured = handles
         .post_headers
@@ -3189,9 +3198,9 @@ async fn anonymous_access_probe_preserves_configured_user_agent() {
         ("Content-Type".to_string(), "text/plain".to_string()),
         ("Accept".to_string(), "text/html".to_string()),
     ];
-    let prep =
+    let decision =
         resolve_tokenless_with_headers(&url, &headers, OauthInteractivity::NonInteractive).await;
-    assert!(matches!(prep, HttpOauthPrep::NoOauthSupport));
+    assert!(matches!(decision, HttpAuthDecision::NoOauthSupport));
 
     let captured = handles
         .post_headers
@@ -3215,16 +3224,16 @@ async fn anonymous_access_probe_preserves_configured_user_agent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn anonymous_access_probe_accepts_bad_request_reply() {
     let (url, _handles) = spawn_fake_streamable_http(axum::http::StatusCode::BAD_REQUEST).await;
-    let prep = resolve_tokenless(&url, OauthInteractivity::NonInteractive).await;
-    assert!(matches!(prep, HttpOauthPrep::NoOauthSupport));
+    let decision = resolve_tokenless(&url, OauthInteractivity::NonInteractive).await;
+    assert!(matches!(decision, HttpAuthDecision::NoOauthSupport));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn inconclusive_oauth_probe_stays_fail_closed_on_auth_challenge() {
     let (url, _handles) = spawn_fake_streamable_http(axum::http::StatusCode::UNAUTHORIZED).await;
-    let prep = resolve_tokenless(&url, OauthInteractivity::NonInteractive).await;
+    let decision = resolve_tokenless(&url, OauthInteractivity::NonInteractive).await;
     assert!(
-        matches!(prep, HttpOauthPrep::NeedsInteractiveLogin),
+        matches!(decision, HttpAuthDecision::NeedsInteractiveLogin),
         "auth-challenging server must keep failing closed in non-interactive mode"
     );
 }
@@ -3239,26 +3248,18 @@ async fn inconclusive_oauth_probe_unreachable_fails_closed() {
             axum::http::StatusCode::OK.into_response()
         }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    let prep = resolve_tokenless(
-        &format!("http://{addr}/mcp"),
-        OauthInteractivity::NonInteractive,
-    )
-    .await;
-    assert!(matches!(prep, HttpOauthPrep::NeedsInteractiveLogin));
+    let url = spawn_test_http_server(app).await;
+    let decision = resolve_tokenless(&url, OauthInteractivity::NonInteractive).await;
+    // A server nobody can reach is a connectivity verdict, not an auth one:
+    // still fails this spawn closed, but as the retryable `Unreachable`.
+    assert!(matches!(decision, HttpAuthDecision::Unreachable));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn inconclusive_oauth_probe_connects_plain_interactively() {
     let (url, _handles) = spawn_fake_streamable_http(axum::http::StatusCode::UNAUTHORIZED).await;
-    let prep = resolve_tokenless(&url, OauthInteractivity::Interactive).await;
-    assert!(matches!(prep, HttpOauthPrep::NoOauthSupport));
+    let decision = resolve_tokenless(&url, OauthInteractivity::Interactive).await;
+    assert!(matches!(decision, HttpAuthDecision::NoOauthSupport));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3267,8 +3268,9 @@ async fn inconclusive_oauth_probe_emits_timeout_and_verdict_events() {
     let tmp = tempfile::tempdir().unwrap();
     let event_writer = xai_grok_session_events::EventWriter::open(tmp.path());
     let ctx = probe_ctx(&event_writer, OauthInteractivity::NonInteractive);
-    let prep = resolve_http_oauth_prep("fake", &url, &[], &ctx, TEST_DISCOVERY_TIMEOUT).await;
-    assert!(matches!(prep, HttpOauthPrep::NoOauthSupport));
+    let decision =
+        decide_http_auth_over_network("fake", &url, &[], &ctx, TEST_DISCOVERY_TIMEOUT).await;
+    assert!(matches!(decision, HttpAuthDecision::NoOauthSupport));
 
     let jsonl = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
     let events = event_types(&jsonl);
@@ -3284,6 +3286,52 @@ async fn inconclusive_oauth_probe_emits_timeout_and_verdict_events() {
     assert!(
         types.iter().any(|t| t == "mcp_oauth_probe_resolved"),
         "missing verdict event; got {types:?}"
+    );
+}
+
+async fn spawn_counting_http_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handler_counter = Arc::clone(&counter);
+    let app = axum::Router::new().fallback(move || {
+        let c = Arc::clone(&handler_counter);
+        async move {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            axum::http::StatusCode::NOT_FOUND
+        }
+    });
+    (spawn_test_http_server(app).await, counter)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_spawn_sends_zero_network_requests() {
+    let (url, counter) = spawn_counting_http_server().await;
+    let event_writer = xai_grok_session_events::EventWriter::noop();
+
+    let session_ctx = session_test_ctx(&event_writer);
+    let client = start_mcp_server(
+        make_http_server("fake", &url),
+        None,
+        None,
+        None,
+        &session_ctx,
+    )
+    .await
+    .expect("plain HTTP client");
+    assert!(!client.has_auth(), "no stored creds → plain HTTP client");
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "session spawn must perform zero network requests"
+    );
+
+    let login_ctx =
+        session_test_ctx(&event_writer).with_oauth_discovery(McpOauthDiscovery::Network);
+    let _ = start_mcp_server(make_http_server("fake", &url), None, None, None, &login_ctx)
+        .await
+        .expect("discovery resolves no-oauth against the counting fake");
+    assert!(
+        counter.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "login path still runs network discovery (and proves the counter sees requests)"
     );
 }
 
@@ -3449,5 +3497,269 @@ async fn spawn_into_a_closed_scope_fails_fast() {
     assert!(
         result.is_err(),
         "spawning into a closed scope must fail fast, not start a doomed server"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Unreachable-spawn retry (McpError::Unreachable + McpState cooldown gating)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `Unreachable` is a connectivity verdict: never auth, always retryable,
+/// still attributable to its server for failure recording.
+#[test]
+fn unreachable_error_is_retryable_not_auth() {
+    let err = McpError::Unreachable {
+        server: "srv".to_string(),
+    };
+    assert!(!err.is_auth_rejection());
+    assert!(err.is_unreachable());
+    assert_eq!(err.server_name(), Some("srv"));
+    // AuthRequired stays the only pre-spawn auth gate.
+    assert!(
+        McpError::AuthRequired {
+            server: "srv".to_string()
+        }
+        .is_auth_rejection()
+    );
+}
+
+/// Candidates are returned only when the cooldown expired AND the server is
+/// still configured; a taken candidate is in-flight (holding an attempt
+/// token) and is not handed to another trigger until its attempt settles.
+#[test]
+fn unreachable_retry_candidates_respect_cooldown_and_config() {
+    let mut state = McpState::new(vec![
+        make_stdio_server("due", "/bin/due"),
+        make_stdio_server("cooling", "/bin/cooling"),
+    ]);
+    let now = std::time::Instant::now();
+    state.record_unreachable_failure_at("due", "conn refused".to_string(), now);
+    state.record_unreachable_failure_at(
+        "cooling",
+        "conn refused".to_string(),
+        now + McpState::UNREACHABLE_RETRY_COOLDOWN,
+    );
+    // A server no longer in the config list is never a candidate.
+    state.record_unreachable_failure_at("unconfigured", "conn refused".to_string(), now);
+
+    let taken = state.take_unreachable_retry_candidates();
+    assert_eq!(taken.len(), 1);
+    let (name, token) = taken[0].clone();
+    assert_eq!(name, "due");
+    // Both failures surface as init_failed (Unavailable in status snapshots).
+    assert!(state.init_failed.contains_key("due"));
+    assert!(state.init_failed.contains_key("cooling"));
+
+    // In-flight: no other trigger can take the same server, even though the
+    // attempt may outlive any fixed cooldown.
+    assert!(state.take_unreachable_retry_candidates().is_empty());
+    // Recording from the init path never demotes an in-flight attempt.
+    state.record_unreachable_failure_at("due", "racing".to_string(), now);
+    assert!(state.take_unreachable_retry_candidates().is_empty());
+
+    // A failed settle restarts the cooldown from settle time (still cooling
+    // now), refreshing the detail.
+    state.settle_unreachable_attempt_failed("due", token, "still down".to_string());
+    assert_eq!(
+        state.init_failed.get("due").map(String::as_str),
+        Some("still down")
+    );
+    assert!(state.take_unreachable_retry_candidates().is_empty());
+
+    // Success path: finish requires the token and clears the failure record.
+    state.record_unreachable_failure_at("due", "again".to_string(), now);
+    let (name, token) = state.take_unreachable_retry_candidates()[0].clone();
+    assert!(state.finish_unreachable_attempt(&name, token));
+    assert!(!state.init_failed.contains_key("due"));
+    // Settling twice (or with a stale token) is a no-op.
+    assert!(!state.finish_unreachable_attempt(&name, token));
+}
+
+/// Config teardown mid-attempt invalidates the attempt token: a stale attempt
+/// can neither install (finish returns false) nor re-pollute the records its
+/// teardown cleaned (failed/unretryable settles no-op).
+#[test]
+fn unreachable_attempt_token_invalidated_by_config_teardown() {
+    let mut state = McpState::new(vec![
+        make_stdio_server("keep", "/bin/keep"),
+        make_stdio_server("gone", "/bin/gone"),
+    ]);
+    let now = std::time::Instant::now();
+    state.record_unreachable_failure_at("gone", "down".to_string(), now);
+    let (name, token) = state.take_unreachable_retry_candidates()[0].clone();
+    assert_eq!(name, "gone");
+
+    // The server is removed from config while the attempt is in flight.
+    state
+        .update_configs_diff(vec![make_stdio_server("keep", "/bin/keep")])
+        .expect("should detect change");
+    assert!(!state.init_failed.contains_key("gone"));
+
+    assert!(!state.finish_unreachable_attempt("gone", token));
+    assert!(!state.settle_unreachable_attempt_unretryable("gone", token));
+    state.settle_unreachable_attempt_failed("gone", token, "stale".to_string());
+    assert!(!state.init_failed.contains_key("gone"));
+    assert!(state.take_unreachable_retry_candidates().is_empty());
+}
+
+/// Config updates must not leave a stale unreachable schedule behind: the
+/// diff path forgets removed servers, the full-replace path clears everything.
+#[test]
+fn unreachable_schedule_cleared_on_config_updates() {
+    let mut state = McpState::new(vec![
+        make_stdio_server("keep", "/bin/keep"),
+        make_stdio_server("remove", "/bin/remove"),
+    ]);
+    let now = std::time::Instant::now();
+    state.record_unreachable_failure_at("keep", "down".to_string(), now);
+    state.record_unreachable_failure_at("remove", "down".to_string(), now);
+
+    let diff = state
+        .update_configs_diff(vec![make_stdio_server("keep", "/bin/keep")])
+        .expect("should detect change");
+    assert_eq!(diff.removed, vec!["remove"]);
+    assert!(!state.init_failed.contains_key("remove"));
+    // Removed server is no longer scheduled; kept server still is.
+    let taken: Vec<McpServerName> = state
+        .take_unreachable_retry_candidates()
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(taken, vec!["keep".to_string()]);
+
+    // Full replace clears the whole schedule (including in-flight attempts).
+    assert!(state.update_configs(vec![make_stdio_server("keep", "/bin/keep2")]));
+    assert!(state.take_unreachable_retry_candidates().is_empty());
+    assert!(state.init_failed.is_empty());
+}
+
+/// A fresh init attempt (`mark_servers_initializing`) supersedes any pending
+/// unreachable-respawn schedule — the attempt itself re-records on failure —
+/// so a server recovered by a full re-init cannot be respawned over later.
+#[test]
+fn fresh_init_attempt_clears_unreachable_schedule() {
+    let mut state = McpState::new(vec![make_stdio_server("srv", "/bin/srv")]);
+    state.record_unreachable_failure_at("srv", "down".to_string(), std::time::Instant::now());
+
+    state.mark_servers_initializing(vec!["srv".to_string()]);
+    assert!(!state.init_failed.contains_key("srv"));
+    assert!(state.take_unreachable_retry_candidates().is_empty());
+}
+
+/// An attempt whose future was cancelled never settles; after the lease
+/// expires the server is takeable again with a fresh token and the zombie
+/// attempt's old token no-ops.
+#[test]
+fn unreachable_attempt_lease_reclaims_cancelled_attempts() {
+    let mut state = McpState::new(vec![make_stdio_server("srv", "/bin/srv")]);
+    let now = std::time::Instant::now();
+    state.record_unreachable_failure_at("srv", "down".to_string(), now);
+    let (_, old_token) = state.take_unreachable_retry_candidates_at(now)[0].clone();
+
+    // Within the lease the attempt is exclusive.
+    assert!(
+        state
+            .take_unreachable_retry_candidates_at(now + McpState::UNREACHABLE_ATTEMPT_LEASE)
+            .is_empty()
+    );
+
+    // Past the lease the server is handed out again with a new token…
+    let later = now + McpState::UNREACHABLE_ATTEMPT_LEASE + std::time::Duration::from_secs(1);
+    let taken = state.take_unreachable_retry_candidates_at(later);
+    assert_eq!(taken.len(), 1);
+    let (name, new_token) = taken[0].clone();
+    assert_eq!(name, "srv");
+    assert_ne!(new_token, old_token);
+
+    // …and the zombie attempt's token is dead: it cannot install or settle.
+    assert!(!state.finish_unreachable_attempt("srv", old_token));
+    state.settle_unreachable_attempt_failed("srv", old_token, "stale".to_string());
+    // Still owned by the new attempt (settle with the new token works).
+    assert!(state.finish_unreachable_attempt("srv", new_token));
+}
+
+/// Transient-connectivity classification: typed verdicts and transport-level
+/// handshake/client errors are retryable; protocol junk and auth are not.
+#[test]
+fn transient_connectivity_classification() {
+    assert!(
+        McpError::Unreachable {
+            server: "srv".to_string()
+        }
+        .is_transient_connectivity()
+    );
+    assert!(
+        McpError::Timeout {
+            server: "srv".to_string(),
+            timeout_secs: 65
+        }
+        .is_transient_connectivity()
+    );
+    assert!(
+        McpError::ClientError("transport error: Connection reset by peer (os error 104)".into())
+            .is_transient_connectivity()
+    );
+    assert!(
+        McpError::ClientError("error sending request for url (http://x/mcp)".into())
+            .is_transient_connectivity()
+    );
+    // Protocol-level and auth failures stay non-retryable.
+    assert!(
+        !McpError::ClientError("invalid params: missing field `tools`".into())
+            .is_transient_connectivity()
+    );
+    assert!(
+        !McpError::AuthRequired {
+            server: "srv".to_string()
+        }
+        .is_transient_connectivity()
+    );
+    // The connect-failure subset excludes timeouts and mid-stream drops.
+    assert!(
+        McpError::Unreachable {
+            server: "srv".to_string()
+        }
+        .is_connect_failure()
+    );
+    assert!(
+        McpError::ClientError("tcp connect error: Connection refused (os error 61)".into())
+            .is_connect_failure()
+    );
+    assert!(
+        !McpError::Timeout {
+            server: "srv".to_string(),
+            timeout_secs: 65
+        }
+        .is_connect_failure()
+    );
+    assert!(
+        !McpError::ClientError("transport error: Connection reset by peer (os error 104)".into())
+            .is_connect_failure()
+    );
+    assert!(
+        !McpError::ClientError("request timed out awaiting the server response".into())
+            .is_connect_failure(),
+        "post-connect timeouts stay out of the connect-phase class"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refused_connect_handshake_classifies_connect_phase() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    drop(listener);
+
+    let event_writer = xai_grok_session_events::EventWriter::noop();
+    let ctx = session_test_ctx(&event_writer);
+    let client = start_mcp_server(make_http_server("refused", &url), None, None, None, &ctx)
+        .await
+        .expect("a plain HTTP client builds without network");
+    let err = client
+        .ensure_initialized()
+        .await
+        .expect_err("a refused port must fail the handshake");
+    assert!(
+        err.is_connect_failure(),
+        "a real refused-connect handshake must classify connect-phase: {err}"
     );
 }

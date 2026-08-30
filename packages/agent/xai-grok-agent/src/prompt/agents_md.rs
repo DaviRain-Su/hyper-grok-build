@@ -167,7 +167,7 @@ async fn read_agents_config_with_options(
         workspace_user_dir,
         compat,
         xai_grok_tools::util::grok_home::grok_home(),
-        dirs::home_dir(),
+        xai_dirs::home_dir(),
     )
     .await
 }

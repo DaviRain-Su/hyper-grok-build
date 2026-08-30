@@ -343,10 +343,12 @@ fn project_claude_absent_when_home_is_git_repo() {
     // repo-root walk must NOT reach $HOME and treat `~/.claude` as
     // project-tier (its env is injected into every spawned subprocess).
     // Serialize + guard $HOME (find_repo_root reaches home via `.git`, and
-    // the guard reads dirs::home_dir()).
+    // the guard reads xai_dirs::home_dir()). Pin USERPROFILE too:
+    // home_dir() prefers it on Windows and ignores HOME.
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("HOME", home.path());
+    let _userprofile_guard = EnvVarGuard::set("USERPROFILE", home.path());
     git2::Repository::init(home.path()).unwrap();
     let claude_dir = home.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();

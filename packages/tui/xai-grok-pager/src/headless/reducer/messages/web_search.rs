@@ -1,6 +1,5 @@
-//! Backend `web_search` reconciliation for `streaming-messages-json`: folding a
-//! completed search inline (or the generic client split on failure), plus parsing
-//! Grok's `WebSearchCall` output into the wire hit array.
+//! Backend `web_search` reconciliation for `streaming-messages-json`.
+//! Folds a completed search inline (or the generic client split on failure), and parses Grok's `WebSearchCall` output into the wire hit array.
 
 use agent_client_protocol as acp;
 use serde_json::{Value, json};
@@ -11,9 +10,9 @@ use super::MessagesReducer;
 use super::wire::ContentBlock;
 
 impl MessagesReducer {
-    /// Resolve a completed backend `web_search`. A successful search folds inline and
-    /// counts; a failure pairs an error result (uncounted); a non-search action falls
-    /// back to the generic client split.
+    /// Resolve a completed backend `web_search`.
+    /// A successful search folds inline and counts; a failure pairs an error result (uncounted).
+    /// A non-search action falls back to the generic client split.
     pub(super) fn finish_web_search(
         &mut self,
         out: &mut Vec<Value>,
@@ -42,9 +41,8 @@ impl MessagesReducer {
         self.append_web_search_result(out, &u.tool_call_id, &query, &hits);
     }
 
-    /// Fold a `web_search` into the open frame as an adjacent `server_tool_use` +
-    /// `web_search_tool_result` pair. The frame is not flushed, so text around the
-    /// search stays in one message; the request counter is untouched.
+    /// Fold a `web_search` into the open frame as an adjacent `server_tool_use` and `web_search_tool_result` pair.
+    /// The frame is not flushed, so text around the search stays in one message; the request counter is untouched.
     pub(super) fn append_web_search_result(
         &mut self,
         out: &mut Vec<Value>,
@@ -52,7 +50,7 @@ impl MessagesReducer {
         query: &str,
         content: &Value,
     ) {
-        // Materialize any pending signature-only thinking block first so indices stay in sync.
+        // Emit any pending signature-only thinking block first so indices stay in sync
         self.partial_signature_only_block(out);
         if self.include_partials() {
             self.partial_close_block(out);

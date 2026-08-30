@@ -1,7 +1,5 @@
-//! Status row state: whether this process draws a row at all, and for one that
-//! does, its content, throttle, and which runs may still paint. What the row
-//! should become is decided in `status_line_policy`, rendering is
-//! `views::status_line`, and the counters are the `metrics` child.
+//! Status row state: whether this process draws a row at all, and for one that does, its content, throttle, and which runs may still paint.
+//! What the row should become is decided in `status_line_policy`, rendering is `views::status_line`, and the counters are the `metrics` child.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,17 +13,19 @@ use crate::views::status_line::{RowSize, SanitizedText, StatusLineDisplay, Statu
 mod command;
 pub(crate) mod metrics;
 
-/// Shortest gap between event-driven recomputes. A constant rather than a
-/// config knob: the one cadence a user can set is the `refresh_interval`
-/// timer, and this debounce only keeps a busy turn from re-running a script
-/// `status_line_policy` call the throttle.
+/// Shortest gap between event-driven recomputes; it keeps a busy turn from re-running a script every frame.
+/// A constant rather than a config knob: the one cadence a user can set is the `refresh_interval` timer.
+/// A force and a due refresh drop to [`MIN_REFRESH_INTERVAL_MS`] instead, so those may run after 100ms rather than 300.
+/// Together the two intervals are what comments here and in `status_line_policy` call the throttle.
 pub(crate) const EVENT_DEBOUNCE: Duration = Duration::from_millis(300);
 
 pub(crate) const MIN_REFRESH_INTERVAL_MS: Duration = Duration::from_millis(100);
 
 pub(crate) const ABANDON_AFTER: Duration = Duration::from_secs(30);
 
-/// itself is broken and stops being papered over with stale data.
+/// The consecutive refresh failure at which the error text paints; below it the row keeps its last confirmed output.
+/// A transient outage must not paint an error over hours of good answers.
+/// From here on the script itself is broken and stops being papered over with stale data.
 pub(crate) const REFRESH_FAILURES_TO_PAINT: u32 = 3;
 
 const _: () = assert!(
@@ -33,8 +33,8 @@ const _: () = assert!(
     "the watchdog must only fire for a task that never answers, never for a slow script"
 );
 
-/// Whether this process draws a row at all. Every gate that builds or streams
-/// reads this, or one of them sends a payload nobody draws.
+/// Whether this process draws a row at all.
+/// Every gate that builds or streams reads this, or one of them sends a payload nobody draws.
 pub(crate) fn draws_a_row(config: &StatusLineConfig) -> bool {
     config.reserves_a_row()
 }
@@ -44,18 +44,15 @@ fn display_for(text: &str) -> Option<StatusLineDisplay> {
     (!text.is_empty()).then(|| StatusLineDisplay::Text(SanitizedText::new(text)))
 }
 
-/// The parts of the payload the client fills in rather than the shell. The
-/// overlay and the staleness check read this one value, so a field added here
-/// is watched by the code that applies it. `trigger` is client-stamped too
-/// but lives outside: it is a property of one run, not a staleness input the
-/// row must rebuild over.
+/// The parts of the payload the client fills in rather than the shell.
+/// The overlay and the staleness check read this one value, so a field added here is watched by the code that applies it.
+/// `trigger` is client-stamped too but lives outside: it is a property of one run, not a staleness input the row must rebuild over.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ClientOwnedFields {
     pub(crate) session_name: Option<String>,
 }
 
-/// Identifies one run of the user's script, so a result that outlived the run
-/// that asked for it can be told from the one the row is waiting on.
+/// Identifies one run of the user's script, so a result that outlived the run that asked for it can be told from the one the row is waiting on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RunId(pub(crate) u64);
 
@@ -63,8 +60,7 @@ pub struct RunId(pub(crate) u64);
 struct Run {
     id: RunId,
     started: Instant,
-    /// Rides the slot rather than the task result, so a result can never
-    /// claim a trigger the run was not started with.
+    /// Stored on the slot rather than the task result, so a result can never claim a trigger the run was not started with.
     trigger: StatusLineTrigger,
 }
 
@@ -80,19 +76,17 @@ enum RunState {
     Idle,
     Running(Run),
     Superseded(Run),
-    /// A run past [`ABANDON_AFTER`]. The id is kept so a late result still
-    /// paints, until the next run takes the slot.
+    /// A run past [`ABANDON_AFTER`]. The id is kept so a late result still paints, until the next run takes the slot.
     Abandoned(Run),
 }
 
-/// The state of the run slot. One value rather than a pair of predicates, so
-/// no caller can read a run as both inside its deadline and past it.
+/// The state of the run slot. One value rather than a pair of predicates, so no caller can read a run as both inside its deadline and past it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunSlot {
     Free,
     WithinDeadline,
-    /// A run holds the slot past [`ABANDON_AFTER`]. Only the tick that runs
-    /// [`StatusLineState::abandon_if_past_deadline`] hands the slot back.
+    /// A run holds the slot past [`ABANDON_AFTER`].
+    /// Only the tick that runs [`StatusLineState::abandon_if_past_deadline`] hands the slot back.
     PastDeadline,
 }
 
@@ -108,13 +102,12 @@ impl RunState {
         }
     }
 
-    /// Abandon a run that has held the slot past [`ABANDON_AFTER`], counting
-    /// it once. Returns the trigger of a run newly parked as `Abandoned`; a
-    /// already re-raised when it was superseded.
+    /// Abandon a run that has held the slot past [`ABANDON_AFTER`], counting it once.
+    /// Returns the trigger of a run newly parked as `Abandoned`.
+    /// A dropped superseded run reports `None`: its due refresh was already re-raised when it was superseded.
     fn abandon_if_past_deadline(&mut self, now: Instant) -> Option<StatusLineTrigger> {
         let (next, run, abandoned_trigger) = match *self {
-            // Dropped rather than re-armed: `Abandoned` keeps the id, which
-            // would let a superseded run's output paint.
+            // Dropped to Idle rather than parked: `Abandoned` keeps the id, which would let a superseded run's output paint
             RunState::Superseded(run) if run.past_deadline(now) => (RunState::Idle, run, None),
             RunState::Running(run) if run.past_deadline(now) => {
                 (RunState::Abandoned(run), run, Some(run.trigger))
@@ -134,8 +127,7 @@ impl RunState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ForcePolicy {
     Clear,
-    /// The force was raised while this update's work was already running, so
-    /// this update does not satisfy it.
+    /// The force was raised while this update's work was already running, so this update does not satisfy it.
     Keep,
 }
 
@@ -154,9 +146,9 @@ pub struct StatusLineRun {
     term_size: RowSize,
 }
 
-/// What one run produced. A failure carries both the text it would paint and
-/// the raw error for the log, so the state can decide which run gets which
-/// without re-deriving either.
+/// What one run produced.
+/// A failure carries both the text it would paint and the raw error for the log.
+/// The state can decide which run gets which without re-deriving either.
 #[derive(Debug)]
 pub enum RunOutcome {
     Output(String),
@@ -168,7 +160,7 @@ pub enum RunOutcome {
     },
 }
 
-/// What [`StatusLineState::finish_command_run`] did with a result, so the
+/// What [`StatusLineState::finish_command_run`] did with a result, so the caller can log the refresh outcomes without the state knowing about logs.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FinishDisposition {
     Applied,
@@ -184,10 +176,9 @@ pub(crate) struct StatusLineState {
     last_update: Option<Instant>,
     forced: bool,
     refresh_due: bool,
-    /// that succeeds. The configured command is fixed for the life of the
-    /// process, so the count deliberately survives [`Self::invalidate`]: an
-    /// agent switch does not absolve a broken script. A future config reload
-    /// must reset it when the command changes.
+    /// Consecutive failed refresh runs of the user's script, reset by any run that succeeds.
+    /// The configured command is fixed for the life of the process, so the count deliberately survives [`Self::invalidate`].
+    /// An agent switch does not absolve a broken script; a future config reload must reset the count when the command changes.
     refresh_failures: u32,
     run: RunState,
     next_run_id: RunId,
@@ -205,8 +196,8 @@ impl StatusLineState {
         &self.built_from
     }
 
-    /// Returns whether they changed. Unlike [`Self::set_source`] the content
-    /// stands: a renamed session is still this session, so the row is stale.
+    /// Returns whether they changed.
+    /// Unlike [`Self::set_source`] the content stands: a renamed session is still this session, so the row is stale.
     #[must_use = "a change needs the rebuild the caller was going to force"]
     pub(crate) fn set_client_fields(&mut self, current: ClientOwnedFields) -> bool {
         if self.built_from == current {
@@ -234,8 +225,9 @@ impl StatusLineState {
         self.settled
     }
 
-    /// Settle with no content, leaving `last_update` alone so a later snapshot
-    /// paints at once. A force left standing would demand ticks forever, and
+    /// Settle with no content, leaving `last_update` alone so a later snapshot paints at once.
+    /// A force left standing would demand ticks forever, and so would a due refresh.
+    /// Whatever starved this update of a context starves the run the refresh is waiting for too.
     pub(crate) fn settle_empty(&mut self) {
         self.settled = true;
         self.clear_force();
@@ -248,7 +240,7 @@ impl StatusLineState {
     }
 
     pub(crate) fn is_due(&self, now: Instant) -> bool {
-        // already served by the timer that raised it.
+        // A due refresh drops to the floor like a force: its interval was already served by the timer that raised it
         let interval = if self.forced || self.refresh_due {
             MIN_REFRESH_INTERVAL_MS
         } else {
@@ -270,8 +262,7 @@ impl StatusLineState {
         self.forced = false;
     }
 
-    /// Drops the next run to the floor rather than clearing the throttle: a
-    /// window drag would otherwise run a script per frame.
+    /// Drops the next run to the floor rather than clearing the throttle: a window drag would otherwise run a script per frame.
     pub(crate) fn force_next_run(&mut self) {
         self.forced = true;
     }
@@ -293,7 +284,7 @@ impl StatusLineState {
     }
 
     pub(crate) fn abandon_if_past_deadline(&mut self, now: Instant) {
-        // must not swallow the cycle the timer scheduled.
+        // Mirrors the supersede re-raise: a refresh run abandoned unanswered must not swallow the cycle the timer scheduled
         if self.run.abandon_if_past_deadline(now) == Some(StatusLineTrigger::RefreshInterval) {
             self.refresh_due = true;
         }
@@ -303,8 +294,7 @@ impl StatusLineState {
         self.run.slot(now)
     }
 
-    /// A run still holds the slot, inside its deadline or past it. `Abandoned`
-    /// does not.
+    /// A run still holds the slot, inside its deadline or past it. `Abandoned` does not.
     pub(crate) fn command_in_flight(&self, now: Instant) -> bool {
         self.run_slot(now) != RunSlot::Free
     }
@@ -374,8 +364,7 @@ impl StatusLineState {
             | RunState::Running(_)
             | RunState::Superseded(_) => return FinishDisposition::Applied,
         };
-        // The interval runs from the end of this run, not from its start, or a
-        // script slower than the interval re-runs with no gap.
+        // The interval runs from the end of this run, not from its start, or a script slower than the interval re-runs with no gap
         self.stamp(now, ForcePolicy::Keep);
         disposition
     }
@@ -404,8 +393,7 @@ impl StatusLineState {
                         self.settle_with_session_content(display_for(&text));
                         FinishDisposition::RefreshFailurePainted { error, failures }
                     } else {
-                        // Settled without touching the content: the row keeps
-                        // its last answer rather than waiting on this one.
+                        // Settled without touching the content: the row keeps its last answer rather than waiting on this one
                         self.settled = true;
                         FinishDisposition::RefreshFailureKept { error, failures }
                     }
@@ -414,13 +402,13 @@ impl StatusLineState {
         }
     }
 
-    /// Supersede the outstanding run so its output can no longer paint. The
-    /// caller says what replaces it, since this destroys the only thing that
-    /// would have refreshed the row.
+    /// Supersede the outstanding run so its output can no longer paint.
+    /// The caller says what replaces it, since this destroys the only thing that would have refreshed the row.
     pub(crate) fn supersede_command_run(&mut self, after: AfterSupersede) {
         self.run = match self.run {
             RunState::Running(run) => {
-                // scheduled until the next fire.
+                // The refresh a superseded run carried is still owed
+                // A resize landing mid-run would otherwise swallow the cycle the timer scheduled until the next fire
                 if run.trigger == StatusLineTrigger::RefreshInterval {
                     self.refresh_due = true;
                 }
@@ -429,8 +417,7 @@ impl StatusLineState {
             RunState::Abandoned(_) => RunState::Idle,
             state @ (RunState::Superseded(_) | RunState::Idle) => state,
         };
-        // Outside the match: a caller that wants no run is obeyed even when there
-        // was none, or a stale force demands ticks forever.
+        // Outside the match: a caller that wants no run is obeyed even when there was none, or a stale force demands ticks forever
         match after {
             AfterSupersede::Rerun => self.force_next_run(),
             AfterSupersede::NoRun => self.clear_force(),
@@ -446,15 +433,15 @@ impl StatusLineState {
     /// About the config rather than the session, so it does not count as content.
     pub(crate) fn set_problem(&mut self, text: &str) {
         self.settled = true;
-        // A segment for the warning tone: the rest of the row is chrome, and a row
-        // that cannot read its own config is the one thing the user must notice.
+        // A segment for the warning tone: the rest of the row is chrome
+        // A row that cannot read its own config is the one thing the user must notice
         self.write_content(Some(StatusLineDisplay::Segments(vec![
             StatusSegment::warn(text),
         ])));
     }
 
-    /// An answer about the session, which is what `had_content` reports. Counted
-    /// here rather than where a script prints: a superseded run never lands.
+    /// An answer about the session, which is what `had_content` reports.
+    /// Counted here rather than where a script prints: a superseded run never lands.
     fn settle_with_session_content(&mut self, next: Option<StatusLineDisplay>) {
         if next.is_some() {
             metrics::global().note_content();
@@ -471,9 +458,9 @@ impl StatusLineState {
         }
     }
 
-    /// Clear the content and leave the row unsettled, so ticks continue until an
-    /// answer arrives. Contrast [`Self::settle_empty`]; the force goes with it,
-    /// screen had no agent is kept for the first run after one appears.
+    /// Clear the content and leave the row unsettled, so ticks continue until an answer arrives.
+    /// Contrast [`Self::settle_empty`]: the force goes with it, but `refresh_due` deliberately survives.
+    /// A refresh owed while the welcome screen had no agent is kept for the first run after one appears.
     pub(crate) fn invalidate(&mut self) {
         self.supersede_command_run(AfterSupersede::NoRun);
         self.write_content(None);

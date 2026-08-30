@@ -2,10 +2,9 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// With two mid-turn queued rows, empty Enter sends the **top** (first) row
-/// now — not the most recently typed one. Cancel-and-send: the running turn
-/// is cancelled silently, alpha runs as its own next turn (with the interjection
-/// preamble), and bravo stays queued to promote afterwards.
+/// With two mid-turn queued rows, empty Enter sends the **top** (first) row now, not the most recently typed one.
+/// The running turn is cancelled silently and alpha runs as its own next turn, with the interjection preamble.
+/// Bravo stays queued and promotes afterwards.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn empty_enter_sends_top_not_last_of_two() {
@@ -56,15 +55,11 @@ async fn empty_enter_sends_top_not_last_of_two() {
         .inject_keys(b"\r")
         .expect("empty Enter send-now top");
     turn_one.release();
-    // Alpha (the promoted TOP row) then bravo drain back-to-back after the
-    // completion release. Each promoted "❯ …" block and every reply —
-    // including the final TURNTHREE — can scroll above the viewport before a
-    // 100ms poll observes it, so gating on any on-screen marker is inherently
-    // racy (a flaky observation, not a real failure — same rationale as
-    // `removed_queued_prompt_never_sent`). Gate on the WIRE instead: wait
-    // until bravo's request has been sent, which is the authoritative record
-    // that both queued rows drained in order. Pump the event loop while
-    // waiting so the queued rows actually promote.
+    // Alpha (the promoted TOP row) then bravo drain back-to-back after the completion release
+    // Each promoted "❯ …" block and every reply, including the final TURNTHREE, can scroll above the viewport before a 100ms poll observes it
+    // Waiting on any on-screen marker is thus racy: a flaky observation, not a real failure, same rationale as `removed_queued_prompt_never_sent`
+    // Wait on the wire instead: bravo's sent request is the authoritative record that both queued rows drained in order
+    // Pump the event loop while waiting so the queued rows actually promote
     let deadline = std::time::Instant::now() + Duration::from_secs(90);
     while !all_user_messages(&content)
         .iter()
@@ -84,7 +79,6 @@ async fn empty_enter_sends_top_not_last_of_two() {
         .await
         .expect("remaining queued row expectation satisfied");
 
-    // The send-now cancel of turn 1 is silent.
     assert!(
         !harness.contains_text("Turn cancelled by user"),
         "send-now cancel must not render a cancelled marker\nscreen:\n{}",
@@ -105,8 +99,7 @@ async fn empty_enter_sends_top_not_last_of_two() {
         "send-now must wrap the steered text in user_query: {alpha}"
     );
 
-    // The final request's user sequence proves the order: prompt, then the
-    // TOP row (alpha), then bravo — never bravo before alpha.
+    // The final request's user sequence proves the order: prompt, then the TOP row (alpha), then bravo
     let bodies = content.request_bodies();
     let last = bodies.last().expect("final request recorded");
     let finals: Vec<String> = last["messages"]

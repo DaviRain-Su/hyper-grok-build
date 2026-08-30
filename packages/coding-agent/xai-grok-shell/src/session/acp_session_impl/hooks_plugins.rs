@@ -12,7 +12,7 @@ impl SessionActor {
                     "Not in a git repository. Project hooks require a git worktree root."
                         .to_string()
                 })?;
-        crate::agent::folder_trust::grant_folder_trust(&root);
+        xai_grok_workspace::folder_trust::grant_folder_trust(&root);
         Ok(root)
     }
 
@@ -204,12 +204,20 @@ impl SessionActor {
                     };
                 }
                 match crate::config::remove_hooks_path(&path) {
-                    Ok(()) => ActionOutcome {
+                    Ok(true) => ActionOutcome {
                         status: OutcomeStatus::Success,
                         message: {
                             let reload_msg = self.reload_hooks_impl().await;
                             format!("Removed hook path: {path}.\n{reload_msg}")
                         },
+                        requires_reload: false,
+                        requires_restart: false,
+                    },
+                    // Pathless copy: the selection already identifies
+                    // the source.
+                    Ok(false) => ActionOutcome {
+                        status: OutcomeStatus::NotFound,
+                        message: "Only user-added hook directories can be removed here.".to_owned(),
                         requires_reload: false,
                         requires_restart: false,
                     },
@@ -222,12 +230,12 @@ impl SessionActor {
                 }
             }
             HooksAction::Disable { hook_name } => {
+                // No internal spec names in user-facing copy.
                 if self.is_managed_policy_hook(&hook_name) {
                     return ActionOutcome {
                         status: OutcomeStatus::ValidationError,
-                        message: format!(
-                            "Hook '{hook_name}' is enforced by managed policy and cannot be disabled."
-                        ),
+                        message: "This hook is enforced by managed policy and cannot be disabled."
+                            .to_owned(),
                         requires_reload: false,
                         requires_restart: false,
                     };
@@ -235,7 +243,7 @@ impl SessionActor {
                 match xai_grok_hooks::trust::disable_hook(&hook_name) {
                     Ok(()) => ActionOutcome {
                         status: OutcomeStatus::Success,
-                        message: format!("Disabled hook: {hook_name}"),
+                        message: "Hook disabled.".to_owned(),
                         requires_reload: false,
                         requires_restart: false,
                     },
@@ -251,13 +259,13 @@ impl SessionActor {
                 match xai_grok_hooks::trust::enable_hook(&hook_name) {
                     Ok(true) => ActionOutcome {
                         status: OutcomeStatus::Success,
-                        message: format!("Enabled hook: {hook_name}"),
+                        message: "Hook enabled.".to_owned(),
                         requires_reload: false,
                         requires_restart: false,
                     },
                     Ok(false) => ActionOutcome {
                         status: OutcomeStatus::NotFound,
-                        message: format!("Hook was not disabled: {hook_name}"),
+                        message: "Hook was not disabled.".to_owned(),
                         requires_reload: false,
                         requires_restart: false,
                     },
@@ -737,12 +745,13 @@ impl SessionActor {
             use crate::extensions::hooks::hook_spec_to_info_with;
             let hooks = {
                 let disabled = xai_grok_hooks::trust::DisabledHooks::load();
+                let registered = crate::config::registered_hook_paths();
                 let reg = self.hook_registry.borrow();
                 match &*reg {
                     Some(registry) => registry
                         .all_hooks()
                         .iter()
-                        .map(|s| hook_spec_to_info_with(s, &disabled))
+                        .map(|s| hook_spec_to_info_with(s, &disabled, &registered))
                         .collect(),
                     None => Vec::new(),
                 }
@@ -1175,12 +1184,13 @@ impl SessionActor {
 
             let hooks = {
                 let disabled = xai_grok_hooks::trust::DisabledHooks::load();
+                let registered = crate::config::registered_hook_paths();
                 let reg = self.hook_registry.borrow();
                 match &*reg {
                     Some(registry) => registry
                         .all_hooks()
                         .iter()
-                        .map(|s| hook_spec_to_info_with(s, &disabled))
+                        .map(|s| hook_spec_to_info_with(s, &disabled, &registered))
                         .collect(),
                     None => Vec::new(),
                 }

@@ -85,7 +85,7 @@ struct Scrubber {
 impl Scrubber {
     fn from_env() -> Self {
         Self {
-            home_dir: dirs::home_dir().map(|p| p.to_string_lossy().to_string()),
+            home_dir: xai_dirs::home_dir().map(|p| p.to_string_lossy().to_string()),
             usernames: collect_usernames_from_env(),
         }
     }
