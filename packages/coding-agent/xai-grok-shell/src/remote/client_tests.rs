@@ -345,8 +345,8 @@ async fn fetch_subagent_bundle_success() {
     let headers = headers.last().unwrap();
     assert_eq!(headers.authorization.as_deref(), Some("Bearer token"));
     assert_eq!(headers.token_auth.as_deref(), Some("xai-grok-cli"));
-    assert_eq!(headers.user_id.as_deref(), Some("user-1"));
-    assert_eq!(headers.email.as_deref(), Some("test@example.com"));
+    assert_eq!(headers.user_id.as_deref(), Some("test-user"));
+    assert_eq!(headers.email.as_deref(), None);
     assert_eq!(headers.alpha_test_key, None);
     assert!(headers.client_version.is_some());
     server.abort();

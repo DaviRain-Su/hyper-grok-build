@@ -774,9 +774,16 @@ fn strip_empty_json_schema_enum_values_in_place(value: &mut serde_json::Value) {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LengthPolicy {
     /// Fail the attempt with `MaxTokensTruncation` (legacy behavior).
-    #[default]
     Fail,
-    /// Complete with the partial response; empty-Length still fails.
+    /// Complete a response whose tool calls all carry complete arguments;
+    /// text-only and empty `Length` still fail. `Length` is usually context
+    /// exhaustion (output budget = window minus prompt), so retrying cannot
+    /// succeed — executing the calls advances the turn toward compaction.
+    /// The default: a caller that does not choose gets its tool calls run
+    /// and its text-only truncation failed.
+    #[default]
+    CompleteToolCalls,
+    /// Additionally complete with partial text; empty `Length` still fails.
     CompletePartial,
 }
 
@@ -785,8 +792,10 @@ pub enum LengthPolicy {
 pub enum LengthVerdict {
     /// The stop reason is not `Length`; the policy does not apply.
     Pass,
-    /// A `Length` stop delivered with its partial content.
+    /// A `Length` stop delivered with its partial text content.
     Salvage,
+    /// A `Length` stop delivered with its completed tool calls.
+    SalvageToolCalls,
     /// A `Length` stop the policy rejects (`MaxTokensTruncation`).
     Fail,
 }
@@ -806,10 +815,27 @@ impl LengthPolicy {
         if response.stop_reason != Some(StopReason::Length) {
             return LengthVerdict::Pass;
         }
-        if self == LengthPolicy::CompletePartial
-            && response.empty_reason().is_none()
-            && response.tool_calls().is_empty()
-        {
+        let tool_calls = response.tool_calls();
+        if !tool_calls.is_empty() {
+            // Empty arguments are the zero-arg call convention, not proof of
+            // truncation: a call cut before its first argument delta also
+            // collects as empty, but executing it as `{}` just bounces off
+            // tool-argument validation — cheaper than failing the turn.
+            let all_arguments_complete = tool_calls.iter().all(|tc| {
+                tc.arguments.trim().is_empty()
+                    || serde_json::from_str::<serde::de::IgnoredAny>(&tc.arguments).is_ok()
+            });
+            return match (self, all_arguments_complete) {
+                (LengthPolicy::Fail, _)
+                | (LengthPolicy::CompleteToolCalls | LengthPolicy::CompletePartial, false) => {
+                    LengthVerdict::Fail
+                }
+                (LengthPolicy::CompleteToolCalls | LengthPolicy::CompletePartial, true) => {
+                    LengthVerdict::SalvageToolCalls
+                }
+            };
+        }
+        if self == LengthPolicy::CompletePartial && response.empty_reason().is_none() {
             LengthVerdict::Salvage
         } else {
             LengthVerdict::Fail
@@ -846,6 +872,8 @@ pub struct ConversationRequest {
     pub x_grok_req_id: Option<String>,
     pub x_grok_session_id: Option<String>,
     pub x_grok_turn_idx: Option<String>,
+    /// Transient retry marker echoed back on sampler-retried turns (telemetry).
+    pub x_grok_transient_retry: Option<String>,
     pub x_grok_agent_id: Option<String>,
     pub x_grok_deployment_id: Option<String>,
     pub x_grok_user_id: Option<String>,
@@ -2689,6 +2717,7 @@ impl From<ConversationRequest> for ChatCompletionRequest {
             x_grok_req_id: req.x_grok_req_id,
             x_grok_session_id: req.x_grok_session_id,
             x_grok_turn_idx: req.x_grok_turn_idx,
+            x_grok_transient_retry: req.x_grok_transient_retry,
             x_grok_agent_id: req.x_grok_agent_id,
             x_grok_deployment_id: req.x_grok_deployment_id,
             x_grok_user_id: req.x_grok_user_id,

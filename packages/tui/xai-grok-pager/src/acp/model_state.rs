@@ -1,14 +1,35 @@
 use agent_client_protocol as acp;
 use indexmap::IndexMap;
 use xai_grok_shell::sampling::types::{
-    ReasoningEffort, ReasoningEffortOption, parse_reasoning_effort_meta,
-    parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
+    PlatformLockMeta, ReasoningEffort, ReasoningEffortOption, parse_platform_lock_meta,
+    parse_reasoning_effort_meta, parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
 };
 
 use crate::slash::commands::effort_levels::legacy_effort_options;
 
-/// Why an effort token could not be applied to a model.
-/// Shared by `/effort`, the CLI deferred switch, and headless so they classify the same input identically and differ only in how they report the error.
+/// Lock/setup metadata of a credential-less managed platform model, parsed
+/// from its ACP meta. `None` for ordinary (usable) models.
+pub(crate) fn platform_lock(info: &acp::ModelInfo) -> Option<PlatformLockMeta> {
+    parse_platform_lock_meta(info.meta.as_ref())
+}
+
+/// `(id, display name)` pairs for every model that is usable right now —
+/// i.e. not locked behind missing platform credentials. Surfaces that let
+/// the user route work to a model (e.g. the `/agents` subagent-model picker)
+/// should offer only these; pinning an unconfigured model would silently
+/// fall back to inherit at spawn.
+pub(crate) fn usable_model_choices(models: &ModelState) -> Vec<(String, String)> {
+    models
+        .available
+        .iter()
+        .filter(|(_, info)| platform_lock(info).is_none())
+        .map(|(id, info)| (id.0.to_string(), info.name.clone()))
+        .collect()
+}
+
+/// Why an effort token could not be applied to a model. Shared by every effort
+/// surface (`/effort`, the CLI deferred switch, and headless) so they classify
+/// the same input identically and differ only in how they surface the error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EffortTokenError {
     /// The target model does not advertise `supportsReasoningEffort`.
@@ -47,6 +68,9 @@ pub struct ModelState {
     pub available: IndexMap<acp::ModelId, acp::ModelInfo>,
     pub current: Option<acp::ModelId>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// This catalog came from an initialized ACP agent and may be refreshed
+    /// from the effective config when the user invokes `/model`.
+    pub reload_config_on_model_command: bool,
     /// External override for the context window size (tokens).
     /// When set, `get_context_window()` returns this instead of reading from the current model's metadata.
     /// Used for subagent views where SubagentProgress reports the actual window size.
@@ -73,9 +97,9 @@ impl ModelState {
         Some(self.current.as_ref()?.0.as_ref())
     }
 
-    /// Total context window tokens for the current model (if available).
-    fn current_context_window_tokens(&self) -> Option<u64> {
-        let meta = self.available.get(self.current.as_ref()?)?.meta.as_ref()?;
+    /// Total context window tokens advertised for a catalog model.
+    pub fn context_window_for(&self, model_id: &acp::ModelId) -> Option<u64> {
+        let meta = self.available.get(model_id)?.meta.as_ref()?;
         meta.get("totalContextTokens")
             .and_then(|value| match value {
                 serde_json::Value::Number(number) => number.as_u64(),
@@ -83,10 +107,20 @@ impl ModelState {
             })
     }
 
-    /// Whether the current model accepts image input, read from the model's `meta` (the ACP extension point, same source as `totalContextTokens`).
-    /// Honors an explicit `acceptsImages` bool, else an `inputModalities` array containing `"image"`.
-    /// DEFAULTS TO `true` when neither key is present: all current Grok models accept images, so nothing is suppressed today.
-    /// Once the ACP server populates the key, non-vision models get suppressed.
+    /// Total context window tokens for the current model (if available).
+    fn current_context_window_tokens(&self) -> Option<u64> {
+        self.context_window_for(self.current.as_ref()?)
+    }
+
+    /// Whether the current model accepts image input, read from the model's
+    /// `meta` (the ACP extension point — same source as `totalContextTokens`).
+    ///
+    /// Honors an explicit `acceptsImages` bool, else an `inputModalities` array
+    /// containing `"image"`. DEFAULTS TO `true` when neither key is present:
+    /// correct today (all current Grok models accept images, so nothing is
+    /// suppressed) and forward-compatible (suppresses non-vision models once the
+    /// ACP server populates the key). Populating that key server-side is a
+    /// separate change.
     pub fn current_model_accepts_images(&self) -> bool {
         let Some(meta) = self
             .current
@@ -122,6 +156,34 @@ impl ModelState {
     /// Leaves `current` and `reasoning_effort` alone; those change only via `/model`, create, or load.
     pub fn update_catalog(&mut self, new_available: IndexMap<acp::ModelId, acp::ModelInfo>) {
         self.available = new_available;
+    }
+
+    /// Replace the available-model list and re-resolve `current` against a
+    /// fallback when the catalog drops it (Hyper config-catalog reload path).
+    pub fn update_catalog_with_fallback(
+        &mut self,
+        new_available: IndexMap<acp::ModelId, acp::ModelInfo>,
+        fallback_current: Option<acp::ModelId>,
+    ) {
+        let previous_current_model = self.current.clone();
+        self.available = new_available;
+        if let Some(ref id) = self.current {
+            if !self.available.contains_key(id) {
+                self.current = fallback_current;
+            }
+        } else {
+            self.current = fallback_current;
+        }
+        // The models/update broadcast carries each model's static default effort,
+        // not this session's choice; only re-derive when the model changed so a
+        // catalog refresh can't clobber a user-set effort.
+        if self.current != previous_current_model {
+            self.reasoning_effort = self
+                .current
+                .as_ref()
+                .and_then(|id| self.available.get(id))
+                .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref()));
+        }
     }
 
     /// Set the current model and resolve reasoning effort from catalog meta.
@@ -224,15 +286,42 @@ impl ModelState {
             })
     }
 
-    /// Resolve a user-supplied name to a `ModelId` via case-insensitive ASCII match against the catalog.
+    /// Resolve a user-supplied name to a `ModelId` via case-insensitive
+    /// ASCII match against the catalog.
+    ///
+    /// Catalog **ids** win over display names (so `zai-coding-cn/glm-5.2` is
+    /// unambiguous when several rows share the label "GLM-5.2"). Display-name
+    /// matches only succeed when exactly one model uses that name; collisions
+    /// return `None` so the caller can ask the user to pick a provider-scoped
+    /// id instead of silently routing to the first catalog entry.
     pub fn resolve_by_name_or_id(&self, query: &str) -> Option<acp::ModelId> {
-        self.available.iter().find_map(|(id, info)| {
-            if info.name.eq_ignore_ascii_case(query) || id.0.as_ref().eq_ignore_ascii_case(query) {
-                Some(id.clone())
-            } else {
-                None
+        if let Some((id, _)) = self
+            .available
+            .iter()
+            .find(|(id, _)| id.0.as_ref().eq_ignore_ascii_case(query))
+        {
+            return Some(id.clone());
+        }
+        let mut name_match: Option<acp::ModelId> = None;
+        for (id, info) in &self.available {
+            if info.name.eq_ignore_ascii_case(query) {
+                if name_match.is_some() {
+                    return None; // ambiguous display name
+                }
+                name_match = Some(id.clone());
             }
-        })
+        }
+        name_match
+    }
+
+    /// All catalog ids whose display name matches `query` (case-insensitive).
+    /// Used for ambiguous-name error messages.
+    pub fn ids_matching_name(&self, query: &str) -> Vec<acp::ModelId> {
+        self.available
+            .iter()
+            .filter(|(_, info)| info.name.eq_ignore_ascii_case(query))
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     pub fn display_name_for(&self, id: &acp::ModelId) -> String {
@@ -242,16 +331,22 @@ impl ModelState {
             .unwrap_or_else(|| id.0.to_string())
     }
 
-    /// Cycle to the next model.
+    /// Cycle to the next usable model. Locked platform models (credential-less
+    /// BYOK entries shown for discovery) are skipped — they can't sample.
     pub fn next_model(&self) -> Option<acp::ModelId> {
-        if self.available.is_empty() {
+        let usable: Vec<&acp::ModelId> = self
+            .available
+            .iter()
+            .filter(|(_, info)| platform_lock(info).is_none())
+            .map(|(id, _)| id)
+            .collect();
+        if usable.is_empty() {
             None
         } else if let Some(ref current) = self.current {
-            let idx = self.available.get_index_of(current)?;
-            let idx = (idx + 1) % self.available.len();
-            Some(self.available.get_index(idx)?.0.clone())
+            let idx = usable.iter().position(|id| *id == current)?;
+            Some(usable[(idx + 1) % usable.len()].clone())
         } else {
-            Some(self.available.first()?.0.clone())
+            usable.first().map(|id| (*id).clone())
         }
     }
 }
@@ -275,6 +370,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     available: models,
                     current: current_model,
                     reasoning_effort,
+                    reload_config_on_model_command: false,
                     context_window_override: None,
                 }
             })
@@ -310,10 +406,112 @@ mod tests {
     }
 
     #[test]
+    fn context_window_for_reads_target_model_metadata() {
+        let id = acp::ModelId::new(Arc::from("small-model"));
+        let mut state = ModelState::default();
+        state.available.insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "Small Model".to_string()).meta(
+                serde_json::json!({ "totalContextTokens": 128_000 })
+                    .as_object()
+                    .cloned(),
+            ),
+        );
+        assert_eq!(state.context_window_for(&id), Some(128_000));
+    }
+
+    #[test]
+    fn resolve_by_name_or_id_prefers_id_and_rejects_ambiguous_names() {
+        let mut state = ModelState::default();
+        let zai = acp::ModelId::new(Arc::from("zai-coding-cn/glm-5.2"));
+        let ollama = acp::ModelId::new(Arc::from("ollama/glm-5.2"));
+        state.available.insert(
+            zai.clone(),
+            acp::ModelInfo::new(zai.clone(), "GLM-5.2".to_string()),
+        );
+        state.available.insert(
+            ollama.clone(),
+            acp::ModelInfo::new(ollama.clone(), "GLM-5.2".to_string()),
+        );
+
+        assert_eq!(
+            state.resolve_by_name_or_id("zai-coding-cn/glm-5.2"),
+            Some(zai)
+        );
+        assert_eq!(state.resolve_by_name_or_id("GLM-5.2"), None);
+        assert_eq!(state.ids_matching_name("glm-5.2").len(), 2);
+    }
+
+    #[test]
     fn test_next_model_cycles() {
         let state = sample_models();
         let next = state.next_model().unwrap();
         assert_eq!(next.0.as_ref(), "model-b");
+    }
+
+    #[test]
+    fn next_model_skips_locked_platform_models() {
+        let mut state = sample_models();
+        let locked_id = acp::ModelId::new(Arc::from("deepseek/deepseek-v4-flash"));
+        let meta = serde_json::json!({
+            "requiresApiKey": true,
+            "platform": "deepseek",
+            "platformName": "DeepSeek",
+            "apiKeyEnv": ["DEEPSEEK_API_KEY"],
+            "setupHint": "export DEEPSEEK_API_KEY=…",
+        })
+        .as_object()
+        .cloned();
+        state.available.insert(
+            locked_id,
+            acp::ModelInfo::new(
+                acp::ModelId::new(Arc::from("deepseek/deepseek-v4-flash")),
+                "DeepSeek V4 Flash".to_string(),
+            )
+            .meta(meta),
+        );
+        // model-a → model-b (skipping the locked row appended after it).
+        let next = state.next_model().unwrap();
+        assert_eq!(next.0.as_ref(), "model-b");
+        // model-b wraps to model-a, never landing on the locked entry.
+        let mut state = state;
+        state.current = Some(acp::ModelId::new(Arc::from("model-b")));
+        let next = state.next_model().unwrap();
+        assert_eq!(next.0.as_ref(), "model-a");
+    }
+
+    #[test]
+    fn usable_model_choices_excludes_locked_platform_models() {
+        let mut state = sample_models();
+        let locked_id = acp::ModelId::new(Arc::from("deepseek/deepseek-v4-flash"));
+        let meta = serde_json::json!({
+            "requiresApiKey": true,
+            "platform": "deepseek",
+            "platformName": "DeepSeek",
+            "apiKeyEnv": ["DEEPSEEK_API_KEY"],
+            "setupHint": "export DEEPSEEK_API_KEY=…",
+        })
+        .as_object()
+        .cloned();
+        state.available.insert(
+            locked_id,
+            acp::ModelInfo::new(
+                acp::ModelId::new(Arc::from("deepseek/deepseek-v4-flash")),
+                "DeepSeek V4 Flash".to_string(),
+            )
+            .meta(meta),
+        );
+        let choices = usable_model_choices(&state);
+        assert_eq!(choices.len(), 2);
+        assert!(
+            choices.iter().all(|(id, _)| !id.starts_with("deepseek/")),
+            "credential-less platform models must not be offered"
+        );
+        assert!(
+            choices
+                .iter()
+                .any(|(id, name)| id == "model-a" && name == "Model A")
+        );
     }
 
     #[test]

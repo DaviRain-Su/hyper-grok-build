@@ -1,6 +1,8 @@
 //! ConversationRequest assembly — image compaction, pruning, repair, memory injection.
 
-use xai_grok_sampling_types::{ConversationItem, ConversationRequest, ToolSpec, TraceContext};
+use xai_grok_sampling_types::{
+    ConversationItem, ConversationRequest, ReasoningModelIdentity, ToolSpec, TraceContext,
+};
 
 use super::ChatStateActor;
 use crate::events::ChatStateEvent;
@@ -98,7 +100,7 @@ impl ChatStateActor {
             temperature: self.state.sampling_config.temperature,
             max_output_tokens: self.state.sampling_config.max_completion_tokens,
             top_p: self.state.sampling_config.top_p,
-            x_grok_conv_id: Some(conv_id),
+            x_grok_conv_id: Some(conv_id.clone()),
             x_grok_req_id: Some(req_id),
             x_grok_session_id: None,
             x_grok_turn_idx: None,
@@ -106,10 +108,23 @@ impl ChatStateActor {
             x_grok_agent_id: None,
             x_grok_deployment_id: None,
             x_grok_user_id: None,
+            reasoning_model_identity: Some(ReasoningModelIdentity::new(
+                self.state.sampling_config.model.clone(),
+                self.state.sampling_config.api_backend.clone(),
+                &self.state.sampling_config.base_url,
+            )),
             trace,
-            prompt_cache_key: None,
+            // OpenAI Responses + Chat Completions sticky key for prefix-cache
+            // affinity (session id). Turn code may overwrite with the live
+            // session id; Anthropic Messages ignores this field.
+            prompt_cache_key: Some(xai_grok_sampling_types::clamp_prompt_cache_key(&conv_id)),
             reasoning_effort: self.state.sampling_config.reasoning_effort,
             json_schema: None,
+            kimi_dialect: None,
+            request_compat: self.state.sampling_config.request_compat.clone(),
+            prompt_cache_retention: None,
+            bedrock_request_metadata: Default::default(),
+            bedrock_headers: Default::default(),
             // Execute completed tool calls on a Length-truncated turn instead
             // of failing it; text-only salvage stays behind `CompletePartial`.
             length_policy: xai_grok_sampling_types::LengthPolicy::CompleteToolCalls,

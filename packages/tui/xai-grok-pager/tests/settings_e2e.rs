@@ -66,6 +66,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "voice_keybind_enabled",
     "voice_capture_mode",
     "voice_stt_language",
+    "language",
     // Contextual-hints group and its per-tip child toggles (exercised via the group sub-sheet, not as top-level rows)
     "contextual_hints",
     "contextual_hints.undo",
@@ -1898,6 +1899,7 @@ fn registry_kind_membership_through_pr_14() {
             "follow_up_behavior",
             "hunk_tracker_mode",
             "keep_text_selection",
+            "language",
             "permission_mode",
             "plan_mode",
             "render_mermaid",
@@ -1968,6 +1970,7 @@ fn enum_settings_membership_through_pr_14() {
             "follow_up_behavior",
             "hunk_tracker_mode",
             "keep_text_selection",
+            "language",
             "permission_mode",
             "plan_mode",
             "render_mermaid",
@@ -2043,6 +2046,7 @@ fn defaults_round_trip_through_registry() {
             "voice_keybind_enabled" => SettingValue::Bool(true),
             "voice_capture_mode" => SettingValue::Enum("hold"),
             "voice_stt_language" => SettingValue::Enum("en"),
+            "language" => SettingValue::Enum("auto"),
             "plan_mode" => SettingValue::Enum("off"),
             "show_tips" => SettingValue::Bool(true),
             "auto_update" => SettingValue::Bool(true),
@@ -2650,6 +2654,19 @@ fn pr4_theme_picker_esc_dispatches_revert_action() {
 /// Also exercises EVERY choice (not just the first Down), so a refactor that routes correctly for choice 0 but breaks for choice N>0 gets caught.
 #[test]
 fn pr4_picker_dispatches_each_theme_settings_action_variant() {
+    let _theme_guard = xai_grok_pager::theme::cache::test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    xai_grok_pager::theme::color_support::force_level_for_test(Some(
+        xai_grok_pager::theme::color_support::ColorLevel::TrueColor,
+    ));
+    struct ColorLevelGuard;
+    impl Drop for ColorLevelGuard {
+        fn drop(&mut self) {
+            xai_grok_pager::theme::color_support::force_level_for_test(None);
+        }
+    }
+    let _color_level_guard = ColorLevelGuard;
     let reg = SettingsRegistry::defaults();
 
     for key in &["theme", "auto_dark_theme", "auto_light_theme"] {
@@ -6213,6 +6230,158 @@ fn mouse_click_on_voice_stt_language_indicator_opens_picker_in_one_click() {
     match &s.mode() {
         SettingsModalMode::PickingEnum { key, .. } => assert_eq!(*key, "voice_stt_language"),
         _ => panic!("value click on voice_stt_language must enter PickingEnum"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// language (SHELL Enum, Appearance, live-applied, no preview).
+// Catalog [auto, en, zh-CN]; `auto` follows the OS locale. Mirrors the
+// screen_mode enum tests (keyboard ↔ mouse parity).
+// ---------------------------------------------------------------------------
+
+/// Enter on the `language` row opens the picker seeded at the default `auto`
+/// (UiConfig.language is None → canonical auto).
+#[test]
+fn enter_on_language_row_enters_picking_enum() {
+    let mut s = make_state();
+    navigate_to(&mut s, "language");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "Enter on language row must transition to PickingEnum, got {outcome:?}"
+    );
+    match s.mode() {
+        SettingsModalMode::PickingEnum {
+            key,
+            original_value,
+            ..
+        } => {
+            assert_eq!(key, "language");
+            assert_eq!(
+                original_value,
+                SettingValue::Enum("auto"),
+                "default UiConfig language=None → original 'auto'"
+            );
+        }
+        other => panic!("expected PickingEnum mode, got {other:?}"),
+    }
+}
+
+/// Up/Down/j/k nav in the `language` picker MUST NOT dispatch a preview
+/// Action — `supports_preview: false` (locale applies on commit only).
+#[test]
+fn language_picker_nav_does_not_dispatch_preview() {
+    for nav_key in &[
+        KeyCode::Down,
+        KeyCode::Char('j'),
+        KeyCode::Up,
+        KeyCode::Char('k'),
+    ] {
+        let mut s = make_state();
+        navigate_to(&mut s, "language");
+        let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
+        assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+
+        if matches!(nav_key, KeyCode::Up | KeyCode::Char('k')) {
+            let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+        }
+
+        let outcome = handle_settings_key(&mut s, &press(*nav_key));
+        assert!(
+            matches!(outcome, SettingsKeyOutcome::Changed),
+            "Nav key {nav_key:?} in language picker MUST NOT dispatch a preview \
+             Action. Got {outcome:?}",
+        );
+        assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+    }
+}
+
+/// Enter on the focused picker choice commits via `Action::SetLanguage(String)`
+/// carrying the registry canonical. Seed is `auto` (index 0); one Down moves
+/// to `en` (index 1).
+#[test]
+fn language_picker_enter_dispatches_set_commit() {
+    let mut s = make_state();
+    navigate_to(&mut s, "language");
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    match outcome {
+        SettingsKeyOutcome::Action(Action::SetLanguage(lang)) => {
+            assert_eq!(lang, "en", "Enter must commit `en` → SetLanguage(\"en\")");
+        }
+        other => panic!("expected Action::SetLanguage commit, got {other:?}"),
+    }
+    assert!(
+        matches!(s.mode(), SettingsModalMode::Browse),
+        "Enter commit must return to Browse"
+    );
+}
+
+/// The choices catalog is EXACTLY {auto, en, de, es, fr, ja, ko, pt-BR, ru,
+/// zh-CN, zh-TW} in order — contract with `i18n::canonical_language`,
+/// `i18n::SUPPORTED_LOCALES`, and the `locales/*.yml` bundles on disk.
+#[test]
+fn language_choices_use_canonical_strings() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg.find("language").unwrap();
+    let canonicals: Vec<&str> = match &meta.kind {
+        SettingKind::Enum { choices, .. } => choices.iter().map(|c| c.canonical).collect(),
+        _ => panic!("language must be Enum"),
+    };
+    assert_eq!(
+        canonicals,
+        vec![
+            "auto", "en", "de", "es", "fr", "ja", "ko", "pt-BR", "ru", "zh-CN", "zh-TW"
+        ],
+        "language catalog drift — adding a language requires a new \
+         locales/<id>.yml bundle, an i18n::canonical_language arm, and an \
+         i18n::SUPPORTED_LOCALES entry",
+    );
+    // Every non-auto choice must have a matching bundle registered in
+    // `SUPPORTED_LOCALES`.
+    for c in canonicals.iter().skip(1) {
+        assert!(
+            xai_grok_pager::i18n::SUPPORTED_LOCALES.contains(c),
+            "language choice `{c}` has no entry in i18n::SUPPORTED_LOCALES",
+        );
+    }
+    match &meta.kind {
+        SettingKind::Enum {
+            supports_preview, ..
+        } => {
+            assert!(
+                !*supports_preview,
+                "language applies on commit — no preview"
+            );
+        }
+        _ => unreachable!(),
+    }
+    // Live-applied via rust_i18n::set_locale at commit; no restart needed.
+    assert!(!meta.restart_required, "language must not require restart");
+}
+
+/// Value-column click on the language row opens the picker in ONE click
+/// (mouse ↔ keyboard parity).
+#[test]
+fn mouse_click_on_language_indicator_opens_picker_in_one_click() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "language") as u16;
+
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        72,
+        row_y,
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "value click must open picker in one click, got: {outcome:?}",
+    );
+    match s.mode() {
+        SettingsModalMode::PickingEnum { key, .. } => assert_eq!(key, "language"),
+        _ => panic!("value click on language must enter PickingEnum"),
     }
 }
 

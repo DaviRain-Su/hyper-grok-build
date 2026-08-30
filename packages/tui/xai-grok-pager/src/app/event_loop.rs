@@ -1209,37 +1209,24 @@ pub(crate) async fn run(
                 crate::acp::AuthStartMode::Command => super::app_view::AuthMode::Command,
             };
         } else {
-            // --force-login: find the grok.com method from the advertised list
-            let grok_com = connection
-                .auth_methods
-                .iter()
-                .find(|m| m.id().0.as_ref() == "grok.com");
-            if let Some(method) = grok_com {
-                app.login_label = Some(method.name().to_string());
-                app.login_method_id = Some(method.id().clone());
-                let is_provider = method
-                    .meta()
-                    .as_ref()
-                    .and_then(|v| v.get("external_provider"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                app.auth_start_mode = if is_provider {
-                    super::app_view::AuthMode::Command
-                } else {
-                    super::app_view::AuthMode::Pending
-                };
-            } else {
-                // No grok.com method available, use the first method as fallback
-                let first = &connection.auth_methods[0];
-                app.login_label = Some(first.name().to_string());
-                app.login_method_id = Some(first.id().clone());
-                app.auth_start_mode = super::app_view::AuthMode::Pending;
-            }
+            // --force-login seeds the same xAI-only default used by the welcome
+            // Login action. Do not display a third-party method as the default;
+            // dispatch_login re-resolves this method and fails closed if absent.
+            let (label, method_id, start_mode) =
+                crate::acp::find_xai_interactive_login_method(&connection.auth_methods);
+            app.login_label = label;
+            app.login_method_id = method_id;
+            app.auth_start_mode = match start_mode {
+                crate::acp::AuthStartMode::Pending => super::app_view::AuthMode::Pending,
+                crate::acp::AuthStartMode::Command => super::app_view::AuthMode::Command,
+            };
         }
 
-        // Skip the login splash screen: auto-trigger login immediately by reusing dispatch_login
-        // Effects are stashed and drained after the initial render so the user sees the auth UI right away
-        // Empty auth_methods (preferred_method pin with no credentials) is fail-closed: do not invent grok.com / auto-start OIDC
+        // Skip the login splash screen — auto-trigger login immediately
+        // by reusing the xAI-only dispatch_login. Effects are stashed and drained after
+        // the initial render so the user sees the auth UI right away.
+        // Empty auth_methods (preferred_method pin with no credentials) is
+        // fail-closed: do not invent grok.com / auto-start OIDC.
         tracing::info!(
             method_id = ?app.login_method_id,
             methods_empty = connection.auth_methods.is_empty(),
@@ -1256,6 +1243,17 @@ pub(crate) async fn run(
                     xai_grok_shell::agent::auth_method::PREFERRED_API_KEY_UNAVAILABLE.to_string(),
                 ),
             };
+            vec![]
+        } else if cfg!(feature = "community-build") {
+            // Hyper: do **not** auto-launch Grok OAuth on first open. Land on
+            // the login splash so the user can pick `/login`, `/login openai`,
+            // `/login kimi`, API keys, or config.toml BYOK when they choose —
+            // instead of being pushed straight into a grok.com browser flow.
+            app.auth_state = super::app_view::AuthState::Pending { error: None };
+            tracing::info!(
+                method_id = ?app.login_method_id,
+                "community-build: deferred login until user chooses a method"
+            );
             vec![]
         } else {
             dispatch::dispatch(Action::Login, &mut app)
@@ -1296,6 +1294,12 @@ pub(crate) async fn run(
     }
     app.apply_voice_mode_enabled(voice_mode_enabled);
 
+    // Codex Live gate (independent of the xAI /voice tier).
+    #[cfg(feature = "codex-live")]
+    {
+        let live_mode_enabled = crate::live::gate::resolve_codex_live_live();
+        app.apply_live_mode_enabled(live_mode_enabled);
+    }
     // Fallback: prefetch may have gate info the shell's AuthMeta missed.
     // Errs on the side of blocking if stale.
     if app.gate.is_none()
@@ -1334,6 +1338,7 @@ pub(crate) async fn run(
         claude: compat.claude.sessions,
         codex: compat.codex.sessions,
         cursor: compat.cursor.sessions,
+        omp: compat.omp.sessions,
     };
 
     // Load notification config from [ui.notifications] in config.toml.
@@ -1429,7 +1434,8 @@ pub(crate) async fn run(
             managed_config.as_ref(),
             remote_announcements,
         );
-        app.active_announcements = xai_grok_announcements::filter_expired(announcements);
+        app.active_announcements =
+            app.filter_announcements(xai_grok_announcements::filter_expired(announcements));
         if !app.active_announcements.is_empty() {
             use rand::Rng;
             let idx = rand::rng().random_range(0..app.active_announcements.len());
@@ -1562,8 +1568,12 @@ pub(crate) async fn run(
 
     // Seed app state from disk once at the I/O boundary so dispatch stays sans-IO
     app.current_ui = load_initial_ui_config();
-    // Here rather than from the row's own update: that runs only once an agent view is on screen
-    // A welcome-only session would otherwise be missing from the denominator adoption is measured against
+    // Apply the configured UI language (`[ui].language`, default `auto`)
+    // before the first render so every `t!` lookup resolves correctly.
+    crate::i18n::init(app.current_ui.language.as_deref());
+    // Here rather than from the row's own update: that runs only once an agent
+    // view is on screen, so a welcome-only session would be missing from the
+    // denominator adoption is measured against.
     crate::app::status_line::metrics::global().report_config(&app.current_ui.status_line);
     // Field-tolerant: a whole-`UiConfig` default (malformed unrelated `[ui]` field) must not wipe a valid `show_timeline`
     // Nor may it leave appearance / cache / `current_ui` disagreeing
@@ -1805,6 +1815,14 @@ pub(crate) async fn run(
     let mut voice_rx = None::<tokio::sync::mpsc::Receiver<xai_grok_voice::VoiceEvent>>;
     let voice_auth_factory = connection.auth_manager.clone();
 
+    // Codex Live event receiver (bounded, lowest-priority arm). `None` when no
+    // Live session is active. Spawned lazily on `/live` ColdStart. Always
+    // declared so the select! arm is always present; the type resolves to a
+    // placeholder when `codex-live` is off.
+    #[cfg(feature = "codex-live")]
+    let mut live_rx: Option<tokio::sync::mpsc::Receiver<crate::live::LiveEvent>> = None;
+    #[cfg(not(feature = "codex-live"))]
+    let _live_rx: Option<std::convert::Infallible> = None;
     // Animation tick: only scheduled when there are running entries.
     let mut tick_interval = tick_interval;
     let mut animation_tick_at: Option<Instant> = None;
@@ -2231,8 +2249,67 @@ pub(crate) async fn run(
         // Stop voice if the user has left the recording session (see method).
         app.enforce_voice_session_bound();
 
-        // Keep the /gboom keyboard layer in sync with whether the game is open
-        // WASD then emit releases while it runs and the layer is popped on every close path (Esc, game-over dismiss, session switch)
+        // Codex Live: drain pending commands that couldn't be sent via
+        // try_send (channel full). Critical commands (CompleteDelegation,
+        // Shutdown) are queued reliably and delivered in order.
+        #[cfg(feature = "codex-live")]
+        if app.live_runtime.drain_pending_cmds() > 0 {
+            presenter.request_presentation(&mut app, terminal, false);
+        }
+
+        // Codex Live: enforce the session binding (stop on navigation away).
+        #[cfg(feature = "codex-live")]
+        dispatch::enforce_live_session_bound(&mut app);
+
+        // Codex Live: resume a PendingUnbound start if the session is now
+        // established (after CreateSession completed).
+        #[cfg(feature = "codex-live")]
+        if dispatch::resume_pending_live(&mut app) {
+            presenter.request_presentation(&mut app, terminal, false);
+        }
+
+        // Codex Live: lazy pipeline spawn on ColdStart (like voice).
+        #[cfg(feature = "codex-live")]
+        {
+            if let crate::live::state::LiveState::ColdStart {
+                agent_id,
+                session_id,
+                generation,
+                draft,
+            } = app.live_runtime.state.clone()
+            {
+                // Spawn the Live pipeline.
+                let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
+                let (event_tx, event_rx) = tokio::sync::mpsc::channel(128);
+                let live_config = crate::live::config::build_live_config_default(&session_id);
+                let live_auth = crate::live::auth::build_live_auth();
+                tokio::spawn(crate::live::run_live_session(
+                    live_config,
+                    live_auth,
+                    cmd_rx,
+                    event_tx,
+                ));
+                app.live_runtime.cmd_tx = Some(cmd_tx);
+                live_rx = Some(event_rx);
+                // Bind the delegation broker to this session+agent+generation.
+                app.live_runtime.broker =
+                    crate::live::broker::LiveDelegationBroker::new(generation);
+                app.live_runtime.broker.bind(session_id.clone(), agent_id);
+                app.live_runtime.state = crate::live::state::LiveState::Active {
+                    agent_id,
+                    session_id,
+                    generation,
+                    draft,
+                };
+                crate::live::state::set_live_active(true);
+                tracing::info!("codex live pipeline started (/live)");
+                presenter.request_presentation(&mut app, terminal, false);
+            }
+        }
+
+        // Keep the /gboom keyboard layer in sync with whether the game is
+        // open, so WASD emit releases while it runs and the layer is popped
+        // on every close path (Esc, game-over dismiss, session switch).
         let want_gboom_keyboard = app.gboom_active();
         if want_gboom_keyboard {
             if !gboom_keyboard_pushed {
@@ -2364,6 +2441,65 @@ pub(crate) async fn run(
             match recap_poll_at {
                 Some(at) => sleep_until(at).await,
                 None => std::future::pending().await,
+            }
+        };
+
+        // Codex Live: capacity-aware critical-command drain. When a final
+        // `CompleteDelegation` (or `Shutdown`) couldn't fit via the loop-top
+        // `try_send` reaper, await the bounded channel's `send` — which
+        // resolves the instant the receiver frees capacity — racing a short
+        // timeout. This guarantees a stranded final command eventually sends
+        // even when no unrelated app event arrives to wake the loop, without
+        // indefinitely blocking the TUI (the timeout re-arms an explicit
+        // retry each iteration).
+        //
+        // **Cancellation-safety:** the head critical command is SNAPSHOTTED
+        // (cloned) without removal, carrying a stable sequence ID. The entry
+        // stays in `pending_cmds` until a confirmed successful `send().await`,
+        // at which point `forget_pending_critical(seq)` removes exactly that
+        // ID once. If a higher-priority `tokio::select` arm wins while the
+        // send is pending (cancellation), the future is dropped but the entry
+        // remains queued — the final command is never lost. On timeout the
+        // entry likewise stays queued for the next iteration. The same final
+        // command is never sent twice: a successful send consumes the slot, and
+        // the loop-top `drain_pending_cmds` reaper may also deliver it via
+        // `try_send` (in which case `forget_pending_critical` is a no-op on an
+        // already-removed entry).
+        let live_critical_drain = async {
+            #[cfg(feature = "codex-live")]
+            {
+                use tokio::time::timeout;
+                const LIVE_CRITICAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(120);
+                match app.live_runtime.snapshot_pending_critical_head() {
+                    Some((seq, cmd, tx)) => {
+                        match timeout(LIVE_CRITICAL_DRAIN_TIMEOUT, tx.send(cmd)).await {
+                            Ok(Ok(())) => {
+                                // Confirmed send — remove exactly this entry by
+                                // its sequence ID.
+                                app.live_runtime.forget_pending_critical(seq);
+                            }
+                            Ok(Err(_closed)) => {
+                                // The pipeline receiver is gone; retrying this
+                                // immediately would hot-loop forever. No queued
+                                // command can be delivered through this channel.
+                                app.live_runtime.cmd_tx = None;
+                                app.live_runtime.pending_cmds.clear();
+                            }
+                            Err(_elapsed) => {
+                                // Timed out: the entry was never removed and is
+                                // retried on the next iteration.
+                            }
+                        }
+                        // If this future is cancelled by another select arm,
+                        // the entry likewise stays queued because mutation only
+                        // happens after a resolved send outcome.
+                    }
+                    None => std::future::pending().await,
+                }
+            }
+            #[cfg(not(feature = "codex-live"))]
+            {
+                std::future::pending::<()>().await;
             }
         };
 
@@ -2761,6 +2897,28 @@ pub(crate) async fn run(
                 }
                 // Always re-arm: a cheap no-op fire while focused / not-yet-eligible.
                 recap_poll_at = Some(Instant::now() + RECAP_POLL_INTERVAL);
+            }
+
+            // Codex Live: capacity freed (or short retry timeout fired) for a
+            // pending critical command. The actual send is reaped by the
+            // loop-top `drain_pending_cmds` try_send on the next iteration;
+            // this arm only provides the wake so a full channel can't strand a
+            // final `CompleteDelegation` with no unrelated app event. Inert
+            // (pending forever) when nothing critical is pending or codex-live
+            // is off.
+            _ = live_critical_drain => {
+                #[cfg(feature = "codex-live")]
+                {
+                    // The arm already delivered the head critical command (or
+                    // returned it on timeout). Reap any remaining non-critical
+                    // / now-fittable commands via the loop-top reaper.
+                    let drained = app.live_runtime.drain_pending_cmds();
+                    if drained > 0 {
+                        presenter.request_presentation(&mut app, terminal, false);
+                    }
+                }
+                // When codex-live is off the drain future is forever-pending,
+                // so this arm never fires; no body is needed.
             }
 
             _ = load_barrier_tick => {}
@@ -3166,6 +3324,72 @@ pub(crate) async fn run(
                     }
                 }
             }
+
+            // Codex Live — THE LAST (lowest-priority) arm, after voice. Live
+            // events (phase, levels, transcript, delegation) are serviced only
+            // when nothing else is pending. A bounded 128-slot channel prevents
+            // backpressure from starving higher-priority arms. Delegations
+            // submit through the normal Action dispatch (preserving the draft).
+            // When `codex-live` is off, `live_rx` is `Infallible` and this arm
+            // never fires.
+            ev = async {
+                #[cfg(feature = "codex-live")]
+                {
+                    match live_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }
+                #[cfg(not(feature = "codex-live"))]
+                {
+                    std::future::pending::<Option<std::convert::Infallible>>().await
+                }
+            } => {
+                #[cfg(feature = "codex-live")]
+                {
+                    match ev {
+                        Some(ev) => {
+                            let (needs_draw, actions) =
+                                crate::live::handle::handle_live_event(&mut app, ev);
+                            // Dispatch any actions (e.g. LiveDelegationSubmit).
+                            for action in actions {
+                                let effs = dispatch::dispatch(action, &mut app);
+                                if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                                    break;
+                                }
+                            }
+                            if needs_draw {
+                                schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                                let now = Instant::now();
+                                if presenter.request_throttled(now, min_draw_interval) {
+                                    app.update_notifications();
+                                }
+                            }
+                        }
+                        // Closed channel: revert to pending() (avoid hot-loop).
+                        None => {
+                            live_rx = None;
+                            let was_active = app.live_active();
+                            // `Error` normally precedes `Closed`, but retain its
+                            // cause here too in case terminal `Closed` delivery
+                            // timed out and the channel ended directly.
+                            let terminal_error =
+                                app.live_runtime.visualizer.error_message.clone();
+                            app.live_reset();
+                            if was_active {
+                                app.show_toast(&crate::live::handle::live_stop_message(
+                                    terminal_error.as_deref(),
+                                ));
+                            }
+                            presenter.request(false);
+                        }
+                    }
+                }
+                #[cfg(not(feature = "codex-live"))]
+                {
+                    let _ = ev;
+                }
+            }
         }
 
         // Flush after observing, not as a select arm, so it can neither starve nor split a boundary stall.
@@ -3185,6 +3409,12 @@ pub(crate) async fn run(
         presenter.present_if_dirty(&mut app, terminal);
     }
 
+    // Every loop-exit rail (including ACP/leader disconnect) tears Live down
+    // explicitly rather than relying only on sender Drop. This restores the
+    // draft, finalizes a partial spoken transcript, clears the process-global
+    // active flag, and releases microphone/speaker resources deterministically.
+    #[cfg(feature = "codex-live")]
+    crate::live::acp_bridge::on_session_disconnect(&mut app);
     flush_pending_stall(&mut stall_rollup);
 
     app.notification_service.shutdown();

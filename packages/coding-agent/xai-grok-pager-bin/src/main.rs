@@ -94,14 +94,15 @@ fn command_needs_pre_sandbox_policy_heal(command: Option<&Command>) -> bool {
     match command {
         None
         | Some(Command::Agent(_))
-        | Some(Command::Dashboard)
+        | Some(Command::Dashboard(_))
         | Some(Command::Models)
         | Some(Command::Worktree(_)) => true,
+        Some(Command::Codex(_)) | Some(Command::Nexus { .. }) | Some(Command::Web(_)) => false,
         Some(
             Command::Inspect { .. }
             | Command::Doctor(_)
             | Command::Leader(_)
-            | Command::Logout
+            | Command::Logout { .. }
             | Command::Login { .. }
             | Command::Mcp(_)
             | Command::Plugin(_)

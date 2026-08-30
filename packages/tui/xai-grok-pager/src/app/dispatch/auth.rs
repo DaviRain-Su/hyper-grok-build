@@ -1,5 +1,7 @@
 //! Login, logout, account switching, and auth-code submission dispatchers.
 
+use agent_client_protocol as acp;
+
 use super::ctx::{restore_auth_return_view, show_welcome};
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
 use super::router::dispatch;
@@ -52,9 +54,20 @@ fn no_login_method_error(app: &AppView) -> String {
     }
 }
 
-/// Abort any in-flight Authenticate/SwitchAccount task *and* its URL poll (single-flight).
-/// A new login must not stack device-code mints or let a stale poll steal the successor's URL.
-/// No-op when not authenticating or when the abort handles have not been installed yet.
+fn no_xai_login_method_error(app: &AppView) -> String {
+    if app.auth_methods.is_empty() {
+        xai_grok_shell::agent::auth_method::PREFERRED_API_KEY_UNAVAILABLE.to_string()
+    } else {
+        "No xAI Grok login method is available. Use `/login kimi`, `/login openai`, or \
+         `/login claude` explicitly for a third-party subscription."
+            .to_string()
+    }
+}
+
+/// Abort any in-flight Authenticate/SwitchAccount task *and* its URL poll so a
+/// new login cannot stack device-code mints or have a stale poll steal the
+/// successor's URL (single-flight). No-op when not authenticating or when the
+/// abort handles have not been installed yet.
 fn abort_prior_auth(app: &mut AppView) {
     if let AuthState::Authenticating {
         handle,
@@ -210,22 +223,157 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
     }
 }
 
-/// Start an interactive login flow. Triggered by pressing 'l' on the welcome screen or by the `/login` slash command.
+/// Start the default xAI interactive login flow. Triggered by pressing 'l' on
+/// the welcome screen or by the bare `/login` slash command.
 ///
-/// Only the welcome view renders the auth UI (the external auth provider's sign-in URL and status).
-/// A mid-session invocation therefore stashes the caller's view in `auth_return_view` and switches to `Welcome` so the flow is visible.
-/// The prior view is restored once auth completes or is cancelled.
+/// Explicit `/login kimi`, `/login openai`, and `/login claude` actions use
+/// their dedicated dispatchers below. Re-resolve xAI here on every invocation
+/// so an earlier explicit third-party login cannot silently change bare
+/// `/login` into a different provider.
+///
+/// When invoked mid-session (the active view is an agent/dashboard rather
+/// than the welcome screen), the auth UI — including the external auth
+/// provider's sign-in URL and status — is only rendered by the welcome
+/// view. We therefore stash the caller's view in `auth_return_view` and
+/// switch to `Welcome` so the flow is actually visible; the prior view is
+/// restored once auth completes or is cancelled.
 pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
-    ensure_login_method(app);
+    let (label, method_id, start_mode) =
+        crate::acp::find_xai_interactive_login_method(&app.auth_methods);
+    app.login_label = label;
+    app.login_method_id = method_id;
+    app.auth_start_mode = match start_mode {
+        crate::acp::AuthStartMode::Pending => AuthMode::Pending,
+        crate::acp::AuthStartMode::Command => AuthMode::Command,
+    };
+
     let Some(method_id) = app.login_method_id.clone() else {
         app.auth_state = AuthState::Pending {
-            error: Some(no_login_method_error(app)),
+            error: Some(no_xai_login_method_error(app)),
         };
         return vec![];
     };
+    start_login_with_method(app, method_id, app.auth_start_mode, app.auth_use_oauth)
+}
 
-    // Show the auth UI when triggered from inside a session
-    // `show_welcome` resets ephemeral state here, covering the AuthComplete / cancel-login fallbacks too (`auth_return_view` is only ever set here)
+/// `/providers <platform> <api_key>` — persist a BYOK platform key and restamp.
+pub(super) fn dispatch_set_platform_api_key(
+    app: &mut AppView,
+    platform: String,
+    api_key: String,
+    base_url: Option<String>,
+) -> Vec<Effect> {
+    let label = xai_grok_models::provider_spec(&platform)
+        .map(|provider| provider.display_name.clone())
+        .unwrap_or_else(|| platform.clone());
+    if api_key.is_empty() {
+        app.show_toast(&format!("Clearing API key for {label}…"));
+    } else {
+        app.show_toast(&format!("Saving API key for {label}…"));
+    }
+    vec![Effect::SetPlatformApiKey {
+        platform,
+        api_key,
+        base_url,
+    }]
+}
+
+/// `/login kimi` — Kimi Code subscription device OAuth.
+pub(super) fn dispatch_login_kimi(app: &mut AppView) -> Vec<Effect> {
+    let method_id = acp::AuthMethodId::new(xai_grok_shell::agent::auth_method::KIMI_CODE_METHOD_ID);
+    // Prefer the advertised label when present.
+    if let Some(m) = app
+        .auth_methods
+        .iter()
+        .find(|m| m.id().0.as_ref() == xai_grok_shell::agent::auth_method::KIMI_CODE_METHOD_ID)
+    {
+        app.login_label = Some(m.name().to_string());
+    } else {
+        app.login_label = Some("Kimi Code".to_string());
+    }
+    app.login_method_id = Some(method_id.clone());
+    app.auth_start_mode = AuthMode::Pending;
+    start_login_with_method(app, method_id, AuthMode::Pending, false)
+}
+
+/// `/login openai` — OpenAI Codex (ChatGPT) subscription browser OAuth.
+pub(super) fn dispatch_login_openai_codex(app: &mut AppView) -> Vec<Effect> {
+    let method_id =
+        acp::AuthMethodId::new(xai_grok_shell::agent::auth_method::OPENAI_CODEX_METHOD_ID);
+    if let Some(m) = app
+        .auth_methods
+        .iter()
+        .find(|m| m.id().0.as_ref() == xai_grok_shell::agent::auth_method::OPENAI_CODEX_METHOD_ID)
+    {
+        app.login_label = Some(m.name().to_string());
+    } else {
+        app.login_label = Some("OpenAI Codex".to_string());
+    }
+    app.login_method_id = Some(method_id.clone());
+    app.auth_start_mode = AuthMode::Pending;
+    start_login_with_method(app, method_id, AuthMode::Pending, false)
+}
+
+/// `/login claude` — Anthropic Claude (Pro/Max) subscription browser OAuth.
+pub(super) fn dispatch_login_anthropic_claude(app: &mut AppView) -> Vec<Effect> {
+    let method_id =
+        acp::AuthMethodId::new(xai_grok_shell::agent::auth_method::ANTHROPIC_CLAUDE_METHOD_ID);
+    if let Some(m) = app.auth_methods.iter().find(|m| {
+        m.id().0.as_ref() == xai_grok_shell::agent::auth_method::ANTHROPIC_CLAUDE_METHOD_ID
+    }) {
+        app.login_label = Some(m.name().to_string());
+    } else {
+        app.login_label = Some("Anthropic Claude".to_string());
+    }
+    app.login_method_id = Some(method_id.clone());
+    app.auth_start_mode = AuthMode::Pending;
+    start_login_with_method(app, method_id, AuthMode::Pending, false)
+}
+
+/// `/login radius` — Radius gateway OAuth.
+pub(super) fn dispatch_login_radius(app: &mut AppView) -> Vec<Effect> {
+    let method_id = acp::AuthMethodId::new(xai_grok_shell::agent::auth_method::RADIUS_METHOD_ID);
+    if let Some(m) = app
+        .auth_methods
+        .iter()
+        .find(|m| m.id().0.as_ref() == xai_grok_shell::agent::auth_method::RADIUS_METHOD_ID)
+    {
+        app.login_label = Some(m.name().to_string());
+    } else {
+        app.login_label = Some("Radius".to_string());
+    }
+    app.login_method_id = Some(method_id.clone());
+    app.auth_start_mode = AuthMode::Pending;
+    start_login_with_method(app, method_id, AuthMode::Pending, false)
+}
+
+/// `/login github` — GitHub Copilot subscription device OAuth.
+pub(super) fn dispatch_login_github_copilot(app: &mut AppView) -> Vec<Effect> {
+    let method_id =
+        acp::AuthMethodId::new(xai_grok_shell::agent::auth_method::GITHUB_COPILOT_METHOD_ID);
+    if let Some(m) = app
+        .auth_methods
+        .iter()
+        .find(|m| m.id().0.as_ref() == xai_grok_shell::agent::auth_method::GITHUB_COPILOT_METHOD_ID)
+    {
+        app.login_label = Some(m.name().to_string());
+    } else {
+        app.login_label = Some("GitHub Copilot".to_string());
+    }
+    app.login_method_id = Some(method_id.clone());
+    app.auth_start_mode = AuthMode::Pending;
+    start_login_with_method(app, method_id, AuthMode::Pending, false)
+}
+
+fn start_login_with_method(
+    app: &mut AppView,
+    method_id: acp::AuthMethodId,
+    mode: AuthMode,
+    use_oauth: bool,
+) -> Vec<Effect> {
+    // Surface the auth UI when triggered from inside a session. `show_welcome`
+    // resets ephemeral state here, covering the AuthComplete / cancel-login
+    // fallbacks too (`auth_return_view` is only ever set here).
     if !matches!(app.active_view, ActiveView::Welcome) {
         app.auth_return_view = Some(app.active_view);
         show_welcome(app);
@@ -240,14 +388,14 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
         request_seq,
         handle: None,
         auth_url: None,
-        mode: app.auth_start_mode,
+        mode,
     };
 
     vec![
         Effect::Authenticate {
             request_seq,
             method_id,
-            use_oauth: app.auth_use_oauth,
+            use_oauth,
             force_interactive: true,
         },
         Effect::PollAuthUrl { request_seq },

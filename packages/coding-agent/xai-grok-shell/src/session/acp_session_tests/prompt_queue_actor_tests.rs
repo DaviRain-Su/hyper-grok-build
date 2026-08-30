@@ -1,6 +1,7 @@
 //! Server-authoritative prompt queue.
 use super::support::*;
 use super::*;
+use serial_test::serial;
 
 /// The shared-queue text must use a block's compact `displayText` (e.g. a
 /// locally-expanded `/loop` invocation) rather than the raw expanded wire text,
@@ -1716,6 +1717,7 @@ async fn promote_queued_as_interjections_stops_at_send_now() {
 /// Product gate: with Steer off, a held plain row must not promote at a
 /// safe point (queue stays; no interjection in conversation).
 #[tokio::test]
+#[serial]
 async fn drain_at_safe_point_with_steer_off_does_not_promote_held_row() {
     let local = tokio::task::LocalSet::new();
     local
@@ -1749,6 +1751,7 @@ async fn drain_at_safe_point_with_steer_off_does_not_promote_held_row() {
 /// Product gate: with Steer on, a held plain row promotes and drains into a
 /// synthetic interjection user item.
 #[tokio::test]
+#[serial]
 async fn drain_at_safe_point_with_steer_on_promotes_and_drains_held_row() {
     let local = tokio::task::LocalSet::new();
     local
@@ -1986,6 +1989,7 @@ async fn promote_queued_as_interjections_stops_when_protected_is_next() {
 /// Steer-on safe-point drain must not treat a protected pin as promotable held
 /// work (pair with direct promote tests above).
 #[tokio::test]
+#[serial]
 async fn drain_at_safe_point_with_steer_on_leaves_protected_row_queued() {
     let local = tokio::task::LocalSet::new();
     local
@@ -3018,6 +3022,11 @@ async fn unsupported_backend_search_sends_no_hosted_tool_on_either_channel() {
     local
         .run_until(async {
             let (actor, _rx) = build_actor().await;
+            // Backend search projects only onto Responses-family routes
+            // (see `projected_hosted_tools`); pin the fixture to Responses.
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.api_backend = xai_grok_sampling_types::ApiBackend::Responses;
+            actor.chat_state_handle.update_sampling_config(cfg);
             let configured = xai_grok_sampling_types::WebSearchOptions {
                 allowed_domains: None,
                 excluded_domains: Some(vec!["reddit.com".to_string()]),
@@ -3028,12 +3037,14 @@ async fn unsupported_backend_search_sends_no_hosted_tool_on_either_channel() {
                 }])
                 .await;
 
-            // Model advertises server-side search: the hosted tool rides both channels.
+            // Model advertises server-side search: the hosted tool rides the
+            // hosted_tools channel; WebSearch ships natively (rs::Tool::WebSearch)
+            // so the raw-JSON splice channel stays empty.
             actor.supports_backend_search.set(true);
             assert!(!actor.hosted_tools_for_turn().await.is_empty());
-            assert_eq!(
-                xai_grok_sampling_types::extra_tool_entries(&actor.hosted_tools_for_turn().await).len(),
-                1
+            assert!(
+                xai_grok_sampling_types::extra_tool_entries(&actor.hosted_tools_for_turn().await)
+                    .is_empty()
             );
 
             // Model does not: the gate empties the list before it can reach the wire.
@@ -3061,6 +3072,11 @@ async fn per_turn_tool_overrides_win_over_the_config_web_search_policy() {
     local
         .run_until(async {
             let (actor, _rx) = build_actor().await;
+            // Backend search projects only onto Responses-family routes
+            // (see `projected_hosted_tools`); pin the fixture to Responses.
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.api_backend = xai_grok_sampling_types::ApiBackend::Responses;
+            actor.chat_state_handle.update_sampling_config(cfg);
             // The hosted tool as `build_agent` leaves it: config blocklist already folded in.
             let configured = xai_grok_sampling_types::WebSearchOptions {
                 allowed_domains: None,

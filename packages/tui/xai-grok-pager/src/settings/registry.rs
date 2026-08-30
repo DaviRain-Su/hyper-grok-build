@@ -70,6 +70,25 @@ impl SettingCategory {
             Self::Advanced => "Advanced",
         }
     }
+
+    /// Stable slug for i18n keys: `settings.category.{slug}`.
+    pub fn slug(&self) -> &'static str {
+        match self {
+            Self::Appearance => "appearance",
+            Self::Mouse => "mouse",
+            Self::Editor => "editor",
+            Self::Agent => "agent",
+            Self::Privacy => "privacy",
+            Self::Models => "models",
+            Self::Session => "session",
+            Self::Advanced => "advanced",
+        }
+    }
+
+    /// Translated section-header label (falls back to [`Self::label`]).
+    pub fn label_l10n(&self) -> std::borrow::Cow<'static, str> {
+        crate::i18n::tr_or(&format!("settings.category.{}", self.slug()), self.label())
+    }
 }
 
 /// One choice in an `Enum` setting.
@@ -83,8 +102,34 @@ pub struct EnumChoice {
     pub description: &'static str,
 }
 
-/// Runtime-built enum choice for `SettingKind::DynamicEnum` settings whose choices come from a `PagerLocalSnapshot` at picker-open time.
-/// The fields are owned `String`s because the values come from runtime catalogs.
+impl EnumChoice {
+    /// Translated display name for `setting_key`'s picker sheet
+    /// (`settings.{setting_key}.choice.{canonical}.display`). Brand/proper
+    /// nouns (theme names, language endonyms) have no bundle entry and keep
+    /// the English source via `tr_or` fallback.
+    pub fn display_l10n(&self, setting_key: &str) -> std::borrow::Cow<'static, str> {
+        crate::i18n::tr_or(
+            &format!("settings.{setting_key}.choice.{}.display", self.canonical),
+            self.display,
+        )
+    }
+
+    /// Translated choice description
+    /// (`settings.{setting_key}.choice.{canonical}.description`).
+    pub fn description_l10n(&self, setting_key: &str) -> std::borrow::Cow<'static, str> {
+        crate::i18n::tr_or(
+            &format!(
+                "settings.{setting_key}.choice.{}.description",
+                self.canonical
+            ),
+            self.description,
+        )
+    }
+}
+
+/// Runtime-built enum choice for `SettingKind::DynamicEnum` settings
+/// whose choices come from a `PagerLocalSnapshot` at picker-open time.
+/// Owned `String` fields because values are sourced from runtime catalogs.
 #[derive(Debug, Clone)]
 pub struct OwnedEnumChoice {
     pub canonical: String,
@@ -208,7 +253,24 @@ pub struct SettingMeta {
     pub hidden_in_minimal: bool,
 }
 
-/// A typed value carried by `Action::Set*` payloads, modal preview state, and the rollback path on persist failure.
+impl SettingMeta {
+    /// Translated row label (`settings.{key}.label`), falling back to the
+    /// English source in `defs.rs` when the locale bundle has no entry.
+    pub fn label_l10n(&self) -> std::borrow::Cow<'static, str> {
+        crate::i18n::tr_or(&format!("settings.{}.label", self.key), self.label)
+    }
+
+    /// Translated description (`settings.{key}.description`).
+    pub fn description_l10n(&self) -> std::borrow::Cow<'static, str> {
+        crate::i18n::tr_or(
+            &format!("settings.{}.description", self.key),
+            self.description,
+        )
+    }
+}
+
+/// A typed value carried by `Action::Set*` payloads, modal preview state,
+/// and the rollback path on persist failure.
 ///
 /// Each variant aligns 1:1 with a `SettingKind` variant.
 #[derive(Debug, Clone, PartialEq)]
@@ -466,6 +528,17 @@ fn build_search_haystack(m: &SettingMeta) -> String {
     s.push(' ');
     s.push_str(&m.description.to_lowercase());
     s.push(' ');
+    // Translated label/description too, so users can search in their own
+    // language (e.g. "主题" finds Theme under a zh-CN locale). Skipped under
+    // the default `en` locale: `tr_or` would return the same English source
+    // already above — this saves ~2 hash lookups + allocations per setting
+    // per keystroke in the common case.
+    if &*rust_i18n::locale() != "en" {
+        s.push_str(&m.label_l10n().to_lowercase());
+        s.push(' ');
+        s.push_str(&m.description_l10n().to_lowercase());
+        s.push(' ');
+    }
     s.push_str(m.key);
     for kw in m.keywords {
         s.push(' ');
@@ -576,7 +649,11 @@ pub fn current_value_for(
         "screen_mode" => Some(SettingValue::Enum(canonical_screen_mode(
             ui.screen_mode.as_deref(),
         ))),
-        // SHELL: whether the Ctrl+Space or F8 chord is active; None means true
+        // SHELL — canonicalized from `[ui].language`; None → "auto".
+        "language" => Some(SettingValue::Enum(crate::i18n::canonical_language(
+            ui.language.as_deref(),
+        ))),
+        // SHELL — whether the Ctrl+Space / F8 chord is active; None → true.
         "voice_keybind_enabled" => {
             Some(SettingValue::Bool(ui.voice_keybind_enabled.unwrap_or(true)))
         }
@@ -1071,7 +1148,20 @@ mod tests {
                     );
                     assert_eq!(*default, "fullscreen");
                 }
-                // render_mermaid: Option<String>; None reads as "auto"
+                // language: Option<String>; None → "auto" (follow OS locale).
+                ("language", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        ui.language, None,
+                        "test assumes UiConfig::default().language is None",
+                    );
+                    assert_eq!(
+                        *default,
+                        crate::i18n::canonical_language(ui.language.as_deref()),
+                        "language default drifts from UiConfig::default()",
+                    );
+                    assert_eq!(*default, "auto");
+                }
+                // render_mermaid: Option<String>; None → "auto".
                 ("render_mermaid", SettingKind::Enum { default, .. }) => {
                     assert_eq!(
                         ui.render_mermaid, None,

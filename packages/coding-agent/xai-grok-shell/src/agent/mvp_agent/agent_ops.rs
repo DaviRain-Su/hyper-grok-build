@@ -4326,7 +4326,10 @@ impl MvpAgent {
         );
         tool_ctx.monitor_event_buffer = Some(self.monitor_event_buffer.clone());
         tool_ctx.subagent_depth = 0;
-        tool_ctx.auto_wake_enabled = self.cfg.borrow().auto_wake_enabled;
+        tool_ctx.auto_wake_enabled = self
+            .cfg
+            .borrow()
+            .is_feature_enabled(crate::agent::config::Feature::AutoWake);
         // TTSR-lite (default off). Enable with GROK_TTSR_ENABLED=1 or
         // `[features] ttsr = true` in config.toml.
         {

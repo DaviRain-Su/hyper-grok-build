@@ -2807,8 +2807,13 @@ fn resolve_model_override_wires_resolver_for_fresh_and_hard_expired_session_keys
             crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
         );
         ctx.auth = Some(auth);
+        // Session-token resolvers are wired only to first-party endpoints
+        // (session_token_auth_gate); a first-party base_url is required
+        // for the resolver to be installed.
+        let mut entry = test_model_entry("grok-4.5");
+        entry.info.base_url = "https://api.x.ai/v1".to_string();
         ctx.available_models
-            .insert("grok-4.5".to_string(), test_model_entry("grok-4.5"));
+            .insert("grok-4.5".to_string(), entry);
         let (config, _) = resolve_model_override_to_config("grok-4.5", &ctx).unwrap();
         assert!(config.bearer_resolver.is_some(), "key={key}");
     }
@@ -2823,7 +2828,9 @@ fn resolve_model_override_to_config_never_strips_a_fallback_key() {
         crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
     );
     ctx.auth = None;
-    ctx.available_models.insert("grok-4.5".to_string(), test_model_entry("grok-4.5"));
+    let mut entry = test_model_entry("grok-4.5");
+    entry.info.base_url = "https://api.x.ai/v1".to_string();
+    ctx.available_models.insert("grok-4.5".to_string(), entry);
     let (config, _) = resolve_model_override_to_config("grok-4.5", &ctx).unwrap();
     assert_eq!(
             config.bearer_resolver.is_some(),

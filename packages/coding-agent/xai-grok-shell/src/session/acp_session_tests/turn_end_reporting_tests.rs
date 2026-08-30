@@ -187,7 +187,7 @@ impl Harness {
         self.actor.state.lock().await.running_task = Some(AgentTask::new(prompt_id, handle));
     }
 
-    async fn cancel(&self, trigger: CancelTrigger) -> super::cancel::CancelOutcome {
+    async fn cancel(&self, trigger: CancelTrigger) -> super::tasks_cancel::CancelOutcome {
         self.cancel_with(trigger, true).await
     }
 
@@ -195,7 +195,7 @@ impl Harness {
         &self,
         trigger: CancelTrigger,
         cancel_subagents: bool,
-    ) -> super::cancel::CancelOutcome {
+    ) -> super::tasks_cancel::CancelOutcome {
         self.actor
             .cancel_running_task(crate::session::CancelOptions {
                 cancel_subagents,

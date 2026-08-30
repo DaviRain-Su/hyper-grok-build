@@ -1150,7 +1150,15 @@ fn shell_aliases_expand_to_exact_argv_and_bypass_is_explicit() {
     };
     let mut shell = std::process::Command::new(bash);
     shell
-        .args(["-ic", "alias ssh='grok wrap ssh'; command ssh host"])
+        // Single-command `PATH=` prefix keeps the shim ahead of dirs prepended
+        // by the user's interactive rc (e.g. mise activate, omarchy), which
+        // would otherwise shadow the test shim with the real ssh.
+        .args([
+            "-ic",
+            "alias ssh='grok wrap ssh'; PATH=\"$PATH_SHIM:$PATH_GROK:/usr/bin:/bin\" command ssh host",
+        ])
+        .env("PATH_SHIM", fake_bin.display().to_string())
+        .env("PATH_GROK", temp.path().display().to_string())
         .env("CAPTURE", &capture)
         .env(
             "PATH",

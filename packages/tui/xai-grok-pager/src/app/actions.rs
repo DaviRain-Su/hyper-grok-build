@@ -110,9 +110,14 @@ pub enum Action {
     ImportClaudeConfirm,
     /// User cancelled the import modal: close without applying.
     ImportClaudeCancel,
-    /// Hide the import-claude menu row by recording the current `.claude/` content hash as "seen".
-    /// Doesn't import anything, doesn't change runtime fallback behavior.
-    /// The menu reappears only if `.claude/` content changes.
+    /// Open the changes review modal (fetch pending hunks first).
+    OpenChanges,
+    /// Dispatch a review action (accept/reject) from the changes modal.
+    ChangesAction(crate::views::changes_modal::ChangesActionKind),
+    /// Hide the import-claude menu row by recording the current `.claude/`
+    /// content hash as "seen". Doesn't import anything, doesn't change
+    /// runtime fallback behavior. The menu reappears only if `.claude/`
+    /// content changes.
     DismissClaudeImport,
     /// Load (resume) an existing session by ID (strict: never create).
     /// The optional `PathBuf` overrides the CWD for sessions stored under a different directory (e.g., a worktree).
@@ -168,6 +173,35 @@ pub enum Action {
     /// Stop capture unconditionally (Ctrl+Space hold-to-talk key release).
     /// Clears any pending cold-start so a release during pipeline spawn can't leave a hot mic.
     VoiceStop,
+    /// Toggle the Codex Live voice session (`/live`). Starts if idle, stops if
+    /// active. Mutually exclusive with `/voice` dictation — starting one stops
+    /// the other.
+    #[cfg(feature = "codex-live")]
+    LiveToggle,
+    /// Stop the Codex Live session unconditionally (Esc, Ctrl+C, navigation,
+    /// quit, ACP disconnect). Idempotent.
+    #[cfg(feature = "codex-live")]
+    LiveStop,
+    /// Toggle the Live mute state (Space key in the visualizer).
+    #[cfg(feature = "codex-live")]
+    LiveToggleMute,
+    /// Set the Live mute state explicitly (`true` = muted, `false` = unmuted).
+    /// Space toggles; this is the explicit variant.
+    #[cfg(feature = "codex-live")]
+    LiveSetMuted(bool),
+    /// A `LiveEvent::Delegation` submitted text to the bound AgentSession.
+    /// Carries the draft snapshot so it can be restored after the prompt
+    /// pipeline clears the textarea. The event loop dispatches this to submit
+    /// the text through the normal `SendPrompt` path, then registers the
+    /// `(generation, delegation_id) -> (AgentId, SessionId, prompt_id)`.
+    #[cfg(feature = "codex-live")]
+    LiveDelegationSubmit {
+        agent_id: crate::app::agent::AgentId,
+        text: String,
+        delegation_id: String,
+        generation: u64,
+        draft: crate::live::state::DraftSnapshot,
+    },
     /// Send a direct bash command (bypasses agent loop).
     SendBashCommand(String),
     /// The user wiped a substantial prompt draft: show the seen-gated "ctrl+z to undo" ephemeral tip on the active agent.
@@ -341,6 +375,12 @@ pub enum Action {
     /// Open the agents modal (listing all agent definitions).
     /// Optionally opens directly on a specific tab.
     OpenConfigAgentsModal(Option<crate::views::agents_modal::AgentsTab>),
+    /// Refresh the shell's live `[subagents.models]` map after the agents
+    /// modal commits a model pin. The originating modal remains blocked until
+    /// completion, even if the active view changes before dispatch.
+    ReloadSubagentModels {
+        agent_id: AgentId,
+    },
     /// Trigger OAuth for an MCP server from the modal.
     McpAuthTrigger {
         server_name: String,
@@ -384,8 +424,10 @@ pub enum Action {
         tool_name: String,
         enabled: bool,
     },
-    /// Cycle to next model.
+    /// Cycle to the next model in the scoped shortlist (`enabled_models`).
     NextModel,
+    /// Cycle to the previous model in the scoped shortlist.
+    PrevModel,
     /// Switch active model.
     SwitchModel {
         model_id: acp::ModelId,
@@ -480,8 +522,13 @@ pub enum Action {
     SetHunkTrackerMode(String),
     /// Set default screen mode (`fullscreen` | `minimal`); restart-required.
     SetScreenMode(String),
-    /// Enable/disable the Ctrl+Space / F8 voice-dictation shortcut. SHELL-owned; persisted to `[ui].voice_keybind_enabled`.
-    /// Takes effect on the next keypress; `/voice` is unaffected.
+    /// Set the UI display language (`auto` | `en` | `zh-CN`). SHELL-owned;
+    /// persisted to `[ui].language` and applied live via
+    /// `rust_i18n::set_locale` — no restart required.
+    SetLanguage(String),
+    /// Enable/disable the Ctrl+Space / F8 voice-dictation shortcut. SHELL-owned;
+    /// persisted to `[ui].voice_keybind_enabled`. Takes effect on the next
+    /// keypress; `/voice` is unaffected.
     SetVoiceKeybindEnabled(bool),
     /// Set the voice capture mode (`toggle` | `hold`). SHELL-owned; persisted to `[ui].voice_capture_mode`.
     /// Takes effect for the next Ctrl+Space press.
@@ -533,6 +580,15 @@ pub enum Action {
     /// The dispatcher switches the active session and persists via `Effect::PersistSetting`.
     /// Does not carry effort; use `Action::SwitchModel` for that.
     SetDefaultModel(acp::ModelId),
+    /// Persist a third-party platform API key from `/providers` (stored in
+    /// `~/.grok/auth.json` under `platform/<id>`, then restamps the catalog).
+    /// Empty `api_key` clears the stored key. `base_url` carries the optional
+    /// self-hosted gateway root for BYOK platforms (Nexus).
+    SetPlatformApiKey {
+        platform: String,
+        api_key: String,
+        base_url: Option<String>,
+    },
     /// Clear the persisted default model (`cfg.models.default = None`).
     /// Active session's model is unchanged; next session resolves via the shell's default-resolution chain.
     ClearDefaultModel,
@@ -600,12 +656,34 @@ pub enum Action {
     PermissionCancel,
     /// Log out: remove credentials and return to the login screen.
     Logout,
+    /// Log out of Kimi Code OAuth only (static API keys are unchanged).
+    LogoutKimi,
+    /// Log out of OpenAI Codex OAuth only.
+    LogoutOpenAiCodex,
+    /// Log out of Anthropic Claude OAuth only.
+    LogoutAnthropicClaude,
+    /// Log out of GitHub Copilot OAuth only (static tokens are unchanged).
+    LogoutGitHubCopilot,
+    /// Log out of Radius OAuth only (static Radius API keys are unchanged).
+    LogoutRadius,
     /// Log out and immediately start a new login flow.
     SwitchAccount,
     /// User pressed login on the welcome screen.
     Login,
-    /// Cancel an in-progress login that was started from inside a session (`/login` or a 401 re-auth prompt) and return to the previous view.
-    /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit the app or lose the open session.
+    /// Interactive Kimi Code subscription login (`/login kimi`).
+    LoginKimi,
+    /// Interactive OpenAI Codex (ChatGPT) subscription login (`/login openai`).
+    LoginOpenAiCodex,
+    /// Interactive Anthropic Claude (Pro/Max) subscription login (`/login claude`).
+    LoginAnthropicClaude,
+    /// Interactive GitHub Copilot subscription login (`/login github`).
+    LoginGitHubCopilot,
+    /// Interactive Radius gateway login (`/login radius`).
+    LoginRadius,
+    /// Cancel an in-progress login that was started from inside a session
+    /// (`/login` or a 401 re-auth prompt) and return to the previous view.
+    /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit
+    /// the app or lose the open session.
     CancelLogin,
     /// User submitted a manually-pasted auth token (loopback mode).
     SubmitAuthCode(String),
@@ -1313,6 +1391,20 @@ pub enum AfterSessionDelete {
 /// The event loop spawns these into a `JoinSet`; completions come back through [`TaskResult`] as `Action::TaskComplete`.
 #[derive(Debug)]
 pub enum Effect {
+    /// Fetch pending changes (files + hunks) for the review modal.
+    /// `post_action`: this is a refetch after an action landed (must not
+    /// reopen a closed modal).
+    FetchChanges {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        post_action: bool,
+    },
+    /// Run one review action (accept/reject hunk/file/all).
+    ChangesAction {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        kind: crate::views::changes_modal::ChangesActionKind,
+    },
     /// Run a `command` status line.
     RunStatusLineCommand(StatusLineRun),
     /// Create a new ACP session.
@@ -1487,6 +1579,17 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
+    /// Persist a BYOK platform API key via `x.ai/internal/set_platform_api_key`
+    /// and restamp the catalog. Empty `api_key` clears the stored key.
+    /// `base_url` carries the optional self-hosted gateway root (Nexus).
+    SetPlatformApiKey {
+        platform: String,
+        api_key: String,
+        base_url: Option<String>,
+    },
+    /// Reload live subagent model pins from the just-committed config file and
+    /// wait for the shell acknowledgement before releasing modal input.
+    ReloadSubagentModels { agent_id: AgentId },
     /// Kill a background task.
     KillBgTask {
         session_id: acp::SessionId,
@@ -1902,6 +2005,16 @@ pub enum Effect {
     },
     /// Log out via `x.ai/auth/logout` (shell clears auth.json and in-memory state).
     Logout,
+    /// Clear Kimi Code OAuth locally (does not remove a static API key).
+    LogoutKimi,
+    /// Clear OpenAI Codex OAuth locally.
+    LogoutOpenAiCodex,
+    /// Clear Anthropic Claude OAuth locally.
+    LogoutAnthropicClaude,
+    /// Clear GitHub Copilot OAuth locally (does not remove a static token).
+    LogoutGitHubCopilot,
+    /// Clear Radius OAuth locally (does not remove a Radius API key).
+    LogoutRadius,
     /// Cancel an in-flight interactive auth on the shell (`x.ai/auth/cancel`).
     /// Used when the user abandons mid-session `/login` so the device-code poll stops instead of running until the code expires.
     /// `request_seq` scopes the cancel so a delayed RPC cannot tear down a successor login.
@@ -2192,6 +2305,27 @@ pub enum TaskResult {
         /// See [`crate::app::effects::parse_session_scheduler_background_loops`].
         scheduler_background_loops: Option<bool>,
     },
+    /// Pending changes (files + hunks) loaded for the review modal.
+    ChangesLoaded {
+        agent_id: AgentId,
+        files: Vec<crate::views::changes_modal::FileSummaryDto>,
+        hunks: Vec<crate::views::changes_modal::HunkDto>,
+        /// `true` for refetches after an action landed — those must not
+        /// reopen a modal the user closed meanwhile (oracle).
+        post_action: bool,
+    },
+    /// The pending-changes fetch failed.
+    ChangesFailed {
+        agent_id: AgentId,
+        error: String,
+    },
+    /// A review action (accept/reject) completed.
+    ChangesActionDone {
+        agent_id: AgentId,
+        success: bool,
+        error: Option<String>,
+        affected_count: Option<usize>,
+    },
     /// Session creation failed.
     SessionFailed {
         agent_id: AgentId,
@@ -2434,8 +2568,23 @@ pub enum TaskResult {
         agent_id: AgentId,
         result: Result<(), crate::app::effects::CompactError>,
     },
-    /// Background task kill result.
-    /// `outcome` is `None` when the agent returned an error envelope or an unparseable payload (treated as "clear pending state, keep the row").
+    /// `/providers` API key save / clear completed.
+    SetPlatformApiKeyComplete {
+        platform: String,
+        cleared: bool,
+        models_unlocked: u64,
+        /// Env var *names* still set after clear (values never included).
+        env_still_active: Vec<String>,
+        error: Option<String>,
+    },
+    /// Live subagent model-pin reload completed.
+    SubagentModelsReloaded {
+        agent_id: AgentId,
+        result: Result<(), String>,
+    },
+    /// Background task kill result. `outcome` is `None` when the agent
+    /// returned an error envelope or an unparseable payload (treated as
+    /// "clear pending state, keep the row").
     BgTaskKilled {
         session_id: String,
         task_id: String,
@@ -2789,6 +2938,26 @@ pub enum TaskResult {
     },
     /// Shell acknowledged logout (auth cleared).
     LogoutComplete,
+    /// Kimi Code scoped OAuth logout completed.
+    LogoutKimiComplete {
+        message: String,
+    },
+    /// OpenAI Codex scoped OAuth logout completed.
+    LogoutOpenAiCodexComplete {
+        message: String,
+    },
+    /// Anthropic Claude scoped OAuth logout completed.
+    LogoutAnthropicClaudeComplete {
+        message: String,
+    },
+    /// GitHub Copilot scoped OAuth logout completed.
+    LogoutGitHubCopilotComplete {
+        message: String,
+    },
+    /// Radius scoped OAuth logout completed.
+    LogoutRadiusComplete {
+        message: String,
+    },
     /// Best-effort `x.ai/auth/cancel` finished (no UI update; state already left Authenticating).
     AuthCancelComplete,
     /// Shell responded to `x.ai/auth/check_subscription`.

@@ -293,12 +293,43 @@ fn handle_list_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
     }
 }
 
-/// Intro copy shown above the topic list.
-/// It doesn't promise how long the tour takes, just what it is and how to leave.
-const INTRO_LINES: [&str; 2] = [
-    "Quick tips to get the most out of Grok Build.",
-    "Pick a topic. Esc when you're done.",
-];
+/// Derive a stable snake_case slug from a tutorial topic title for i18n keys.
+/// Lowercases, replaces non-alnum runs with `_`, trims leading/trailing `_`.
+fn topic_slug(title: &str) -> String {
+    let mut slug = String::with_capacity(title.len());
+    let mut prev_under = false;
+    for ch in title.chars() {
+        if ch.is_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_under = false;
+        } else if !prev_under {
+            slug.push('_');
+            prev_under = true;
+        }
+    }
+    slug.trim_matches('_').to_owned()
+}
+
+/// Translate a topic title via `tr_or`, falling back to the English source.
+fn topic_title_l10n(topic: &crate::tutorial_docs::TutorialTopic) -> std::borrow::Cow<'static, str> {
+    let slug = topic_slug(topic.title);
+    crate::i18n::tr_or(&format!("tutorial.topic.{slug}.title"), topic.title)
+}
+
+/// Translate a topic blurb via `tr_or`, falling back to the English source.
+fn topic_blurb_l10n(topic: &crate::tutorial_docs::TutorialTopic) -> std::borrow::Cow<'static, str> {
+    let slug = topic_slug(topic.title);
+    crate::i18n::tr_or(&format!("tutorial.topic.{slug}.blurb"), topic.blurb)
+}
+
+/// Intro copy shown above the topic list. No time promises — just what it
+/// is and how to leave.
+fn intro_lines() -> [std::borrow::Cow<'static, str>; 2] {
+    [
+        rust_i18n::t!("tutorial.intro_quick_tips"),
+        rust_i18n::t!("tutorial.intro_pick_topic"),
+    ]
+}
 
 /// Topic page body: the embedded markdown minus its leading `# ` heading.
 /// The modal window chrome already shows the title, so rendering the H1 would double it.
@@ -319,30 +350,30 @@ pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, com
                 return;
             };
             let next_hint = match TUTORIAL_TOPICS.get(index + 1) {
-                Some(next) => format!("\u{2192} next: {}", next.title),
-                None => "\u{2192} done".to_owned(),
+                Some(next) => rust_i18n::t!("footer.next_title", title = next.title),
+                None => rust_i18n::t!("footer.arrow_done"),
             };
             let mut shortcuts = vec![
                 Shortcut {
-                    label: "\u{2191}/\u{2193} scroll",
+                    label: rust_i18n::t!("footer.scroll"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: &next_hint,
+                    label: next_hint,
                     clickable: false,
                     id: 0,
                 },
             ];
             if topic.go_deeper.is_some() {
                 shortcuts.push(Shortcut {
-                    label: "d go deeper",
+                    label: rust_i18n::t!("footer.d_go_deeper"),
                     clickable: false,
                     id: 0,
                 });
             }
             shortcuts.push(Shortcut {
-                label: "Esc list",
+                label: rust_i18n::t!("footer.esc_list"),
                 clickable: false,
                 id: 0,
             });
@@ -350,7 +381,7 @@ pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, com
                 buf,
                 area,
                 &mut st.window,
-                topic.title,
+                topic_title_l10n(topic).as_ref(),
                 topic_body(topic.content),
                 &mut st.scroll,
                 &mut st.cached_lines,
@@ -384,31 +415,35 @@ pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, com
 }
 
 fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bool, theme: &Theme) {
-    let progress = format!("{}/{} explored", st.viewed.len(), TUTORIAL_TOPICS.len());
     let shortcuts = [
         Shortcut {
-            label: &progress,
+            label: rust_i18n::t!(
+                "footer.explored",
+                n = st.viewed.len(),
+                m = TUTORIAL_TOPICS.len()
+            ),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "\u{2191}/\u{2193} navigate",
+            label: rust_i18n::t!("footer.navigate"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Enter open",
+            label: rust_i18n::t!("footer.enter_open"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Esc done",
+            label: rust_i18n::t!("footer.esc_done"),
             clickable: false,
             id: 0,
         },
     ];
+    let modal_title = rust_i18n::t!("tutorial.welcome_title");
     let modal_config = ModalWindowConfig {
-        title: "Welcome to Grok Build",
+        title: modal_title.as_ref(),
         tabs: None,
         shortcuts: &shortcuts,
         sizing: ModalSizing {
@@ -430,11 +465,11 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
     // Intro copy, then a blank row, then the topic rows.
     let intro_style = Style::default().fg(theme.gray_bright);
     let mut y = mca.content.y;
-    for line in INTRO_LINES {
+    for line in intro_lines() {
         if y >= mca.content.y + mca.content.height {
             break;
         }
-        Paragraph::new(Line::styled(line, intro_style)).render(
+        Paragraph::new(Line::styled(line.as_ref(), intro_style)).render(
             Rect {
                 x: mca.content.x,
                 y,
@@ -460,16 +495,21 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
     // Narrow modals can't fit title and blurb on one row; stack the blurb below
     const NARROW_THRESHOLD: u16 = 64;
     let narrow = entries_area.width < NARROW_THRESHOLD;
-    let blurb_slices: Vec<[&str; 1]> = TUTORIAL_TOPICS.iter().map(|t| [t.blurb]).collect();
+    // Localize titles/blurbs at consumption (static data stays English).
+    let titles_l10n: Vec<std::borrow::Cow<'static, str>> =
+        TUTORIAL_TOPICS.iter().map(topic_title_l10n).collect();
+    let blurbs_l10n: Vec<std::borrow::Cow<'static, str>> =
+        TUTORIAL_TOPICS.iter().map(topic_blurb_l10n).collect();
+    let blurb_slices: Vec<[&str; 1]> = blurbs_l10n.iter().map(|b| [b.as_ref()]).collect();
 
     let picker_entries: Vec<PickerEntry<'_>> = TUTORIAL_TOPICS
         .iter()
         .enumerate()
-        .map(|(i, t)| {
+        .map(|(i, _t)| {
             let viewed = st.viewed.contains(&i);
             PickerEntry::Row(PickerRow {
-                label: t.title,
-                right_label: if narrow { "" } else { t.blurb },
+                label: titles_l10n[i].as_ref(),
+                right_label: if narrow { "" } else { blurbs_l10n[i].as_ref() },
                 selected: i == st.picker.selected,
                 expanded: narrow,
                 fields: &[],

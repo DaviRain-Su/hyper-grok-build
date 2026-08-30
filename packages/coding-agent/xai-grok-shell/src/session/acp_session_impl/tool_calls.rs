@@ -1481,6 +1481,79 @@ impl SessionActor {
                 rewriting_hook = Some(rewrite.hook_name);
             }
         }
+        // Wasm extensions gate after hooks, unconditionally of hook
+        // registration (first deny wins). Clone the runtime so a RefCell
+        // guard never crosses `.await`.
+        let ext_rt = self.extension_runtime.borrow().clone();
+        if !ext_rt.is_empty() {
+            let pre_in = xai_grok_extension_api::PreToolIn {
+                tool_name: resolved_tool_name.clone(),
+                tool_input_json: raw_input.to_string(),
+            };
+            let wasm_result = ext_rt.dispatch_pre_tool_use(&pre_in).await;
+            if let xai_grok_extension_runtime::PreToolDecision::Deny { extension, reason } =
+                wasm_result.decision
+            {
+                let m = ext_rt.metrics();
+                tracing::warn!(
+                    target: "wasm_extension",
+                    extension = %extension,
+                    tool = %resolved_tool_name,
+                    pre_tool_denies = m.pre_tool_denies,
+                    calls_failed = m.calls_failed,
+                    calls_timeout = m.calls_timeout,
+                    reason = %reason,
+                    "wasm extension denied tool"
+                );
+                crate::session::wasm_tools::emit_wasm_extension_blocked(
+                    self.telemetry_enabled,
+                    &extension,
+                    &resolved_tool_name,
+                    crate::session::wasm_tools::deny_category_from_reason(&reason),
+                );
+                return Ok(Err(self
+                    .deny_tool(
+                        &call.id,
+                        &tool_call_id,
+                        &resolved_tool_name,
+                        format!("wasm:{extension}"),
+                        reason,
+                    )
+                    .await?));
+            }
+        }
+        // Scheme extensions after wasm: same gate contract (first deny wins,
+        // GateFailMode on trap/timeout, fail-open when the image is missing).
+        {
+            let scheme_rt = self.scheme_runtime.clone();
+            if !scheme_rt.is_empty() {
+                let pre_in = xai_grok_extension_api::PreToolIn {
+                    tool_name: resolved_tool_name.clone(),
+                    tool_input_json: raw_input.to_string(),
+                };
+                let scheme_result = scheme_rt.dispatch_pre_tool_use(&pre_in).await;
+                if let xai_grok_extension_api::PreToolOut::Deny { reason } = scheme_result.decision
+                {
+                    let plugin = scheme_result.denied_by.unwrap_or_default();
+                    tracing::warn!(
+                        target: "scheme_extension",
+                        plugin = %plugin,
+                        tool = %resolved_tool_name,
+                        reason = %reason,
+                        "scheme extension denied tool"
+                    );
+                    return Ok(Err(self
+                        .deny_tool(
+                            &call.id,
+                            &tool_call_id,
+                            &resolved_tool_name,
+                            format!("scheme:{plugin}"),
+                            reason,
+                        )
+                        .await?));
+                }
+            }
+        }
         let access_kind = AccessKind::from(&tool_input);
         let plan_gate = plan_mode_edit_gate(&self.plan_mode.lock(), &tool_input, &access_kind);
         if plan_gate != PlanEditGate::Allow {

@@ -116,11 +116,14 @@ mod tests {
     /// Isolate process-global auth sources that `AuthStatus::resolve` consults.
     ///
     /// Uses `GROK_AUTH_PATH` (not `GROK_HOME`) so a OnceLock-cached real home
-    /// with `auth.json` cannot leak into these tests.
-    fn isolate_auth_sources() -> (tempfile::TempDir, [EnvGuard; 7]) {
+    /// with `auth.json` cannot leak into these tests. Platform BYOK env keys
+    /// are unset too: the offline multi-provider (Pi) builtins ride along in
+    /// every `resolve_model_list` result, and an ambient `KIMI_API_KEY` etc.
+    /// would unlock one of them ahead of the entry a test installs.
+    fn isolate_auth_sources() -> (tempfile::TempDir, Vec<EnvGuard>) {
         let dir = tempfile::tempdir().unwrap();
         let auth_path = dir.path().join("no-auth.json");
-        let guards = [
+        let mut guards = vec![
             EnvGuard::unset(XAI_API_KEY_ENV_VAR),
             EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR),
             EnvGuard::unset("GROK_AUTH"),
@@ -129,6 +132,7 @@ mod tests {
             EnvGuard::unset("GROK_WS_ORIGIN"),
             EnvGuard::unset("GROK_DISABLE_API_KEY_AUTH"),
         ];
+        guards.extend(xai_grok_test_support::unset_all_byok_platform_api_key_envs());
         (dir, guards)
     }
     fn byok_and_deployment_toml(model_id: &str) -> String {

@@ -32,6 +32,7 @@ regex = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 strip-ansi-escapes = { workspace = true }
+globset = { workspace = true }
 
 # Markdown / syntax highlighting
 xai-grok-markdown = { workspace = true }
@@ -59,6 +60,7 @@ portable-pty = "0.9"
 
 # Utilities
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 shlex = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 clap_complete = { workspace = true }
@@ -84,6 +86,13 @@ obfstr = { workspace = true }
 # Fuzzy matching (history search daemon)
 nucleo = { workspace = true }
 
+# Internationalization: translations are embedded at compile time from
+# `locales/*.yml`; `sys-locale` detects the OS language for `language = "auto"`.
+# Direct (non-workspace) deps on purpose — the workspace root Cargo.toml is
+# generated from the monorepo and must stay untouched.
+rust-i18n = "4"
+sys-locale = "0.3"
+
 # Prompt text input
 xai-ratatui-textarea = { workspace = true }
 xai-ratatui-inline = { workspace = true }
@@ -106,6 +115,7 @@ xai-grok-dashboard-store = { workspace = true }
 # (cpal is target-gated to non-Linux inside xai-grok-voice).
 xai-grok-voice = { path = "../../ai/xai-grok-voice", default-features = false, features = ["audio"] }
 xai-grok-shell = { workspace = true }
+xai-grok-models = { workspace = true }
 # The status-line contract: the config the user writes and the payload the
 # agent sends. A leaf crate rather than the agent's, so the client reads it
 # from upstream of the crate that fills it in.
@@ -122,10 +132,13 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-grok-agent = { workspace = true }
+xai-grok-extension-api = { path = "../../extensions/xai-grok-extension-api" }
+xai-grok-extension-runtime = { path = "../../extensions/xai-grok-extension-runtime" }
 xai-grok-plugin-marketplace = { path = "../../extensions/xai-grok-plugin-marketplace" }
 # Blocked-card copy: `hook_display_name` lives next to the hook-name grammar.
 xai-grok-hooks = { path = "../../coding-agent/xai-grok-hooks" }
 xai-hooks-plugins-types = { path = "../../coding-agent/xai-hooks-plugins-types" }
+wait-timeout = { workspace = true }
 walkdir = { workspace = true }
 xai-grok-sandbox = { path = "../../tools/xai-grok-sandbox", default-features = false }
 
@@ -273,6 +286,14 @@ path = "tests/scripted_scenarios.rs"
 name = "pty_auto_mode"
 path = "tests/pty_auto_mode.rs"
 
+# Operator-docs mirror check. The private internal docs (`docs/internal/`)
+# are not part of this public mirror, so the target only builds when the
+# `internal-docs` feature is on (a checkout that carries those files).
+[[test]]
+name = "registered_features_are_documented"
+path = "tests/registered_features_are_documented.rs"
+required-features = ["internal-docs"]
+
 # Opt into [workspace.lints.clippy] (too_many_arguments etc.). Without this,
 # `cargo clippy --workspace -- -D warnings` on this package is stricter than
 # the workspace-default clippy allows used in CI.
@@ -280,7 +301,7 @@ path = "tests/pty_auto_mode.rs"
 workspace = true
 
 [features]
-default = ["jemalloc", "sandbox-enforce"]
+default = ["jemalloc", "sandbox-enforce", "codex-live"]
 default-bazel = [
     "jemalloc",
     "sandbox-enforce",
@@ -296,7 +317,20 @@ local-workspace = ["xai-grok-shell/local-workspace"]
 jemalloc = []
 sandbox-enforce = ["xai-grok-sandbox/enforce"]
 release-dist = []
+# Community Hyper branding (CLI name for completions / help strings). Empty
+# feature — gated with `cfg!(feature = "community-build")` in this crate.
+# Forwarded from `xai-grok-pager-bin` when that binary is a Hyper build.
+community-build = []
 # Exposes test-only view-model constructors/setters (e.g. `test_agent_view`,
 # `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
 # by `xai-grok-pager-minimal`'s unit tests. Never enabled in production builds.
 test-support = ["xai-grok-pager-render/test-support", "xai-grok-gboom/test-support"]
+# Codex Live (`/live`): real-time bidirectional voice sessions against the
+# Codex sideband. Forwards `xai-grok-voice/live` so production code directly
+# uses the real `xai_grok_voice::live` types and `run_live_session`. Test
+# doubles are kept only under `#[cfg(test)]` where needed.
+codex-live = ["xai-grok-voice/live"]
+# Enables the `registered_features_are_documented` integration test, which
+# `include_str!`s the private internal operator docs. Only checkouts that
+# carry `docs/internal/` enable this.
+internal-docs = []

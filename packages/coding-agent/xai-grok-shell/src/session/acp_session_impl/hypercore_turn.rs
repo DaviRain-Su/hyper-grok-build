@@ -747,7 +747,19 @@ impl SessionActor {
             credential,
             error_code: None,
         };
-        match self.handle_sampling_failure(synthetic, 0).await {
+        match self
+            .handle_sampling_failure(
+                synthetic,
+                0,
+                TransientRetryState {
+                    step_attempts: 0,
+                    prompt_attempts: 0,
+                    episode_start: None,
+                    enabled: false,
+                },
+            )
+            .await
+        {
             Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                 credential: recovered_cred,
                 store,
@@ -785,6 +797,15 @@ impl SessionActor {
                 // Unexpected for pure auth; treat as terminal to avoid loops.
                 Ok(Some(acp::Error::internal_error().data(format!(
                     "hypercore auth recovery returned compact: {message}"
+                ))))
+            }
+            Ok(SamplerFailureRecovery::RetryTransient { kind, status_code }) => {
+                // Transient retry is owned by the legacy turn loop; in the
+                // hypercore auth-recovery path this is unexpected — treat it
+                // as terminal to avoid an unbounded loop.
+                Ok(Some(acp::Error::internal_error().data(format!(
+                    "hypercore auth recovery returned transient retry \
+                     (kind={kind:?}, status={status_code:?}): {message}"
                 ))))
             }
             Err(e) => Ok(Some(e)),

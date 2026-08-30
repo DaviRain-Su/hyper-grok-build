@@ -119,6 +119,8 @@
                 child_session_id: "child-1".into(),
                 status: "failed".into(),
                 error: Some("real failure".into()),
+                termination_reason: None,
+                usage: None,
                 tool_calls: 7,
                 turns: 3,
                 duration_ms: 9_876,

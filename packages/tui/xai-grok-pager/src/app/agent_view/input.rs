@@ -81,7 +81,36 @@ impl AgentView {
     pub(crate) fn no_input_overlay_pending(&self) -> bool {
         self.blocking_card().is_none() && self.plan_approval_view.is_none()
     }
-    /// Whether FocusGained should move focus from Scrollback to Prompt.
+    /// Whether an agent-owned modal, viewer, or focused overlay must receive
+    /// Space/Esc before Codex Live's global mute/stop shortcuts.
+    ///
+    /// Keep this aligned with the early-return surfaces in `handle_input_inner`:
+    /// Live replaces only the ordinary composer and must never steal input from
+    /// permission/question/plan flows or from a viewer layered above it.
+    #[cfg(feature = "codex-live")]
+    pub(crate) fn live_key_intercept_blocked(&self) -> bool {
+        !self.no_input_overlay_pending()
+            || self.active_modal.is_some()
+            || self.extensions_modal.is_some()
+            || self.persona_detail.is_some()
+            || self.agents_modal.is_some()
+            || self.block_viewer.is_some()
+            || self.line_viewer.is_some()
+            || self.image_viewer.is_some()
+            || self.video_viewer.is_some()
+            || self.gboom.is_some()
+            || self.inline_edit.is_some()
+            || self.rewind_state.is_some()
+            || self.jump_state.is_some()
+            || self.btw_state.is_some()
+            || self.scrollback_search.is_some()
+            || self.active_subagent.is_some()
+            || self.show_goal_detail
+            || self.show_workflows
+            || self.prompt.any_dropdown_open()
+    }
+    /// Whether FocusGained should move focus from Scrollback → Prompt.
+    ///
     pub(crate) fn should_restore_prompt_on_focus_gained(&self) -> bool {
         if self.active_pane != AgentPane::Scrollback {
             return false;
@@ -1358,11 +1387,16 @@ impl AgentView {
                     if let Some(items) = cmd.suggest_args(&ctx, "")
                         && !items.is_empty()
                     {
+                        let hidden_ids = crate::config_toml_edit::hidden_model_ids();
+                        let scoped =
+                            crate::app::modals::model_picker_view_items(&items, &hidden_ids, false);
                         self.active_modal = Some(crate::views::modal::ActiveModal::ArgPicker {
                             command: command.to_string(),
                             args_query: String::new(),
-                            items: items.clone(),
+                            items: scoped,
                             original_items: items,
+                            show_all: false,
+                            hidden_ids,
                             state: crate::views::picker::PickerState::input_active(),
                             previous_palette: None,
                             window: crate::views::modal_window::ModalWindowState::new(),
@@ -1960,6 +1994,7 @@ mod btw_focus_tests {
             None,
             None,
             None,
+            Vec::new(),
         ));
         agents.handle_minimal_input(&key(KeyCode::Esc), &reg);
         assert!(agents.agents_modal.is_none(), "agents modal handled Esc");
@@ -2268,6 +2303,7 @@ mod esc_would_cancel_turn_tests {
             None,
             None,
             None,
+            Vec::new(),
         ));
         assert!(
             !agent.esc_would_cancel_turn(false),

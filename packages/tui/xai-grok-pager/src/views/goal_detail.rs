@@ -1696,7 +1696,7 @@ mod tests {
         render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
 
         let text = buffer_text(&buf);
-        assert!(text.contains("Type /goal resume to continue"));
+        assert!(text.contains("type /goal resume to continue"));
     }
 
     #[test]
@@ -1708,7 +1708,7 @@ mod tests {
         render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
 
         let text = buffer_text(&buf);
-        assert!(!text.contains("Type /goal resume to continue"));
+        assert!(!text.contains("type /goal resume to continue"));
     }
 
     #[test]
@@ -1746,7 +1746,7 @@ mod tests {
             "modal must render the pause_message text, got:\n{text}"
         );
         assert!(
-            text.contains("Type /goal resume to continue"),
+            text.contains("type /goal resume to continue"),
             "InfraPaused is paused so the resume hint must render, got:\n{text}"
         );
     }
@@ -1771,7 +1771,7 @@ mod tests {
             "modal must render the pause_message text, got:\n{text}"
         );
         assert!(
-            text.contains("Type /goal resume to continue"),
+            text.contains("type /goal resume to continue"),
             "Blocked is paused so the resume hint must render, got:\n{text}"
         );
     }
@@ -1835,7 +1835,7 @@ mod tests {
 
         let text = buffer_text(&buf);
         let hint_pos = text
-            .find("Type /goal resume to continue")
+            .find("type /goal resume to continue")
             .expect("pause hint must render");
         let reason_pos = text
             .find("Reason: no windows sdk")

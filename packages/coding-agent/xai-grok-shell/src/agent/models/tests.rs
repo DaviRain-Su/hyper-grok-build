@@ -963,7 +963,12 @@ fn reselect_locked_current_platform_model_bumps_watch() {
     let cfg = config::Config::default();
     let mut models = make_prefetched(&["grok-3"]);
     let locked_id = "openai/gpt-5";
-    models.insert(locked_id.to_string(), make_model_entry(locked_id));
+    let mut locked = make_model_entry(locked_id);
+    // Simulate the credential-locked projection: the reselect check reads
+    // `ModelInfo::visible_for_auth`, so a locked entry is modeled as not
+    // user-selectable (how catalog projection presents it).
+    locked.info.user_selectable = false;
+    models.insert(locked_id.to_string(), locked);
     mgr.inner.catalog.write().models = models;
     mgr.set_current_model_id(acp::ModelId::new(locked_id));
     let start = mgr.model_switch_generation();

@@ -176,8 +176,9 @@ use mcp_snapshot::*;
 #[path = "acp_session_impl/turn_task.rs"]
 mod turn_task;
 use turn_task::*;
-#[path = "acp_session_impl/cancel.rs"]
-mod cancel;
+#[path = "acp_session_impl/tasks_cancel.rs"]
+mod tasks_cancel;
+use tasks_cancel::*;
 #[path = "acp_session_impl/reminders.rs"]
 mod reminders;
 use reminders::*;

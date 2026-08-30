@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 use xai_grok_tools::implementations::skills::discovery::extract_first_paragraph;
+use xai_tool_types::SubagentReasoningEffort;
 
 use serde::Deserialize;
 
@@ -21,19 +22,20 @@ use serde::Deserialize;
 pub struct SubagentRole {
     /// Human-readable description of what this role does.
     pub description: String,
-    /// Default capability mode for agents using this role.
+    /// Capability ceiling for agents using this role.
     /// One of: "read-only", "read-write", "execute", "all".
-    /// This is a config default, not an argument the model passes at spawn; `general-purpose` stays `all`.
+    /// Not a model-facing spawn argument; `general-purpose` stays `all`.
+    /// A per-spawn `capability_mode` can narrow this, but cannot widen it.
     #[serde(default)]
     pub default_capability_mode: Option<String>,
     /// Model override for this role.
     /// If set, agents using this role default to this model unless the spawn-time `model` override is provided.
     #[serde(default)]
     pub model: Option<String>,
-    /// Default reasoning effort for this role (e.g. "low", "medium", "high").
+    /// Default reasoning effort for this role.
     /// Can be overridden per-spawn via `reasoning_effort` in the task tool.
     #[serde(default)]
-    pub reasoning_effort: Option<String>,
+    pub reasoning_effort: Option<SubagentReasoningEffort>,
     /// Path to a prompt/instruction file (relative to workspace root).
     /// Content is loaded at spawn time and prepended to the child's prompt as a `<role-instructions>` block.
     #[serde(default)]
@@ -77,9 +79,9 @@ pub struct SubagentPersona {
     /// Model override when this persona is used.
     #[serde(default)]
     pub model: Option<String>,
-    /// Default reasoning effort for this persona (e.g. "low", "medium", "high").
+    /// Default reasoning effort for this persona.
     #[serde(default)]
-    pub reasoning_effort: Option<String>,
+    pub reasoning_effort: Option<SubagentReasoningEffort>,
     /// Base directory for resolving relative file references.
     /// Set to the parent dir of the source `.toml` file during discovery.
     /// When `None`, relative paths resolve against the workspace cwd.
@@ -188,7 +190,7 @@ default_isolation = "worktree"
         assert_eq!(role.description, "Research agent");
         assert_eq!(role.default_capability_mode.as_deref(), Some("read-only"));
         assert_eq!(role.model.as_deref(), Some("grok-3"));
-        assert_eq!(role.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(role.reasoning_effort, Some(SubagentReasoningEffort::High));
         assert_eq!(
             role.prompt_file.as_deref(),
             Some(".grok/prompts/researcher.md")
@@ -238,7 +240,7 @@ description = "Path to write the summary"
             Some(".grok/personas/concise.md")
         );
         assert_eq!(persona.model.as_deref(), Some("grok-3-fast"));
-        assert_eq!(persona.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(persona.reasoning_effort, Some(SubagentReasoningEffort::Low));
         assert_eq!(persona.inputs.len(), 1);
         assert_eq!(persona.inputs[0].name, "review_file");
         assert!(persona.inputs[0].required);

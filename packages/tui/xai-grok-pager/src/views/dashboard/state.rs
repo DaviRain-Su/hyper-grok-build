@@ -204,6 +204,8 @@ pub enum RowState {
     Completed,
     /// Finished, with status in ("failed", "cancelled").
     Failed,
+    /// Goal blocked / paused for human reasons. Reserved — unused in this version.
+    Blocked,
 }
 
 impl RowState {
@@ -222,6 +224,7 @@ impl RowState {
         match self {
             Self::NeedsInput => 6,
             Self::Working => 5,
+            Self::Blocked => 4,
             Self::Idle => 3,
             // Below Idle (these aren't loaded here, so they're less immediately
             // actionable) but above Done/Failed (they're still live, resumable sessions)
@@ -232,16 +235,17 @@ impl RowState {
     }
 
     /// Human-readable group header.
-    pub fn group_label(self) -> &'static str {
+    pub fn group_label(self) -> std::borrow::Cow<'static, str> {
         match self {
-            // Shorter, punchier labels
-            // "Done" reads cleaner as a group header than the past-tense "Completed" did
-            Self::NeedsInput => "Awaiting",
-            Self::Working => "Working",
-            Self::Idle => "Idle",
-            Self::Inactive => "Inactive",
-            Self::Completed => "Done",
-            Self::Failed => "Failed",
+            // Shorter, punchier labels. "Done" reads cleaner as a group
+            // header than the past-tense "Completed" did.
+            Self::NeedsInput => rust_i18n::t!("dash.state.awaiting"),
+            Self::Working => rust_i18n::t!("dash.state.working"),
+            Self::Idle => rust_i18n::t!("dash.state.idle"),
+            Self::Inactive => rust_i18n::t!("dash.state.inactive"),
+            Self::Completed => rust_i18n::t!("dash.state.done"),
+            Self::Failed => rust_i18n::t!("dash.state.failed"),
+            Self::Blocked => rust_i18n::t!("dash.state.blocked"),
         }
     }
 }
@@ -4109,6 +4113,7 @@ fn dashboard_action_for_id(
         | ActionId::ToggleRaw
         | ActionId::ToggleMouseCapture
         | ActionId::NextModel
+        | ActionId::PrevModel
         | ActionId::CancelTurn
         | ActionId::ToggleYolo
         | ActionId::ToggleMultiline

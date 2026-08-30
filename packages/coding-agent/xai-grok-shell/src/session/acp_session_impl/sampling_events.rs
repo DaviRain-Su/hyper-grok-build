@@ -518,6 +518,28 @@ impl SessionActor {
                 )
                 .await;
             }
+            SamplingEvent::BackendToolCallFailed {
+                call_id,
+                name,
+                error,
+                ..
+            } => {
+                if request_owned {
+                    self.signals_handle().record_tool_failure(&name);
+                }
+                let (title, _kind, _raw_input) = backend_tool_display(&name);
+                self.send_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        acp::ToolCallId::new(Arc::from(call_id.as_str())),
+                        acp::ToolCallUpdateFields::new()
+                            .status(Some(acp::ToolCallStatus::Failed))
+                            .title(Some(title))
+                            .raw_output(Some(serde_json::json!({ "error": error }))),
+                    )),
+                    None,
+                )
+                .await;
+            }
         }
     }
 }

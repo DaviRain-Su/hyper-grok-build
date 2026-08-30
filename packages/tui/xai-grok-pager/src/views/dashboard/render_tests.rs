@@ -4425,7 +4425,7 @@ fn render_footer_delete_confirm_uses_pending_hint() {
         "stop-confirm footer must say `press again`, got: {content:?}",
     );
     assert!(
-        content.to_lowercase().contains("delete this session"),
+        content.to_lowercase().contains("delete row"),
         "delete-confirm footer must name the action, got: {content:?}",
     );
 }

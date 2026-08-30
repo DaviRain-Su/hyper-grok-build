@@ -39,7 +39,9 @@ pub enum ExpandKey {
 /// Headers are non-selectable section dividers; Hints are the actual key bindings, selectable and dispatchable on Enter.
 pub enum ShortcutsHelpEntry {
     SectionHeader {
-        label: &'static str,
+        /// Translated at build time (`shortcuts_help.category.{slug}`);
+        /// `Cow` so the English source can stay borrowed.
+        label: std::borrow::Cow<'static, str>,
         category_idx: usize,
         entry_count: usize,
     },
@@ -114,8 +116,26 @@ const REDO_LONG_HELP: &str = "\
 Redoes the last undone change in the prompt editor.\n\
 Ctrl+Shift+Z is primary; Ctrl+R is an alternate.";
 
-// Prompt history is not an ActionRegistry entry: Up is an inline key handler and /history is a slash command
-// List both here so users can find them
+/// Bundle key for a localized pseudo-row long-help const.
+///
+/// Search and history also carry source-only long help. Returning `None` for
+/// those rows is important: treating every unknown value as redo help makes
+/// their detail pages render the wrong text whenever the locale bundle has a
+/// translated redo entry.
+fn pseudo_long_help_key(lh: &str) -> Option<&'static str> {
+    if lh == PASTE_LONG_HELP {
+        Some("shortcuts_help.paste_long_help")
+    } else if lh == UNDO_LONG_HELP {
+        Some("shortcuts_help.undo_long_help")
+    } else if lh == REDO_LONG_HELP {
+        Some("shortcuts_help.redo_long_help")
+    } else {
+        None
+    }
+}
+
+// Prompt history is not an ActionRegistry entry: Up is an inline key handler and
+// /history is a slash command. Surface both here for discoverability.
 const HISTORY_LONG_HELP: &str = "\
 Recalls previously sent prompts.\n\
 Press Up on an empty prompt to browse earlier prompts, newest first; each move \
@@ -173,7 +193,7 @@ pub fn build_entries(
         }
         let header_idx = entries.len();
         entries.push(ShortcutsHelpEntry::SectionHeader {
-            label,
+            label: crate::i18n::tr_or(&format!("shortcuts_help.category.{}", cat.slug()), label),
             category_idx: cat_idx,
             entry_count: 0,
         });
@@ -256,8 +276,8 @@ pub fn build_entries(
         }
         // Scrollback search (`/`) has no registered ActionDef yet (vim-only, handled inline); list it here for discoverability
         if vim_mode && cat == Category::ConversationNav {
-            let mut item = HintItem::new(crate::key!('/'), "search");
-            item.description = Some("Search scrollback".into());
+            let mut item = HintItem::new(crate::key!('/'), rust_i18n::t!("hints.search"));
+            item.description = Some(rust_i18n::t!("shortcuts_help.search_scrollback"));
             let dimmed = !active_contexts.contains(&When::ScrollbackFocused);
             entries.push(ShortcutsHelpEntry::Hint {
                 item,
@@ -298,20 +318,23 @@ pub fn build_entries(
                 });
             };
 
-            let mut paste = HintItem::new(crate::key!('v', CONTROL), "paste");
-            paste.description = Some("Paste images (and text) from the clipboard".into());
+            let mut paste = HintItem::new(crate::key!('v', CONTROL), rust_i18n::t!("hints.paste"));
+            paste.description = Some(rust_i18n::t!("shortcuts_help.paste_desc"));
             #[cfg(target_os = "windows")]
             paste.keys.push(crate::key!('v', ALT));
             push_pseudo(&mut entries, paste, Some(PASTE_LONG_HELP));
 
-            let mut undo = HintItem::new(crate::key!('z', CONTROL), "undo");
-            undo.description = Some("Undo the last prompt edit".into());
+            let mut undo = HintItem::new(crate::key!('z', CONTROL), rust_i18n::t!("hints.undo"));
+            undo.description = Some(rust_i18n::t!("shortcuts_help.undo_desc"));
             push_pseudo(&mut entries, undo, Some(UNDO_LONG_HELP));
 
-            // Textarea: Ctrl+Shift+Z, with Ctrl+R as alt
-            // Ctrl+R is prompt-only; scrollback may bind it to mouse reporting when that toggle is on
-            let mut redo = HintItem::new(crate::key!('z', CONTROL | SHIFT), "redo");
-            redo.description = Some("Redo the last undone prompt edit".into());
+            // Textarea: Ctrl+Shift+Z (+ Ctrl+R alt). Ctrl+R is prompt-only;
+            // scrollback may bind it to mouse reporting when that toggle is on.
+            let mut redo = HintItem::new(
+                crate::key!('z', CONTROL | SHIFT),
+                rust_i18n::t!("hints.redo"),
+            );
+            redo.description = Some(rust_i18n::t!("shortcuts_help.redo_desc"));
             redo.keys.push(crate::key!('r', CONTROL));
             push_pseudo(&mut entries, redo, Some(REDO_LONG_HELP));
 
@@ -600,11 +623,22 @@ pub fn detail_from_entry(entry: &ShortcutsHelpEntry) -> Option<ShortcutsHelpMode
                 .join(" / ")
         });
     // Body prefers long_help; falls back to the one-line description.
-    let body = long_help
-        .as_deref()
-        .or(item.description.as_deref())
-        .unwrap_or(item.label.as_ref())
-        .to_string();
+    let body = match (long_help.as_deref(), action_id) {
+        // Registry rows: per-action `actions.{id}.long_help` bundle key.
+        (Some(lh), Some(id)) => {
+            crate::i18n::tr_or(&format!("actions.{}.long_help", id.i18n_key()), lh).into_owned()
+        }
+        // Pseudo-rows with a bundle key are localized; source-only rows such
+        // as search/history keep their own help instead of aliasing to redo.
+        (Some(lh), None) => pseudo_long_help_key(lh)
+            .map(|key| crate::i18n::tr_or(key, lh).into_owned())
+            .unwrap_or_else(|| lh.to_string()),
+        _ => item
+            .description
+            .as_deref()
+            .unwrap_or(item.label.as_ref())
+            .to_string(),
+    };
     Some(ShortcutsHelpMode::Detail {
         title,
         keys_line,
@@ -628,17 +662,17 @@ pub fn modal_footer_detail() -> Vec<crate::views::modal_window::Shortcut<'static
     use crate::views::modal_window::Shortcut;
     vec![
         Shortcut {
-            label: "Esc back",
+            label: rust_i18n::t!("footer.esc_back"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "\u{2191}/\u{2193} scroll",
+            label: rust_i18n::t!("footer.scroll"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Ctrl+./X close",
+            label: rust_i18n::t!("footer.ctrl_dot_x_close"),
             clickable: false,
             id: 0,
         },
@@ -696,7 +730,7 @@ pub fn render_detail_body<'a>(
     if dimmed_note {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "(not active in current context)",
+            rust_i18n::t!("shortcuts_help.dimmed_note"),
             Style::default().fg(theme.gray_dim),
         )));
     }
@@ -732,8 +766,9 @@ pub fn render_detail(
         return;
     };
     let footer = modal_footer_detail();
+    let modal_title = rust_i18n::t!("modal.title.keyboard_shortcuts").to_string();
     let modal_config = mw::ModalWindowConfig {
-        title: "Keyboard Shortcuts",
+        title: modal_title.as_str(),
         tabs: None,
         shortcuts: &footer,
         sizing: modal_sizing(compact),
@@ -753,13 +788,33 @@ pub fn render_detail(
     }
 }
 
-/// Help line(s) shown under an expanded hint: prefers the action's `long_help`, falling back to the palette description.
-/// Callers split on `\n` for multi-line.
-pub fn hint_inline_help(entry: &ShortcutsHelpEntry) -> Option<&str> {
+/// Help line(s) shown under an expanded hint: prefers the action's `long_help`,
+/// falling back to the palette description. Callers split on `\n` for multi-line.
+pub fn hint_inline_help(entry: &ShortcutsHelpEntry) -> Option<std::borrow::Cow<'static, str>> {
     match entry {
         ShortcutsHelpEntry::Hint {
-            item, long_help, ..
-        } => long_help.as_deref().or(item.description.as_deref()),
+            item,
+            long_help,
+            action_id,
+            ..
+        } => {
+            if let (Some(lh), Some(id)) = (long_help, action_id) {
+                return Some(crate::i18n::tr_or(
+                    &format!("actions.{}.long_help", id.i18n_key()),
+                    lh,
+                ));
+            }
+            if let Some(lh) = long_help {
+                // Localize known pseudo rows; preserve source-only search and
+                // history help verbatim rather than mapping them to redo.
+                return Some(
+                    pseudo_long_help_key(lh)
+                        .map(|key| crate::i18n::tr_or(key, lh))
+                        .unwrap_or(std::borrow::Cow::Borrowed(*lh)),
+                );
+            }
+            item.description.clone()
+        }
         _ => None,
     }
 }
@@ -1043,41 +1098,41 @@ pub fn modal_footer(filter_active: bool) -> Vec<crate::views::modal_window::Shor
     use crate::views::modal_window::Shortcut;
     let mut shortcuts = vec![
         Shortcut {
-            label: "\u{2191}/\u{2193} nav",
+            label: rust_i18n::t!("footer.nav"),
             clickable: false,
             id: 0,
         },
         Shortcut {
             label: if filter_active {
-                "f show all"
+                rust_i18n::t!("footer.f_show_all")
             } else {
-                "f filter"
+                rust_i18n::t!("footer.f_filter")
             },
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "e/Space/\u{2192} expand",
+            label: rust_i18n::t!("footer.e_space_expand"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "\u{2190} collapse",
+            label: rust_i18n::t!("footer.arrow_collapse"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Enter details",
+            label: rust_i18n::t!("footer.enter_details"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "/ search",
+            label: rust_i18n::t!("footer.search"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Esc close",
+            label: rust_i18n::t!("footer.esc_close"),
             clickable: false,
             id: 0,
         },

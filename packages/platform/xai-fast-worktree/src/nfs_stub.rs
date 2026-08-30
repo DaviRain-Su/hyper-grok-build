@@ -118,6 +118,7 @@ pub(crate) fn is_safe_worktree_id(id: &str) -> bool {
         && !id.contains('/')
         && !id.contains('\\')
         && !id.contains('\0')
+        && !id.chars().any(char::is_whitespace)
 }
 pub(crate) fn try_grove_worktree(_plan: &WorktreePlan) -> Result<Option<CreateWorktreeResult>> {
     Ok(None)

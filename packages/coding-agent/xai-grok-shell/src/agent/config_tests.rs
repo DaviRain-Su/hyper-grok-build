@@ -3339,7 +3339,15 @@ fn e2e_enterprise_custom_endpoint_skips_xai_defaults() {
         !resolved.contains_key(crate::models::default_model()),
         "xAI default must not leak into enterprise model list"
     );
-    assert_eq!(resolved.len(), 1, "only the prefetched enterprise model");
+    // The offline multi-provider (Pi) builtins ride along with every
+    // endpoint; only the xAI first-party defaults are endpoint-gated.
+    assert!(
+        resolved
+            .keys()
+            .all(|k| xai_grok_models::parse_managed_model_key(k).is_some() || k == "acme-model"),
+        "enterprise list must only add Pi builtins on top of the prefetch; got: {:?}",
+        resolved.keys().take(8).collect::<Vec<_>>(),
+    );
 }
 #[test]
 fn e2e_default_endpoint_still_injects_defaults() {
@@ -7126,16 +7134,35 @@ fn resolve_model_list_prefetch_visibility_matches_auth_and_server_list() {
         p.insert(dm.to_string(), e);
     }
     let resolved = resolve_model_list(&cfg, Some(p));
-    let sess: Vec<_> = resolved
-        .values()
-        .filter(|e| e.visible_for_auth(true))
-        .collect();
-    let api: Vec<_> = resolved
-        .values()
-        .filter(|e| e.visible_for_auth(false))
-        .collect();
-    assert_eq!(sess.len(), 1);
-    assert_eq!(api.len(), 1);
+    // The prefetched xAI entry must be visible in both auth modes. Any other
+    // visible rows are managed platform builtins that ambient platform
+    // credentials (e.g. KIMI_API_KEY) legitimately unlock — visibility for
+    // those is `has_own_credentials`, independent of the session auth mode.
+    assert!(
+        resolved
+            .get(dm)
+            .is_some_and(|e| e.visible_for_auth(true) && e.visible_for_auth(false)),
+        "prefetched xAI entry must be visible for session and API-key auth"
+    );
+    for (key, entry) in &resolved {
+        if key == dm {
+            continue;
+        }
+        assert!(
+            entry.is_managed_platform_model(),
+            "a non-managed entry leaked into the resolved list: {key}"
+        );
+        assert_eq!(
+            entry.visible_for_auth(true),
+            entry.has_own_credentials(),
+            "{key}: session visibility must follow ambient credentials"
+        );
+        assert_eq!(
+            entry.visible_for_auth(false),
+            entry.has_own_credentials(),
+            "{key}: API-key visibility must follow ambient credentials"
+        );
+    }
 }
 #[test]
 fn resolve_model_list_keeps_prefetch_only_entries_and_prunes_defaults() {
@@ -7163,7 +7190,20 @@ fn resolve_model_list_prefetch_replaces_bundled_entirely() {
 fn resolve_model_list_empty_prefetch_yields_empty_base() {
     let cfg = Config::default();
     let resolved = resolve_model_list(&cfg, Some(IndexMap::new()));
-    assert!(resolved.is_empty());
+    // No xAI first-party models without a prefetch/catalog — the offline
+    // multi-provider (Pi) builtins still ride along (same contract as
+    // `resolve_model_list_empty_prefetch_yields_only_platform_builtins`).
+    assert!(
+        !resolved.contains_key(crate::models::default_model()),
+        "xAI default must not appear without a catalog"
+    );
+    assert!(
+        resolved
+            .keys()
+            .all(|k| xai_grok_models::parse_managed_model_key(k).is_some()),
+        "empty prefetch yields only managed platform builtins, got: {:?}",
+        resolved.keys().take(5).collect::<Vec<_>>()
+    );
 }
 /// Regression: enterprise managed config overlays env_key on an oauth-only
 /// catalog entry. BYOK must force visibility for API-key users so a

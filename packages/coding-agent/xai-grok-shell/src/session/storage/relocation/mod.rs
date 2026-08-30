@@ -142,8 +142,14 @@ fn load_candidates(sessions_root: &Path) -> Result<(SessionCandidates, SessionCa
         if !cwd_type.is_dir() || cwd_type.is_symlink() {
             continue;
         }
-        for session_entry in
-            fs::read_dir(&cwd_path).map_err(|error| io_error("read", &cwd_path, error))?
+        // A cwd bucket may vanish between readdir and open (concurrent session
+        // deletion, test fixtures cleaning tempdirs) — that race yields an
+        // empty listing, not a failed scan.
+        for session_entry in match fs::read_dir(&cwd_path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error("read", &cwd_path, error)),
+        }
         {
             let session_entry =
                 session_entry.map_err(|error| io_error("read", &cwd_path, error))?;

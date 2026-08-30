@@ -1,5 +1,5 @@
 ---
-source: crates/codegen/xai-grok-pager/src/app/status_blocks.rs
+source: packages/tui/xai-grok-pager/src/app/status_blocks.rs
 expression: text
 ---
 Session usage (since start or last resume):

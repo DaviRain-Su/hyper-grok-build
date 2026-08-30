@@ -188,6 +188,12 @@ pub enum ActiveModal {
         items: Vec<crate::slash::command::ArgItem>,
         /// Original items from suggest_args() (source for filtering).
         original_items: Vec<crate::slash::command::ArgItem>,
+        /// `/model` only: show the full catalog (locked BYOK rows + hidden
+        /// models) instead of the scoped default. Toggled with Tab.
+        show_all: bool,
+        /// `/model` only: ids currently in `[models].hidden_models` (for
+        /// hide/unhide via ^X and All-view synthesis).
+        hidden_ids: Vec<String>,
         /// Unified picker state.
         state: crate::views::picker::PickerState,
         /// Previous command palette state (if opened from palette). Restored on Esc.
@@ -277,7 +283,11 @@ pub enum ActiveModal {
     MemoryBrowser {
         state: Box<crate::views::memory_modal::MemoryModalState>,
     },
-    /// Settings modal (F2, /settings, palette). Boxed because the state is large.
+    /// Changes review modal (A2): pending hunks with accept/reject.
+    Changes {
+        state: Box<crate::views::changes_modal::ChangesModalState>,
+    },
+    /// Settings modal (F2, /settings, palette). Boxed — large state.
     Settings {
         state: Box<crate::views::settings_modal::SettingsModalState>,
     },
@@ -365,141 +375,146 @@ pub(crate) fn default_palette_entries(
     let mut entries = vec![
         // ── Session ──
         PaletteEntry {
-            label: "Session".into(),
+            label: crate::i18n::tr_or("palette.session", "Session").into(),
             shortcut: String::new(),
             command: PaletteCommand::SectionHeader("Session".into()),
         },
         PaletteEntry {
-            label: "New Session".into(),
+            label: crate::i18n::tr_or("palette.new_session", "New Session").into(),
             shortcut: "Ctrl+N".into(),
             command: PaletteCommand::NewSession,
         },
         PaletteEntry {
-            label: "New Session in Worktree".into(),
+            label: crate::i18n::tr_or("palette.new_session_in_worktree", "New Session in Worktree")
+                .into(),
             shortcut: "Ctrl+P → worktree".into(),
             command: PaletteCommand::NewSessionInWorktree,
         },
         PaletteEntry {
-            label: "Agent Dashboard".into(),
+            label: crate::i18n::tr_or("palette.agent_dashboard", "Agent Dashboard").into(),
             shortcut: "/dashboard".into(),
             command: PaletteCommand::SlashCommand("/dashboard".into()),
         },
         PaletteEntry {
-            label: "Back to Home".into(),
+            label: crate::i18n::tr_or("palette.back_to_home", "Back to Home").into(),
             shortcut: "/home".into(),
             command: PaletteCommand::Home,
         },
         PaletteEntry {
-            label: "Delete This Session".into(),
+            label: crate::i18n::tr_or("palette.delete_session", "Delete This Session").into(),
             shortcut: "/delete".into(),
             command: PaletteCommand::SlashCommand("/delete".into()),
         },
         PaletteEntry {
-            label: "Resume Session".into(),
+            label: crate::i18n::tr_or("palette.resume_session", "Resume Session").into(),
             shortcut: "/resume".into(),
             command: PaletteCommand::SlashCommand("/resume".into()),
         },
         PaletteEntry {
-            label: "Share Session".into(),
+            label: crate::i18n::tr_or("palette.share_session", "Share Session").into(),
             shortcut: "/share".into(),
             command: PaletteCommand::SlashCommand("/share".into()),
         },
         PaletteEntry {
-            label: "Rename Session".into(),
+            label: crate::i18n::tr_or("palette.rename_session", "Rename Session").into(),
             shortcut: "/rename ".into(),
             command: PaletteCommand::SlashCommand("/rename ".into()),
         },
         PaletteEntry {
-            label: "Session Info".into(),
+            label: crate::i18n::tr_or("palette.session_info", "Session Info").into(),
             shortcut: "/session-info".into(),
             command: PaletteCommand::SlashCommand("/session-info".into()),
         },
         PaletteEntry {
-            label: "Send Feedback".into(),
+            label: crate::i18n::tr_or("palette.send_feedback", "Send Feedback").into(),
             shortcut: "/feedback".into(),
             command: PaletteCommand::SlashCommand("/feedback ".into()),
         },
         // ── Context ──
         PaletteEntry {
-            label: "Context".into(),
+            label: crate::i18n::tr_or("palette.context", "Context").into(),
             shortcut: String::new(),
             command: PaletteCommand::SectionHeader("Context".into()),
         },
         PaletteEntry {
-            label: "Compact History".into(),
+            label: crate::i18n::tr_or("palette.compact_history", "Compact History").into(),
             shortcut: "/compact".into(),
             command: PaletteCommand::SlashCommand("/compact".into()),
         },
         PaletteEntry {
-            label: "Context Usage".into(),
+            label: crate::i18n::tr_or("palette.context_usage", "Context Usage").into(),
             shortcut: "/context".into(),
             command: PaletteCommand::SlashCommand("/context".into()),
         },
         PaletteEntry {
-            label: "View Plan".into(),
+            label: crate::i18n::tr_or("palette.view_plan", "View Plan").into(),
             shortcut: "/view-plan".into(),
             command: PaletteCommand::SlashCommand("/view-plan".into()),
         },
         PaletteEntry {
-            label: "Memory".into(),
+            label: crate::i18n::tr_or("palette.memory", "Memory").into(),
             shortcut: "/memory".into(),
             command: PaletteCommand::Memory,
         },
         // ── Model & Input ──
         PaletteEntry {
-            label: "Model & Input".into(),
+            label: crate::i18n::tr_or("palette.model_input", "Model & Input").into(),
             shortcut: String::new(),
             command: PaletteCommand::SectionHeader("Model & Input".into()),
         },
         PaletteEntry {
-            label: "Switch Model".into(),
+            label: crate::i18n::tr_or("palette.switch_model", "Switch Model").into(),
             shortcut: "/model".into(),
             command: PaletteCommand::SlashCommand("/model ".into()),
         },
         PaletteEntry {
-            label: "Always Approve Mode".into(),
+            label: crate::i18n::tr_or("palette.always_approve_mode", "Always Approve Mode").into(),
             shortcut: "/always-approve".into(),
             command: PaletteCommand::SlashCommand("/always-approve".into()),
         },
         PaletteEntry {
-            label: "Multiline Input".into(),
+            label: crate::i18n::tr_or("palette.multiline_input", "Multiline Input").into(),
             shortcut: "/multiline".into(),
             command: PaletteCommand::SlashCommand("/multiline".into()),
         },
         PaletteEntry {
-            label: "Edit Prompt in External Editor".into(),
+            label: crate::i18n::tr_or(
+                "palette.edit_prompt_external",
+                "Edit Prompt in External Editor",
+            )
+            .into(),
             shortcut: "Ctrl+G".into(),
             command: PaletteCommand::EditPromptExternal,
         },
         // ── Tools ──
         PaletteEntry {
-            label: "Tools".into(),
+            label: crate::i18n::tr_or("palette.tools", "Tools").into(),
             shortcut: String::new(),
             command: PaletteCommand::SectionHeader("Tools".into()),
         },
         PaletteEntry {
-            label: "Hooks".into(),
+            label: crate::i18n::tr_or("palette.hooks", "Hooks").into(),
             shortcut: "/hooks".into(),
             command: PaletteCommand::OpenExtensionsTab(
                 crate::views::extensions_modal::ExtensionsTab::Hooks,
             ),
         },
         PaletteEntry {
-            label: "Plugins".into(),
+            label: crate::i18n::tr_or("palette.plugins", "Plugins").into(),
             shortcut: "/plugins".into(),
             command: PaletteCommand::OpenExtensionsTab(
                 crate::views::extensions_modal::ExtensionsTab::Plugins,
             ),
         },
         PaletteEntry {
-            label: "Marketplace".into(),
+            label: crate::i18n::tr_or("palette.marketplace", "Marketplace").into(),
             shortcut: "/marketplace".into(),
             command: PaletteCommand::OpenExtensionsTab(
                 crate::views::extensions_modal::ExtensionsTab::Marketplace,
             ),
         },
         PaletteEntry {
-            label: "Skills".into(),
+            label: crate::i18n::tr_or("palette.skills", "Skills").into(),
             shortcut: "/skills".into(),
             command: PaletteCommand::OpenExtensionsTab(
                 crate::views::extensions_modal::ExtensionsTab::Skills,
@@ -513,35 +528,35 @@ pub(crate) fn default_palette_entries(
             ),
         },
         PaletteEntry {
-            label: "MCP Servers".into(),
+            label: crate::i18n::tr_or("palette.mcp_servers", "MCP Servers").into(),
             shortcut: "/mcps".into(),
             command: PaletteCommand::OpenExtensionsTab(
                 crate::views::extensions_modal::ExtensionsTab::McpServers,
             ),
         },
         PaletteEntry {
-            label: "Manage Agents".into(),
+            label: crate::i18n::tr_or("palette.manage_agents", "Manage Agents").into(),
             shortcut: "/config-agents".into(),
             command: PaletteCommand::OpenAgentsModal,
         },
         // ── Other ──
         PaletteEntry {
-            label: "Other".into(),
+            label: crate::i18n::tr_or("palette.other", "Other").into(),
             shortcut: String::new(),
             command: PaletteCommand::SectionHeader("Other".into()),
         },
         PaletteEntry {
-            label: "Switch Theme".into(),
+            label: crate::i18n::tr_or("palette.switch_theme", "Switch Theme").into(),
             shortcut: "/theme".into(),
             command: PaletteCommand::SlashCommand("/theme ".into()),
         },
         PaletteEntry {
-            label: "Settings".into(),
+            label: crate::i18n::tr_or("palette.settings", "Settings").into(),
             shortcut: "F2".into(),
             command: PaletteCommand::OpenSettings,
         },
         PaletteEntry {
-            label: "Keyboard Shortcuts".into(),
+            label: crate::i18n::tr_or("palette.keyboard_shortcuts", "Keyboard Shortcuts").into(),
             shortcut: if crate::actions::ctrl_dot_unreliable() {
                 "Ctrl+X".into()
             } else {
@@ -550,17 +565,17 @@ pub(crate) fn default_palette_entries(
             command: PaletteCommand::KeyboardShortcuts,
         },
         PaletteEntry {
-            label: "How-to Guides".into(),
+            label: crate::i18n::tr_or("palette.howto_guides", "How-to Guides").into(),
             shortcut: "/docs".into(),
             command: PaletteCommand::HowTo,
         },
         PaletteEntry {
-            label: "Tutorial".into(),
+            label: crate::i18n::tr_or("palette.tutorial", "Tutorial").into(),
             shortcut: "/tutorial".into(),
             command: PaletteCommand::SlashCommand("/tutorial".into()),
         },
         PaletteEntry {
-            label: "Quit".into(),
+            label: crate::i18n::tr_or("palette.quit", "Quit").into(),
             shortcut: "Ctrl+Q".into(),
             command: PaletteCommand::Quit,
         },
@@ -654,40 +669,46 @@ impl ActiveModal {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
+            | ActiveModal::Changes { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
             | ActiveModal::RememberNoteReview { .. } => vec![],
         }
     }
-    pub fn message(&self, drain_blocked: bool) -> &str {
+    pub fn message(&self, drain_blocked: bool) -> std::borrow::Cow<'static, str> {
         match self {
             ActiveModal::EditConfirm { .. } => {
                 if drain_blocked {
-                    "Save and send?"
+                    rust_i18n::t!("modal.title.save_and_send")
                 } else {
-                    "Save changes?"
+                    rust_i18n::t!("modal.title.save_changes")
                 }
             }
-            ActiveModal::CommandPalette { .. } => "Commands",
-            ActiveModal::SessionPicker { .. } => "Resume session",
+            ActiveModal::CommandPalette { .. } => rust_i18n::t!("modal.title.commands"),
+            ActiveModal::SessionPicker { .. } => rust_i18n::t!("modal.title.resume_session"),
             ActiveModal::ArgPicker {
                 command,
                 args_query,
                 ..
             } => match command.as_str() {
-                "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
-                "model" | "m" => "Pick model",
-                "theme" | "t" => "Pick theme",
-                _ => "Pick option",
+                "model" | "m" if !args_query.is_empty() => {
+                    rust_i18n::t!("modal.title.pick_effort")
+                }
+                "model" | "m" => rust_i18n::t!("modal.title.pick_model"),
+                "theme" | "t" => rust_i18n::t!("modal.title.pick_theme"),
+                _ => rust_i18n::t!("modal.title.pick_option"),
             },
-            ActiveModal::DocPicker { .. } => "How-to Guides",
-            ActiveModal::DocViewer { title, .. } => title.as_str(),
-            ActiveModal::ShortcutsHelp { .. } => "Keyboard Shortcuts",
-            ActiveModal::MemoryBrowser { .. } => "Memory",
-            ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
-            ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
-            ActiveModal::RememberNoteReview { .. } => "Memory Note",
-            ActiveModal::UsageInfo { .. } => "Usage",
+            ActiveModal::DocPicker { .. } => rust_i18n::t!("modal.title.howto_guides"),
+            ActiveModal::DocViewer { title, .. } => title.clone().into(),
+            ActiveModal::ShortcutsHelp { .. } => rust_i18n::t!("modal.title.keyboard_shortcuts"),
+            ActiveModal::MemoryBrowser { .. } => rust_i18n::t!("modal.title.memory"),
+            ActiveModal::Changes { .. } => rust_i18n::t!("changes.title"),
+            ActiveModal::Settings { .. } => rust_i18n::t!("modal.title.settings"),
+            ActiveModal::ResetSettingsConfirm { .. } => {
+                rust_i18n::t!("modal.title.reset_setting")
+            }
+            ActiveModal::RememberNoteReview { .. } => rust_i18n::t!("modal.title.memory_note"),
+            ActiveModal::UsageInfo { .. } => rust_i18n::t!("modal.title.usage"),
         }
     }
 }
@@ -704,11 +725,14 @@ pub fn reset_confirm_prompt(modal: &ActiveModal) -> Option<String> {
     };
     let meta = settings_state.registry.find(key)?;
     let default = crate::settings::default_value_for(meta);
-    Some(format!(
-        "Reset '{}' to default ({})?",
-        meta.label,
-        format_default_for_prompt(&meta.kind, &default),
-    ))
+    Some(
+        rust_i18n::t!(
+            "settings_modal.reset_prompt",
+            label = meta.label_l10n(),
+            default = format_default_for_prompt(meta, &default)
+        )
+        .into_owned(),
+    )
 }
 /// Abbreviated title breadcrumb for the reset-confirm dialog, e.g. "Reset 'Compact mode'".
 pub fn reset_confirm_breadcrumb(modal: &ActiveModal) -> Option<String> {
@@ -721,22 +745,22 @@ pub fn reset_confirm_breadcrumb(modal: &ActiveModal) -> Option<String> {
         return None;
     };
     let meta = settings_state.registry.find(key)?;
-    Some(format!("Reset '{}'", meta.label))
+    Some(rust_i18n::t!("settings_modal.reset_breadcrumb", label = meta.label_l10n()).into_owned())
 }
 /// Format a `SettingValue` for the prompt's `(<default>)` display.
 fn format_default_for_prompt(
-    kind: &crate::settings::SettingKind,
+    meta: &crate::settings::SettingMeta,
     value: &crate::settings::SettingValue,
 ) -> String {
     use crate::settings::{SettingKind, SettingValue};
     match value {
-        SettingValue::Bool(true) => "on".to_owned(),
-        SettingValue::Bool(false) => "off".to_owned(),
+        SettingValue::Bool(true) => rust_i18n::t!("settings_modal.value_on").into_owned(),
+        SettingValue::Bool(false) => rust_i18n::t!("settings_modal.value_off").into_owned(),
         SettingValue::Enum(canonical) => {
-            if let SettingKind::Enum { choices, .. } = kind {
+            if let SettingKind::Enum { choices, .. } = &meta.kind {
                 for c in *choices {
                     if c.canonical == *canonical {
-                        return c.display.to_owned();
+                        return c.display_l10n(meta.key).into_owned();
                     }
                 }
             }
@@ -806,7 +830,7 @@ pub fn render_modal_overlay(
         .fg(theme.text_primary)
         .bg(bar_bg)
         .add_modifier(Modifier::BOLD);
-    let msg_span = Span::styled(msg, msg_style);
+    let msg_span = Span::styled(msg.clone(), msg_style);
     buf.set_span(bar_area.x, bar_area.y, &msg_span, bar_area.width);
     let mut x = bar_area.x + msg.width() as u16 + 2;
     let btn_bg = theme.bg_dark;
@@ -1079,17 +1103,17 @@ pub fn render_doc_picker_overlay(
     let non_sel = vec![false; filtered.len()];
     let mut picker_shortcuts: Vec<Shortcut<'_>> = vec![
         Shortcut {
-            label: "\u{2191}/\u{2193} nav",
+            label: rust_i18n::t!("footer.nav"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Enter select",
+            label: rust_i18n::t!("footer.enter_select"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Esc close",
+            label: rust_i18n::t!("footer.esc_close"),
             clickable: false,
             id: 0,
         },
@@ -1109,8 +1133,9 @@ pub fn render_doc_picker_overlay(
         footer_lines: footer_lines_with_tip_gap(area, &base_sizing, &picker_shortcuts),
         ..base_sizing
     };
+    let howto_title = rust_i18n::t!("modal.title.howto_guides");
     let modal_config = ModalWindowConfig {
-        title: "How-to Guides",
+        title: howto_title.as_ref(),
         tabs: None,
         shortcuts: &picker_shortcuts,
         sizing,
@@ -1187,12 +1212,12 @@ pub fn render_doc_viewer_overlay(
 ) {
     let doc_shortcuts = [
         super::modal_window::Shortcut {
-            label: "\u{2191}/\u{2193} scroll",
+            label: rust_i18n::t!("footer.scroll"),
             clickable: false,
             id: 0,
         },
         super::modal_window::Shortcut {
-            label: "Esc back",
+            label: rust_i18n::t!("footer.esc_back"),
             clickable: false,
             id: 0,
         },

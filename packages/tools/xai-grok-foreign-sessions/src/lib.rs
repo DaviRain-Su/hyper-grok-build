@@ -18,6 +18,47 @@ mod capability;
 mod claude;
 mod codex;
 mod omp;
+
+/// Crate-wide serialization lock for every env-mutating test: `cargo test
+/// --lib` shares one process across threads, so per-module locks don't
+/// serialize cross-module env mutation (global `environ` array hazard).
+#[cfg(test)]
+pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Crate-shared RAII guard for a single process env var in tests: sets (or
+/// unsets) it on construction and restores the prior value on drop. Acquire
+/// [`ENV_TEST_LOCK`] FIRST so the restore runs before the lock releases.
+#[cfg(test)]
+pub(crate) struct TestEnvGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl TestEnvGuard {
+    /// Set `key` to `val`, restoring the prior value on drop.
+    pub(crate) fn set(key: &'static str, val: &std::path::Path) -> Self {
+        let prev = std::env::var_os(key);
+        unsafe { std::env::set_var(key, val) };
+        Self { key, prev }
+    }
+    /// Unset `key`, restoring the prior value on drop.
+    pub(crate) fn unset(key: &'static str) -> Self {
+        let prev = std::env::var_os(key);
+        unsafe { std::env::remove_var(key) };
+        Self { key, prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(prev) => unsafe { std::env::set_var(self.key, prev) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
 use capability::{ApprovedRoot, open_sqlite_transaction};
 pub const MAX_SESSIONS_PER_TOOL: usize = 50;
 pub const MAX_SESSION_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);

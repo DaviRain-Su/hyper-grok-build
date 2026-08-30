@@ -264,6 +264,23 @@ mod tests {
     use super::super::liveness::WORKTREE_BACKING_DIR;
     use super::*;
     use tempfile::TempDir;
+
+    /// Plant a SQLite WAL journal in `backing` so the confined-delete probe in
+    /// these tests sees a foreign (journal-mode) store. The `data_root` and
+    /// `arming_source` parameters mirror the historical signature; only the
+    /// backing store matters for the probe.
+    fn plant_journal(
+        _data_root: &Path,
+        _worktree_id: &str,
+        backing: &Path,
+        _arming_source: Option<&Path>,
+    ) {
+        let conn = rusqlite::Connection::open(backing.join("sessions.db")).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS t(x);")
+            .unwrap();
+    }
+
     #[test]
     fn non_nfs_path_returns_none() {
         let tmp = TempDir::new().unwrap();
@@ -314,7 +331,7 @@ mod tests {
             serde_json::to_vec(&decoy_marker).unwrap(),
         )
         .unwrap();
-        crate::nfs::confined::tests::plant_journal(&data, victim_id, &victim_backing, None);
+        plant_journal(&data, victim_id, &victim_backing, None);
         let _env = crate::nfs::GROVE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());

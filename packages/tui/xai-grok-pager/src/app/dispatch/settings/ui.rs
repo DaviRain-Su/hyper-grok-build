@@ -8,13 +8,13 @@ use super::setters::{
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
     set_follow_up_behavior_inner, set_fork_secondary_model_inner, set_group_tool_verbs_inner,
     set_hunk_tracker_mode_inner, set_invert_scroll_inner, set_keep_text_selection_inner,
-    set_max_thoughts_width_inner, set_multiline_mode, set_page_flip_on_send_inner,
-    set_prompt_suggestions_inner, set_remember_tool_approvals_inner, set_render_mermaid_inner,
-    set_respect_manual_folds_inner, set_screen_mode_inner, set_scroll_lines_inner,
-    set_scroll_mode_inner, set_scroll_speed_inner, set_show_thinking_blocks_inner,
-    set_show_tips_inner, set_simple_mode_inner, set_theme_inner, set_timeline_inner,
-    set_timestamps, set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
-    set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
+    set_language_inner, set_max_thoughts_width_inner, set_multiline_mode,
+    set_page_flip_on_send_inner, set_prompt_suggestions_inner,
+    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
+    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
+    set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
+    set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
+    set_voice_capture_mode_inner, set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::{ActiveView, AppView};
@@ -27,8 +27,44 @@ use agent_client_protocol as acp;
 
 /// Format a "✓ Label: value" success toast.
 pub(in crate::app::dispatch) fn save_success_toast(label: &str, on: bool) -> String {
-    let value = if on { "on" } else { "off" };
-    format!("\u{2713} {label}: {value}")
+    let value = if on {
+        rust_i18n::t!("settings_modal.value_on")
+    } else {
+        rust_i18n::t!("settings_modal.value_off")
+    };
+    rust_i18n::t!("toast.saved", label = label, value = value).into_owned()
+}
+
+/// Format a "✓ Label: value" toast with an arbitrary (already localized or
+/// canonical) value — enum settings commit path.
+pub(in crate::app::dispatch) fn save_value_toast(label: &str, value: &str) -> String {
+    rust_i18n::t!("toast.saved", label = label, value = value).into_owned()
+}
+
+/// Format a "✓ Label: value (restart to apply)" toast — restart-required
+/// settings commit path.
+pub(in crate::app::dispatch) fn save_restart_toast(label: &str, value: &str) -> String {
+    rust_i18n::t!("toast.saved_restart", label = label, value = value).into_owned()
+}
+
+/// Bool variant of [`save_restart_toast`] using the localized on/off value.
+pub(in crate::app::dispatch) fn save_restart_bool_toast(label: &str, on: bool) -> String {
+    let value = if on {
+        rust_i18n::t!("settings_modal.value_on")
+    } else {
+        rust_i18n::t!("settings_modal.value_off")
+    };
+    rust_i18n::t!("toast.saved_restart", label = label, value = value).into_owned()
+}
+
+/// Translated settings-catalog label for toasts (`settings.{key}.label`),
+/// falling back to the English source. Keeps toast wording in sync with the
+/// settings row the user just toggled.
+pub(in crate::app::dispatch) fn setting_label_l10n(
+    key: &str,
+    fallback: &'static str,
+) -> std::borrow::Cow<'static, str> {
+    crate::i18n::tr_or(&format!("settings.{key}.label"), fallback)
 }
 
 /// Refresh every open settings modal's `ui_snapshot` and `pager_snapshot` so the next render reads the latest live state.
@@ -537,7 +573,7 @@ pub(in crate::app::dispatch) fn dispatch_toggle_mouse_capture(app: &mut AppView)
         }
         with_active_agent(app, |agent| {
             toast_applied = true;
-            agent.show_toast("Mouse reporting on");
+            agent.show_toast(&rust_i18n::t!("notices.mouse_reporting_on"));
         });
     } else {
         for agent in app.agents.values_mut() {
@@ -804,6 +840,7 @@ pub(in crate::app::dispatch) fn action_for_reset(
             Some(Action::SetHunkTrackerMode((*s).to_string()))
         }
         ("screen_mode", SettingValue::Enum(s)) => Some(Action::SetScreenMode((*s).to_string())),
+        ("language", SettingValue::Enum(s)) => Some(Action::SetLanguage((*s).to_string())),
         ("voice_keybind_enabled", SettingValue::Bool(b)) => {
             Some(Action::SetVoiceKeybindEnabled(*b))
         }
@@ -832,8 +869,10 @@ pub(in crate::app::dispatch) fn action_for_reset(
     }
 }
 
-/// Toast shown by the [`apply_setting_rollback`] catch-all when a persisted setting has no rollback arm.
-/// Shared with `every_persisting_setting_has_rollback_arm` so the guard can't be silently defeated by a wording edit.
+/// English source text of the `toast.rollback_no_arm` bundle entry (en.yml),
+/// shown by the [`apply_setting_rollback`] catch-all when a persisted setting
+/// has no rollback arm. Kept as a const so `every_persisting_setting_has_rollback_arm`
+/// can't be silently defeated by a wording edit — it MUST match en.yml.
 pub(crate) const ROLLBACK_NO_ARM_TOAST: &str =
     "Settings rolled back, but local state may be out of sync: restart to reload";
 
@@ -1071,6 +1110,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("screen_mode", SettingValue::Enum(s)) => {
             set_screen_mode_inner(app, crate::settings::canonical_screen_mode(Some(s)));
         }
+        ("language", SettingValue::Enum(s)) => {
+            set_language_inner(app, crate::i18n::canonical_language(Some(s)));
+        }
         ("voice_keybind_enabled", SettingValue::Bool(b)) => {
             set_voice_keybind_enabled_inner(app, *b)
         }
@@ -1119,7 +1161,10 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 "rollback path has no arm for this setting key; in-memory cache is now \
                  inconsistent with the on-disk state (which already failed to write)"
             );
-            app.show_toast(ROLLBACK_NO_ARM_TOAST);
+            app.show_toast(&crate::i18n::tr_or(
+                "toast.rollback_no_arm",
+                ROLLBACK_NO_ARM_TOAST,
+            ));
             return companion_effects;
         }
     }

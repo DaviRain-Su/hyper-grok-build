@@ -9,10 +9,10 @@ use xai_grok_tools::types::tool::ToolKind;
 /// Synthetic tool the model calls to return its schema-constrained final answer
 /// on backends that can't constrain output natively (Messages API). Intercepted
 /// in the loop, never executed as a real tool.
-const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
+pub(crate) const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
 /// Max times the model may re-call `StructuredOutput` with non-conforming args
 /// before the turn ends with the last validation error.
-const STRUCTURED_OUTPUT_MAX_RETRIES: u32 = 3;
+pub(crate) const STRUCTURED_OUTPUT_MAX_RETRIES: u32 = 3;
 /// What a `StructuredOutput` tool call means for the turn (see
 /// `handle_structured_output_tool_call`).
 enum StructuredOutputStep {
@@ -28,7 +28,7 @@ enum StructuredOutputStep {
 /// turn. Returns the value on success, or a human-readable error (surfaced to
 /// the model on retry and to the client as `structuredOutputError`). A `validator`
 /// of `Err` means the user's schema itself was invalid.
-fn validate_structured_output(
+pub(crate) fn validate_structured_output(
     validator: &Result<jsonschema::Validator, String>,
     raw: &str,
 ) -> Result<serde_json::Value, String> {
@@ -39,6 +39,26 @@ fn validate_structured_output(
         Ok(()) => Ok(value),
         Err(e) => Err(format!("output does not match the required schema: {e}")),
     }
+}
+
+/// Pin a large turn future on the heap from a **thin, never-inlined**
+/// stack frame.
+///
+/// `Box::pin(fut)` still constructs `fut` on the *caller* stack before the
+/// move. Calling that construction from an `#[inline(never)]` helper keeps
+/// the outer `handle_prompt` / recovery frames small so the default 2 MiB
+/// thread stack has room for the temporary. Pair with structural splits of
+/// huge async fns (setup vs loop) so no single future exceeds ~2 MiB.
+///
+/// No `stacker` / permanent `RUST_MIN_STACK` — see docs/test-isolation.md §8.3.
+#[inline(never)]
+pub(crate) fn box_turn_future<'a, F, T>(
+    build: impl FnOnce() -> F,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>
+where
+    F: std::future::Future<Output = T> + 'a,
+{
+    Box::pin(build())
 }
 /// Result of the turn-end usage drain (and cancel's no-drain snapshot).
 ///
@@ -292,7 +312,17 @@ impl SessionActor {
                 crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
             ));
     }
-    #[cfg(test)]
+    #[tracing::instrument(
+        name = "session.handle_prompt",
+        skip_all,
+        fields(
+            session_id = %self.session_info.id.0,
+            prompt_id = %prompt_id,
+            prompt_length = tracing::field::Empty,
+            command_name = tracing::field::Empty,
+            command_source = tracing::field::Empty,
+        )
+    )]
     pub(super) async fn handle_prompt(
         self: &Arc<Self>,
         prompt_id: &str,
@@ -344,13 +374,15 @@ impl SessionActor {
                 &serde_json::json!({ "traceparent": tp }),
             );
         }
-        self.handle_turn_input_inner(request).instrument(span).await
+        // Fork: pin the large inner state machine from a thin never-inlined
+        // frame so construction does not sit under the caller's stack load
+        // (docs/test-isolation.md §8.3).
+        box_turn_future(|| self.handle_turn_input_inner(request).instrument(span)).await
     }
     async fn handle_turn_input_inner(
         self: &Arc<Self>,
         request: TurnInputRequest,
     ) -> PromptTurnResult {
-        let _active = xai_grok_telemetry::activity::TURNS_ACTIVE.enter();
         let TurnInputRequest {
             prompt_id,
             input_origin,
@@ -446,6 +478,10 @@ impl SessionActor {
         } else {
             LoopFireMode::InSession
         };
+        // Hyper fork: wasm/scheme-registered slash commands participate in
+        // human-intent resolution alongside built-ins, skills and workflows.
+        let wasm_cmds = self.wasm_registered_commands.borrow().clone();
+        let scheme_cmds = self.scheme_registered_commands.borrow().clone();
         let (resolved, slash_skills, workflow_registry) = match policy.authority {
             InputAuthority::HumanIntent => {
                 let slash_skills = self.slash_skills_for_resolve().await;
@@ -466,6 +502,8 @@ impl SessionActor {
                     skill_rewrite,
                     &named_workflows,
                     loop_fire_mode,
+                    &wasm_cmds,
+                    &scheme_cmds,
                 );
                 (resolved, slash_skills, Some(workflow_registry))
             }
@@ -759,7 +797,12 @@ impl SessionActor {
         } else {
             None
         };
+        // Text observed by hooks / wasm / scheme extensions (post-truncation,
+        // post-image-transcription — the exact text pushed into chat state).
+        // Empty when the prompt gate blocked the turn.
+        let prompt_text_for_hook: String;
         if prompt_block.is_some() {
+            prompt_text_for_hook = String::new();
             if let Some(ack) = persist_ack.take() {
                 let _ = ack.send(());
             }
@@ -1077,6 +1120,74 @@ impl SessionActor {
                     "user prompt commit skipped: chat-state actor unavailable"
                 );
             }
+            prompt_text_for_hook = text;
+        }
+        // Scheme extensions observe the submitted prompt (fail-open, no gating).
+        {
+            let scheme_rt = self.scheme_runtime.clone();
+            if !scheme_rt.is_empty() {
+                let results = scheme_rt
+                    .dispatch_user_prompt_submit(&prompt_text_for_hook)
+                    .await;
+                crate::session::scheme_ext::log_observe_failures("user_prompt_submit", &results);
+            }
+        }
+        // Pi-style before_agent_start: wasm guests may inject context / append
+        // system notes (design-wasm-extensions Phase 2). Uses system-reminder
+        // messages so we do not rewrite the durable system prompt blob.
+        {
+            let ext_rt = self.extension_runtime.borrow().clone();
+            if !ext_rt.is_empty() {
+                let d = ext_rt
+                    .dispatch_before_agent_start(&xai_grok_extension_api::BeforeAgentStartIn {
+                        prompt: prompt_text_for_hook.clone(),
+                    })
+                    .await;
+                if let Some(ctx) = d.out.inject_context.as_deref() {
+                    self.push_system_reminder(ctx);
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        bytes = ctx.len(),
+                        "wasm before_agent_start inject_context applied"
+                    );
+                }
+                if let Some(sys) = d.out.append_system.as_deref() {
+                    self.push_system_reminder_with_tag(sys, "system-extension");
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        bytes = sys.len(),
+                        "wasm before_agent_start append_system applied"
+                    );
+                }
+            }
+        }
+        // Scheme extensions after wasm: same before_agent_start inject contract
+        // (system-reminder messages, host-capped, fail-open).
+        {
+            let scheme_rt = self.scheme_runtime.clone();
+            if !scheme_rt.is_empty() {
+                let d = scheme_rt
+                    .dispatch_before_agent_start(&xai_grok_extension_api::BeforeAgentStartIn {
+                        prompt: prompt_text_for_hook.clone(),
+                    })
+                    .await;
+                if let Some(ctx) = d.out.inject_context.as_deref() {
+                    self.push_system_reminder(ctx);
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        bytes = ctx.len(),
+                        "scheme before_agent_start inject_context applied"
+                    );
+                }
+                if let Some(sys) = d.out.append_system.as_deref() {
+                    self.push_system_reminder_with_tag(sys, "system-extension");
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        bytes = sys.len(),
+                        "scheme before_agent_start append_system applied"
+                    );
+                }
+            }
         }
         let turn_scope_guard =
             TurnSubagentScopeGuard::new(self.current_prompt_id.clone(), prompt_id.to_string());
@@ -1107,89 +1218,19 @@ impl SessionActor {
                 }),
             })
         } else {
-            let mut round_trace = trace_gcs_config;
-            let mut round_artifact = artifact_tracker;
-            let mut stop_continuations_this_turn: u32 = 0;
-            loop {
-                if self.goal_harness_enabled() {
-                    let goal_loop_active = self.goal_tracker.lock().status()
-                        == Some(crate::session::goal_tracker::GoalStatus::Active);
-                    self.set_goal_loop_active_resource(goal_loop_active).await;
-                }
-                let round = self
-                    .process_conversation_turn_with_recovery(
-                        prompt_id,
-                        round_trace.take(),
-                        round_artifact.take(),
-                        json_schema.clone(),
-                    )
-                    .await;
-                if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
-                    break round;
-                }
-                if matches!(
-                    round,
-                    Ok(TurnOutcome::Completed {
-                        refusal: Some(_),
-                        ..
-                    })
-                ) {
-                    self.auto_pause_goal_if_active_with_message(
-                        crate::session::goal_tracker::GoalPauseReason::Infra,
-                        "The model provider refused this goal round. Use /goal resume to retry."
-                            .to_string(),
-                    )
-                    .await;
-                    break round;
-                }
-                let goal_active = laziness_injection_active(
-                    self.goal_harness_enabled(),
-                    self.goal_tracker.lock().status(),
-                );
-                if goal_active {
-                    if self.has_runnable_queued_user_row().await {
-                        xai_grok_telemetry::unified_log::info(
-                            "shell.goal.yielded_to_queued_input",
-                            Some(self.session_info.id.0.as_ref()),
-                            Some(serde_json::json!({ "prompt_id": prompt_id })),
-                        );
-                        tracing::info!(
-                            "goal turn: yielding to queued user prompts; continuation re-arms \
-                             at turn end"
-                        );
-                        break round;
-                    }
-                    if crate::session::PromptOrigin::from_prompt_id(prompt_id).is_synthetic()
-                        || !self.has_pending_goal_continuation().await
-                    {
-                        let decision = if self.goal_runs_on_workflow_engine() {
-                            self.run_goal_round_end().await
-                        } else {
-                            self.run_goal_round_end_legacy().await
-                        };
-                        if let GoalRoundDecision::Continue(directive) = decision {
-                            self.inject_goal_continuation_message(directive).await;
-                            continue;
-                        }
-                    } else {
-                        tracing::info!(
-                            "goal turn: user prompt runs standalone; a queued continuation \
-                             resumes the goal"
-                        );
-                    }
-                }
-                match self
-                    .run_stop_gate(prompt_id, stop_continuations_this_turn)
-                    .await
-                {
-                    StopGateDecision::AllowStop => break round,
-                    StopGateDecision::KeepWorking { feedback } => {
-                        stop_continuations_this_turn += 1;
-                        self.chat_state_handle
-                            .push_user_message(ConversationItem::stop_hook_feedback(feedback));
-                    }
-                }
-            }
+            // Outer loop (goal / stop_gate) always shell-side. Each round uses
+            // Hypercore when enabled (incl. json_schema since P4), else legacy.
+            // Pin large outer-loop future from a thin frame — see `box_turn_future`.
+            box_turn_future(|| {
+                self.run_turn_outer_loop(
+                    prompt_id,
+                    prompt_text_for_hook.trim(),
+                    trace_gcs_config,
+                    artifact_tracker,
+                    json_schema,
+                )
+            })
+            .await
         };
         if matches!(
             result,
@@ -1811,6 +1852,202 @@ impl SessionActor {
             }
         }
     }
+    /// Shell outer loop: goal continuation + stop gate around each agent round.
+    ///
+    /// Each round is Hypercore (when enabled) or legacy `process_conversation_turn`.
+    /// Outer rounds use stable unique Hypercore turn ids (`r0`, `r1`, …).
+    async fn run_turn_outer_loop(
+        self: &Arc<Self>,
+        prompt_id: &str,
+        user_text: &str,
+        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
+        artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+        json_schema: Option<serde_json::Value>,
+    ) -> Result<TurnOutcome, acp::Error> {
+        let mut round_trace = trace_gcs_config;
+        let mut round_artifact = artifact_tracker;
+        let mut stop_continuations_this_turn: u32 = 0;
+        // First outer-loop round uses the original user text for Hypercore seed
+        // stripping; goal/stop continuations inject new user rows that Hypercore
+        // must see as the current turn text.
+        let mut round_user_text = user_text.to_string();
+        let mut outer_round: u32 = 0;
+        loop {
+            // Per-round extension inject (`BeforeModelInject`): wasm then scheme,
+            // both as system reminders — never a history rewrite. Fires on every
+            // outer round (incl. goal/stop continuations), unlike the once-per-
+            // prompt before_agent_start inject.
+            {
+                let input = xai_grok_extension_api::BeforeAgentStartIn {
+                    prompt: round_user_text.clone(),
+                };
+                let ext_rt = self.extension_runtime.borrow().clone();
+                if ext_rt.has_capability(xai_grok_extension_api::Capability::BeforeModelInject) {
+                    let d = ext_rt.dispatch_before_model(&input).await;
+                    if let Some(ctx) = d.out.inject_context.as_deref() {
+                        self.push_system_reminder(ctx);
+                    }
+                    if let Some(sys) = d.out.append_system.as_deref() {
+                        self.push_system_reminder_with_tag(sys, "system-extension");
+                    }
+                }
+                let scheme_rt = self.scheme_runtime.clone();
+                if scheme_rt.has_capability(xai_grok_extension_api::Capability::BeforeModelInject)
+                {
+                    let d = scheme_rt.dispatch_before_model(&input).await;
+                    if let Some(ctx) = d.out.inject_context.as_deref() {
+                        self.push_system_reminder(ctx);
+                    }
+                    if let Some(sys) = d.out.append_system.as_deref() {
+                        self.push_system_reminder_with_tag(sys, "system-extension");
+                    }
+                }
+            }
+            if self.goal_harness_enabled() {
+                let goal_loop_active = self.goal_tracker.lock().status()
+                    == Some(crate::session::goal_tracker::GoalStatus::Active);
+                self.set_goal_loop_active_resource(goal_loop_active).await;
+            }
+            let round = self
+                .run_one_agent_round(
+                    prompt_id,
+                    &round_user_text,
+                    round_trace.take(),
+                    round_artifact.take(),
+                    json_schema.clone(),
+                    outer_round,
+                )
+                .await;
+            if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
+                break round;
+            }
+            if matches!(
+                round,
+                Ok(TurnOutcome::Completed {
+                    refusal: Some(_),
+                    ..
+                })
+            ) {
+                self.auto_pause_goal_if_active_with_message(
+                    crate::session::goal_tracker::GoalPauseReason::Infra,
+                    "The model provider refused this goal round. Use /goal resume to retry."
+                        .to_string(),
+                )
+                .await;
+                break round;
+            }
+            let goal_active = laziness_injection_active(
+                self.goal_harness_enabled(),
+                self.goal_tracker.lock().status(),
+            );
+            if goal_active {
+                let decision = if self.goal_runs_on_workflow_engine() {
+                    self.run_goal_round_end().await
+                } else {
+                    self.run_goal_round_end_legacy().await
+                };
+                if let GoalRoundDecision::Continue(directive) = decision {
+                    round_user_text = directive.clone();
+                    self.inject_goal_continuation_message(directive).await;
+                    outer_round = outer_round.saturating_add(1);
+                    continue;
+                }
+            }
+            match self
+                .run_stop_gate(prompt_id, stop_continuations_this_turn)
+                .await
+            {
+                StopGateDecision::AllowStop => break round,
+                StopGateDecision::KeepWorking { feedback } => {
+                    stop_continuations_this_turn += 1;
+                    round_user_text = feedback.clone();
+                    self.chat_state_handle
+                        .push_user_message(ConversationItem::stop_hook_feedback(feedback));
+                    outer_round = outer_round.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    /// One agent round: legacy by default, experimental Hypercore on explicit opt-in.
+    ///
+    /// P6 containment: legacy remains the default production path and is selected
+    /// only by capability / path decision **before** entering Hypercore. Once
+    /// Hypercore is entered, non-Abort errors propagate (no same-round legacy
+    /// fallback).
+    async fn run_one_agent_round(
+        self: &Arc<Self>,
+        prompt_id: &str,
+        user_text: &str,
+        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
+        artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+        json_schema: Option<serde_json::Value>,
+        outer_round: u32,
+    ) -> Result<TurnOutcome, acp::Error> {
+        let conversation = self.chat_state_handle.get_conversation().await;
+        let decision = super::hypercore_turn::hypercore_path_decision_for_conversation(
+            user_text,
+            &conversation,
+        );
+        if decision.uses_hypercore() {
+            let core_turn_id =
+                super::hypercore_turn::hypercore_round_turn_id(prompt_id, outer_round, None);
+            debug_assert_eq!(
+                super::hypercore_turn::hypercore_post_entry_error_policy(),
+                "propagate"
+            );
+            // Entered Hypercore: any non-Abort error propagates upward.
+            let outcome = self
+                .run_hypercore_plain_turn(prompt_id, user_text, json_schema.clone(), &core_turn_id)
+                .await?;
+            tracing::info!(
+                session_id = %self.session_info.id.0,
+                path = "hypercore",
+                outer_round,
+                core_turn_id = %core_turn_id,
+                "agent round succeeded"
+            );
+            xai_grok_telemetry::unified_log::info(
+                "shell.turn.path",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({
+                    "path": "hypercore",
+                    "prompt_id": prompt_id,
+                    "core_turn_id": core_turn_id,
+                    "outer_round": outer_round,
+                    "ok": true,
+                })),
+            );
+            return Ok(outcome);
+        }
+
+        tracing::info!(
+            session_id = %self.session_info.id.0,
+            path = "legacy",
+            reason = decision.as_str(),
+            "agent round using legacy path"
+        );
+        xai_grok_telemetry::unified_log::info(
+            "shell.turn.path",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "path": "legacy",
+                "reason": decision.as_str(),
+                "prompt_id": prompt_id,
+                "outer_round": outer_round,
+            })),
+        );
+        box_turn_future(|| {
+            self.process_conversation_turn_with_recovery(
+                prompt_id,
+                trace_gcs_config,
+                artifact_tracker,
+                json_schema,
+            )
+        })
+        .await
+    }
+
     /// Wraps `process_conversation_turn` with auto-recovery for agents that opt in.
     ///
     /// Agents with a `completion_requirement` in their definition require the model
@@ -1843,7 +2080,7 @@ impl SessionActor {
             Some(req) => req,
             None => {
                 return self
-                    .process_conversation_turn(
+                    .process_conversation_turn_boxed(
                         req_id,
                         trace_gcs_config,
                         artifact_tracker.as_ref(),
@@ -1856,7 +2093,7 @@ impl SessionActor {
             Some(r) => r.clone(),
             None => {
                 return self
-                    .process_conversation_turn(
+                    .process_conversation_turn_boxed(
                         req_id,
                         trace_gcs_config,
                         artifact_tracker.as_ref(),
@@ -1868,7 +2105,7 @@ impl SessionActor {
         let required_tool = completion_req.tool.clone();
         let recovery_prompt = completion_req.reminder.clone();
         let mut result = self
-            .process_conversation_turn(
+            .process_conversation_turn_boxed(
                 req_id,
                 trace_gcs_config.clone(),
                 artifact_tracker.as_ref(),
@@ -1935,7 +2172,7 @@ impl SessionActor {
             let recovery_message = ConversationItem::auto_recovery(recovery_prompt.clone());
             self.chat_state_handle.push_user_message(recovery_message);
             result = self
-                .process_conversation_turn(
+                .process_conversation_turn_boxed(
                     req_id,
                     trace_gcs_config.clone(),
                     artifact_tracker.as_ref(),
@@ -1964,6 +2201,26 @@ impl SessionActor {
             }
         }
     }
+    /// Heap-allocate the legacy turn future and poll it under a temporary
+    /// heap pin from thin frame. See [`box_turn_future`] / docs §8.3.
+    fn process_conversation_turn_boxed<'a>(
+        self: &'a Arc<Self>,
+        req_id: &'a str,
+        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
+        artifact_tracker: Option<&'a crate::upload::manifest::ArtifactTracker>,
+        json_schema: Option<serde_json::Value>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TurnOutcome, acp::Error>> + 'a>>
+    {
+        box_turn_future(|| {
+            self.process_conversation_turn_body(
+                req_id,
+                trace_gcs_config,
+                artifact_tracker,
+                json_schema,
+            )
+        })
+    }
+
     pub(super) fn is_first_turn_memory_score_visible(score: f64) -> bool {
         format!("{score:.2}") != "0.00"
     }
@@ -2218,6 +2475,36 @@ impl SessionActor {
         }
         snapshot
     }
+    /// Legacy full agent loop (tools / compact / recovery details).
+    ///
+    /// **Default path:** Hypercore is experimental and only entered through
+    /// [`Self::run_one_agent_round`] after an explicit `HYPERCORE_TURN=1` opt-in.
+    /// Keep this legacy loop as the safe production path until Hypercore reaches
+    /// parity and its canary gate is deliberately enabled.
+    async fn process_conversation_turn(
+        self: &Arc<Self>,
+        req_id: &str,
+        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
+        artifact_tracker: Option<&crate::upload::manifest::ArtifactTracker>,
+        json_schema: Option<serde_json::Value>,
+    ) -> Result<TurnOutcome, acp::Error> {
+        // Pin the large body from a never-inlined frame (docs §8.3).
+        box_turn_future(|| {
+            self.process_conversation_turn_body(
+                req_id,
+                trace_gcs_config,
+                artifact_tracker,
+                json_schema,
+            )
+        })
+        .await
+    }
+
+    /// Legacy agentic turn body (setup + tool/sample loop). Carries the
+    /// `session.process_conversation_turn` span: the fork's thin-frame wrapper
+    /// below is not called directly (callers enter via
+    /// `process_conversation_turn_boxed`), so the instrument must live here for
+    /// `Span::current()` inside the loop to see the turn fields.
     #[tracing::instrument(
         name = "session.process_conversation_turn",
         skip_all,
@@ -2247,7 +2534,8 @@ impl SessionActor {
             parent_agent_id = tracing::field::Empty,
         )
     )]
-    async fn process_conversation_turn(
+    #[inline(never)]
+    async fn process_conversation_turn_body(
         self: &Arc<Self>,
         req_id: &str,
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
@@ -2290,6 +2578,10 @@ impl SessionActor {
         let mut prompt_timing = Some(crate::session::prompt_timing::PromptTiming::start());
         let tool_prep_start = std::time::Instant::now();
         let (tool_definitions, mcp_wait_ms) = self.prepare_tool_definitions_timed().await;
+        // Heap-allocate large turn-scoped values so the async state machine
+        // holds pointers across awaits instead of multi-KB enum variants
+        // (root cause of default-stack overflow in auth_retry_budget_tests).
+        let tool_definitions = std::sync::Arc::new(tool_definitions);
         let total_prep_ms = tool_prep_start.elapsed().as_millis() as u64;
         if let Some(ref mut pt) = prompt_timing {
             pt.record_tool_prep(mcp_wait_ms, total_prep_ms);
@@ -2306,7 +2598,7 @@ impl SessionActor {
         );
         if let Some(ref gcs_config) = trace_gcs_config {
             let gcs_cfg = gcs_config.clone();
-            let tool_defs = tool_definitions.clone();
+            let tool_defs = tool_definitions.as_ref().clone();
             let manifest_clone = artifact_tracker.cloned();
             let auth_manager = self.auth_manager.clone();
             tokio::spawn(async move {
@@ -2336,10 +2628,11 @@ impl SessionActor {
         let mut model_fingerprint: Option<String> = None;
         let mut structured_output_retries: u32 = 0;
         let mut media_gen_resamples: u32 = 0;
-        let structured_output_validator = json_schema.as_ref().map(|schema| {
+        // Validator is large; keep it on the heap for the whole turn.
+        let structured_output_validator = std::sync::Arc::new(json_schema.as_ref().map(|schema| {
             jsonschema::validator_for(schema).map_err(|e| format!("invalid output schema: {e}"))
-        });
-        let schema_ok = matches!(structured_output_validator, Some(Ok(_)));
+        }));
+        let schema_ok = matches!(structured_output_validator.as_ref(), Some(Ok(_)));
         let native_backend = if json_schema.is_some() {
             match self.chat_state_handle.get_sampling_config().await {
                 Some(c) => c.api_backend.supports_native_schema(),
@@ -2486,7 +2779,7 @@ impl SessionActor {
                     return Err(self.surface_compact_auth_failure(e).await);
                 }
             }
-            let backend_search_active = self.backend_search_active();
+            let backend_search_active = self.backend_search_active().await;
             tracing::debug!(
                 backend_search_active,
                 "backend_search: turn tool resolution"
@@ -2505,7 +2798,7 @@ impl SessionActor {
                     }
                     tools
                 } else {
-                    let tools = self.turn_base_tool_specs(&tool_definitions);
+                    let tools = self.turn_base_tool_specs(tool_definitions.as_ref()).await;
                     if self.startup_hints.is_subagent {
                         let bridge = self.agent.borrow().tool_bridge().clone();
                         child_tool_projection::child_safe_tool_specs(
@@ -2556,7 +2849,9 @@ impl SessionActor {
                     "loop_index": loop_index,
                 })),
             );
-            let mut request = request;
+            // Box request/response: ConversationRequest holds the full item
+            // history + tool specs and is live across the sampler await.
+            let mut request = Box::new(request);
             request.x_grok_session_id = Some(self.session_info.id.to_string());
             request.x_grok_turn_idx =
                 Some(self.chat_state_handle.get_prompt_index().await.to_string());
@@ -2571,7 +2866,7 @@ impl SessionActor {
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }
-            request.hosted_tools = self.hosted_tools_for_turn();
+            request.hosted_tools = self.hosted_tools_for_turn().await;
             request.max_output_tokens = self
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
@@ -2599,7 +2894,7 @@ impl SessionActor {
             let model_timer = std::time::Instant::now();
             let (response, latency) = match self
                 .run_turn_via_sampler(
-                    request.clone(),
+                    (*request).clone(),
                     &mut rate_limit_waits,
                     TransientRetryState {
                         step_attempts: transient_retry_attempts,
@@ -2610,7 +2905,7 @@ impl SessionActor {
                 )
                 .await
             {
-                Ok(SamplerTurnOutcome::Response(r, latency)) => (r, latency),
+                Ok(SamplerTurnOutcome::Response(r, latency)) => (Box::new(r), latency),
                 Err(error) => {
                     self.tool_context.fail_task_output_usage_closed();
                     return Err(error);
@@ -3100,7 +3395,8 @@ impl SessionActor {
                     refusal: turn_refused.then(|| refusal_explanation.clone().unwrap_or_default()),
                 });
             }
-            if structured_output_tool && let Some(validator) = structured_output_validator.as_ref()
+            if structured_output_tool
+                && let Some(validator) = structured_output_validator.as_ref().as_ref()
             {
                 match self
                     .handle_structured_output_tool_call(

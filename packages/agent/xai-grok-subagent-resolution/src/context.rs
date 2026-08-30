@@ -310,8 +310,10 @@ fn render_item_to_background(out: &mut String, item: &ConversationItem) {
         ConversationItem::BackendToolCall(b) => {
             let _ = writeln!(out, "[Backend Tool]: {}", b.text_summary());
         }
-        // Reasoning siblings do not enter the background text; they render inline with the surrounding assistant turn elsewhere, when needed
-        ConversationItem::Reasoning(_) => {}
+        // Reasoning siblings don't enter the fork-background rendering —
+        // they're rendered (when needed) inline with the surrounding
+        // assistant turn elsewhere.
+        ConversationItem::Reasoning(_) | ConversationItem::Compaction(_) => {}
     }
 }
 
@@ -387,6 +389,7 @@ mod tests {
         ConversationItem::ToolResult(ToolResultItem {
             tool_call_id: "tc-1".to_string(),
             content: content.into(),
+            is_error: false,
             images: Vec::new(),
         })
     }

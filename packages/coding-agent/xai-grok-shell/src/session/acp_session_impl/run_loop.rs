@@ -584,7 +584,7 @@ pub(super) async fn run_session(
                             session.on_title_renamed(manual);
                         }
                         SessionCommand::GetToolOverrides { respond_to } => {
-                            let _ = respond_to.send(session.effective_tool_overrides());
+                            let _ = respond_to.send(session.effective_tool_overrides().await);
                         }
                         SessionCommand::SetToolOverrides { overrides } => {
                             session.set_tool_overrides(overrides);
@@ -1051,7 +1051,7 @@ pub(super) async fn run_session(
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                             // An armed barrier must outlive the cancel; only
                             // a clear one lets queued notifications drain.
-                            if cancel.barrier == super::cancel::WakeBarrier::Clear {
+                            if cancel.barrier == super::tasks_cancel::WakeBarrier::Clear {
                                 SessionActor::maybe_drain_notifications(
                                     session.clone(),
                                     completion_tx.clone(),
@@ -1739,7 +1739,7 @@ pub(super) async fn run_session(
                             // Verbatim mirrors inherit the parent schema for radix-cache reuse,
                             // minus root-only ActiveAgentMessage tools (same strip as rebuilt).
                             let defs = session.prepare_tool_definitions_inner().await;
-                            let specs = session.turn_base_tool_specs(&defs);
+                            let specs = session.turn_base_tool_specs(&defs).await;
                             let bridge = session.agent.borrow().tool_bridge().clone();
                             let specs = child_tool_projection::child_safe_tool_specs(
                                 specs,
@@ -1858,10 +1858,15 @@ pub(super) async fn run_session(
                             let availability =
                                 session.build_command_availability(&tool_names, has_runs);
                             let (_, workflows) = session.named_workflow_snapshot();
+                            let wasm_cmds = session.wasm_registered_commands.borrow().clone();
+                            let scheme_cmds =
+                                session.scheme_registered_commands.borrow().clone();
                             let commands = slash_commands::available_commands(
                                 &skills,
                                 availability,
                                 &workflows,
+                                &wasm_cmds,
+                                &scheme_cmds,
                             );
                             let _ = respond_to.send(slash_commands::ListCommandsResponse {
                                 commands,

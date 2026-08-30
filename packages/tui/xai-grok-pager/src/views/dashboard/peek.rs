@@ -629,13 +629,16 @@ pub fn render_peek_panel(
                     reply_rect = Some(slot);
                     if reply.text().is_empty() {
                         // Permission reject vs. ask-tool "Other" free-text.
-                        // Painted manually (not via the widget's unfocused-only placeholder) so the hint stays visible while the caret sits on the row
-                        let placeholder_text = if panel.is_ask_question() {
-                            "Other (type your own answer)"
-                        } else {
-                            "No, reject (type to add feedback)"
-                        };
-                        let placeholder = truncate_str(placeholder_text, avail as usize);
+                        // Painted manually (not via the widget's
+                        // unfocused-only placeholder) so the hint stays
+                        // visible while the caret sits on the row.
+                        let placeholder_text: std::borrow::Cow<'static, str> =
+                            if panel.is_ask_question() {
+                                rust_i18n::t!("question.other_freeform")
+                            } else {
+                                rust_i18n::t!("question.reject_feedback")
+                            };
+                        let placeholder = truncate_str(placeholder_text.as_ref(), avail as usize);
                         buf.set_string(
                             text_x,
                             y,
@@ -730,7 +733,8 @@ pub fn render_peek_panel(
         if let Some(PeekLiveTailArgs { scrollback }) = live_tail {
             if middle_h > 0 {
                 if scrollback.is_empty() {
-                    if let Some(hint) = empty_hint.or(Some("No activity yet")) {
+                    let default_hint = rust_i18n::t!("dash.no_activity");
+                    if let Some(hint) = empty_hint.or(Some(default_hint.as_ref())) {
                         let trunc = truncate_str(hint, inner.width as usize);
                         buf.set_string(
                             inner.x,
@@ -780,7 +784,7 @@ pub fn render_peek_panel(
         vpad_top: 0,
         chrome: false,
         bg: PromptBg::Canvas(theme.bg_base),
-        placeholder_override: Some("reply\u{2026}"),
+        placeholder_override: Some(rust_i18n::t!("hints.reply_placeholder")),
         image_preview: false,
         ..PromptStyle::default()
     };

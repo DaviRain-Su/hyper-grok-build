@@ -588,7 +588,8 @@ pub(crate) fn top_level_last_change_at(agent: &AgentView, state: RowState) -> Sy
         | RowState::Idle
         | RowState::Inactive
         | RowState::Completed
-        | RowState::Failed => agent.last_active_at.unwrap_or_else(fallback_epoch),
+        | RowState::Failed
+        | RowState::Blocked => agent.last_active_at.unwrap_or_else(fallback_epoch),
     };
     crate::util::system_time_from_instant(anchor)
 }
@@ -749,7 +750,11 @@ fn top_level_secondary_line(
             activity.map(sanitize)
         }
         RowState::Working => activity.map(sanitize),
-        RowState::Idle | RowState::Inactive | RowState::Completed | RowState::Failed => agent
+        RowState::Idle
+        | RowState::Inactive
+        | RowState::Completed
+        | RowState::Failed
+        | RowState::Blocked => agent
             .last_turn_summary
             .as_deref()
             .map(sanitize)

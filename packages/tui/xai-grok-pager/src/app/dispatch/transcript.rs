@@ -539,7 +539,16 @@ pub(super) fn dispatch_open_config_agents_modal(
         .and_then(model_agent_type_from_info);
     let session_id = agent.session.session_id.clone();
     let active_agent = agent.session_agent_name.clone();
-    // One-shot plugin discovery (same gating as `/mcp doctor` and `inspect`) so plugin-provided agents are listed alongside native ones
+    // Usable catalog entries (id + display name) for the modal's model-pin
+    // picker (`m`). Credential-less (locked) platform models are excluded —
+    // pinning one would silently fall back to inherit at spawn.
+    let available_models: Vec<crate::views::agents_modal::ModelChoice> =
+        crate::acp::model_state::usable_model_choices(&agent.session.models)
+            .into_iter()
+            .map(|(id, name)| crate::views::agents_modal::ModelChoice { id, name })
+            .collect();
+    // One-shot plugin discovery (same gating as `/mcp doctor` and `inspect`)
+    // so plugin-provided agents are listed alongside native ones.
     let plugin_registry = xai_grok_shell::util::config::load_cli_plugin_registry(&cwd);
     let plugin_registry = (!plugin_registry.is_empty()).then_some(plugin_registry);
     let mut modal = AgentsModalState::new(
@@ -549,6 +558,7 @@ pub(super) fn dispatch_open_config_agents_modal(
         model_agent_type.as_deref(),
         active_agent,
         plugin_registry,
+        available_models,
     );
     if let Some(tab) = initial_tab {
         modal.active_tab = tab;

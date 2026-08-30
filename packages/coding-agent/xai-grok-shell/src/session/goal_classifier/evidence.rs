@@ -510,7 +510,14 @@ async fn run_git_diff_against_baseline(
     workspace_root: &Path,
 ) -> Result<String, ChangesCaptureError> {
     let mut cmd = git_command(workspace_root);
-    cmd.arg("diff").arg(baseline);
+    cmd.arg("diff")
+        // Pin the `a/` / `b/` header prefixes: a host `diff.mnemonicPrefix`
+        // or `diff.noprefix` gitconfig otherwise rewrites `diff --git c/…
+        // w/…` (or drops the prefixes entirely), which silently breaks
+        // `extract_changed_files`'s ` b/` parsing. See `extract_changed_files`.
+        .arg("--src-prefix=a/")
+        .arg("--dst-prefix=b/")
+        .arg(baseline);
     let output = match tokio::time::timeout(DIFF_COMMAND_TIMEOUT, cmd.output()).await {
         Ok(Ok(output)) => output,
         Ok(Err(err)) => return Err(ChangesCaptureError::DiffCommandFailed(err.to_string())),
@@ -563,10 +570,17 @@ async fn lazy_git_baseline_diff(
     // support SHA-256 repos.
     let mut cmd = git_command(workspace_root);
     if git_has_parent(workspace_root, &oldest).await {
-        cmd.arg("diff").arg(format!("{oldest}^..{head}"));
+        cmd.arg("diff")
+            // Same prefix pinning as `run_git_diff_against_baseline`.
+            .arg("--src-prefix=a/")
+            .arg("--dst-prefix=b/")
+            .arg(format!("{oldest}^..{head}"));
     } else {
         let empty_tree = derive_empty_tree_sha(workspace_root).await;
-        cmd.arg("diff").arg(format!("{empty_tree}..{head}"));
+        cmd.arg("diff")
+            .arg("--src-prefix=a/")
+            .arg("--dst-prefix=b/")
+            .arg(format!("{empty_tree}..{head}"));
     }
 
     let output = match tokio::time::timeout(DIFF_COMMAND_TIMEOUT, cmd.output()).await {

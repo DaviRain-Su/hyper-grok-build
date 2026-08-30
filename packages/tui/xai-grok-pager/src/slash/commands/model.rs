@@ -507,6 +507,8 @@ mod tests {
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
+            saved_workflows: &[],
+            workflow_runs: &[],
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
         assert_eq!(items.len(), 2, "model phase: one row per logical model");
@@ -541,6 +543,8 @@ mod tests {
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
+            saved_workflows: &[],
+            workflow_runs: &[],
         };
         // Args query has a trailing space -> effort phase. Items come out
         // ordered xhigh -> low (strongest first) per EFFORT_LEVELS.
@@ -574,6 +578,8 @@ mod tests {
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
+            saved_workflows: &[],
+            workflow_runs: &[],
         };
         // Still in effort phase; matcher upstream narrows to high / xhigh.
         let items = cmd.suggest_args(&ctx, "Reasoning X h").unwrap();
@@ -596,6 +602,8 @@ mod tests {
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
+            saved_workflows: &[],
+            workflow_runs: &[],
         };
         // No trailing space, user is still typing the model name.
         let items = cmd.suggest_args(&ctx, "Reason").unwrap();
@@ -761,6 +769,8 @@ mod tests {
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
+            saved_workflows: &[],
+            workflow_runs: &[],
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
         assert_eq!(items.len(), 2);
@@ -794,6 +804,8 @@ mod tests {
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
+            saved_workflows: &[],
+            workflow_runs: &[],
         };
         // Trailing space after a locked reasoning-capable model must NOT
         // enter the effort phase — the model list is re-rendered instead.
@@ -876,6 +888,8 @@ mod tests {
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
+            saved_workflows: &[],
+            workflow_runs: &[],
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
         assert_eq!(items.len(), 2);
@@ -934,6 +948,8 @@ mod tests {
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
+            saved_workflows: &[],
+            workflow_runs: &[],
         };
         // Ambiguous bare name + space must NOT enter effort phase.
         let items = cmd.suggest_args(&ctx, "GLM-5.2 ").unwrap();
@@ -1006,6 +1022,8 @@ mod tests {
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
+            saved_workflows: &[],
+            workflow_runs: &[],
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
         assert_eq!(items.len(), 1);

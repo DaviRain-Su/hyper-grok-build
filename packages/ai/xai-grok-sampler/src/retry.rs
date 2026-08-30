@@ -1,3 +1,73 @@
+//! Retry classification, backoff, and decision-making.
+//!
+//! Pure logic only: no I/O, no notifications, no logging side-effects.
+//! The actor (M4) wraps this with the actual retry loop.
+//!
+//! # Retry behavior summary
+//!
+//! **Retried** (up to 14 times — attempt [`DEFAULT_MAX_RETRIES`] = 15 is
+//! fatal — ≈5.5 min: every wait, including a server `Retry-After`, is
+//! capped at [`MAX_RETRY_BACKOFF`] and jittered):
+//! - 429 and any 5xx except 525/526 — covers the Cloudflare edge pages
+//!   (520–524 origin unreachable/timed out, 530 edge 1xxx) and upstream
+//!   overload (529). The rule is `RetryPolicy::edge_client`.
+//! - Connection errors (timeout, refused, reset)
+//! - `EventStreamError` / `StreamError` (mid-stream failures)
+//! - `EmptyResponse` (model returned no content/tool calls)
+//! - transient remote-sampler failures forwarded by a peer harness
+//!
+//! **Retried with lower cap** ([`RATE_LIMIT_RETRY_THRESHOLD`] = 2):
+//! - 429 (rate limited) — waits the full `Retry-After`, so the attempt
+//!   count is what bounds the total wait
+//!
+//! **Special handling**:
+//! - stale model-bound reasoning/signatures/native tool state → strip it and retry once
+//! - 413 / image processing errors → strip images and retry. Debits the
+//!   retry budget but is never blocked by it; a repeat with nothing left to
+//!   strip is fatal, so at most one strip cycle per request.
+//! Retry classification, backoff, and decision-making.
+//!
+//! Pure logic only: no I/O, no notifications, no logging side-effects.
+//! The actor (M4) wraps this with the actual retry loop.
+//!
+//! # Retry behavior summary
+//!
+//! **Retried** (up to 14 times — attempt [`DEFAULT_MAX_RETRIES`] = 15 is
+//! fatal — ≈5.5 min: every wait, including a server `Retry-After`, is
+//! capped at [`MAX_RETRY_BACKOFF`] and jittered):
+//! - 429 and any 5xx except 525/526 — covers the Cloudflare edge pages
+//!   (520–524 origin unreachable/timed out, 530 edge 1xxx) and upstream
+//!   overload (529). The rule is `RetryPolicy::edge_client`.
+//! - Connection errors (timeout, refused, reset)
+//! - `EventStreamError` / `StreamError` (mid-stream failures)
+//! - `EmptyResponse` (model returned no content/tool calls)
+//!
+//! **Retried with lower cap** ([`RATE_LIMIT_RETRY_THRESHOLD`] = 2):
+//! - 429 (rate limited) — waits the full `Retry-After`, so the attempt
+//!   count is what bounds the total wait
+//!
+//! **Special handling**:
+//! - 413 / image processing errors → strip images and retry. Debits the
+//!   retry budget but is never blocked by it; a repeat with nothing left to
+//!   strip is fatal, so at most one strip cycle per request.
+//!
+//! **Not retried** (Fatal immediately):
+//! - 400, 401, 403, 404, 408, 422 (client errors)
+//! - Cloudflare 525/526 (origin TLS handshake / invalid cert) — a broken
+//!   origin certificate never clears on its own
+//! - `Auth` / `InvalidConfiguration` (credential/config issues)
+//! - `IdleTimeout` (model stuck, retry would stall again)
+//! - `Serialization` (response parsing failure)
+//! - `MaxTokensTruncation` (by design)
+//!
+//! **Server hint** (`x-should-retry` header from CCP):
+//! - `false` → Fatal immediately, regardless of status code
+//! - `true` / absent → falls through to status-code logic above
+//!
+//! CCP's header is 429 + any 5xx (`RetryPolicy::server`). Cloudflare's own
+//! 52x pages never carry it, so the client policy above is what applies at
+//! the edge, and 525/526 stay Fatal even if a future header said retry.
+
 use std::time::Duration;
 
 use xai_grok_sampling_types::{SamplingError, is_retryable_api_status};
@@ -81,12 +151,21 @@ pub enum RetryDecision {
         is_rate_limited: bool,
     },
 
+    /// Retry after stripping provider/model-bound continuation state from
+    /// conversation history. The caller upgrades to fatal when nothing can be
+    /// stripped, so this recovery cannot loop.
+    RetryWithModelBoundStateStrip,
+
+    /// Retry after stripping inline images from the request (413
+    /// Payload Too Large or image processing rejection).
     RetryWithImageStrip,
 
     RetryWithClientRebuild {
         backoff: Duration,
     },
 
+    /// Emit the error to the session and let it decide what to do (currently
+    /// authentication refresh).
     EmitToSession(SamplingError),
 
     Fatal(SamplingError),
@@ -98,11 +177,15 @@ pub fn classify_error(
     max_retries: u32,
     rate_limit_threshold: u32,
 ) -> RetryDecision {
+    // Auth errors are session-owned so the session can refresh credentials.
     if err.is_auth_error() {
         return RetryDecision::EmitToSession(clone_error(err));
     }
-    if err.is_encrypted_content_error() {
-        return RetryDecision::EmitToSession(clone_error(err));
+    // Opaque history is optional continuation state. Strip it and retry the
+    // portable transcript once instead of forcing a new session after a model
+    // switch. The request task fails closed when there is nothing to strip.
+    if err.is_model_bound_history_error() {
+        return RetryDecision::RetryWithModelBoundStateStrip;
     }
     if max_retries == 0 {
         return RetryDecision::Fatal(clone_error(err));
@@ -432,14 +515,18 @@ mod tests {
     }
 
     #[test]
-    fn classify_encrypted_content_emits_to_session() {
-        let err = api_err(
-            StatusCode::BAD_REQUEST,
+    fn classify_model_bound_history_for_strip_recovery() {
+        for message in [
             "Could not decrypt the provided encrypted_content",
-        );
-        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::EmitToSession(_) => {}
-            other => panic!("expected EmitToSession, got {other:?}"),
+            "Invalid signature in thinking block",
+            "Invalid 'input[5].id': ''",
+            "Item with id 'rs_stale' not found",
+        ] {
+            let err = api_err(StatusCode::BAD_REQUEST, message);
+            assert!(matches!(
+                classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
+                RetryDecision::RetryWithModelBoundStateStrip
+            ));
         }
     }
 

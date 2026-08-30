@@ -3489,13 +3489,26 @@ use crate::session::storage::search::IndexDecision;
 /// `decide_search_index` stops short of a session store, but do not reach
 /// `bootstrap_once`: it takes the process-cached `grok_home()`, which these
 /// guards cannot redirect, so it could index the developer's own store.
-fn search_index_env() -> (tempfile::TempDir, [xai_grok_test_support::EnvGuard; 2]) {
+///
+/// Also pins the startup endpoints to an unreachable port: `MvpAgent::new`'s
+/// bootstrap fallback synchronously prefetches remote settings with whatever
+/// identity the real `~/.grok` still holds (the OnceLock-cached home these
+/// guards cannot redirect), so a developer machine with a live session would
+/// otherwise "land" settings mid-test and break the no-settings preconditions.
+fn search_index_env() -> (
+    tempfile::TempDir,
+    Vec<xai_grok_test_support::EnvGuard>,
+) {
     use xai_grok_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
-    let guards = [
+    let mut guards = vec![
         EnvGuard::set("GROK_HOME", home.path()),
         EnvGuard::unset("GROK_SESSION_SEARCH"),
+        // Nothing connects to a closed port on loopback; the (bounded,
+        // retried) fetch fails fast and leaves `remote_settings` unset.
+        EnvGuard::set("GROK_CLI_CHAT_PROXY_BASE_URL", "http://127.0.0.1:9"),
     ];
+    guards.extend(xai_grok_test_support::unset_all_byok_platform_api_key_envs());
     (home, guards)
 }
 #[tokio::test]

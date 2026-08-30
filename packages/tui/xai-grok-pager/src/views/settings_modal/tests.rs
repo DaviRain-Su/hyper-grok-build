@@ -1644,7 +1644,7 @@ fn render_editing_value_paints_validation_error_row_and_buffer_red() {
 
 /// Empty buffer renders a low-contrast placeholder hint.
 /// The cursor block (`▏`) lands at col 0 and overdraws the placeholder's leading `<`.
-/// So the assertion targets the unique "empty: uses shell default" substring that survives the cursor overdraw.
+/// So the assertion targets the unique "empty: use shell default" substring that survives the cursor overdraw.
 #[test]
 fn render_editing_value_empty_buffer_shows_placeholder() {
     let mut s = editor_render_fixture("", 0);
@@ -1664,9 +1664,9 @@ fn render_editing_value_empty_buffer_shows_placeholder() {
             input_row.push_str(cell.symbol());
         }
     }
-    // Placeholder for KnownModel ends with "uses shell default>". The cursor at col 0 overdraws the leading `<`, so we match on the body substring.
+    // Placeholder for KnownModel ends with "use shell default>". The cursor at col 0 overdraws the leading `<`, so we match on the body substring.
     assert!(
-        input_row.contains("uses shell default"),
+        input_row.contains("use shell default"),
         "empty buffer must render the KnownModel placeholder, got {input_row:?}",
     );
 }

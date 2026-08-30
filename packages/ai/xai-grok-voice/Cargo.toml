@@ -21,6 +21,7 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
+xai-dirs = { workspace = true }
 # Shared rustls ClientConfig (native + webpki + EXTRA_CA). Upstream 1.0.8 STT
 # streaming and `voice-probe` call this instead of installing rustls locally.
 xai-grok-extra-ca = { workspace = true }

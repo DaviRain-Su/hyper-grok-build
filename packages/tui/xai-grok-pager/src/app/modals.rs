@@ -17,6 +17,83 @@ use super::app_view::InputOutcome;
 use crate::theme::Theme;
 use crate::views::modal::{self, ActiveModal};
 
+/// Items for the `/model` picker's current view.
+///
+/// **Scoped** (default): drops locked BYOK rows and currently-hidden models
+/// so the everyday list stays small — the full catalog flooded it with
+/// hundreds of rows. **All**: everything, plus synthesized rows for hidden
+/// ids that already fell out of the catalog projection (so ^X can unhide
+/// them). Rows whose `action_id` is currently hidden are flagged
+/// [`ArgItem::hidden`] for dimmed rendering.
+pub(crate) fn model_picker_view_items(
+    original_items: &[crate::slash::command::ArgItem],
+    hidden_ids: &[String],
+    show_all: bool,
+) -> Vec<crate::slash::command::ArgItem> {
+    use crate::slash::command::ArgItem;
+    let is_hidden = |item: &ArgItem| {
+        item.action_id
+            .as_deref()
+            .is_some_and(|id| hidden_ids.iter().any(|h| h == id))
+    };
+    if !show_all {
+        return original_items
+            .iter()
+            .filter(|item| !item.locked && !is_hidden(item))
+            .cloned()
+            .collect();
+    }
+    let mut out: Vec<ArgItem> = original_items
+        .iter()
+        .cloned()
+        .map(|mut item| {
+            if is_hidden(&item) {
+                item.hidden = true;
+            }
+            item
+        })
+        .collect();
+    for id in hidden_ids {
+        if out
+            .iter()
+            .any(|i| i.action_id.as_deref() == Some(id.as_str()))
+        {
+            continue;
+        }
+        out.push(ArgItem {
+            display: format!("🚫 {id} (hidden)"),
+            match_text: id.clone(),
+            insert_text: id.clone(),
+            description: "hidden by your config — ^X to unhide".to_string(),
+            locked: false,
+            action_id: Some(id.clone()),
+            hidden: true,
+        });
+    }
+    out
+}
+
+/// View items further narrowed by the picker's type-to-filter query.
+fn apply_model_picker_filter(
+    original_items: &[crate::slash::command::ArgItem],
+    hidden_ids: &[String],
+    show_all: bool,
+    query: &str,
+) -> Vec<crate::slash::command::ArgItem> {
+    let base = model_picker_view_items(original_items, hidden_ids, show_all);
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return base;
+    }
+    base.into_iter()
+        .filter(|item| {
+            item.match_text.to_lowercase().contains(&q)
+                || item.display.to_lowercase().contains(&q)
+                || item.description.to_lowercase().contains(&q)
+        })
+        .collect()
+}
+
 impl AgentView {
     /// `suggest_args` falls back to model rows when the query is not in effort phase.
     /// Model-phase reasoning rows use a trailing space in `insert_text`; effort rows do not.
@@ -82,12 +159,14 @@ impl AgentView {
             args_query,
             items,
             original_items,
+            show_all,
+            hidden_ids,
             state,
             ..
         }) = active_modal.as_mut()
         {
             args_query.clear();
-            *items = model_items.clone();
+            *items = model_picker_view_items(&model_items, hidden_ids, *show_all);
             *original_items = model_items;
             // Model list is type-to-find: reopen input-default like the initial /model open.
             *state = crate::views::picker::PickerState::input_active();
@@ -396,6 +475,44 @@ impl AgentView {
             }
         }
 
+        // Changes review: chrome for close/shortcut clicks, then delegate.
+        if let ActiveModal::Changes { state } = modal {
+            let shortcuts = crate::views::changes_modal::build_shortcuts(state);
+            let chrome_cfg = mw::ModalWindowConfig {
+                title: "",
+                tabs: None,
+                shortcuts: &shortcuts,
+                sizing: mw::ModalSizing::large(),
+                fold_info: None,
+            };
+            let outcome = mw::handle_modal_key(&mut state.window, key, &chrome_cfg);
+            fn delegate(
+                outcome: crate::views::changes_modal::ChangesModalOutcome,
+            ) -> (bool, InputOutcome) {
+                use crate::views::changes_modal::ChangesModalOutcome as Out;
+                match outcome {
+                    Out::Changed => (false, InputOutcome::Changed),
+                    Out::Unchanged => (false, InputOutcome::Unchanged),
+                    Out::Closed => (true, InputOutcome::Changed),
+                    Out::Act(kind) => (false, InputOutcome::Action(Action::ChangesAction(kind))),
+                    Out::Refresh => (false, InputOutcome::Action(Action::OpenChanges)),
+                }
+            }
+            let (close, out) = match outcome {
+                ModalWindowOutcome::CloseRequested => (true, InputOutcome::Changed),
+                ModalWindowOutcome::ShortcutActivated(id) => state
+                    .handle_shortcut_id(id)
+                    .map(delegate)
+                    .unwrap_or((false, InputOutcome::Changed)),
+                ModalWindowOutcome::Unhandled => delegate(state.handle_key(key)),
+                _ => (false, InputOutcome::Changed),
+            };
+            if close {
+                self.active_modal = None;
+            }
+            return out;
+        }
+
         // Settings: route through ModalWindow chrome, then delegate.
         if let ActiveModal::Settings { state } = modal {
             // Sub-mode short-circuit: FilterFocused, PickingEnum, PickingGroup, and EditingValue handle their own Esc and keystrokes
@@ -512,6 +629,7 @@ impl AgentView {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
+            | ActiveModal::Changes { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
@@ -589,12 +707,71 @@ impl AgentView {
             _ => return InputOutcome::Changed,
         };
 
+        // `/model` scoping keys (model phase only, i.e. not in the effort
+        // sub-menu): Tab toggles scoped ↔ all view; ^X hides/unhides the
+        // selected model via `[models].hidden_models` in config.toml. The
+        // shell's config watcher hot-reloads the catalog on write.
+        if matches!(command_clone.as_str(), "model" | "m")
+            && !in_effort_phase
+            && let crossterm::event::Event::Key(key) = ev
+            && key.kind == KeyEventKind::Press
+        {
+            if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+                if let Some(ActiveModal::ArgPicker {
+                    items,
+                    original_items,
+                    show_all,
+                    hidden_ids,
+                    state,
+                    ..
+                }) = self.active_modal.as_mut()
+                {
+                    *show_all = !*show_all;
+                    let q = state.query().to_string();
+                    *items = apply_model_picker_filter(original_items, hidden_ids, *show_all, &q);
+                    state.selected = state.selected.min(items.len().saturating_sub(1));
+                }
+                return InputOutcome::Changed;
+            }
+            if key.code == KeyCode::Char('x') && key.modifiers == KeyModifiers::CONTROL {
+                if let Some(ActiveModal::ArgPicker {
+                    items,
+                    original_items,
+                    show_all,
+                    hidden_ids,
+                    state,
+                    ..
+                }) = self.active_modal.as_mut()
+                {
+                    let target = items
+                        .get(state.selected)
+                        .and_then(|item| item.action_id.clone());
+                    if let Some(id) = target {
+                        if let Some(pos) = hidden_ids.iter().position(|h| h == &id) {
+                            hidden_ids.remove(pos);
+                        } else {
+                            hidden_ids.push(id);
+                        }
+                        if let Err(e) = crate::config_toml_edit::set_hidden_model_ids(hidden_ids) {
+                            tracing::warn!(error = %e, "failed to persist hidden_models");
+                        }
+                        let q = state.query().to_string();
+                        *items =
+                            apply_model_picker_filter(original_items, hidden_ids, *show_all, &q);
+                        state.selected = state.selected.min(items.len().saturating_sub(1));
+                    }
+                }
+                return InputOutcome::Changed;
+            }
+        }
+
+        let picker_sc = crate::views::picker::picker_shortcuts();
         let config = PickerConfig {
             title: None,
             show_search_hint: false,
             expandable: false,
             esc_clears_query: false,
-            shortcuts: Some(crate::views::picker::picker_shortcuts()),
+            shortcuts: Some(&picker_sc),
             pending_hint: None,
             non_selectable: &[],
             non_selectable_clickable: &[],
@@ -633,23 +810,32 @@ impl AgentView {
         match step {
             ArgPickerStep::FilterChanged => {
                 if let Some(ActiveModal::ArgPicker {
+                    command,
+                    args_query,
                     items,
                     original_items,
+                    show_all,
+                    hidden_ids,
                     state,
                     ..
                 }) = self.active_modal.as_mut()
                 {
                     let q = state.query().to_lowercase();
-                    *items = original_items
-                        .iter()
-                        .filter(|item| {
-                            q.is_empty()
-                                || item.match_text.to_lowercase().contains(&q)
-                                || item.display.to_lowercase().contains(&q)
-                                || item.description.to_lowercase().contains(&q)
-                        })
-                        .cloned()
-                        .collect();
+                    if matches!(command.as_str(), "model" | "m") && args_query.is_empty() {
+                        *items =
+                            apply_model_picker_filter(original_items, hidden_ids, *show_all, &q);
+                    } else {
+                        *items = original_items
+                            .iter()
+                            .filter(|item| {
+                                q.is_empty()
+                                    || item.match_text.to_lowercase().contains(&q)
+                                    || item.display.to_lowercase().contains(&q)
+                                    || item.description.to_lowercase().contains(&q)
+                            })
+                            .cloned()
+                            .collect();
+                    }
                     state.selected = state.selected.min(items.len().saturating_sub(1));
                 }
                 InputOutcome::Changed
@@ -750,12 +936,13 @@ impl AgentView {
                     .collect();
                 let entry_count = filtered.len();
 
+                let picker_sc = crate::views::picker::picker_shortcuts();
                 let config = PickerConfig {
                     title: None,
                     show_search_hint: false,
                     expandable: false,
                     esc_clears_query: true,
-                    shortcuts: Some(crate::views::picker::picker_shortcuts()),
+                    shortcuts: Some(&picker_sc),
                     pending_hint: None,
                     non_selectable: &non_sel,
                     non_selectable_clickable: &[],
@@ -930,12 +1117,25 @@ impl AgentView {
                                                 state: state.clone(),
                                             })
                                         };
+                                        let is_model = matches!(trimmed.as_str(), "model" | "m");
+                                        let hidden_ids = if is_model {
+                                            crate::config_toml_edit::hidden_model_ids()
+                                        } else {
+                                            Vec::new()
+                                        };
+                                        let view_items = if is_model {
+                                            model_picker_view_items(&items, &hidden_ids, false)
+                                        } else {
+                                            items.clone()
+                                        };
                                         self.active_modal = Some(ActiveModal::ArgPicker {
                                             command: trimmed,
                                             args_query: String::new(),
-                                            items: items.clone(),
+                                            items: view_items,
                                             original_items: items,
-                                            // Type-to-find: open in input mode (vim: Esc drops to nav, i re-enters input)
+                                            show_all: false,
+                                            hidden_ids,
+                                            // Type-to-find: open in input mode (vim: Esc→nav, i→input).
                                             state: crate::views::picker::PickerState::input_active(
                                             ),
                                             previous_palette: prev,
@@ -1025,19 +1225,21 @@ impl AgentView {
 
                 // Chat-mode picker lists conversations only: the source filter and local-disk delete are dead weight there
                 let chat_mode = self.app_chat_mode;
+                let picker_sc = crate::views::picker::picker_shortcuts();
+                let sf_label = source_filter.label();
                 let config = PickerConfig {
                     title: Some("Resume session"),
                     show_search_hint: true,
                     expandable: true,
                     esc_clears_query: false, // Esc returns to palette or closes
-                    shortcuts: Some(crate::views::picker::picker_shortcuts()),
+                    shortcuts: Some(&picker_sc),
                     pending_hint: None,
                     non_selectable: &non_sel,
                     non_selectable_clickable: &[],
                     shortcuts_area: None,
                     tabs: None,
                     active_tab: 0,
-                    filter_label: (!chat_mode).then(|| source_filter.label()),
+                    filter_label: (!chat_mode).then(|| sf_label.as_ref()),
                     filter_key_hint: (!chat_mode).then_some("f"),
                     filter_active: !chat_mode && source_filter.is_active(),
                     header_note: None,
@@ -1313,12 +1515,13 @@ impl AgentView {
                     })
                 })
                 .collect();
+            let picker_sc = crate::views::picker::picker_shortcuts();
             let config = PickerConfig {
                 title: Some("How-to Guides"),
                 show_search_hint: false,
                 expandable: false,
                 esc_clears_query: true,
-                shortcuts: Some(crate::views::picker::picker_shortcuts()),
+                shortcuts: Some(&picker_sc),
                 pending_hint: None,
                 non_selectable: &non_sel,
                 non_selectable_clickable: &[],
@@ -1564,6 +1767,32 @@ impl AgentView {
             }
         }
 
+        // Changes review (mouse): chrome handles close + footer shortcut clicks.
+        if let Some(ActiveModal::Changes { state }) = &mut self.active_modal {
+            let outcome =
+                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
+            return match outcome {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::ShortcutActivated(id) => match state.handle_shortcut_id(id) {
+                    Some(crate::views::changes_modal::ChangesModalOutcome::Act(kind)) => {
+                        InputOutcome::Action(Action::ChangesAction(kind))
+                    }
+                    Some(crate::views::changes_modal::ChangesModalOutcome::Closed) => {
+                        self.active_modal = None;
+                        InputOutcome::Changed
+                    }
+                    Some(crate::views::changes_modal::ChangesModalOutcome::Refresh) => {
+                        InputOutcome::Action(Action::OpenChanges)
+                    }
+                    _ => InputOutcome::Changed,
+                },
+                _ => InputOutcome::Changed,
+            };
+        }
+
         // Settings: route through ModalWindow chrome, then delegate.
         if let Some(ActiveModal::Settings { state }) = &mut self.active_modal {
             let outcome =
@@ -1777,17 +2006,17 @@ impl AgentView {
             // Standard footer shortcuts for picker-style modals.
             let mut picker_shortcuts: Vec<Shortcut> = vec![
                 Shortcut {
-                    label: "\u{2191}/\u{2193} nav",
+                    label: rust_i18n::t!("footer.nav"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "Enter select",
+                    label: rust_i18n::t!("footer.enter_select"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "Esc close",
+                    label: rust_i18n::t!("footer.esc_close"),
                     clickable: false,
                     id: 0,
                 },
@@ -1874,6 +2103,8 @@ impl AgentView {
                 command,
                 args_query,
                 items,
+                original_items,
+                show_all,
                 state,
                 window,
                 ..
@@ -1882,6 +2113,7 @@ impl AgentView {
                 // Arg picker: ModalWindow chrome and picker content
                 let title = match command.as_str() {
                     "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
+                    "model" | "m" if *show_all => "Pick model (all)",
                     "model" | "m" => "Pick model",
                     "theme" | "t" => "Pick theme",
                     _ => "Pick option",
@@ -1899,7 +2131,7 @@ impl AgentView {
                             fields: &[],
                             description_lines: &[],
                             summary_lines: &[],
-                            dimmed: false,
+                            dimmed: item.locked || item.hidden,
                             indent: 0,
                             badge: "",
                             badge_color: None,
@@ -1909,6 +2141,43 @@ impl AgentView {
                     })
                     .collect();
                 let compact = self.scrollback.appearance().prompt.compact;
+                // `/model` scoping hints (model phase): Tab toggles the full
+                // catalog (locked BYOK rows), ^X hides a model from the list.
+                // Owned string must outlive `picker_shortcuts` which borrows it.
+                let locked_count = original_items.iter().filter(|i| i.locked).count();
+                let model_tab_hint: Option<std::borrow::Cow<str>> =
+                    if matches!(command.as_str(), "model" | "m") && args_query.is_empty() {
+                        if *show_all {
+                            Some(rust_i18n::t!("footer.tab_scoped"))
+                        } else if locked_count > 0 {
+                            Some(rust_i18n::t!("footer.tab_all_locked", count = locked_count))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                if matches!(command.as_str(), "model" | "m") && args_query.is_empty() {
+                    if let Some(hint) = &model_tab_hint {
+                        picker_shortcuts.push(Shortcut {
+                            label: hint.clone(),
+                            clickable: false,
+                            id: 0,
+                        });
+                    }
+                    if *show_all && locked_count > 0 {
+                        picker_shortcuts.push(Shortcut {
+                            label: rust_i18n::t!("footer.needs_key"),
+                            clickable: false,
+                            id: 0,
+                        });
+                    }
+                    picker_shortcuts.push(Shortcut {
+                        label: rust_i18n::t!("footer.ctrlx_hide"),
+                        clickable: false,
+                        id: 0,
+                    });
+                }
                 // Surface `i search` in the footer when vim nav mode is active.
                 mw::push_vim_nav_search_hint(&mut picker_shortcuts, state.search_active);
                 let modal_config = ModalWindowConfig {
@@ -1968,12 +2237,12 @@ impl AgentView {
                 let mut session_shortcuts: Vec<Shortcut> = if pending_delete.is_some() {
                     vec![
                         Shortcut {
-                            label: "y confirm delete",
+                            label: rust_i18n::t!("footer.y_confirm_delete"),
                             clickable: false,
                             id: 0,
                         },
                         Shortcut {
-                            label: "n cancel",
+                            label: rust_i18n::t!("footer.n_cancel"),
                             clickable: false,
                             id: 0,
                         },
@@ -1982,19 +2251,19 @@ impl AgentView {
                     let external =
                         *source_filter == crate::views::session_picker::SourceFilter::External;
                     let mut shortcuts = vec![Shortcut {
-                        label: "\u{2191}\u{2193} nav",
+                        label: rust_i18n::t!("footer.nav_compact"),
                         clickable: false,
                         id: 0,
                     }];
                     if !external {
                         shortcuts.extend([
                             Shortcut {
-                                label: "e expand",
+                                label: rust_i18n::t!("footer.e_expand"),
                                 clickable: false,
                                 id: 0,
                             },
                             Shortcut {
-                                label: "/ search",
+                                label: rust_i18n::t!("footer.search"),
                                 clickable: false,
                                 id: 0,
                             },
@@ -2002,13 +2271,13 @@ impl AgentView {
                     }
                     if !chat_mode {
                         shortcuts.push(Shortcut {
-                            label: "f filter",
+                            label: rust_i18n::t!("footer.f_filter"),
                             clickable: false,
                             id: 0,
                         });
                         if !external {
                             shortcuts.push(Shortcut {
-                                label: "d delete",
+                                label: rust_i18n::t!("footer.d_delete"),
                                 clickable: false,
                                 id: 0,
                             });
@@ -2055,13 +2324,14 @@ impl AgentView {
                     if chat_mode {
                         state.filter_area = None;
                     } else {
+                        let filter_label = source_filter.label();
                         let filter_rect = picker::render_filter_indicator(
                             buf,
                             content_area.x,
                             content_area.y,
                             content_area.width,
                             &theme,
-                            source_filter.label(),
+                            filter_label.as_ref(),
                             "f",
                             source_filter.is_active(),
                             state.filter_hovered,
@@ -2311,22 +2581,22 @@ impl AgentView {
 
                 let shortcuts: Vec<Shortcut> = vec![
                     Shortcut {
-                        label: "\u{2191}/\u{2193} scroll",
+                        label: rust_i18n::t!("footer.scroll"),
                         clickable: false,
                         id: 0,
                     },
                     Shortcut {
-                        label: "Enter save",
+                        label: rust_i18n::t!("footer.enter_save"),
                         clickable: false,
                         id: 0,
                     },
                     Shortcut {
-                        label: tab_label,
+                        label: tab_label.into(),
                         clickable: false,
                         id: 0,
                     },
                     Shortcut {
-                        label: "Esc cancel",
+                        label: rust_i18n::t!("footer.esc_cancel"),
                         clickable: false,
                         id: 0,
                     },
@@ -2449,6 +2719,8 @@ impl AgentView {
                 );
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
+            } else if let modal::ActiveModal::Changes { state } = active_modal {
+                crate::views::changes_modal::render_changes_modal(buf, area, state, &theme);
             } else if let modal::ActiveModal::Settings {
                 state: settings_state,
             } = active_modal
@@ -2466,9 +2738,13 @@ impl AgentView {
             ) {
                 // Render settings modal with reset-confirm overlay.
                 let prompt = crate::views::modal::reset_confirm_prompt(active_modal)
-                    .unwrap_or_else(|| "Reset setting to default?".to_owned());
+                    .unwrap_or_else(|| {
+                        rust_i18n::t!("settings_modal.reset_prompt_fallback").into_owned()
+                    });
                 let breadcrumb = crate::views::modal::reset_confirm_breadcrumb(active_modal)
-                    .unwrap_or_else(|| "Reset setting".to_owned());
+                    .unwrap_or_else(|| {
+                        rust_i18n::t!("settings_modal.reset_breadcrumb_fallback").into_owned()
+                    });
                 if let modal::ActiveModal::ResetSettingsConfirm { settings_state, .. } =
                     active_modal
                 {
@@ -3147,6 +3423,7 @@ mod command_palette_vim_input_tests {
     // That is the path the bug was on; the test asserts the cursor tracks focus
     #[test]
     fn command_palette_search_bar_cursor_only_when_focused() {
+        let _theme = crate::test_util::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -3261,5 +3538,83 @@ mod settings_memory_paste_routing_tests {
         };
         assert_eq!(state.query(), "a中b");
         assert_eq!(agent.prompt.text(), "hidden prompt");
+    }
+}
+
+#[cfg(test)]
+mod model_picker_view_tests {
+    use super::*;
+    use crate::slash::command::ArgItem;
+
+    fn row(id: &str, locked: bool) -> ArgItem {
+        ArgItem {
+            display: id.to_string(),
+            match_text: id.to_string(),
+            insert_text: id.to_string(),
+            description: String::new(),
+            locked,
+            action_id: Some(id.to_string()),
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn scoped_drops_locked_and_hidden_rows() {
+        let items = vec![
+            row("grok-4.5", false),
+            row("deepseek/deepseek-v4-flash", true),
+            row("openai/gpt-5", false),
+        ];
+        let hidden = vec!["openai/gpt-5".to_string()];
+        let view = model_picker_view_items(&items, &hidden, false);
+        let ids: Vec<_> = view
+            .iter()
+            .map(|i| i.action_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(ids, ["grok-4.5"]);
+    }
+
+    #[test]
+    fn all_view_marks_hidden_and_synthesizes_missing_rows() {
+        let items = vec![
+            row("grok-4.5", false),
+            row("deepseek/deepseek-v4-flash", true),
+        ];
+        // One hidden id still in the catalog projection, one already gone.
+        let hidden = vec!["grok-4.5".to_string(), "ollama/gpt-oss:120b".to_string()];
+        let view = model_picker_view_items(&items, &hidden, true);
+        let grok = view
+            .iter()
+            .find(|i| i.action_id.as_deref() == Some("grok-4.5"))
+            .unwrap();
+        assert!(grok.hidden, "hidden id in catalog flagged for dimming");
+        assert!(
+            view.iter().any(|i| i.locked),
+            "locked rows visible in All view"
+        );
+        let synth = view
+            .iter()
+            .find(|i| i.action_id.as_deref() == Some("ollama/gpt-oss:120b"))
+            .expect("synthesized row for hidden id absent from projection");
+        assert!(synth.hidden);
+        assert!(synth.display.contains("hidden"));
+        // No duplicate when the id exists in the projection already.
+        assert_eq!(
+            view.iter()
+                .filter(|i| i.action_id.as_deref() == Some("grok-4.5"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn filter_narrows_view_by_query() {
+        let items = vec![
+            row("grok-4.5", false),
+            row("deepseek/deepseek-v4-flash", true),
+        ];
+        let view = apply_model_picker_filter(&items, &[], true, "deepseek");
+        assert_eq!(view.len(), 1);
+        assert!(view[0].locked);
     }
 }

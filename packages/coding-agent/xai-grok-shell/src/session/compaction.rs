@@ -60,6 +60,7 @@ fn fingerprint_prefix(items: &[ConversationItem]) -> u64 {
             ConversationItem::ToolResult(_) => 3,
             ConversationItem::BackendToolCall(_) => 4,
             ConversationItem::Reasoning(_) => 5,
+            ConversationItem::Compaction(_) => 6,
         };
         tag.hash(&mut h);
         it.text_content().hash(&mut h);
@@ -144,14 +145,14 @@ impl SessionActor {
             }
         };
         let tool_defs = self.prepare_tool_definitions().await;
-        let tools = self.turn_base_tool_specs(&tool_defs);
+        let tools = self.turn_base_tool_specs(&tool_defs).await;
         let compaction_tool_tokens = xai_chat_state::estimate_tool_specs_tokens(&tools);
         let wall_clock_budget_secs = self
             .agent
             .borrow()
             .compaction_policy()
             .wall_clock_budget_secs;
-        let hosted_tools = self.hosted_tools_for_turn();
+        let hosted_tools = self.hosted_tools_for_turn().await;
         let (cancel, _cancel_scope) = self.compaction.cancel.enter();
         match generate_session_compact(
             history,
@@ -1055,7 +1056,7 @@ impl SessionActor {
         }
         let sampling_config = self.reconstruct_full_config().await;
         let sampling_client = self.prepare_chat_completion(false).await?;
-        let backend_search_active = self.backend_search_active();
+        let backend_search_active = self.backend_search_active().await;
         let effective_tool_defs: Vec<xai_grok_sampling_types::ToolDefinition> = self
             .prepare_tool_definitions()
             .await
@@ -1069,7 +1070,7 @@ impl SessionActor {
             .map(xai_grok_sampling_types::ToolSpec::from)
             .collect();
         let compaction_hosted_tools: Vec<xai_grok_sampling_types::HostedTool> =
-            self.hosted_tools_for_turn();
+            self.hosted_tools_for_turn().await;
         if lossy_input {
             simplified_messages = xai_chat_state::compaction_utils::fit_conversation_to_budget(
                 simplified_messages,

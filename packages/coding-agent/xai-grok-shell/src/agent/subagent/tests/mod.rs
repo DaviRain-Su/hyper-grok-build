@@ -13,7 +13,7 @@ use xai_grok_subagent_resolution::resolve_effective_overrides;
 use xai_grok_tools::implementations::grok_build::task::coordinator::{
     ChildCompletion, CompletionDisposition,
 };
-use xai_tool_types::SubagentReasoningEffort;
+
 #[test]
 fn canonical_total_tokens_does_not_double_count_reasoning() {
     let totals = xai_chat_state::UsageTotals {
@@ -1068,12 +1068,12 @@ fn partial_override_fills_from_role() {
 #[test]
 fn reasoning_effort_explicit_overrides_role() {
     let overrides = SubagentRuntimeOverrides {
-        reasoning_effort: Some(SubagentReasoningEffort::High),
+        reasoning_effort: Some(xai_tool_types::SubagentReasoningEffort::High),
         ..Default::default()
     };
     let role = xai_grok_subagent_resolution::config::SubagentRole {
         description: "test".into(),
-        reasoning_effort: Some(SubagentReasoningEffort::Low),
+        reasoning_effort: Some(xai_tool_types::SubagentReasoningEffort::Low),
         ..Default::default()
     };
     let resolved = resolve_effective_overrides(
@@ -1085,7 +1085,7 @@ fn reasoning_effort_explicit_overrides_role() {
     );
     assert_eq!(
         resolved.reasoning_effort,
-        Some(SubagentReasoningEffort::High)
+        Some(xai_tool_types::SubagentReasoningEffort::High)
     );
 }
 #[test]
@@ -1093,7 +1093,7 @@ fn reasoning_effort_falls_back_to_role() {
     let overrides = SubagentRuntimeOverrides::default();
     let role = xai_grok_subagent_resolution::config::SubagentRole {
         description: "test".into(),
-        reasoning_effort: Some(SubagentReasoningEffort::Medium),
+        reasoning_effort: Some(xai_tool_types::SubagentReasoningEffort::Medium),
         ..Default::default()
     };
     let resolved = resolve_effective_overrides(
@@ -1105,7 +1105,7 @@ fn reasoning_effort_falls_back_to_role() {
     );
     assert_eq!(
         resolved.reasoning_effort,
-        Some(SubagentReasoningEffort::Medium)
+        Some(xai_tool_types::SubagentReasoningEffort::Medium)
     );
 }
 #[test]
@@ -1237,28 +1237,28 @@ fn reasoning_effort_precedence_explicit_over_role_over_persona() {
         .insert(
             "dev".to_string(),
             xai_grok_subagent_resolution::config::SubagentPersona {
-                reasoning_effort: Some(SubagentReasoningEffort::Low),
+                reasoning_effort: Some(xai_tool_types::SubagentReasoningEffort::Low),
                 ..Default::default()
             },
         );
     let role = xai_grok_subagent_resolution::config::SubagentRole {
         description: "test".into(),
-        reasoning_effort: Some(SubagentReasoningEffort::Medium),
+        reasoning_effort: Some(xai_tool_types::SubagentReasoningEffort::Medium),
         ..Default::default()
     };
     let overrides = SubagentRuntimeOverrides {
         persona: Some("dev".into()),
-        reasoning_effort: Some(SubagentReasoningEffort::High),
+        reasoning_effort: Some(xai_tool_types::SubagentReasoningEffort::High),
         ..Default::default()
     };
     let r = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
-    assert_eq!(r.reasoning_effort, Some(SubagentReasoningEffort::High));
+    assert_eq!(r.reasoning_effort, Some(xai_tool_types::SubagentReasoningEffort::High));
     let overrides = SubagentRuntimeOverrides {
         persona: Some("dev".into()),
         ..Default::default()
     };
     let r = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
-    assert_eq!(r.reasoning_effort, Some(SubagentReasoningEffort::Medium));
+    assert_eq!(r.reasoning_effort, Some(xai_tool_types::SubagentReasoningEffort::Medium));
     let role_no_re = xai_grok_subagent_resolution::config::SubagentRole {
         description: "test".into(),
         ..Default::default()
@@ -1270,7 +1270,7 @@ fn reasoning_effort_precedence_explicit_over_role_over_persona() {
         None,
         None,
     );
-    assert_eq!(r.reasoning_effort, Some(SubagentReasoningEffort::Low));
+    assert_eq!(r.reasoning_effort, Some(xai_tool_types::SubagentReasoningEffort::Low));
     let overrides = SubagentRuntimeOverrides::default();
     let r = resolve_effective_overrides(&overrides, None, &HashMap::new(), None, None);
     assert!(r.reasoning_effort.is_none());

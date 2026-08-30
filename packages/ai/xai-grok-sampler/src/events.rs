@@ -205,7 +205,8 @@ impl SamplingEvent {
             | Self::Failed { request_id, .. }
             | Self::ModelMetadata { request_id, .. }
             | Self::BackendToolCallStarted { request_id, .. }
-            | Self::BackendToolCallCompleted { request_id, .. } => request_id,
+            | Self::BackendToolCallCompleted { request_id, .. }
+            | Self::BackendToolCallFailed { request_id, .. } => request_id,
         }
     }
 }

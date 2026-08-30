@@ -2478,7 +2478,7 @@ fn xdg_runtime_dir_is_usable(dir: &std::path::Path) -> bool {
 
 /// User-private home fallback: `~/.grok/subagent-worktrees` (per-user, not /tmp).
 fn subagent_home_worktree_base() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".grok").join("subagent-worktrees"))
+    xai_dirs::home_dir().map(|h| h.join(".grok").join("subagent-worktrees"))
 }
 
 /// Per-UID private temp/home root for subagent worktrees.

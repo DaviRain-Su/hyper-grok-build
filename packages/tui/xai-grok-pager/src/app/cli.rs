@@ -6,6 +6,8 @@ use std::path::PathBuf;
 /// Top-level commands for the pager binary.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
+    /// Use an existing Codex/ChatGPT subscription (native backend)
+    Codex(CodexArgs),
     /// Run Grok without the interactive UI
     Agent(Box<AgentArgs>),
     /// Show the configuration Grok discovers for this directory
@@ -19,22 +21,102 @@ pub enum Command {
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
     /// Sign out and clear cached credentials
-    Logout,
+    Logout {
+        /// Clear only the Kimi Code subscription credential (leave xAI alone).
+        #[arg(long = "kimi", conflicts_with = "all")]
+        kimi: bool,
+        /// Clear only the OpenAI Codex (ChatGPT) subscription credential.
+        #[arg(long = "openai", conflicts_with_all = ["kimi", "all"])]
+        openai: bool,
+        /// Clear only the Anthropic Claude (Pro/Max) subscription credential.
+        #[arg(long = "claude", alias = "anthropic", conflicts_with_all = ["kimi", "openai", "github", "all"])]
+        claude: bool,
+        /// Clear only the GitHub Copilot subscription credential.
+        #[arg(long = "github", visible_alias = "copilot", conflicts_with_all = ["kimi", "openai", "claude", "bedrock", "all"])]
+        github: bool,
+        /// Clear only the Radius OAuth credential.
+        #[arg(long = "radius", conflicts_with_all = ["kimi", "openai", "claude", "github", "bedrock", "all"])]
+        radius: bool,
+        /// Clear only the Amazon Bedrock bearer/profile/chain marker.
+        #[arg(long = "bedrock", visible_alias = "amazon-bedrock", conflicts_with_all = ["kimi", "openai", "claude", "github", "radius", "all"])]
+        bedrock: bool,
+        /// Clear xAI session **and** Kimi / Codex / Claude / GitHub Copilot / Radius OAuth scopes.
+        /// Does not remove BYOK platform API keys or env vars (use
+        /// `/logout provider <id>` / unset env for those).
+        #[arg(long = "all", conflicts_with_all = ["kimi", "openai", "claude", "github", "bedrock"])]
+        all: bool,
+    },
+    /// Configure the Nexus relay key without signing in (writes ~/.grok/auth.json)
+    ///
+    /// Nexus is a self-hosted OpenAI/Anthropic-compatible relay. This works
+    /// before any xAI login, so you can set up `nexus/*` models up front.
+    /// Run with no arguments to print setup guidance and current status.
+    Nexus {
+        /// API key to save. Omit to print setup guidance / current status.
+        #[arg(value_name = "API_KEY")]
+        key: Option<String>,
+        /// Optional self-hosted gateway root (default https://nexuscore.now).
+        #[arg(value_name = "BASE_URL")]
+        base_url: Option<String>,
+        /// Remove the stored Nexus key.
+        #[arg(long, conflicts_with_all = ["key", "base_url"])]
+        clear: bool,
+    },
     /// Sign in to Grok
     Login {
         /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
         #[arg(long, hide = true)]
         legacy: bool,
         /// Use Grok OAuth via auth.x.ai.
-        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth"])]
+        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth", "kimi", "openai", "github", "bedrock"])]
         oauth: bool,
         /// Use device-code authentication for headless/remote environments.
         #[arg(
             long = "device-auth",
             visible_alias = "device-code",
-            conflicts_with_all = ["oauth"]
+            conflicts_with_all = ["oauth", "kimi", "github", "bedrock"]
         )]
         device_auth: bool,
+        /// Sign in with a Kimi Code subscription (device OAuth).
+        ///
+        /// Stores credentials under the `oauth/kimi-code` scope and unlocks
+        /// `kimi-code/*` models. Independent of xAI login.
+        #[arg(long = "kimi", conflicts_with_all = ["oauth", "device_auth", "openai", "github", "bedrock"])]
+        kimi: bool,
+        /// Sign in with an OpenAI Codex (ChatGPT Plus/Pro) subscription.
+        ///
+        /// Browser OAuth by default (PKCE + loopback callback, manual paste
+        /// supported); combine with `--device-auth` for headless environments.
+        /// Stores credentials under the `oauth/openai-codex` scope and unlocks
+        /// `openai-codex/*` models. Independent of xAI login.
+        #[arg(long = "openai", alias = "chatgpt", conflicts_with_all = ["oauth", "kimi", "github", "bedrock"])]
+        openai: bool,
+        /// Sign in with an Anthropic Claude (Pro/Max) subscription.
+        ///
+        /// Browser OAuth (PKCE + loopback callback, manual paste supported).
+        /// Stores credentials under the `oauth/anthropic-claude` scope and
+        /// unlocks `anthropic-claude/*` models. Independent of xAI login.
+        #[arg(long = "claude", alias = "anthropic", conflicts_with_all = ["oauth", "kimi", "openai", "github", "bedrock"])]
+        claude: bool,
+        /// Sign in with a GitHub Copilot subscription.
+        ///
+        /// Device OAuth against GitHub. Stores credentials under the
+        /// `oauth/github-copilot` scope and unlocks `github-copilot/*` models.
+        /// Independent of xAI login.
+        #[arg(long = "github", visible_alias = "copilot", conflicts_with_all = ["oauth", "device_auth", "kimi", "openai", "claude", "bedrock"])]
+        github: bool,
+        /// Sign in with Radius gateway OAuth (browser PKCE by default; add --device-auth for remote/headless use).
+        #[arg(long = "radius", conflicts_with_all = ["oauth", "kimi", "openai", "claude", "github", "bedrock"])]
+        radius: bool,
+        /// Configure Amazon Bedrock auth. Use --profile NAME, --chain, or enter a bearer token interactively.
+        #[arg(long = "bedrock", visible_alias = "amazon-bedrock", conflicts_with_all = ["oauth", "device_auth", "kimi", "openai", "claude", "github", "radius"])]
+        bedrock: bool,
+        /// Persist an AWS profile for Amazon Bedrock without copying AWS keys.
+        #[arg(long = "profile", requires = "bedrock", conflicts_with = "chain")]
+        profile: Option<String>,
+        /// Persist a marker to use the existing AWS SDK credential chain for Amazon Bedrock.
+        #[arg(long = "chain", requires = "bedrock", conflicts_with = "profile")]
+        chain: bool,
         /// Authenticate for remote development environments (hidden).
         ///
         /// Field is always present so match arms stay feature-unification-safe
@@ -139,11 +221,74 @@ See ~/.grok/README.md for more information.
     /// Disabled by default and enabled server-side per account; set `GROK_WORKSPACE_COMMAND=1` to enable it locally for testing.
     #[command(hide = true)]
     Workspace(WorkspaceMgmtArgs),
-    /// Open the Agent Dashboard view at startup.
+    /// Open the Agent Dashboard, or launch its local web observability UI.
     ///
-    /// The dashboard shows every session, top-level and subagents.
-    /// Disabled when `[dashboard].enabled = false` in `~/.grok/config.toml` or when the `GROK_AGENT_DASHBOARD=0` env var is set.
-    Dashboard,
+    /// Bare `dashboard` opens the terminal-native multi-agent dashboard.
+    /// `dashboard --web` starts the read-only Rust web dashboard over local
+    /// session artifacts. The web server only accepts loopback bind addresses.
+    Dashboard(DashboardArgs),
+    /// Browser control plane for a local Hyper agent (Tailscale-first).
+    ///
+    /// Listens on loopback by default. Put `tailscale serve` in front for
+    /// access from a phone or another machine on your tailnet. Chat sessions
+    /// are not wired yet; this command is the authenticated listener.
+    Web(WebArgs),
+}
+
+#[derive(Debug, clap::Args, Clone, Default)]
+pub struct DashboardArgs {
+    /// Launch the local web dashboard instead of the terminal dashboard.
+    #[arg(long)]
+    pub web: bool,
+
+    /// Loopback address for `--web` (default: 127.0.0.1:9090).
+    #[arg(long, value_name = "ADDR", requires = "web")]
+    pub bind: Option<SocketAddr>,
+
+    /// Do not open the default browser for `--web`.
+    #[arg(long, requires = "web")]
+    pub no_open: bool,
+}
+
+#[derive(Debug, clap::Args, Clone, Default)]
+pub struct WebArgs {
+    /// Listen address (default: 127.0.0.1:9100).
+    #[arg(long, value_name = "ADDR")]
+    pub bind: Option<SocketAddr>,
+
+    /// Allow a non-loopback bind (Tailscale 100.x). Never use a public address.
+    /// Prefer `tailscale serve` in front of loopback instead.
+    #[arg(long)]
+    pub allow_remote: bool,
+
+    /// Open the default browser to the local URL (includes the token).
+    #[arg(long)]
+    pub open: bool,
+}
+/// Arguments for the subscription-backed Codex connector.
+#[derive(Debug, clap::Args, Clone)]
+pub struct CodexArgs {
+    /// Run one Codex prompt and exit.
+    #[arg(short = 'p', long = "prompt", conflicts_with = "message")]
+    pub prompt: Option<String>,
+    /// Initial prompt. Without a prompt, starts an interactive session.
+    #[arg(value_name = "PROMPT", conflicts_with = "prompt")]
+    pub message: Option<String>,
+    /// Codex model ID. Defaults to the subscription's current default.
+    #[arg(short = 'm', long = "model")]
+    pub model: Option<String>,
+    /// Deprecated: the native backend talks to ChatGPT directly (no Codex CLI).
+    #[arg(long = "codex-binary", default_value = "codex", value_hint = ValueHint::FilePath, hide = true)]
+    pub codex_binary: PathBuf,
+    /// Deprecated: app-server threads are not resumable; use `grok sessions`.
+    #[arg(long = "resume", value_name = "THREAD_ID", hide = true)]
+    pub resume: Option<String>,
+    /// Allow Codex to access the host without its workspace sandbox.
+    #[arg(long = "full-access")]
+    pub full_access: bool,
+    /// Check subscription authentication and list available Codex models.
+    #[arg(long = "status")]
+    pub status: bool,
 }
 /// Arguments for the `wrap` subcommand: the command to run, then its args.
 #[derive(Debug, clap::Args, Clone)]
@@ -1396,8 +1541,170 @@ mod tests {
     #[test]
     fn subcommand_takes_precedence_over_positional_prompt() {
         let args = PagerArgs::try_parse_from(["grok", "logout"]).expect("subcommand parses");
-        assert!(matches!(args.command, Some(Command::Logout)));
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout {
+                kimi: false,
+                openai: false,
+                claude: false,
+                github: false,
+                radius: false,
+                bedrock: false,
+                all: false,
+            })
+        ));
+        let args = PagerArgs::try_parse_from(["grok", "logout", "--kimi"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout {
+                kimi: true,
+                openai: false,
+                claude: false,
+                github: false,
+                radius: false,
+                bedrock: false,
+                all: false,
+            })
+        ));
+        let args = PagerArgs::try_parse_from(["grok", "logout", "--all"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout {
+                kimi: false,
+                openai: false,
+                claude: false,
+                github: false,
+                radius: false,
+                bedrock: false,
+                all: true,
+            })
+        ));
+        assert!(
+            PagerArgs::try_parse_from(["grok", "logout", "--all", "--kimi"]).is_err(),
+            "--all conflicts with --kimi"
+        );
+        assert!(
+            PagerArgs::try_parse_from(["grok", "logout", "--all", "--openai"]).is_err(),
+            "--all conflicts with --openai"
+        );
+        assert!(
+            PagerArgs::try_parse_from(["grok", "logout", "--all", "--radius"]).is_err(),
+            "--all conflicts with --radius"
+        );
+        assert!(
+            PagerArgs::try_parse_from(["grok", "logout", "--kimi", "--openai"]).is_err(),
+            "--kimi conflicts with --openai"
+        );
+        let args = PagerArgs::try_parse_from(["grok", "logout", "--openai"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout {
+                kimi: false,
+                openai: true,
+                claude: false,
+                github: false,
+                radius: false,
+                bedrock: false,
+                all: false,
+            })
+        ));
+        let args = PagerArgs::try_parse_from(["grok", "logout", "--radius"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout { radius: true, .. })
+        ));
         assert!(args.prompt.is_none());
+    }
+
+    #[test]
+    fn login_openai_flag_parses_and_conflicts() {
+        let args = PagerArgs::try_parse_from(["grok", "login", "--openai"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Login { openai: true, .. })
+        ));
+        // --openai may combine with --device-auth (headless device flow)…
+        let args = PagerArgs::try_parse_from(["grok", "login", "--openai", "--device-auth"])
+            .expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Login {
+                openai: true,
+                device_auth: true,
+                ..
+            })
+        ));
+        // …but conflicts with --kimi and --oauth.
+        assert!(PagerArgs::try_parse_from(["grok", "login", "--openai", "--kimi"]).is_err());
+        assert!(PagerArgs::try_parse_from(["grok", "login", "--openai", "--oauth"]).is_err());
+    }
+
+    #[test]
+    fn login_radius_flag_parses_device_auth_and_conflicts() {
+        let args = PagerArgs::try_parse_from(["grok", "login", "--radius"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Login {
+                radius: true,
+                device_auth: false,
+                ..
+            })
+        ));
+        let args = PagerArgs::try_parse_from(["grok", "login", "--radius", "--device-auth"])
+            .expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Login {
+                radius: true,
+                device_auth: true,
+                ..
+            })
+        ));
+        assert!(PagerArgs::try_parse_from(["grok", "login", "--radius", "--openai"]).is_err());
+        assert!(PagerArgs::try_parse_from(["grok", "login", "--radius", "--oauth"]).is_err());
+        assert!(PagerArgs::try_parse_from(["grok", "login", "--radius", "--bedrock"]).is_err());
+    }
+
+    #[test]
+    fn login_bedrock_profile_chain_and_logout_parse() {
+        let args = PagerArgs::try_parse_from(["grok", "login", "--bedrock", "--profile", "dev"])
+            .expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Login {
+                bedrock: true,
+                profile: Some(ref p),
+                chain: false,
+                ..
+            }) if p == "dev"
+        ));
+        let args =
+            PagerArgs::try_parse_from(["grok", "login", "--bedrock", "--chain"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Login {
+                bedrock: true,
+                profile: None,
+                chain: true,
+                ..
+            })
+        ));
+        assert!(
+            PagerArgs::try_parse_from([
+                "grok",
+                "login",
+                "--bedrock",
+                "--profile",
+                "dev",
+                "--chain"
+            ])
+            .is_err()
+        );
+        let args = PagerArgs::try_parse_from(["grok", "logout", "--bedrock"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout { bedrock: true, .. })
+        ));
     }
     #[test]
     fn positional_prompt_conflicts_with_headless_single() {

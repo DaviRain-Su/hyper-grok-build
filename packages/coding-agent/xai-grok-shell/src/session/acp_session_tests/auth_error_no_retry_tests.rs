@@ -1353,7 +1353,12 @@ async fn sampler_401_static_kimi_skips_oauth_refresh() {
             actor.models_manager.insert_test_entry(catalog_id, entry);
             actor.invalidate_model_auth_memo();
 
-            let result = actor.handle_sampling_failure(auth_error(), 0).await;
+            let result = actor.handle_sampling_failure(
+                auth_error(),
+                0,
+                super::support::transient_state(0, false),
+            )
+            .await;
             let err = match result {
                 Err(e) => e,
                 Ok(_) => {
@@ -1769,7 +1774,12 @@ async fn sampler_401_on_open_platform_endpoint_skips_session_recovery() {
                 actor.chat_state_handle.update_sampling_config(cfg);
             }
 
-            let result = actor.handle_sampling_failure(auth_error(), 0).await;
+            let result = actor.handle_sampling_failure(
+                auth_error(),
+                0,
+                super::support::transient_state(0, false),
+            )
+            .await;
 
             let Err(err) = result else {
                 panic!(
@@ -1864,7 +1874,12 @@ async fn sampler_401_on_custom_model_url_skips_session_recovery() {
                 actor.chat_state_handle.update_sampling_config(cfg);
             }
 
-            let result = actor.handle_sampling_failure(auth_error(), 0).await;
+            let result = actor.handle_sampling_failure(
+                auth_error(),
+                0,
+                super::support::transient_state(0, false),
+            )
+            .await;
 
             let Err(err) = result else {
                 panic!(

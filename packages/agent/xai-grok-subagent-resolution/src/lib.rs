@@ -1,16 +1,28 @@
 //! Extracts the pure-logic "resolution" phase of subagent spawning from `xai-grok-shell` into a reusable library.
 //! Given a spawn request and a resolution context (roles, personas, parent state), this crate resolves:
 //!
-//! - Effective runtime config (model, persona, capability mode, isolation) via precedence: explicit override > role > persona > parent.
-//! - Persona instruction loading (inline `instructions` and `instructions_file`).
+//! Extracts the pure-logic "resolution" phase of subagent spawning from
+//! `xai-grok-shell` into a reusable library. Given a spawn request and a
+//! resolution context (roles, personas, parent state), this crate resolves:
+//!
+//! - Effective runtime config (model, effort, persona, capability mode,
+//!   isolation) via explicit > role > persona > definition > parent layering;
+//!   capability layers are intersected as security ceilings.
+//! - Persona instruction loading (inline `instructions` + `instructions_file`).
 //! - Role prompt file loading.
 //! - Resume identity validation (type/persona match checks; a model override is silently ignored).
 //!
 //! This crate has no dependency on session, coordinator, or transport types.
 //! It serves local hosts (e.g. `xai-grok-shell`) and any future remote spawn path that needs only pure resolution logic.
 //!
-//! Definition discovery, gating, prompt context, runtime defaults, and capability/depth tool policy are shared here.
-//! Choosing the model from the catalog and creating the child workspace stay in the host adapters.
+//! [`resolve_subagent_spec`] is the pure composition boundary for spawn-time,
+//! role, persona, and agent-definition runtime defaults. Catalog credentials,
+//! filesystem/worktree operations, and session construction remain in the host
+//! because they require shell-owned state and I/O.
+//!
+//! Definition discovery, gating, prompt context, runtime defaults, and
+//! capability/depth tool policy are shared here. Model catalog selection and
+//! workspace materialization remain host adapters.
 
 pub mod config;
 pub mod context;
@@ -28,7 +40,12 @@ pub use definition::{
     resolve_runtime_config, select_role, subagent_harness_flavor_is_representable,
     validate_agent_name,
 };
-pub use overrides::{intersect_capability_modes, resolve_effective_overrides};
+pub use overrides::{
+    intersect_capability_modes, resolve_effective_overrides, resolve_subagent_spec,
+};
 pub use resume::{ResumeValidationError, validate_resume_identity};
-pub use types::{ContextSource, EffectiveRuntimeConfig, ResolutionError, ResumeSourceData};
+pub use types::{
+    ContextSource, DefinitionRuntimeDefaults, EffectiveRuntimeConfig, ResolutionError,
+    ResumeSourceData,
+};
 pub use xai_grok_agent::config::AgentDefinition;

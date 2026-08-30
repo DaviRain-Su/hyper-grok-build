@@ -1,4 +1,5 @@
 use super::*;
+use crate::remote::fetch_models_blocking;
 use crate::remote::{ModelSource, active_model_source};
 
 // ── Fetch ───────────────────────────────────────────────────────────────────
@@ -17,6 +18,7 @@ pub(crate) fn build_prefetched_map(
             api_key: None,
             env_key: None,
             auth_provider: None,
+            platform_oauth_active: false,
             api_base_url: m.api_base_url.clone().or(api_base_url_override.clone()),
         };
         map.insert(key, entry);
@@ -55,8 +57,9 @@ pub(crate) fn prefetch_models_and_settings_blocking(
     let settings = match auth {
         Some(auth) if remote_fetch_enabled => {
             let _timer = crate::instrumentation_timer!("startup.early_settings_fetch");
+            let proxy_url = endpoints.proxy_url();
             crate::remote::fetch_settings_blocking(
-                &endpoints.proxy_url(),
+                &proxy_url,
                 auth,
                 endpoints.alpha_test_key.as_deref(),
             )
@@ -74,13 +77,37 @@ fn prefetch_models_blocking_gated(
     fetch_auth: ModelFetchAuth,
     remote_fetch_enabled: bool,
 ) -> Option<IndexMap<String, ModelEntry>> {
-    let cache_auth = fetch_auth.cache_auth_method();
-    let source = active_model_source(endpoints, fetch_auth);
-    let cache_origin = source.cache_origin();
+    prefetch_models_blocking_with_cache(
+        endpoints,
+        auth,
+        fetch_auth,
+        remote_fetch_enabled,
+        ModelsCacheManager::new(),
+    )
+}
 
-    let cache = ModelsCacheManager::new();
+/// Prefetch with an explicit cache manager (tests inject `with_path(TempDir)`).
+pub(crate) fn prefetch_models_blocking_with_cache(
+    endpoints: &config::EndpointsConfig,
+    auth: Option<&GrokAuth>,
+    fetch_auth: ModelFetchAuth,
+    remote_fetch_enabled: bool,
+    cache: ModelsCacheManager,
+) -> Option<IndexMap<String, ModelEntry>> {
+    let cache_auth = fetch_auth.cache_auth_method();
+    let cache_origin = crate::remote::models_list_url(endpoints, fetch_auth);
+    let platforms = crate::agent::platform_models_fetch::load_platforms_config();
+
+    // xAI disk cache hit: still merge live platform listings so Kimi/Moonshot
+    // models stay current without waiting for the xAI etag to change.
     if let Some(cached) = cache.load_fresh(&cache_auth, &cache_origin) {
-        return Some(cached.models);
+        if !remote_fetch_enabled {
+            return Some(cached.models);
+        }
+        return crate::agent::platform_models_fetch::fetch_and_merge_platform_models(
+            Some(cached.models),
+            &platforms,
+        );
     }
 
     if !remote_fetch_enabled {
@@ -89,7 +116,7 @@ fn prefetch_models_blocking_gated(
     }
 
     let _timer = crate::instrumentation_timer!("startup.fetch_models_blocking");
-    match source.fetch(auth) {
+    let xai_map = match fetch_models_blocking(endpoints, auth, fetch_auth) {
         Ok(FetchModelsResult { models, etag }) if !models.is_empty() => {
             let api_base_url_override = match fetch_auth {
                 ModelFetchAuth::ApiKey => Some(endpoints.xai_api_base_url.clone()),
@@ -98,6 +125,8 @@ fn prefetch_models_blocking_gated(
             let map = build_prefetched_map(models, api_base_url_override);
 
             tracing::info!(count = map.len(), etag = ?etag, "Prefetched models");
+            // Persist the xAI-only map so the cache origin stays tied to the
+            // xAI list URL; platform entries are re-merged on every load.
             cache.persist(&map, etag.as_deref(), cache_auth, &cache_origin);
             Some(map)
         }
@@ -109,7 +138,11 @@ fn prefetch_models_blocking_gated(
             tracing::warn!("Failed to fetch models: {:?}", e);
             None
         }
-    }
+    };
+
+    // Live platform catalogs merge in whether or not the xAI fetch succeeded —
+    // platform-only logins still get a real list.
+    crate::agent::platform_models_fetch::fetch_and_merge_platform_models(xai_map, &platforms)
 }
 
 /// Startup prefetch result: models + remote settings.
@@ -149,9 +182,12 @@ pub(crate) fn resolve_prefetch_env_from_parts(
 
     let model_fetch_auth = ModelFetchAuth::resolve(&endpoints, auth.is_some());
 
+    // No xAI session / custom endpoint / API key: still prefetch when a
+    // built-in platform has credentials so live `/models` can run.
     if auth.is_none()
         && !endpoints.has_custom_endpoint()
         && model_fetch_auth == ModelFetchAuth::Session
+        && !has_any_platform_credentials()
     {
         return None;
     }
@@ -161,6 +197,28 @@ pub(crate) fn resolve_prefetch_env_from_parts(
         endpoints,
         model_fetch_auth,
     })
+}
+
+/// True when any platform credential is available for a live platform catalog
+/// fetch. Startup gating must stay disk/env-only and avoid token refresh I/O.
+fn has_any_platform_credentials() -> bool {
+    if crate::auth::kimi::kimi_code_access_token_cached().is_some() {
+        return true;
+    }
+    if crate::auth::openai_codex::openai_codex_catalog_access_token_cached().is_some() {
+        return true;
+    }
+    if crate::auth::anthropic_claude::anthropic_claude_catalog_access_token_cached().is_some() {
+        return true;
+    }
+    let platforms = crate::agent::platform_models_fetch::load_platforms_config();
+    xai_grok_models::provider_registry()
+        .providers()
+        .iter()
+        .any(|provider| {
+            provider.accepts_api_key()
+                && crate::agent::config::resolve_provider_api_key(provider, &platforms).is_some()
+        })
 }
 
 /// Start model + settings prefetch on a background thread using pre-resolved auth.

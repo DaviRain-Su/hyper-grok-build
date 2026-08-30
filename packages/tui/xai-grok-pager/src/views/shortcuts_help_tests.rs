@@ -19,7 +19,7 @@ impl Drop for VimModeGuard {
 
 fn header(label: &'static str, idx: usize, count: usize) -> ShortcutsHelpEntry {
     ShortcutsHelpEntry::SectionHeader {
-        label,
+        label: label.into(),
         category_idx: idx,
         entry_count: count,
     }
@@ -230,16 +230,16 @@ fn build_entries_groups_by_category() {
     let registry = ActionRegistry::defaults();
     let entries = build_entries(&all_contexts(), &registry, true);
 
-    let headers: Vec<&str> = entries
+    let headers: Vec<String> = entries
         .iter()
         .filter_map(|e| match e {
-            ShortcutsHelpEntry::SectionHeader { label, .. } => Some(*label),
+            ShortcutsHelpEntry::SectionHeader { label, .. } => Some(label.to_string()),
             _ => None,
         })
         .collect();
-    assert!(headers.contains(&"Essentials"));
-    assert!(headers.contains(&"Conversation Navigation"));
-    assert!(headers.contains(&"Panels"));
+    assert!(headers.iter().any(|h| h == "Essentials"));
+    assert!(headers.iter().any(|h| h == "Conversation Navigation"));
+    assert!(headers.iter().any(|h| h == "Panels"));
 }
 
 #[test]
@@ -2189,7 +2189,7 @@ fn render_modal_shows_long_help_only_when_expanded() {
     item.description = Some("Quit the app".into());
     let entries = vec![
         ShortcutsHelpEntry::SectionHeader {
-            label: "Essentials",
+            label: "Essentials".into(),
             category_idx: 0,
             entry_count: 1,
         },
@@ -2250,7 +2250,7 @@ fn cheatsheet_rows_inline_help_joins_newlines_with_spaces() {
     item.description = Some("Quit the app".into());
     let entries = vec![
         ShortcutsHelpEntry::SectionHeader {
-            label: "Essentials",
+            label: "Essentials".into(),
             category_idx: 0,
             entry_count: 1,
         },
@@ -2284,7 +2284,7 @@ fn inline_expand_with_no_help_renders_no_description_line() {
     let item = HintItem::new(key!('q', CONTROL), "quit");
     let entries = vec![
         ShortcutsHelpEntry::SectionHeader {
-            label: "Essentials",
+            label: "Essentials".into(),
             category_idx: 0,
             entry_count: 1,
         },

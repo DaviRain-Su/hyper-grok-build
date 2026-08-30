@@ -4393,6 +4393,16 @@ pub(crate) fn apply_length_policy(
             );
             Ok(response)
         }
+        LengthVerdict::SalvageToolCalls => {
+            // Breadcrumb for counting turns rescued from max_tokens_truncation.
+            tracing::info!(
+                tool_calls = response.tool_calls().len(),
+                content_len = response.assistant().map_or(0, |a| a.content.len()),
+                completion_tokens = response.usage.as_ref().map(|u| u.completion_tokens),
+                "completing Length-truncated response with completed tool calls"
+            );
+            Ok(response)
+        }
     }
 }
 
@@ -4709,6 +4719,7 @@ mod tests {
             x_grok_deployment_id: None,
             x_grok_user_id: None,
             trace: None,
+            x_grok_transient_retry: None,
         };
 
         let wrapper = StreamingChatRequest {

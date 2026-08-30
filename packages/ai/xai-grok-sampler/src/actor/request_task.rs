@@ -4,6 +4,7 @@
 //! consumes a Layer 2 stream from the matching backend transform.
 //! Cancellation is cooperative via `CancellationToken`.
 
+use std::collections::BTreeMap;
 use std::pin::pin;
 use std::sync::{
     Arc, Mutex,
@@ -18,8 +19,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use xai_grok_sampling_types::{
-    ApiErrorCode, ConversationRequest, ConversationResponse, EmptyResponseContext, SamplingError,
-    SentCredential, error::Result as SamplingResult,
+    ApiErrorCode, ConversationItem, ConversationRequest, ConversationResponse,
+    EmptyResponseContext, ReasoningModelIdentity, SamplingError, SentCredential,
+    error::Result as SamplingResult,
 };
 
 use crate::actor::request_metadata::{
@@ -432,6 +434,30 @@ async fn apply_retry_decision(
                 false
             }
         }
+        RetryDecision::RetryWithModelBoundStateStrip => {
+            let stripped = request.strip_model_bound_state();
+            if stripped == 0 {
+                // The classifier matched but the request contains no removable
+                // continuation state. Repeating the same payload cannot help.
+                let terminal_event_queued = emit_failed(event_tx, request_id, err);
+                send_completion(completion, Err(clone_error(err)), terminal_event_queued);
+                return false;
+            }
+            *retry_count += 1;
+            tracing::warn!(
+                stripped,
+                model = %config.model,
+                "model-bound history rejected; retrying with portable transcript"
+            );
+            emit_retrying(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries.max(*retry_count),
+                err,
+            );
+            true
+        }
         RetryDecision::RetryWithImageStrip => {
             let stripped_urls = request.strip_images();
             if stripped_urls.is_empty() {
@@ -565,7 +591,7 @@ async fn sleep_or_cancel(duration: Duration, cancel_token: &CancellationToken) -
 #[allow(clippy::too_many_arguments)]
 async fn run_one_attempt(
     client: &SamplingClient,
-    request: ConversationRequest,
+    mut request: ConversationRequest,
     request_id: RequestId,
     idle_timeout: Duration,
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
@@ -573,7 +599,12 @@ async fn run_one_attempt(
     doom_check: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
     output_observed: Arc<AtomicBool>,
 ) -> AttemptOutcome {
+    if let Err(error) = client.apply_conversation_defaults(&mut request) {
+        return AttemptOutcome::InitFailed { error };
+    }
+    let reasoning_model_identity = request.reasoning_model_identity.clone();
     let length_policy = request.length_policy;
+
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
             let (raw, metadata) = match client.conversation_stream(request).await {
@@ -588,6 +619,7 @@ async fn run_one_attempt(
                 event_tx,
                 cancel_token,
                 captured,
+                reasoning_model_identity,
                 None,
                 FailedResponseCapture::default(),
                 output_observed,
@@ -595,7 +627,7 @@ async fn run_one_attempt(
             )
             .await
         }
-        ApiBackend::Responses => {
+        ApiBackend::Responses | ApiBackend::CodexResponses => {
             let (raw, metadata, doom_loop) =
                 match client.conversation_stream_responses(request).await {
                     Ok(parts) => parts,
@@ -629,8 +661,87 @@ async fn run_one_attempt(
                 event_tx,
                 cancel_token,
                 captured,
+                reasoning_model_identity,
                 doom_check,
                 failed_response,
+                output_observed,
+                length_policy,
+            )
+            .await
+        }
+        ApiBackend::GoogleGenerateContent => {
+            let (raw, identity) = match client.conversation_stream_google(request).await {
+                Ok(pair) => pair,
+                Err(e) => return AttemptOutcome::InitFailed { error: e },
+            };
+            let (teed, captured) = tee_errors(raw);
+            let l2 = crate::google::stream_google_generate_content(
+                teed,
+                request_id.clone(),
+                identity,
+                idle_timeout,
+            );
+            drive_l2(
+                l2,
+                request_id,
+                event_tx,
+                cancel_token,
+                captured,
+                reasoning_model_identity,
+                None,
+                FailedResponseCapture::default(),
+                output_observed,
+                length_policy,
+            )
+            .await
+        }
+        ApiBackend::BedrockConverseStream => {
+            let (raw, identity) = match client.conversation_stream_bedrock(request).await {
+                Ok(pair) => pair,
+                Err(e) => return AttemptOutcome::InitFailed { error: e },
+            };
+            let (teed, captured) = tee_errors(raw);
+            let l2 = crate::bedrock::stream_bedrock_converse(
+                teed,
+                request_id.clone(),
+                identity,
+                idle_timeout,
+            );
+            drive_l2(
+                l2,
+                request_id,
+                event_tx,
+                cancel_token,
+                captured,
+                reasoning_model_identity,
+                None,
+                FailedResponseCapture::default(),
+                output_observed,
+                length_policy,
+            )
+            .await
+        }
+        ApiBackend::PiMessages => {
+            let (raw, identity) = match client.conversation_stream_pi_messages(request).await {
+                Ok(pair) => pair,
+                Err(e) => return AttemptOutcome::InitFailed { error: e },
+            };
+            let (teed, captured) = tee_errors(raw);
+            let l2 = crate::pi_messages::stream_pi_messages(
+                teed,
+                request_id.clone(),
+                identity,
+                idle_timeout,
+            );
+            drive_l2(
+                l2,
+                request_id,
+                event_tx,
+                cancel_token,
+                captured,
+                reasoning_model_identity,
+                None,
+                FailedResponseCapture::default(),
                 output_observed,
                 length_policy,
             )
@@ -649,6 +760,7 @@ async fn run_one_attempt(
                 event_tx,
                 cancel_token,
                 captured,
+                reasoning_model_identity,
                 None,
                 FailedResponseCapture::default(),
                 output_observed,
@@ -701,22 +813,37 @@ async fn drive_l2(
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     cancel_token: &CancellationToken,
     captured: ErrorCell,
+    reasoning_model_identity: Option<ReasoningModelIdentity>,
     doom_check: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
     failed_response: FailedResponseCapture,
     output_observed: Arc<AtomicBool>,
     length_policy: xai_grok_sampling_types::LengthPolicy,
 ) -> AttemptOutcome {
     let mut l2 = pin!(l2);
+    let mut active_backend_tools = BTreeMap::<String, String>::new();
     let mut doom_loop_signals = Vec::new();
     let mut await_first_output_span = Some(tracing::info_span!("sampling.await_first_output"));
     loop {
         tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
+                for (call_id, name) in std::mem::take(&mut active_backend_tools) {
+                    let _ = event_tx.send(SamplingEvent::BackendToolCallFailed {
+                        request_id: request_id.clone(),
+                        call_id,
+                        name,
+                        error: "request cancelled".to_string(),
+                    });
+                }
                 return AttemptOutcome::Cancelled;
             }
             next = l2.next() => match next {
-                Some(SamplingEvent::Completed { response, metrics, .. }) => {
+                Some(SamplingEvent::Completed { mut response, metrics, .. }) => {
+                    for item in &mut response.items {
+                        if let ConversationItem::Assistant(assistant) = item {
+                            assistant.reasoning_model_identity = reasoning_model_identity.clone();
+                        }
+                    }
                     output_observed.store(true, Ordering::Relaxed);
                     await_first_output_span.take();
                     let mut all_triggers = Vec::new();
@@ -775,6 +902,14 @@ async fn drive_l2(
                     return AttemptOutcome::Completed { response, metrics };
                 }
                 Some(SamplingEvent::Failed { error: info, .. }) => {
+                    for (call_id, name) in std::mem::take(&mut active_backend_tools) {
+                        let _ = event_tx.send(SamplingEvent::BackendToolCallFailed {
+                            request_id: request_id.clone(),
+                            call_id,
+                            name,
+                            error: info.message.clone(),
+                        });
+                    }
                     await_first_output_span.take();
                     let raw = captured
                         .lock()
@@ -800,6 +935,16 @@ async fn drive_l2(
                     });
                 }
                 Some(other) => {
+                    match &other {
+                        SamplingEvent::BackendToolCallStarted { call_id, name, .. } => {
+                            active_backend_tools.insert(call_id.clone(), name.clone());
+                        }
+                        SamplingEvent::BackendToolCallCompleted { call_id, .. }
+                        | SamplingEvent::BackendToolCallFailed { call_id, .. } => {
+                            active_backend_tools.remove(call_id);
+                        }
+                        _ => {}
+                    }
                     if matches!(
                         other,
                         SamplingEvent::FirstToken { .. }
@@ -807,6 +952,7 @@ async fn drive_l2(
                             | SamplingEvent::ToolCallDelta { .. }
                             | SamplingEvent::BackendToolCallStarted { .. }
                             | SamplingEvent::BackendToolCallCompleted { .. }
+                            | SamplingEvent::BackendToolCallFailed { .. }
                     ) {
                         output_observed.store(true, Ordering::Relaxed);
                         await_first_output_span.take();
@@ -814,6 +960,14 @@ async fn drive_l2(
                     let _ = event_tx.send(retag(other, &request_id));
                 }
                 None => {
+                    for (call_id, name) in std::mem::take(&mut active_backend_tools) {
+                        let _ = event_tx.send(SamplingEvent::BackendToolCallFailed {
+                            request_id: request_id.clone(),
+                            call_id,
+                            name,
+                            error: "stream dropped without terminal event".to_string(),
+                        });
+                    }
                     // L2 streams always terminate with Completed or
                     // Failed; reaching None means the producer was
                     // dropped without termination -- treat as a
@@ -962,12 +1116,18 @@ fn emit_retrying(
     err: &SamplingError,
 ) {
     let info = SamplingErrorInfo::from(err);
+    let reason = if err.is_model_bound_history_error() {
+        "Model-specific reasoning history was incompatible; retrying with portable context."
+            .to_string()
+    } else {
+        err.to_string()
+    };
     let _ = event_tx.send(SamplingEvent::Retrying {
         request_id: request_id.clone(),
         attempt,
         max_retries,
         kind: info.kind,
-        reason: err.to_string(),
+        reason,
         doom_loop_triggers: info.doom_loop_triggers,
         doom_loop_aborted_at_chunk: info.doom_loop_aborted_at_chunk,
     });
@@ -1080,6 +1240,7 @@ mod tests {
             &CancellationToken::new(),
             Arc::new(Mutex::new(None)),
             None,
+            None,
             FailedResponseCapture::default(),
             Arc::new(AtomicBool::new(false)),
             policy,
@@ -1099,6 +1260,7 @@ mod tests {
             &event_tx,
             &CancellationToken::new(),
             Arc::new(Mutex::new(None)),
+            None,
             None,
             FailedResponseCapture::default(),
             Arc::new(AtomicBool::new(false)),
@@ -1162,6 +1324,7 @@ mod tests {
             &event_tx,
             &CancellationToken::new(),
             Arc::new(Mutex::new(None)),
+            None,
             None,
             FailedResponseCapture::default(),
             Arc::new(AtomicBool::new(false)),
@@ -1505,6 +1668,92 @@ mod tests {
                 .expect("completion sent")
                 .result
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn model_bound_recovery_strips_state_once_and_surfaces_portable_retry() {
+        use reqwest::StatusCode;
+        use xai_grok_sampling_types::{ConversationItem, synthesized_reasoning_item};
+
+        let cancel_token = CancellationToken::new();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (completion_tx, mut completion_rx) = oneshot::channel::<CollectedSamplingResult>();
+        let mut completion = CompletionState::new(Some(completion_tx));
+        let mut retry_count = 0;
+        let mut request = ConversationRequest::from_items(vec![
+            ConversationItem::user("question"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("private state")),
+            ConversationItem::assistant_with_model("portable answer", "old-model"),
+        ]);
+        let config = SamplerConfig {
+            base_url: "http://localhost".into(),
+            model: "new-model".into(),
+            ..Default::default()
+        };
+        let mut client = SamplingClient::new(config.clone()).expect("test client");
+        let error = SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "Could not decrypt the provided encrypted_content".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: Some(false),
+            error_code: None,
+        };
+
+        let should_continue = apply_retry_decision(
+            &error,
+            &mut retry_count,
+            0,
+            &RetryPolicy::default(),
+            &event_tx,
+            &RequestId::from("model-bound-recovery"),
+            &mut request,
+            &mut client,
+            &config,
+            &cancel_token,
+            &mut completion,
+        )
+        .await;
+
+        assert!(
+            should_continue,
+            "portable recovery gets one retry even when transport retries are disabled"
+        );
+        assert_eq!(retry_count, 1);
+        assert!(request.items.iter().all(|item| !matches!(
+            item,
+            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+        )));
+        assert!(request.items.iter().any(|item| matches!(
+            item,
+            ConversationItem::Assistant(assistant)
+                if assistant.content.as_ref() == "portable answer"
+        )));
+        match event_rx.recv().await {
+            Some(SamplingEvent::Retrying {
+                attempt,
+                max_retries,
+                reason,
+                ..
+            }) => {
+                assert_eq!(attempt, 1);
+                assert_eq!(max_retries, 1);
+                assert_eq!(
+                    reason,
+                    "Model-specific reasoning history was incompatible; retrying with portable context."
+                );
+            }
+            other => panic!("expected portable-context retry event, got {other:?}"),
+        }
+        // A retry must leave the completion channel untouched: the receiver
+        // stays pending (no value sent, sender not dropped).
+        assert!(
+            matches!(
+                completion_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "retry must not complete the request"
         );
     }
 

@@ -5,6 +5,7 @@
 pub mod leader_bridge;
 pub mod meta;
 pub mod model_state;
+pub(crate) mod router;
 pub mod spawn;
 mod subagent_message;
 pub mod tracker;
@@ -547,12 +548,14 @@ async fn initialize(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let models: ModelState = resp
+    // Parse model state from response meta
+    let mut models: ModelState = resp
         .meta
         .as_ref()
         .and_then(|m| m.get("modelState"))
         .and_then(|v| serde_json::from_value::<acp::SessionModelState>(v.clone()).ok())
         .into();
+    models.reload_config_on_model_command = is_grok_shell;
 
     // The available commands (shell builtins and skills) seed the slash command registry so autocomplete works immediately
     let available_commands = parse_available_commands(resp.meta.as_ref());
@@ -646,38 +649,69 @@ pub fn startup_auth_metadata(
     (needs_login, login_label, login_method_id, auth_start_mode)
 }
 
-/// Find an interactive login method from the auth methods list.
+fn is_xai_interactive_login(method: &acp::AuthMethod) -> bool {
+    matches!(
+        AuthMethodKind::from_id(method.id()),
+        AuthMethodKind::GrokCom | AuthMethodKind::Oidc
+    )
+}
+
+fn interactive_login_metadata(
+    method: Option<&acp::AuthMethod>,
+) -> (Option<String>, Option<acp::AuthMethodId>, AuthStartMode) {
+    let Some(method) = method else {
+        return (None, None, AuthStartMode::Pending);
+    };
+    let is_provider = method
+        .meta()
+        .as_ref()
+        .and_then(|v| v.get("external_provider"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mode = if is_provider {
+        AuthStartMode::Command
+    } else {
+        AuthStartMode::Pending
+    };
+    (
+        Some(method.name().to_string()),
+        Some(method.id().clone()),
+        mode,
+    )
+}
+
+/// Find the advertised xAI interactive login (`grok.com` or enterprise OIDC).
 ///
-/// Used when eager auth (cached_token or API key) fails and we need to fall back to the welcome screen with a working login button.
-/// Scans the list for a `grok.com` or `oidc` method; these are the ones that can trigger a browser-based re-auth flow.
+/// Bare `/login` and the welcome-screen Login action use this resolver so an
+/// earlier explicit Kimi/OpenAI/Claude login can never change the default
+/// product login. It deliberately does not invent an unadvertised method.
+pub fn find_xai_interactive_login_method(
+    auth_methods: &[acp::AuthMethod],
+) -> (Option<String>, Option<acp::AuthMethodId>, AuthStartMode) {
+    interactive_login_metadata(
+        auth_methods
+            .iter()
+            .find(|method| is_xai_interactive_login(method)),
+    )
+}
+
+/// Find any advertised interactive login method, preferring the xAI family.
+///
+/// Used only for startup/eager-auth recovery, where an ACP agent may advertise
+/// a third-party interactive method without an xAI method. User-initiated bare
+/// login uses [`find_xai_interactive_login_method`] instead.
 pub fn find_interactive_login_method(
     auth_methods: &[acp::AuthMethod],
 ) -> (Option<String>, Option<acp::AuthMethodId>, AuthStartMode) {
     let interactive = auth_methods
         .iter()
-        .find(|m| AuthMethodKind::from_id(m.id()).needs_interactive_login());
-
-    match interactive {
-        Some(method) => {
-            let is_provider = method
-                .meta()
-                .as_ref()
-                .and_then(|v| v.get("external_provider"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let mode = if is_provider {
-                AuthStartMode::Command
-            } else {
-                AuthStartMode::Pending
-            };
-            (
-                Some(method.name().to_string()),
-                Some(method.id().clone()),
-                mode,
-            )
-        }
-        None => (None, None, AuthStartMode::Pending),
-    }
+        .find(|method| is_xai_interactive_login(method))
+        .or_else(|| {
+            auth_methods
+                .iter()
+                .find(|method| AuthMethodKind::from_id(method.id()).needs_interactive_login())
+        });
+    interactive_login_metadata(interactive)
 }
 
 /// Attempt eager auth; on failure fall back to the interactive login screen.
@@ -837,6 +871,10 @@ pub fn select_eager_auth_method(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xai_grok_shell::agent::auth_method::{
+        ANTHROPIC_CLAUDE_METHOD_ID, GITHUB_COPILOT_METHOD_ID, GROK_COM_METHOD_ID,
+        KIMI_CODE_METHOD_ID, OIDC_METHOD_ID, OPENAI_CODEX_METHOD_ID,
+    };
 
     #[test]
     fn is_session_update_ext_method_covers_both_carriers() {
@@ -1045,6 +1083,50 @@ mod tests {
         let meta = serde_json::json!({ "external_provider": false });
         let methods = vec![make_auth_method("grok.com", "grok.com", Some(meta))];
         let (_, _, _, mode) = startup_auth_metadata(&methods);
+        assert_eq!(mode, AuthStartMode::Pending);
+    }
+
+    #[test]
+    fn bare_login_resolver_prefers_xai_over_third_party_and_preserves_mode() {
+        let external = serde_json::json!({ "external_provider": true });
+        let methods = vec![
+            make_auth_method(KIMI_CODE_METHOD_ID, "Kimi Code", None),
+            make_auth_method(GROK_COM_METHOD_ID, "Acme xAI", Some(external)),
+            make_auth_method(OPENAI_CODEX_METHOD_ID, "OpenAI Codex", None),
+            make_auth_method(ANTHROPIC_CLAUDE_METHOD_ID, "Claude", None),
+        ];
+
+        let (label, method_id, mode) = find_xai_interactive_login_method(&methods);
+        assert_eq!(label.as_deref(), Some("Acme xAI"));
+        assert_eq!(method_id.unwrap().0.as_ref(), GROK_COM_METHOD_ID);
+        assert_eq!(mode, AuthStartMode::Command);
+    }
+
+    #[test]
+    fn bare_login_resolver_accepts_enterprise_oidc() {
+        let methods = vec![
+            make_auth_method(KIMI_CODE_METHOD_ID, "Kimi Code", None),
+            make_auth_method(OIDC_METHOD_ID, "Enterprise xAI", None),
+        ];
+
+        let (label, method_id, mode) = find_xai_interactive_login_method(&methods);
+        assert_eq!(label.as_deref(), Some("Enterprise xAI"));
+        assert_eq!(method_id.unwrap().0.as_ref(), OIDC_METHOD_ID);
+        assert_eq!(mode, AuthStartMode::Pending);
+    }
+
+    #[test]
+    fn bare_login_resolver_never_falls_back_to_third_party() {
+        let methods = vec![
+            make_auth_method(KIMI_CODE_METHOD_ID, "Kimi Code", None),
+            make_auth_method(OPENAI_CODEX_METHOD_ID, "OpenAI Codex", None),
+            make_auth_method(ANTHROPIC_CLAUDE_METHOD_ID, "Claude", None),
+            make_auth_method(GITHUB_COPILOT_METHOD_ID, "GitHub Copilot", None),
+        ];
+
+        let (label, method_id, mode) = find_xai_interactive_login_method(&methods);
+        assert!(label.is_none());
+        assert!(method_id.is_none());
         assert_eq!(mode, AuthStartMode::Pending);
     }
 

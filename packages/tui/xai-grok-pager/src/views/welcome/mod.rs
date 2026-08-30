@@ -60,7 +60,10 @@ fn quit_hint_spans(theme: &Theme) -> Vec<Span<'static>> {
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  quit", Style::default().fg(theme.gray)),
+        Span::styled(
+            format!("  {}", rust_i18n::t!("welcome.quit_hint")),
+            Style::default().fg(theme.gray),
+        ),
     ]
 }
 
@@ -461,14 +464,14 @@ pub(super) fn render_version_badge(
         } = &mode
     {
         spans.push(Span::styled(
-            format!("Tier: {tier}"),
+            rust_i18n::t!("version.tier", tier = tier).to_string(),
             Style::default().fg(theme.gray),
         ));
         spans.push(sep.clone());
     }
     if show_api_key && is_api_key_auth {
         spans.push(Span::styled(
-            "Logged in with API key",
+            rust_i18n::t!("version.api_key"),
             Style::default().fg(theme.gray),
         ));
         spans.push(sep);
@@ -717,9 +720,22 @@ pub fn render_welcome(
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {
             let label = params.login_label.unwrap_or("grok.com");
-            let login_text = format!("Login with {}", label);
-            let menu = [("l", login_text.as_str()), ("q", "Quit")];
-            let msg = error.as_deref().map(|e| (e, theme.accent_error));
+            let login_text = rust_i18n::t!("welcome.login_with", label = label).to_string();
+            let quit_text = rust_i18n::t!("welcome.quit").to_string();
+            // Community builds: make multi-provider entry obvious (not just Grok).
+            let community_hint = if cfg!(feature = "community-build") {
+                Some((
+                    "Press l to log in, or after login: /login openai · /login kimi · /providers <platform> <key> · /model",
+                    theme.gray_bright,
+                ))
+            } else {
+                None
+            };
+            let msg = error
+                .as_deref()
+                .map(|e| (e, theme.accent_error))
+                .or(community_hint);
+            let menu = [("l", login_text.as_str()), ("q", quit_text.as_str())];
             let info = PromptInfo {
                 model_name: params.model_name,
                 flags: params.flags,
@@ -765,14 +781,14 @@ pub fn render_welcome(
             }
         }
         AuthState::Done if params.is_zdr_blocked => {
-            let menu = [("l", "Switch account"), ("q", "Quit")];
+            let switch_text = rust_i18n::t!("welcome.switch_account").to_string();
+            let quit_text = rust_i18n::t!("welcome.quit").to_string();
+            let menu = [("l", switch_text.as_str()), ("q", quit_text.as_str())];
+            let zdr_msg = rust_i18n::t!("welcome.zdr_blocked").to_string();
             let (menu_rects, post_flush_escapes) = render_welcome_blocked(
                 content_area,
                 buf,
-                Some((
-                    "Grok Build is not yet available for this account.",
-                    theme.gray_bright,
-                )),
+                Some((zdr_msg.as_str(), theme.gray_bright)),
                 &menu,
                 params.selected,
                 None,
@@ -799,7 +815,7 @@ pub fn render_welcome(
                     notice,
                     params.selected,
                     params.consent_hover_link,
-                    params.pending_hint,
+                    params.pending_hint.clone(),
                     h_margin,
                     params.compact,
                 )
@@ -937,10 +953,12 @@ fn render_welcome_trust(
     h_margin: u16,
     compact: bool,
 ) -> WelcomeRenderResult {
-    let menu_items = [("y", "Yes, proceed"), ("n", "No, quit")];
+    let yes_text = rust_i18n::t!("welcome.trust_yes").to_string();
+    let no_text = rust_i18n::t!("welcome.trust_no").to_string();
+    let menu_items = [("y", yes_text.as_str()), ("n", no_text.as_str())];
     let lines = vec![
         Line::from(Span::styled(
-            "Do you trust the contents of this directory?",
+            rust_i18n::t!("welcome.trust_question"),
             Style::default().fg(theme.gray_bright),
         ))
         .alignment(Alignment::Center),
@@ -952,12 +970,12 @@ fn render_welcome_trust(
         Line::default(),
         // Two lines so the warning never clips at narrow / compact widths (a single ~78-char line would truncate "...posing security risks")
         Line::from(Span::styled(
-            "Grok Build may run or modify contents in this directory,",
+            rust_i18n::t!("welcome.trust_warning_1"),
             Style::default().fg(theme.gray),
         ))
         .alignment(Alignment::Center),
         Line::from(Span::styled(
-            "posing security risks.",
+            rust_i18n::t!("welcome.trust_warning_2"),
             Style::default().fg(theme.gray),
         ))
         .alignment(Alignment::Center),
@@ -1554,7 +1572,7 @@ fn render_changelog_section(
             .fg(theme.gray_bright)
             .add_modifier(Modifier::DIM),
     );
-    let title = "Changelog";
+    let title = rust_i18n::t!("welcome.changelog");
     buf.set_span(
         centered.x,
         centered.y,
@@ -1672,8 +1690,8 @@ fn render_welcome_done(
 
     let cta = p
         .gate
-        .and_then(|g| g.label.as_deref())
-        .unwrap_or("Upgrade Subscription");
+        .and_then(|g| g.label.clone())
+        .unwrap_or_else(|| rust_i18n::t!("welcome.upgrade_subscription").into_owned());
     let in_vscode_family = welcome_in_vscode_family();
     let (key_g, key_l, key_q) = (
         "ctrl+g",
@@ -1719,10 +1737,22 @@ fn render_welcome_done(
     // Changelog is reachable via this menu row (ctrl+l). Show from the first frame so the menu doesn't shift while the CDN fetch completes.
     let show_changelog_action = p.has_access && !show_picker;
 
+    // Menu label bindings must outlive `menu_items` (borrowed by both
+    // branches below), so hoist them out of the if/else.
+    let logout_text = rust_i18n::t!("welcome.logout").to_string();
+    let quit_text = rust_i18n::t!("welcome.quit").to_string();
+    let import_text = rust_i18n::t!("welcome.import_claude").to_string();
+    let new_worktree_text = rust_i18n::t!("welcome.new_worktree").to_string();
+    let resume_text = rust_i18n::t!("welcome.resume_session").to_string();
+    let changelog_text = rust_i18n::t!("welcome.changelog").to_string();
     let gate_menu;
     let owned_menu;
     let menu_items: &[(&str, &str)] = if !p.has_access {
-        gate_menu = [(key_g, cta), (key_l, "Logout"), (key_q, "Quit")];
+        gate_menu = [
+            (key_g, cta.as_str()),
+            (key_l, logout_text.as_str()),
+            (key_q, quit_text.as_str()),
+        ];
         &gate_menu
     } else {
         let (key_w, key_resume, key_q, key_i_with_x) = (
@@ -1734,18 +1764,20 @@ fn render_welcome_done(
         // Insert the import row at the top when there are pending `.claude/` settings to import; it's the most actionable item right now
         let mut items: Vec<(&str, &str)> = Vec::with_capacity(5);
         if p.has_claude_import {
-            // The trailing "[x]" is a clickable dismiss control
-            // The welcome screen mouse handler treats clicks on the rightmost 3 cells of this row as dismiss instead of open. Keyboard: ctrl-shift-i.
-            // The key string is right-aligned by render_menu, so [x] sits at the very end of the row
-            items.push((key_i_with_x, "Import Claude settings"));
+            // The trailing "[x]" is a clickable dismiss affordance — the
+            // welcome screen mouse handler treats clicks on the rightmost
+            // 3 cells of this row as dismiss instead of open. Keyboard:
+            // ctrl-shift-i. The key string is right-aligned by render_menu,
+            // so [x] sits at the very end of the row.
+            items.push((key_i_with_x, import_text.as_str()));
         }
-        items.push((key_w, "New worktree"));
-        items.push((key_resume, "Resume session"));
-        // "Changelog" above Quit; no shortcut, opened by click (row or block)
+        items.push((key_w, new_worktree_text.as_str()));
+        items.push((key_resume, resume_text.as_str()));
+        // "Changelog" above Quit; no shortcut — opened by click (row or block).
         if show_changelog_action {
-            items.push(("", "Changelog"));
+            items.push(("", changelog_text.as_str()));
         }
-        items.push((key_q, "Quit"));
+        items.push((key_q, quit_text.as_str()));
         owned_menu = items;
         owned_menu.as_slice()
     };
@@ -1834,7 +1866,7 @@ fn render_welcome_done(
                 state: session_picker_state,
                 sessions: p.session_picker,
                 loading: p.session_picker_loading,
-                pending_hint: p.pending_hint,
+                pending_hint: p.pending_hint.clone(),
                 shortcuts_area: None,
                 content_results: p.session_picker_content_results,
                 content_loading: p.session_picker_content_loading,
@@ -2200,7 +2232,7 @@ fn render_welcome_done(
             p.team_name,
             h_margin,
             p.compact,
-            p.pending_hint,
+            p.pending_hint.clone(),
             p.is_api_key_auth,
             layout.has_hero_box(),
         )
@@ -2427,13 +2459,13 @@ pub(crate) fn render_session_picker(
     let worktree_shortcut: &'static str = "ctrl+w";
     use crate::views::shortcuts_bar::HintItem;
     let mut default_shortcuts: Vec<HintItem> = vec![
-        HintItem::new(crate::key!(Esc), "back"),
-        HintItem::new(crate::key!(Enter), "select"),
+        HintItem::new(crate::key!(Esc), rust_i18n::t!("hints.back")),
+        HintItem::new(crate::key!(Enter), rust_i18n::t!("hints.select")),
     ];
     if !ctx.chat_mode {
         default_shortcuts.push(HintItem {
             keys: vec![],
-            label: "worktree".into(),
+            label: rust_i18n::t!("hints.worktree"),
             custom_display: Some(worktree_shortcut),
             description: None,
             pinned: false,
@@ -2441,7 +2473,7 @@ pub(crate) fn render_session_picker(
     }
     default_shortcuts.push(HintItem {
         keys: vec![],
-        label: "navigate".into(),
+        label: rust_i18n::t!("hints.navigate"),
         custom_display: Some("\u{2191}\u{2193}"),
         description: None,
         pinned: false,
@@ -2465,7 +2497,7 @@ pub(crate) fn render_session_picker(
     } else if !ctx.chat_mode {
         default_shortcuts.push(HintItem {
             keys: vec![],
-            label: "filter".into(),
+            label: rust_i18n::t!("hints.filter"),
             custom_display: Some("f"),
             description: None,
             pinned: false,
@@ -2479,19 +2511,21 @@ pub(crate) fn render_session_picker(
         });
     }
 
+    let sf_label = ctx.source_filter.label();
+    let resume_title = rust_i18n::t!("modal.title.resume_session");
     let config = PickerConfig {
-        title: Some("Resume session"),
+        title: Some(resume_title.as_ref()),
         show_search_hint: true,
         expandable: true,
         esc_clears_query: true,
         shortcuts: Some(&default_shortcuts),
-        pending_hint: ctx.pending_hint,
+        pending_hint: ctx.pending_hint.clone(),
         non_selectable: &non_selectable_indices,
         non_selectable_clickable: &[],
         shortcuts_area: ctx.shortcuts_area,
         tabs: None,
         active_tab: 0,
-        filter_label: (!ctx.chat_mode).then(|| ctx.source_filter.label()),
+        filter_label: (!ctx.chat_mode).then(|| sf_label.as_ref()),
         filter_key_hint: (!ctx.chat_mode).then_some("f"),
         filter_active: !ctx.chat_mode && ctx.source_filter.is_active(),
         header_note: hidden_hint.as_deref(),
@@ -2894,6 +2928,7 @@ mod tests {
             (ForeignSessionTool::Claude, "Claude Code"),
             (ForeignSessionTool::Codex, "Codex"),
             (ForeignSessionTool::Cursor, "Cursor"),
+            (ForeignSessionTool::Omp, "OMP"),
         ] {
             let hint = xai_grok_foreign_sessions::RecentForeignSession {
                 tool,
@@ -3849,6 +3884,42 @@ mod tests {
         assert!(
             fallback_rect.is_some(),
             "device arm must expose a show-full-URL hit-rect"
+        );
+    }
+
+    /// The folder-trust screen resolves its strings through the i18n bundle
+    /// (`t!` + `en.yml`); in the default locale the English text must render
+    /// verbatim. Guards the `t!` wiring in `render_welcome_trust` — the
+    /// zh-CN resolution itself is covered by `crate::i18n` unit tests (which
+    /// use explicit `locale =` args to stay race-free).
+    #[test]
+    fn trust_screen_renders_bundled_strings() {
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::current();
+
+        render_welcome_trust(
+            area,
+            &mut buf,
+            &theme,
+            std::path::Path::new("/tmp/demo-workspace"),
+            None,
+            2,
+            false,
+        );
+
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Do you trust the contents of this directory?"),
+            "trust question must render, got:\n{text}"
+        );
+        assert!(
+            text.contains("Yes, proceed"),
+            "yes menu item must render, got:\n{text}"
+        );
+        assert!(
+            text.contains("No, quit"),
+            "no menu item must render, got:\n{text}"
         );
     }
 

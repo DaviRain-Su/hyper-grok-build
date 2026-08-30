@@ -518,16 +518,35 @@ fn read_marker_capped(path: &Path) -> Option<Vec<u8>> {
     Some(buf)
 }
 fn pin_exists(source: &Path, worktree_id: &str) -> Result<bool> {
-    {
-        let _ = (source, worktree_id);
-        Ok(false)
+    if !is_safe_worktree_id(worktree_id) {
+        return Ok(false);
     }
+    let pin = format!("refs/grok/worktrees/{worktree_id}");
+    let mut cmd = std::process::Command::new("git");
+    xai_tty_utils::detach_std_command(&mut cmd);
+    let out = cmd
+        .current_dir(source)
+        .args(["rev-parse", "--verify", "--quiet", &pin])
+        .status()
+        .map_err(anyhow::Error::from)?;
+    Ok(out.success())
 }
 fn delete_pin_ref_gated(source: &Path, worktree_id: &str) -> Result<()> {
-    {
-        let _ = (source, worktree_id);
-        anyhow::bail!("pin delete requires grove")
+    if !is_safe_worktree_id(worktree_id) {
+        anyhow::bail!("invalid worktree id: {worktree_id:?}");
     }
+    let pin = format!("refs/grok/worktrees/{worktree_id}");
+    let mut cmd = std::process::Command::new("git");
+    xai_tty_utils::detach_std_command(&mut cmd);
+    let status = cmd
+        .current_dir(source)
+        .args(["update-ref", "-d", &pin])
+        .status()
+        .map_err(anyhow::Error::from)?;
+    if !status.success() {
+        anyhow::bail!("git update-ref -d failed for {pin}");
+    }
+    Ok(())
 }
 #[cfg(feature = "metadata")]
 pub fn identities_from_worktree_records(recs: &[crate::db::WorktreeRecord]) -> Vec<NfsIdentity> {

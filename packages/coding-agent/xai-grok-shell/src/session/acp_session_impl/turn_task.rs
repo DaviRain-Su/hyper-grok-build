@@ -120,8 +120,14 @@ impl AgentTask {
         let started_at = std::time::Instant::now();
         Self {
             prompt_id: request.prompt_id.clone(),
-            handle: tokio::task::spawn_local(run_task(session, request, completion_tx, started_at))
-                .abort_handle(),
+            // Box the task future so the large turn state machine is
+            // heap-allocated when the LocalSet task is created (not stacked
+            // into the spawn frame). Same root cause as the auth_retry_budget
+            // stack overflow: composing huge async fns without boxing.
+            handle: tokio::task::spawn_local(Box::pin(async move {
+                run_task(session, request, completion_tx, started_at).await
+            }))
+            .abort_handle(),
             started_at,
         }
     }

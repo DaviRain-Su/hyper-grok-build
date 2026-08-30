@@ -62,8 +62,11 @@ pub fn render_settings_modal(
         match &state.state.mode {
             SettingsMode::PickingEnum { key, .. } => {
                 if let Some(meta) = state.registry.find(key) {
-                    breadcrumb_owned =
-                        format!("{MODAL_TITLE} {} {}", crate::glyphs::chevron(), meta.label);
+                    breadcrumb_owned = format!(
+                        "{MODAL_TITLE} {} {}",
+                        crate::glyphs::chevron(),
+                        meta.label_l10n()
+                    );
                     &breadcrumb_owned
                 } else {
                     MODAL_TITLE
@@ -72,8 +75,11 @@ pub fn render_settings_modal(
 
             SettingsMode::EditingString { key, .. } | SettingsMode::EditingInt { key, .. } => {
                 if let Some(meta) = state.registry.find(key) {
-                    breadcrumb_owned =
-                        format!("{MODAL_TITLE} {} {}", crate::glyphs::chevron(), meta.label);
+                    breadcrumb_owned = format!(
+                        "{MODAL_TITLE} {} {}",
+                        crate::glyphs::chevron(),
+                        meta.label_l10n()
+                    );
                     &breadcrumb_owned
                 } else {
                     MODAL_TITLE
@@ -81,8 +87,11 @@ pub fn render_settings_modal(
             }
             SettingsMode::PickingGroup { key, .. } => {
                 if let Some(meta) = state.registry.find(key) {
-                    breadcrumb_owned =
-                        format!("{MODAL_TITLE} {} {}", crate::glyphs::chevron(), meta.label);
+                    breadcrumb_owned = format!(
+                        "{MODAL_TITLE} {} {}",
+                        crate::glyphs::chevron(),
+                        meta.label_l10n()
+                    );
                     &breadcrumb_owned
                 } else {
                     MODAL_TITLE
@@ -330,22 +339,22 @@ fn build_reset_confirm_shortcuts() -> Vec<Shortcut<'static>> {
     use crate::views::modal::{RESET_CONFIRM_NO_ID, RESET_CONFIRM_YES_ID};
     vec![
         Shortcut {
-            label: "y reset",
+            label: rust_i18n::t!("footer.y_reset"),
             clickable: true,
             id: RESET_CONFIRM_YES_ID,
         },
         Shortcut {
-            label: "n cancel",
+            label: rust_i18n::t!("footer.n_cancel"),
             clickable: true,
             id: RESET_CONFIRM_NO_ID,
         },
         Shortcut {
-            label: "Esc cancel",
+            label: rust_i18n::t!("footer.esc_cancel"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "F2 cancel",
+            label: rust_i18n::t!("footer.f2_cancel"),
             clickable: false,
             id: 0,
         },
@@ -430,10 +439,9 @@ pub(super) fn render_row_list_with_search_bar(
 }
 
 pub(super) fn render_docs_footer(buf: &mut Buffer, area: Rect, theme: &Theme) {
-    const LONG: &str =
-        "Tip · Ask Grok: \"change theme to grokday\" or \"what does compact mode do?\"";
-    const SHORT: &str = "Tip · Ask Grok to change a setting";
-    let text = modal_window::fit_tip_line(&[LONG, SHORT], area.width as usize);
+    let long = rust_i18n::t!("settings_modal.docs_tip_long").to_string();
+    let short = rust_i18n::t!("settings_modal.docs_tip_short").to_string();
+    let text = modal_window::fit_tip_line(&[long.as_str(), short.as_str()], area.width as usize);
     modal_window::render_centered_tip_footer(buf, area, theme, text.as_ref());
 }
 
@@ -466,7 +474,7 @@ pub(super) fn render_rows(
     // Empty filter: show "No matches for <query>"
     if total_visible == 0 {
         if !state.query().is_empty() {
-            let prefix = "No matches for ";
+            let prefix = rust_i18n::t!("settings_modal.no_matches").to_string();
             let suffix_quote_w = 2u16; // surrounding "" chars
             let available_for_query = (area.width as usize)
                 .saturating_sub(prefix.width())
@@ -588,7 +596,7 @@ pub(super) fn render_rows(
 
         match row {
             RowEntry::Header { category } => {
-                let label = category.label();
+                let label = category.label_l10n();
                 let header_style = Style::default()
                     .fg(theme.gray)
                     .bg(theme.bg_base)
@@ -670,7 +678,7 @@ pub(super) fn render_rows(
                 let show_restart_pill_for_layout = meta.restart_required && is_expanded;
                 let layout_decision = row_layout(
                     area.width,
-                    meta.label,
+                    &meta.label_l10n(),
                     &value_display,
                     show_restart_pill_for_layout,
                 );
@@ -807,7 +815,12 @@ fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> 
                 let lock = state.row_lock(key);
                 let value_display = value_display(meta, &value, lock);
                 let show_restart_pill = meta.restart_required && is_expanded;
-                let layout = row_layout(area_width, meta.label, &value_display, show_restart_pill);
+                let layout = row_layout(
+                    area_width,
+                    &meta.label_l10n(),
+                    &value_display,
+                    show_restart_pill,
+                );
                 let mut h: u16 = match layout {
                     RowLayout::OneLine => 1,
                     RowLayout::TwoLine | RowLayout::TwoLineWithLabelTruncation => 2,
@@ -840,7 +853,10 @@ fn wrapped_description_height(
     if wrap_w == 0 {
         return 0;
     }
-    let text = lock_reason.unwrap_or(meta.description);
+    let text: std::borrow::Cow<'_, str> = match lock_reason {
+        Some(reason) => std::borrow::Cow::Borrowed(reason),
+        None => meta.description_l10n(),
+    };
     let line = Line::from(Span::raw(text));
     let wrapped = crate::render::wrapping::word_wrap_line(&line, wrap_w as usize);
     (wrapped.len() as u16).min(cap)
@@ -959,8 +975,8 @@ pub(super) fn render_picking_enum(
                 .into_iter()
                 .map(|c| OwnedEnumChoice {
                     canonical: c.canonical.to_string(),
-                    display: c.display.to_string(),
-                    description: c.description.to_string(),
+                    display: c.display_l10n(setting_key).into_owned(),
+                    description: c.description_l10n(setting_key).into_owned(),
                 })
                 .collect()
         }
@@ -974,8 +990,15 @@ pub(super) fn render_picking_enum(
         return;
     }
 
-    // Choosers need title + gap (2 rows) before the description renders
-    let header_rows = render_sub_pane_header(buf, area, theme, meta.label, meta.description, 2);
+    // Choosers need title + gap (2) before the description renders.
+    let header_rows = render_sub_pane_header(
+        buf,
+        area,
+        theme,
+        &meta.label_l10n(),
+        &meta.description_l10n(),
+        2,
+    );
     if area.height <= header_rows {
         return;
     }
@@ -1260,8 +1283,8 @@ fn render_picking_group(
         buf,
         area,
         theme,
-        group_meta.label,
-        group_meta.description,
+        &group_meta.label_l10n(),
+        &group_meta.description_l10n(),
         2,
     );
     if area.height <= header_rows {
@@ -1312,7 +1335,11 @@ fn render_picking_group(
 
         // Value read live from the snapshot (refreshed after each toggle).
         let on = matches!(state.value_for(child_key), Some(SettingValue::Bool(true)));
-        let value_text = if on { "on" } else { "off" };
+        let value_text = if on {
+            rust_i18n::t!("settings_modal.value_on")
+        } else {
+            rust_i18n::t!("settings_modal.value_off")
+        };
         let value_style = if on {
             Style::default().fg(theme.accent_user).bg(bg)
         } else {
@@ -1341,10 +1368,11 @@ fn render_picking_group(
             .max(label_x);
         if value_x > label_x {
             let label_room = (value_x - label_x).saturating_sub(1) as usize;
-            let label_text: std::borrow::Cow<'_, str> = if child_meta.label.width() <= label_room {
-                std::borrow::Cow::Borrowed(child_meta.label)
+            let child_label = child_meta.label_l10n();
+            let label_text: std::borrow::Cow<'_, str> = if child_label.width() <= label_room {
+                child_label
             } else {
-                std::borrow::Cow::Owned(truncate_str(child_meta.label, label_room))
+                std::borrow::Cow::Owned(truncate_str(&child_label, label_room))
             };
             let label_w = (label_text.width() as u16).min((value_x - label_x).saturating_sub(1));
             buf.set_span(
@@ -1489,17 +1517,26 @@ pub(super) fn int_step_sizes(min: i64, max: i64) -> (i64, i64) {
 }
 
 /// Footer labels for the Int stepper (must be `'static` for `Shortcut`).
-fn int_step_footer_labels(min: i64, max: i64) -> (&'static str, &'static str) {
+fn int_step_footer_labels(
+    min: i64,
+    max: i64,
+) -> (
+    std::borrow::Cow<'static, str>,
+    std::borrow::Cow<'static, str>,
+) {
     let (small, large) = int_step_sizes(min, max);
-    match (small, large) {
-        (1, 1) => ("\u{2191}/\u{2193} +/-1", "\u{2190}/\u{2192} +/-1"),
-        (1, 5) => ("\u{2191}/\u{2193} +/-1", "\u{2190}/\u{2192} +/-5"),
-        (5, 10) => ("\u{2191}/\u{2193} +/-5", "\u{2190}/\u{2192} +/-10"),
-        // Defensive fallback if thresholds change without new static pairs.
-        (1, _) => ("\u{2191}/\u{2193} +/-1", "\u{2190}/\u{2192} step"),
-        (5, _) => ("\u{2191}/\u{2193} +/-5", "\u{2190}/\u{2192} step"),
-        _ => ("\u{2191}/\u{2193} step", "\u{2190}/\u{2192} step"),
-    }
+    let small_label = match small {
+        1 => crate::i18n::tr_or("footer.int_step_up_1", "\u{2191}/\u{2193} +/-1"),
+        5 => crate::i18n::tr_or("footer.int_step_up_5", "\u{2191}/\u{2193} +/-5"),
+        _ => crate::i18n::tr_or("footer.int_step_up", "\u{2191}/\u{2193} step"),
+    };
+    let large_label = match large {
+        1 => crate::i18n::tr_or("footer.int_step_side_1", "\u{2190}/\u{2192} +/-1"),
+        5 => crate::i18n::tr_or("footer.int_step_side_5", "\u{2190}/\u{2192} +/-5"),
+        10 => crate::i18n::tr_or("footer.int_step_side_10", "\u{2190}/\u{2192} +/-10"),
+        _ => crate::i18n::tr_or("footer.int_step_side", "\u{2190}/\u{2192} step"),
+    };
+    (small_label, large_label)
 }
 
 // ‹ / › (U+2039 / U+203A); falls back to ASCII `<` / `>` on legacy ConHost
@@ -1579,8 +1616,15 @@ pub(super) fn render_editing_value(
         return;
     };
 
-    // Editors reserve title + gap + the input row (3 rows) before the description
-    let header_rows = render_sub_pane_header(buf, area, theme, meta.label, meta.description, 3);
+    // Editors reserve title + gap + the input row (3) before the description.
+    let header_rows = render_sub_pane_header(
+        buf,
+        area,
+        theme,
+        &meta.label_l10n(),
+        &meta.description_l10n(),
+        3,
+    );
     if area.height <= header_rows {
         return;
     }
@@ -1627,18 +1671,22 @@ pub(super) fn render_editing_value(
     if buffer.is_empty() {
         let placeholder = match &meta.kind {
             SettingKind::String { validator, .. } => match validator {
-                StringValidator::KnownModel => "<empty: uses shell default>",
-                StringValidator::NonEmptyToken => "<type a value>",
-                StringValidator::Any => "<type a value>",
+                StringValidator::KnownModel => {
+                    rust_i18n::t!("settings_modal.placeholder_shell_default")
+                }
+                StringValidator::NonEmptyToken => {
+                    rust_i18n::t!("settings_modal.placeholder_type_value")
+                }
+                StringValidator::Any => rust_i18n::t!("settings_modal.placeholder_type_value"),
             },
-            _ => "",
+            _ => "".into(),
         };
         if !placeholder.is_empty() && visible_buffer_w > 0 {
             let placeholder_text: std::borrow::Cow<'_, str> =
                 if placeholder.width() <= visible_buffer_w {
-                    std::borrow::Cow::Borrowed(placeholder)
+                    placeholder
                 } else {
-                    std::borrow::Cow::Owned(truncate_str(placeholder, visible_buffer_w))
+                    std::borrow::Cow::Owned(truncate_str(&placeholder, visible_buffer_w))
                 };
             let placeholder_w = (placeholder_text.width() as u16).min(visible_buffer_w as u16);
             let placeholder_style = Style::default().fg(theme.gray_dim).bg(input_bg);
@@ -2064,20 +2112,30 @@ fn compute_settings_max_label_w(metas: &[SettingMeta], content_w: u16) -> u16 {
         .min(cap)
 }
 
-/// Look up the user-friendly display string for an Enum canonical against the setting's own `EnumChoice` catalog.
-/// Falls back to the canonical verbatim if the lookup misses, mirroring `display_name_for_canonical`.
-/// A hand-edited corrupted config with an unknown canonical then still renders without an empty string.
-fn display_for_enum_canonical<'a>(kind: &'a SettingKind, canonical: &'a str) -> &'a str {
-    if let SettingKind::Enum { choices, .. } = kind {
+/// Look up the user-friendly display string for an Enum canonical
+/// against the setting's own `EnumChoice` catalog. Falls back to the
+/// canonical verbatim if the lookup misses (defense-in-depth: a
+/// hand-edited corrupted config with an unknown canonical still
+/// renders without an empty string, mirroring
+/// `display_name_for_canonical`'s pattern).
+///
+/// Look up the display name for an Enum canonical via the registry.
+/// Looks up the choice's translated display name
+/// (`settings.{key}.choice.{canonical}.display`), falling back to the English
+/// source when the locale bundle has no entry. The plain-English variant was
+/// removed once every render site switched to this one.
+fn display_for_enum_canonical_l10n(
+    meta: &SettingMeta,
+    canonical: &str,
+) -> std::borrow::Cow<'static, str> {
+    if let SettingKind::Enum { choices, .. } = &meta.kind {
         for c in *choices {
             if c.canonical == canonical {
-                return c.display;
+                return c.display_l10n(meta.key);
             }
         }
     }
-    // Fallback: render the canonical verbatim
-    // Defensive: catches a schema-vs-renderer drift without crashing the modal
-    canonical
+    canonical.to_string().into()
 }
 
 /// Word-wrap a description string.
@@ -2132,15 +2190,21 @@ pub(super) fn value_display(
         return ROW_ZDR_VALUE.to_string();
     }
     let mut display = match value {
-        SettingValue::Bool(b) => if *b { "on" } else { "off" }.to_string(),
+        SettingValue::Bool(b) => {
+            if *b {
+                rust_i18n::t!("settings_modal.value_on").to_string()
+            } else {
+                rust_i18n::t!("settings_modal.value_off").to_string()
+            }
+        }
         SettingValue::String(s) => {
             if s.is_empty() && matches!(meta.kind, SettingKind::DynamicEnum { .. }) {
-                "(no override)".to_string()
+                rust_i18n::t!("settings_modal.no_override").to_string()
             } else {
                 s.clone()
             }
         }
-        SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e).to_string(),
+        SettingValue::Enum(e) => display_for_enum_canonical_l10n(meta, e).into_owned(),
         SettingValue::Int(i) => i.to_string(),
     };
     if lock == Some(CodingDataSharingLock::TeamManaged) {
@@ -2244,6 +2308,8 @@ pub(super) fn render_setting_row(
         .add_modifier(Modifier::ITALIC);
     let desc_style = Style::default().fg(theme.gray).bg(bg);
 
+    // Enum rows display the localized user-friendly name while managed
+    // settings retain the lock-specific value treatment.
     let value_text = value_display(meta, value, lock);
     let value_text = value_text.as_str();
 
@@ -2292,7 +2358,12 @@ pub(super) fn render_setting_row(
     );
 
     // Fall back to one-line if only 1 line was allocated.
-    let layout_decision = row_layout(area.width, meta.label, value_text, show_restart_pill);
+    let layout_decision = row_layout(
+        area.width,
+        &meta.label_l10n(),
+        value_text,
+        show_restart_pill,
+    );
     let layout = if area.height < 2 {
         // Only 1 line is available: collapse to a one-line render and accept that the label might collide with the value column
         RowLayout::OneLine
@@ -2478,7 +2549,10 @@ fn render_expanded_description(
         .fg(theme.gray)
         .bg(theme.bg_base)
         .add_modifier(Modifier::ITALIC);
-    let desc_text = lock_reason.unwrap_or(meta.description);
+    let desc_text: std::borrow::Cow<'_, str> = match lock_reason {
+        Some(reason) => std::borrow::Cow::Borrowed(reason),
+        None => meta.description_l10n(),
+    };
     // Indent 4 cols to nest under the label.
     let indent = 4u16.min(area.width);
     let wrap_w = area.width.saturating_sub(indent);
@@ -2521,10 +2595,11 @@ fn render_setting_row_no_value(
         .add_modifier(Modifier::BOLD);
 
     let label_max_w = max_label_w;
-    let label_truncated: std::borrow::Cow<'_, str> = if meta.label.width() <= label_max_w as usize {
-        std::borrow::Cow::Borrowed(meta.label)
+    let label_l10n = meta.label_l10n();
+    let label_truncated: std::borrow::Cow<'_, str> = if label_l10n.width() <= label_max_w as usize {
+        label_l10n
     } else {
-        std::borrow::Cow::Owned(truncate_str(meta.label, label_max_w as usize))
+        std::borrow::Cow::Owned(truncate_str(&label_l10n, label_max_w as usize))
     };
     let text = format!(" !   {label_truncated} (no read mapping)");
     let w = text.width() as u16;
@@ -2603,24 +2678,26 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                 .focused_setting()
                 .is_some_and(|(key, _)| state.row_lock(key).is_some());
             let enter_label = match state.focused_setting() {
-                Some((_, meta)) if matches!(meta.kind, SettingKind::Bool { .. }) => "Enter toggle",
-                _ => "Enter edit",
+                Some((_, meta)) if matches!(meta.kind, SettingKind::Bool { .. }) => {
+                    rust_i18n::t!("footer.enter_toggle")
+                }
+                _ => rust_i18n::t!("footer.enter_edit"),
             };
             let mut shortcuts = vec![
                 Shortcut {
-                    label: "\u{2191}/\u{2193}/j/k nav",
+                    label: rust_i18n::t!("footer.nav_arrows_jk"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "g/G top/btm",
+                    label: rust_i18n::t!("footer.top_btm"),
                     clickable: false,
                     id: 0,
                 },
             ];
             if !locked {
                 shortcuts.push(Shortcut {
-                    label: "Space toggle",
+                    label: rust_i18n::t!("footer.space_toggle"),
                     clickable: false,
                     id: 0,
                 });
@@ -2632,25 +2709,25 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
             }
             shortcuts.extend([
                 Shortcut {
-                    label: "\u{2192} expand",
+                    label: rust_i18n::t!("footer.arrow_expand"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "/ search",
+                    label: rust_i18n::t!("footer.search"),
                     clickable: false,
                     id: 0,
                 },
             ]);
             if !locked {
                 shortcuts.push(Shortcut {
-                    label: "d reset",
+                    label: rust_i18n::t!("footer.d_reset"),
                     clickable: false,
                     id: 0,
                 });
             }
             shortcuts.push(Shortcut {
-                label: "F2/Esc close",
+                label: rust_i18n::t!("footer.f2_esc_close"),
                 clickable: false,
                 id: 0,
             });
@@ -2660,27 +2737,27 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
         }
         SettingsMode::FilterFocused => vec![
             Shortcut {
-                label: "type to filter",
+                label: rust_i18n::t!("footer.type_filter"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "\u{2191}/\u{2193} nav",
+                label: rust_i18n::t!("footer.nav"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Backspace edit",
+                label: rust_i18n::t!("footer.backspace_edit"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Enter commit",
+                label: rust_i18n::t!("footer.enter_commit"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc clear",
+                label: rust_i18n::t!("footer.esc_clear"),
                 clickable: false,
                 id: 0,
             },
@@ -2692,11 +2769,15 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
         } => {
             // Labels depend on whether the Enum supports live preview.
             let nav_label = if *sp {
-                "\u{2191}/\u{2193} try"
+                rust_i18n::t!("footer.try")
             } else {
-                "\u{2191}/\u{2193} nav"
+                rust_i18n::t!("footer.nav")
             };
-            let esc_label = if *sp { "Esc revert" } else { "Esc cancel" };
+            let esc_label = if *sp {
+                rust_i18n::t!("footer.esc_revert")
+            } else {
+                rust_i18n::t!("footer.esc_cancel")
+            };
             let consent = crate::settings::is_consent_chooser(key);
             let mut shortcuts = vec![
                 Shortcut {
@@ -2707,7 +2788,7 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                 // A chooser picks one of the offered answers, so Enter "selects"
                 // The filter bar and the value editors, where Enter really does commit typed input, keep that wording
                 Shortcut {
-                    label: "Enter select",
+                    label: rust_i18n::t!("footer.enter_select"),
                     clickable: false,
                     id: 0,
                 },
@@ -2720,7 +2801,7 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
             // Consent choosers hide reset; the key is disabled there too, so this stays a description of what actually works on the pane
             if !consent {
                 shortcuts.push(Shortcut {
-                    label: "d reset",
+                    label: rust_i18n::t!("footer.d_reset"),
                     clickable: false,
                     id: 0,
                 });
@@ -2742,17 +2823,17 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     id: 0,
                 },
                 Shortcut {
-                    label: "Enter commit",
+                    label: rust_i18n::t!("footer.enter_commit"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "Esc cancel",
+                    label: rust_i18n::t!("footer.esc_cancel"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "d reset",
+                    label: rust_i18n::t!("footer.d_reset"),
                     clickable: false,
                     id: 0,
                 },
@@ -2760,39 +2841,39 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
         }
         SettingsMode::EditingString { .. } => vec![
             Shortcut {
-                label: "type to edit",
+                label: rust_i18n::t!("footer.type_edit"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "\u{2190}/\u{2192} cursor",
+                label: rust_i18n::t!("footer.cursor"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Enter commit",
+                label: rust_i18n::t!("footer.enter_commit"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc cancel",
+                label: rust_i18n::t!("footer.esc_cancel"),
                 clickable: false,
                 id: 0,
             },
         ],
         SettingsMode::PickingGroup { .. } => vec![
             Shortcut {
-                label: "\u{2191}/\u{2193}/j/k nav",
+                label: rust_i18n::t!("footer.nav_arrows_jk"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Space/Enter toggle",
+                label: rust_i18n::t!("footer.space_enter_toggle"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc back",
+                label: rust_i18n::t!("footer.esc_back"),
                 clickable: false,
                 id: 0,
             },

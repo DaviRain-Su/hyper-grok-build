@@ -298,29 +298,30 @@ pub fn render_dashboard(
         let multiline = state.multiline_mode;
         let peeked_row = state.peek.as_ref().map(|p| p.row.clone());
         let question_pending = state.peek.as_ref().is_some_and(|p| p.question.is_some());
-        let (empty_hint, has_scrollback) = match peeked_row.as_ref() {
-            Some(DashboardRowId::Subagent {
-                parent,
-                child_session_id,
-            }) => {
-                let parent_ok = agents
-                    .get(parent)
-                    .is_some_and(|p| p.subagent_sessions.contains_key(child_session_id));
-                let loaded = agents
-                    .get(parent)
-                    .is_some_and(|p| p.subagent_views.contains_key(child_session_id));
-                if parent_ok && !loaded {
-                    (Some("Subagent not loaded"), false)
-                } else {
-                    (None, loaded)
+        let (empty_hint, has_scrollback): (Option<std::borrow::Cow<'static, str>>, bool) =
+            match peeked_row.as_ref() {
+                Some(DashboardRowId::Subagent {
+                    parent,
+                    child_session_id,
+                }) => {
+                    let parent_ok = agents
+                        .get(parent)
+                        .is_some_and(|p| p.subagent_sessions.contains_key(child_session_id));
+                    let loaded = agents
+                        .get(parent)
+                        .is_some_and(|p| p.subagent_views.contains_key(child_session_id));
+                    if parent_ok && !loaded {
+                        (Some(rust_i18n::t!("dash.subagent_not_loaded")), false)
+                    } else {
+                        (None, loaded)
+                    }
                 }
-            }
-            Some(row) => (
-                None,
-                super::state::scrollback_available_for_row(row, agents),
-            ),
-            None => (None, false),
-        };
+                Some(row) => (
+                    None,
+                    super::state::scrollback_available_for_row(row, agents),
+                ),
+                None => (None, false),
+            };
         let render = if let Some(panel) = state.peek.as_ref() {
             let live_tail = if !question_pending && has_scrollback {
                 peeked_row
@@ -341,7 +342,7 @@ pub fn render_dashboard(
                 multiline,
                 Some(layout.list).filter(|r| r.area() > 0),
                 live_tail,
-                empty_hint,
+                empty_hint.as_deref(),
             )
         } else {
             Default::default()
@@ -598,8 +599,9 @@ fn render_dashboard_banner(
         return;
     }
     if rows.is_empty() {
-        let hint = " No sessions yet. Esc to dispatch one. ";
-        let trunc = truncate_str(hint, inner.width as usize);
+        let no_sessions_msg = rust_i18n::t!("dash.no_sessions");
+        let hint = format!(" {} ", no_sessions_msg);
+        let trunc = truncate_str(&hint, inner.width as usize);
         buf.set_string(
             inner.x,
             inner.y,
@@ -712,6 +714,7 @@ fn render_header(
     let mut idle = 0usize;
     let mut done = 0usize;
     let mut failed = 0usize;
+    let mut blocked = 0usize;
     for r in rows.iter().filter(|r| r.indent == 0) {
         match r.state {
             RowState::NeedsInput => awaiting += 1,
@@ -722,6 +725,7 @@ fn render_header(
             RowState::Inactive => {}
             RowState::Completed => done += 1,
             RowState::Failed => failed += 1,
+            RowState::Blocked => blocked += 1,
         }
     }
 
@@ -759,6 +763,17 @@ fn render_header(
         status.push(
             "working",
             chip(spin, theme.accent_running, working, "working"),
+        );
+    }
+    if blocked > 0 {
+        status.push(
+            "blocked",
+            chip(
+                crate::glyphs::diamond_filled(),
+                theme.warning,
+                blocked,
+                "blocked",
+            ),
         );
     }
     if idle > 0 {
@@ -928,22 +943,22 @@ fn render_location_picker(
 
     let mut shortcuts = vec![
         Shortcut {
-            label: "\u{2191}\u{2193} nav",
+            label: rust_i18n::t!("footer.nav_compact"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Tab complete",
+            label: rust_i18n::t!("footer.tab_complete"),
             clickable: false,
             id: 1,
         },
         Shortcut {
-            label: "Enter select",
+            label: rust_i18n::t!("footer.enter_select"),
             clickable: false,
             id: 2,
         },
         Shortcut {
-            label: "Esc close",
+            label: rust_i18n::t!("footer.esc_close"),
             clickable: false,
             id: 3,
         },
@@ -1526,8 +1541,16 @@ fn render_rows(
                 let collapsed = state.is_section_collapsed(key);
                 let selected = state.selected_section == Some(key);
                 let hovered = state.hovered_section == Some(key);
+                let pinned_label = rust_i18n::t!("dash.pinned");
                 render_group_header(
-                    buf, line_rect, theme, "Pinned", *count, collapsed, selected, hovered,
+                    buf,
+                    line_rect,
+                    theme,
+                    pinned_label.as_ref(),
+                    *count,
+                    collapsed,
+                    selected,
+                    hovered,
                 );
                 mark(&mut line_bg, 0, theme.bg_base);
                 // Full-height hit rect (label and trailing gap): no hover/click dead zone between items
@@ -1545,11 +1568,12 @@ fn render_rows(
                 let collapsed = state.is_section_collapsed(key);
                 let selected = state.selected_section == Some(key);
                 let hovered = state.hovered_section == Some(key);
+                let state_label = rs.group_label();
                 render_group_header(
                     buf,
                     line_rect,
                     theme,
-                    rs.group_label(),
+                    state_label.as_ref(),
                     *count,
                     collapsed,
                     selected,
@@ -2328,8 +2352,16 @@ fn render_narrow_rows(
                 let collapsed = state.is_section_collapsed(key);
                 let selected = state.selected_section == Some(key);
                 let hovered = state.hovered_section == Some(key);
+                let pinned_label = rust_i18n::t!("dash.pinned");
                 render_group_header_narrow(
-                    buf, line_rect, theme, "Pinned", *count, collapsed, selected, hovered,
+                    buf,
+                    line_rect,
+                    theme,
+                    pinned_label.as_ref(),
+                    *count,
+                    collapsed,
+                    selected,
+                    hovered,
                 );
                 state
                     .section_rects
@@ -2342,11 +2374,12 @@ fn render_narrow_rows(
                 let collapsed = state.is_section_collapsed(key);
                 let selected = state.selected_section == Some(key);
                 let hovered = state.hovered_section == Some(key);
+                let state_label = rs.group_label();
                 render_group_header_narrow(
                     buf,
                     line_rect,
                     theme,
-                    rs.group_label(),
+                    state_label.as_ref(),
                     *count,
                     collapsed,
                     selected,
@@ -2484,13 +2517,10 @@ fn render_no_match(buf: &mut Buffer, area: Rect, theme: &Theme, filter: &Filter)
         return;
     }
     let hint = match filter {
-        Filter::None => "No matching rows.".to_string(),
-        Filter::Agent(n) => format!("No agents match `a:{n}`. Press Esc to clear the filter."),
-        Filter::State(s) => format!(
-            "No agents in state `{}`: press Esc to clear the filter.",
-            s.group_label()
-        ),
-        Filter::Substring(n) => format!("No rows match `{n}`: press Esc to clear the filter."),
+        Filter::None => rust_i18n::t!("dash.no_matching_rows"),
+        Filter::Agent(n) => rust_i18n::t!("dash.no_match_agent", filter = format!("a:{n}")),
+        Filter::State(s) => rust_i18n::t!("dash.no_match_state", state = s.group_label()),
+        Filter::Substring(n) => rust_i18n::t!("dash.no_match_substr", filter = n),
     };
     let truncated = truncate_str(&hint, area.width.saturating_sub(2) as usize);
     // Explicit offset to avoid `area.y + 1.min(...)` precedence ambiguity
@@ -2511,11 +2541,11 @@ fn render_empty_state(buf: &mut Buffer, area: Rect, theme: &Theme, loading: bool
     // A single dim line: the dispatch input below is the call to action, so no multi-line onboarding is needed (but never render a blank screen)
     // While the local session roster is being fetched we show a loading hint so a fresh open doesn't flash the "no agents" copy before rows land
     let line = if loading {
-        "Loading sessions…"
+        rust_i18n::t!("dash.loading")
     } else {
-        "No agents yet, type a prompt to start one."
+        rust_i18n::t!("dash.empty")
     };
-    let truncated = truncate_str(line, area.width.saturating_sub(2) as usize);
+    let truncated = truncate_str(&line, area.width.saturating_sub(2) as usize);
     // See `render_no_match` for the precedence rationale.
     let y_offset: u16 = if area.height >= 2 { 1 } else { 0 };
     buf.set_string(
@@ -2655,10 +2685,11 @@ fn paint_dispatch_config_badge(
 /// Shared by the dispatch box and the peek panel that replaces it, so a capture started in either box shows the same indicator.
 pub(super) fn paint_record_badge(buf: &mut Buffer, area: Rect, theme: &Theme, listening: bool) {
     if listening && area.width >= 12 {
+        let rec_label = rust_i18n::t!("dash.rec");
         buf.set_string(
             area.x + 2,
             area.y,
-            " \u{25CF} rec ",
+            rec_label.as_ref(),
             Style::default()
                 .fg(theme.accent_error)
                 .bg(theme.bg_base)
@@ -3150,8 +3181,8 @@ fn render_footer(
     if state.armed_delete_row_ref().is_some() {
         if state.list_focused {
             let hints = vec![
-                HintItem::new(key!('y'), "confirm delete"),
-                HintItem::new(key!('n'), "cancel"),
+                HintItem::new(key!('y'), rust_i18n::t!("hints.confirm")),
+                HintItem::new(key!('n'), rust_i18n::t!("hints.cancel")),
             ];
             ShortcutsBar::new(&hints)
                 .compact(4, None)
@@ -3163,7 +3194,7 @@ fn render_footer(
                 .unwrap_or_else(|| key!('x', CONTROL));
             let pending = PendingHint {
                 shortcut: stop_key,
-                label: "delete this session",
+                label: rust_i18n::t!("hints.delete_row"),
             };
             ShortcutsBar::new(&[])
                 .with_pending(Some(pending))
@@ -3176,8 +3207,8 @@ fn render_footer(
     // The footer therefore shows exactly its two actions instead of the dispatch and nav hints
     if state.rename.is_some() {
         let hints = vec![
-            HintItem::new(key!(Enter), "save"),
-            HintItem::new(key!(Esc), "cancel"),
+            HintItem::new(key!(Enter), rust_i18n::t!("hints.save")),
+            HintItem::new(key!(Esc), rust_i18n::t!("hints.cancel")),
         ];
         ShortcutsBar::new(&hints)
             .compact(4, None)
@@ -3188,9 +3219,9 @@ fn render_footer(
     // Search mode owns the footer: show how to confirm or cancel the live filter rather than the dispatch and nav hints
     if state.search_mode {
         let hints = vec![
-            HintItem::paired(key!(Up), key!(Down), "nav"),
-            HintItem::new(key!(Enter), "apply"),
-            HintItem::new(key!(Esc), "cancel"),
+            HintItem::paired(key!(Up), key!(Down), rust_i18n::t!("hints.nav")),
+            HintItem::new(key!(Enter), rust_i18n::t!("hints.apply")),
+            HintItem::new(key!(Esc), rust_i18n::t!("hints.cancel")),
         ];
         ShortcutsBar::new(&hints)
             .compact(4, None)
@@ -3209,9 +3240,9 @@ fn render_footer(
         selected_state,
         Some(RowState::Working | RowState::NeedsInput)
     ) {
-        "stop"
+        rust_i18n::t!("hints.stop")
     } else {
-        "delete"
+        rust_i18n::t!("hints.delete_row")
     };
 
     // Overview list focused (via Tab), navigation hints: arrows / j-k move between agents, Enter opens the focused one, Tab returns to the input
@@ -3234,16 +3265,19 @@ fn render_footer(
         // The nav chip is omitted here too, mirroring the section-header row below
         if state.selected_idle_overflow {
             let toggle = if state.idle_show_all {
-                "show fewer"
+                rust_i18n::t!("hints.show_fewer")
             } else {
-                "show all"
+                rust_i18n::t!("hints.show_all")
             };
             let hints = vec![
                 HintItem::new(key!(Enter), toggle),
-                HintItem::new(key!(Tab), "input"),
+                HintItem::new(key!(Tab), rust_i18n::t!("hints.input")),
             ];
             ShortcutsBar::new(&hints)
-                .compact(4, Some(HintItem::new(help, "shortcuts")))
+                .compact(
+                    4,
+                    Some(HintItem::new(help, rust_i18n::t!("hints.shortcuts"))),
+                )
                 .render(inner, buf);
             return;
         }
@@ -3251,29 +3285,35 @@ fn render_footer(
         // Tab hands focus back to the dispatch input (Esc does too, one tier at a time)
         if let Some(section) = state.selected_section {
             let toggle = if state.is_section_collapsed(section) {
-                "expand"
+                rust_i18n::t!("hints.expand")
             } else {
-                "collapse"
+                rust_i18n::t!("hints.collapse")
             };
             let hints = vec![
                 HintItem::new(key!(Enter), toggle),
-                HintItem::new(key!(Tab), "input"),
+                HintItem::new(key!(Tab), rust_i18n::t!("hints.input")),
             ];
             ShortcutsBar::new(&hints)
-                .compact(4, Some(HintItem::new(help, "shortcuts")))
+                .compact(
+                    4,
+                    Some(HintItem::new(help, rust_i18n::t!("hints.shortcuts"))),
+                )
                 .render(inner, buf);
             return;
         }
         let mut hints = vec![
-            HintItem::new(key!(Enter), "open"),
-            HintItem::new(key!(Tab), "input"),
+            HintItem::new(key!(Enter), rust_i18n::t!("hints.open")),
+            HintItem::new(key!(Tab), rust_i18n::t!("hints.input")),
         ];
         if show_ctrl_x {
             hints.push(HintItem::new(stop, stop_label).pinned());
         }
 
         ShortcutsBar::new(&hints)
-            .compact(4, Some(HintItem::new(help, "shortcuts")))
+            .compact(
+                4,
+                Some(HintItem::new(help, rust_i18n::t!("hints.shortcuts"))),
+            )
             .render(inner, buf);
         return;
     }
@@ -3302,7 +3342,7 @@ fn render_footer(
         key!('.', CONTROL),
     );
 
-    let help_hint = HintItem::new(help, "shortcuts");
+    let help_hint = HintItem::new(help, rust_i18n::t!("hints.shortcuts"));
 
     // Submit chord is `send_key` (Enter, or Shift/Alt+Enter in multiline). Ctrl+S is send+open.
     // Empty draft: create/open on the submit chord; non-empty: send
@@ -3330,8 +3370,13 @@ fn render_footer(
             .as_ref()
             .is_some_and(|p| p.selected_option.is_some());
         let reply_empty = state.peek_reply.text().trim().is_empty();
-        let esc_label = if reply_empty { "New Agent" } else { "back" };
-        // Pin Esc when it clears a draft (`back`) so compact doesn't drop it behind stop/help; that matches its importance in handle_peek_key
+        let esc_label = if reply_empty {
+            rust_i18n::t!("hints.new_agent")
+        } else {
+            rust_i18n::t!("hints.back")
+        };
+        // Pin Esc when it clears a draft (`back`) so compact doesn't drop it
+        // behind stop/help — matches how important it is in handle_peek_key.
         let esc_hint = {
             let h = HintItem::new(esc, esc_label);
             if reply_empty { h } else { h.pinned() }
@@ -3340,24 +3385,37 @@ fn render_footer(
         // Two-focus model: Tab toggles between the reply and row nav. Vim opens the reply unfocused so j/k keep selecting.
         let peek_focused = state.peek.as_ref().map(|p| p.focused).unwrap_or(true);
         let question_focused = peek_focused && has_pending_question;
-        let tab_hint = HintItem::new(key!(Tab), if peek_focused { "list" } else { "input" });
+        let tab_hint = HintItem::new(
+            key!(Tab),
+            if peek_focused {
+                rust_i18n::t!("hints.list")
+            } else {
+                rust_i18n::t!("hints.input")
+            },
+        );
         // `1-9 select` hint for the question picker (no single bound key).
         let select_hint = HintItem {
             keys: vec![],
-            label: "select".into(),
+            label: rust_i18n::t!("hints.select"),
             custom_display: Some("1-9"),
             description: None,
             pinned: false,
         };
         if question_focused && option_selected {
-            // An option is selected, so Enter answers
-            // `Tab` unfocuses to the row list (the same two-focus toggle the other peek states show)
-            // ↑/↓ still move within the options; the nav chip is dropped to save bottom-bar space
-            vec![HintItem::new(enter, "answer"), tab_hint, esc_hint]
+            // An option is selected — the panel is an answer surface:
+            // Enter answers; `Tab` unfocuses to the row list (the same
+            // two-focus toggle the other peek states surface). (↑/↓ still
+            // move within the options; the nav chip is dropped to save
+            // bottom-bar space.)
+            vec![
+                HintItem::new(enter, rust_i18n::t!("hints.answer")),
+                tab_hint,
+                esc_hint,
+            ]
         } else if has_pending_question && peek_focused {
             // Question pending, focused, nothing selected: navigation and select
             let mut h = vec![
-                HintItem::new(enter, "open"),
+                HintItem::new(enter, rust_i18n::t!("hints.open")),
                 select_hint,
                 tab_hint,
                 esc_hint,
@@ -3371,9 +3429,9 @@ fn render_footer(
             // Right still attaches; show it so open stays discoverable
             // Pending question: keep 1-9 select (digits still work unfocused).
             let mut h = vec![
-                HintItem::new(enter, "input"),
+                HintItem::new(enter, rust_i18n::t!("hints.input")),
                 // Pin open: attach is the replacement for Enter in this mode.
-                HintItem::new(key!(Right), "open").pinned(),
+                HintItem::new(key!(Right), rust_i18n::t!("hints.open")).pinned(),
                 tab_hint,
                 esc_hint,
             ];
@@ -3381,7 +3439,10 @@ fn render_footer(
                 h.insert(2, select_hint);
             }
             if !reply_empty {
-                h.insert(1, HintItem::new(send_open, "send+open"));
+                h.insert(
+                    1,
+                    HintItem::new(send_open, rust_i18n::t!("hints.send_open")),
+                );
             }
             if show_ctrl_x {
                 h.push(HintItem::new(stop, stop_label).pinned());
@@ -3390,7 +3451,7 @@ fn render_footer(
         } else if has_pending_question {
             // Non-vim unfocused (or other) with a pending question: open and select
             let mut h = vec![
-                HintItem::new(enter, "open"),
+                HintItem::new(enter, rust_i18n::t!("hints.open")),
                 select_hint,
                 tab_hint,
                 esc_hint,
@@ -3401,16 +3462,20 @@ fn render_footer(
             h
         } else if peek_focused && !reply_empty {
             vec![
-                HintItem::new(send_key, "send"),
-                HintItem::new(send_open, "send+open"),
+                HintItem::new(send_key, rust_i18n::t!("hints.send")),
+                HintItem::new(send_open, rust_i18n::t!("hints.send_open")),
                 tab_hint,
-                HintItem::new(esc, "back").pinned(),
+                HintItem::new(esc, rust_i18n::t!("hints.back")).pinned(),
             ]
         } else {
             // Focused empty: open is on the submit chord (send_key)
             // Unfocused: bare Enter still attaches
             let open_key = if peek_focused { send_key } else { enter };
-            let mut h = vec![HintItem::new(open_key, "open"), tab_hint, esc_hint];
+            let mut h = vec![
+                HintItem::new(open_key, rust_i18n::t!("hints.open")),
+                tab_hint,
+                esc_hint,
+            ];
             if show_ctrl_x {
                 h.push(HintItem::new(stop, stop_label).pinned());
             }
@@ -3421,70 +3486,76 @@ fn render_footer(
         if prompt_empty {
             // ↑↓ navigate, Enter toggles collapse/expand, Esc returns to the `[+ New Agent]` button
             let toggle = if state.is_section_collapsed(section) {
-                "expand"
+                rust_i18n::t!("hints.expand")
             } else {
-                "collapse"
+                rust_i18n::t!("hints.collapse")
             };
             vec![
                 HintItem::new(enter, toggle),
-                HintItem::new(key!(Esc), "New Agent"),
+                HintItem::new(key!(Esc), rust_i18n::t!("hints.new_agent")),
             ]
         } else {
             // Typed text dispatches a NEW agent (a section header is never a reply target)
             // Show the same chips as the `[+ New Agent]` button with a draft
             // send_key sends (stays on the dashboard), Ctrl+S sends and opens detail, Shift+Tab cycles the dispatch mode
             vec![
-                HintItem::new(send_key, "send"),
-                HintItem::new(send_open, "send+open"),
-                HintItem::new(key!(BackTab), "mode"),
+                HintItem::new(send_key, rust_i18n::t!("hints.send")),
+                HintItem::new(send_open, rust_i18n::t!("hints.send_open")),
+                HintItem::new(key!(BackTab), rust_i18n::t!("hints.mode")),
             ]
         }
     } else if state.selected_idle_overflow {
         // The Idle overflow toggle is selected. Like a section header, there's no session under it, so no stop chip.
         if prompt_empty {
             let toggle = if state.idle_show_all {
-                "show fewer"
+                rust_i18n::t!("hints.show_fewer")
             } else {
-                "show all"
+                rust_i18n::t!("hints.show_all")
             };
             vec![
                 HintItem::new(enter, toggle),
-                HintItem::new(key!(Esc), "New Agent"),
+                HintItem::new(key!(Esc), rust_i18n::t!("hints.new_agent")),
             ]
         } else {
             vec![
-                HintItem::new(send_key, "send"),
-                HintItem::new(send_open, "send+open"),
-                HintItem::new(key!(BackTab), "mode"),
+                HintItem::new(send_key, rust_i18n::t!("hints.send")),
+                HintItem::new(send_open, rust_i18n::t!("hints.send_open")),
+                HintItem::new(key!(BackTab), rust_i18n::t!("hints.mode")),
             ]
         }
     } else if button_focused {
         let mut h: Vec<HintItem> = vec![];
         if prompt_empty {
-            h.push(HintItem::new(send_key, "create"));
-            h.push(HintItem::new(key!(Tab), "list"));
+            h.push(HintItem::new(send_key, rust_i18n::t!("hints.create")));
+            h.push(HintItem::new(key!(Tab), rust_i18n::t!("hints.list")));
         } else {
-            h.push(HintItem::new(send_key, "send"));
-            h.push(HintItem::new(send_open, "send+open"));
+            h.push(HintItem::new(send_key, rust_i18n::t!("hints.send")));
+            h.push(HintItem::new(send_open, rust_i18n::t!("hints.send_open")));
         }
-        h.push(HintItem::new(key!(BackTab), "mode"));
+        h.push(HintItem::new(key!(BackTab), rust_i18n::t!("hints.mode")));
         h
     } else if row_selected {
         let mut h: Vec<HintItem> = vec![];
         if prompt_empty {
-            h.push(HintItem::new(send_key, "open"));
-            h.push(HintItem::new(key!(Tab), "list"));
+            h.push(HintItem::new(send_key, rust_i18n::t!("hints.open")));
+            h.push(HintItem::new(key!(Tab), rust_i18n::t!("hints.list")));
         } else {
-            h.push(HintItem::new(send_key, "send"));
-            h.push(HintItem::new(send_open, "send+open"));
+            h.push(HintItem::new(send_key, rust_i18n::t!("hints.send")));
+            h.push(HintItem::new(send_open, rust_i18n::t!("hints.send_open")));
         }
         if show_ctrl_x {
             h.push(HintItem::new(stop, stop_label).pinned());
         }
         h
     } else {
-        // Defensive: neither the button nor a row is focused
-        vec![HintItem::new(send_key, "create")]
+        // Defensive — neither the button nor a row is focused.
+        // Should never happen given the invariant on
+        // `DashboardState`, but a fall-through keeps the bar
+        // populated rather than silently empty.
+        vec![
+            HintItem::new(send_key, rust_i18n::t!("hints.create")),
+            HintItem::new(stop, stop_label),
+        ]
     };
 
     ShortcutsBar::new(&hints)
@@ -3502,7 +3573,7 @@ fn state_icon(state: RowState, tick: u64) -> &'static str {
         // Hollow diamond for idle rows; filled diamond for every state that needs visual presence (needs-input, completed, failed)
         // The foreground colour disambiguates (accent_user for needs-input, accent_success for done, accent_error for failed)
         RowState::Idle | RowState::Inactive => crate::glyphs::diamond_hollow(),
-        RowState::NeedsInput | RowState::Completed | RowState::Failed => {
+        RowState::NeedsInput | RowState::Completed | RowState::Failed | RowState::Blocked => {
             crate::glyphs::diamond_filled()
         }
     }
@@ -3515,6 +3586,7 @@ fn state_color(state: RowState, theme: &Theme) -> Color {
         RowState::Idle | RowState::Inactive => theme.gray_dim,
         RowState::Completed => theme.accent_success,
         RowState::Failed => theme.accent_error,
+        RowState::Blocked => theme.warning,
     }
 }
 

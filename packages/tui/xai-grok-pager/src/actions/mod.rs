@@ -73,6 +73,7 @@ pub enum ActionId {
 
     // Agent
     NextModel,
+    PrevModel,
     CancelTurn,
     ToggleYolo,
     ToggleMultiline,
@@ -143,6 +144,36 @@ pub enum ActionId {
     DashboardOpenLocationPicker,
     DashboardToggleWorktree,
 }
+impl ActionId {
+    /// Stable snake-case id used to derive i18n keys at render time:
+    /// `actions.{i18n_key}.label` / `.description` / `.long_help`.
+    /// Derived from the Debug name (`SendPrompt` → `send_prompt`).
+    pub fn i18n_key(&self) -> String {
+        snake_case(&format!("{self:?}"))
+    }
+}
+
+/// `SendPrompt` → `send_prompt`; acronym runs collapse (`OpenURL` → `open_url`).
+fn snake_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            let prev_lower = i > 0 && chars[i - 1].is_lowercase();
+            let acronym_boundary = i > 0
+                && chars[i - 1].is_uppercase()
+                && chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if i > 0 && (prev_lower || acronym_boundary) {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(*c);
+        }
+    }
+    out
+}
+
 /// When an action is available / visible.
 ///
 /// Used for **exact** matching in `registry.lookup()`.
@@ -195,6 +226,22 @@ pub enum Category {
     Dashboard,
 }
 
+impl Category {
+    /// Stable slug for i18n keys (`shortcuts_help.category.{slug}`).
+    pub fn slug(&self) -> &'static str {
+        match self {
+            Self::GettingStarted => "getting_started",
+            Self::Input => "input",
+            Self::ConversationNav => "conversation_nav",
+            Self::ConversationAction => "conversation_action",
+            Self::Panels => "panels",
+            Self::Session => "session",
+            Self::Dashboard => "dashboard",
+        }
+    }
+}
+
+/// A registered action definition.
 #[derive(Debug, Clone)]
 pub struct ActionDef {
     pub id: ActionId,
@@ -227,9 +274,16 @@ impl ActionDef {
     /// Uses `default_key` only.
     /// For paired hints (j/k, h/l), the view should use [`HintItem::paired`] with keys from two related action defs.
     pub fn hint(&self) -> HintItem {
-        let mut item = HintItem::new(self.default_key, self.label);
+        let base = format!("actions.{}", self.id.i18n_key());
+        let mut item = HintItem::new(
+            self.default_key,
+            crate::i18n::tr_or(&format!("{base}.label"), self.label),
+        );
         item.custom_display = self.hint_key_display;
-        item.description = Some(std::borrow::Cow::Borrowed(self.description));
+        item.description = Some(crate::i18n::tr_or(
+            &format!("{base}.description"),
+            self.description,
+        ));
         item
     }
 }
@@ -514,6 +568,38 @@ mod tests {
     use super::*;
     use crate::key;
     use crossterm::event::{KeyCode, KeyModifiers};
+
+    #[test]
+    fn snake_case_conversions() {
+        assert_eq!(snake_case("SendPrompt"), "send_prompt");
+        assert_eq!(snake_case("Quit"), "quit");
+        assert_eq!(snake_case("ToggleYolo"), "toggle_yolo");
+        assert_eq!(snake_case("DashboardOverlayNext"), "dashboard_overlay_next");
+        assert_eq!(snake_case("CopyBlockMeta"), "copy_block_meta");
+    }
+
+    #[test]
+    fn i18n_keys_are_unique_per_action() {
+        let reg = non_vscode_registry();
+        let mut seen = std::collections::HashSet::new();
+        for def in reg.all() {
+            assert!(
+                seen.insert(def.id.i18n_key()),
+                "duplicate i18n key `{}`",
+                def.id.i18n_key()
+            );
+        }
+    }
+
+    #[test]
+    fn hint_falls_back_to_english_without_bundle_entry() {
+        // Under the default `en` test locale, hints render the English source
+        // (registry-driven catalogs degrade to `tr_or`'s fallback).
+        let reg = non_vscode_registry();
+        let def = reg.find(ActionId::Quit).expect("quit action");
+        let item = def.hint();
+        assert_eq!(item.label, "quit");
+    }
 
     fn non_vscode_registry() -> ActionRegistry {
         ActionRegistry::non_vscode_for_test()

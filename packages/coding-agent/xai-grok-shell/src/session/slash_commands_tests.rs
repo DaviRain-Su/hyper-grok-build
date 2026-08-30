@@ -624,6 +624,7 @@ fn available_commands_orders_builtins_first() {
             "hooks-untrust",
             "plugins",
             "reload-plugins",
+            "live",
             "session-info",
             "feedback",
             "deep-research",
@@ -1383,6 +1384,8 @@ fn same_qualified_name_differing_only_by_case_is_withheld() {
 
 #[test]
 fn mixed_case_workflow_does_not_take_reserved_name() {
+    // PAGER_COMMAND_KEYS now reserves "review" and "login"; case-insensitive
+    // via slash_key, so mixed-case listings must stay hidden too.
     let workflows = vec![listing("Login"), listing("Review")];
     let names: Vec<String> = available_commands(&[], all_gated(), &workflows, &[], &[])
         .into_iter()
@@ -1392,7 +1395,14 @@ fn mixed_case_workflow_does_not_take_reserved_name() {
         !names.iter().any(|n| n.eq_ignore_ascii_case("login")),
         "{names:?}"
     );
-    assert!(names.iter().any(|n| n == "Review"), "{names:?}");
+    assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("review")), "{names:?}");
+    // A non-reserved mixed-case name is advertised verbatim.
+    let workflows = vec![listing("Triage-Flakes")];
+    let names: Vec<String> = available_commands(&[], all_gated(), &workflows, &[], &[])
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    assert!(names.iter().any(|n| n == "Triage-Flakes"), "{names:?}");
 }
 
 #[test]
@@ -1647,11 +1657,13 @@ fn parse_skill_refs_single_no_args() {
 
 #[test]
 fn parse_skill_refs_multi_skill() {
-    let skills = vec![make_skill("review", true), make_skill("lint", true)];
+    // "review" is a reserved pager command key, so the skill is only
+    // advertised under its qualified name and mid-text /review can't match.
+    let skills = vec![make_skill("commit", true), make_skill("lint", true)];
     let refs =
-        parse_skill_references("/review fix auth /lint --strict", &skills, all_gated()).unwrap();
+        parse_skill_references("/commit fix auth /lint --strict", &skills, all_gated()).unwrap();
     assert_eq!(refs.len(), 2);
-    assert_eq!(refs[0].name, "review");
+    assert_eq!(refs[0].name, "commit");
     assert_eq!(refs[0].args, "fix auth");
     assert_eq!(refs[1].name, "lint");
     assert_eq!(refs[1].args, "--strict");
@@ -1883,6 +1895,7 @@ fn workflow_collision_policy_includes_aliases_and_ambiguous_skills() {
         listing("sessions"),
         listing("commit"),
         listing("review"),
+        listing("deploy-flow"),
     ];
     let names: Vec<_> = available_commands(&skills, all_gated(), &workflows, &[], &[])
         .into_iter()
@@ -1892,9 +1905,10 @@ fn workflow_collision_policy_includes_aliases_and_ambiguous_skills() {
     assert!(!names.iter().any(|name| name == "yolo"));
     assert!(!names.iter().any(|name| name == "sessions"));
     assert!(!names.iter().any(|name| name == "commit"));
+    assert!(!names.iter().any(|name| name == "review"));
     assert!(names.iter().any(|name| name == "local:commit"));
     assert!(names.iter().any(|name| name == "user:commit"));
-    assert!(names.iter().any(|name| name == "review"));
+    assert!(names.iter().any(|name| name == "deploy-flow"));
 
     assert!(matches!(
         resolve(

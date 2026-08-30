@@ -2291,7 +2291,7 @@ async fn assert_stop_trigger_arms_wake_barrier(trigger: &str) {
                 .barrier;
             assert_eq!(
                 barrier,
-                super::cancel::WakeBarrier::Armed,
+                super::tasks_cancel::WakeBarrier::Armed,
                 "{trigger}: outcome must report the armed barrier"
             );
             assert!(
@@ -2409,7 +2409,7 @@ async fn non_stop_cancels_preserve_queued_task_wakes_and_do_not_arm_barrier() {
                     .barrier;
                 assert_eq!(
                     barrier,
-                    super::cancel::WakeBarrier::Clear,
+                    super::tasks_cancel::WakeBarrier::Clear,
                     "non-stop cancel {trigger:?} must report an unarmed barrier"
                 );
                 let state = actor.state.lock().await;

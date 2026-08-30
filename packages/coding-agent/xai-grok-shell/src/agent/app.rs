@@ -1287,6 +1287,21 @@ pub async fn run_leader(
                                 warn!(error = %e, "failed to inject model reload into ACP stream");
                             }
                         }
+                        ConfigUpdate::SubagentModelsChanged => {
+                            info!("Subagent model pins change detected — reloading live sessions");
+                            let line = internal_reload_request_line(
+                                "config-reload-subagent-models",
+                                InternalMethod::ReloadSubagentModels,
+                                serde_json::json!({}),
+                            );
+                            let mut tx = acp_tx_for_config.lock().await;
+                            if let Err(e) = tx.write_all(line.as_bytes()).await {
+                                warn!(
+                                    error = %e,
+                                    "failed to inject subagent-model reload into ACP stream"
+                                );
+                            }
+                        }
                         ConfigUpdate::ModelsCacheChanged => {
                             info!("Models cache change detected — reloading agent model catalog");
                             let line = internal_reload_request_line(

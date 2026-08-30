@@ -41,7 +41,8 @@ use super::model::{
 };
 use super::refresh::{RefreshOutcome, TokenRefresher, resolve_refresh_credential};
 use super::storage::{
-    AuthFileLock, read_auth_json, read_auth_json_or_empty_recovering_corrupt, write_auth_json,
+    AuthFileLock, read_auth_json, read_auth_json_or_empty_recovering_corrupt,
+    with_auth_json_scope_lock, with_held_auth_json_lock, write_auth_json,
 };
 
 #[cfg(test)]
@@ -52,7 +53,6 @@ use chrono::DateTime;
 use enrichment::apply_user_info_enrichment;
 
 use super::model::AuthStore;
-#[cfg(test)]
 use super::model::LEGACY_SCOPE;
 
 /// Why a token refresh is being requested.
@@ -351,16 +351,21 @@ impl AuthManager {
         );
 
         // GROK_AUTH_PATH: custom file path (overrides default $GROK_HOME/auth.json).
-        // Resolved before the GROK_AUTH branch so inline-credential managers
-        // also honor it: their later refresh persistence (`update()`) writes to
-        // this path, and previously the inline branch hardcoded the default —
-        // silently splitting reads (inline) from writes (default path).
+        // Empty string is treated as unset (subprocess harnesses often pass
+        // `env -u`-style empty overrides). Resolved before the GROK_AUTH branch
+        // so inline-credential managers also honor it: their later refresh
+        // persistence (`update()`) writes to this path.
         let path = std::env::var("GROK_AUTH_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|_| grok_home.join("auth.json"));
+            .unwrap_or_else(|| grok_home.join("auth.json"));
 
         // GROK_AUTH: inline JSON credentials (highest priority, read-only).
-        if let Ok(inline_json) = std::env::var("GROK_AUTH") {
+        // Empty override is treated as unset.
+        if let Ok(inline_json) = std::env::var("GROK_AUTH")
+            && !inline_json.is_empty()
+        {
             if let Ok(auth) = serde_json::from_str::<GrokAuth>(&inline_json) {
                 return Self::assemble(
                     Some(auth),
@@ -374,6 +379,18 @@ impl AuthManager {
             tracing::warn!("GROK_AUTH set but failed to parse as JSON, falling back to file");
         }
 
+        Self::from_auth_json_path(path, scope, grok_com_config, proxy_base_url)
+    }
+
+    /// Load `auth.json` at `path` and assemble a manager. Shared by
+    /// [`Self::new`] (after env resolution) and [`Self::new_test_isolated`]
+    /// (which never consults process-global auth env vars).
+    fn from_auth_json_path(
+        path: PathBuf,
+        scope: String,
+        grok_com_config: GrokComConfig,
+        proxy_base_url: String,
+    ) -> Self {
         let (auth, auth_read_detail, initial_disk_state) = match read_auth_json(&path) {
             Ok(map) => {
                 let found = lookup_auth(&map, &scope);
@@ -428,6 +445,53 @@ impl AuthManager {
         // so the first launch forces a compliant login.
         manager.enforce_pin_on_loaded_token();
         manager
+    }
+
+    /// Deterministic proxy stub for test constructors that must not touch
+    /// effective config / real home.
+    #[doc(hidden)]
+    pub const TEST_ISOLATED_PROXY: &str = "http://127.0.0.1:9";
+
+    /// Explicit-path constructor for tests and integration binaries.
+    ///
+    /// - **Never** reads `GROK_AUTH` / `GROK_AUTH_PATH` / `HOME` / `GROK_HOME`
+    /// - **Never** calls `EndpointsConfig::from_effective_config()` or `grok_home()`
+    /// - Loads/persists **only** the given `auth_json_path`
+    /// - Uses `proxy_base_url` as-is (pass [`Self::TEST_ISOLATED_PROXY`] or a mock)
+    ///
+    /// `#[doc(hidden)]`: not a product API — for hermetic harnesses only.
+    /// Prefer over [`Self::new`] whenever env precedence is not under test.
+    #[doc(hidden)]
+    pub fn for_test_with_auth_path(
+        auth_json_path: impl Into<PathBuf>,
+        grok_com_config: GrokComConfig,
+        proxy_base_url: impl Into<String>,
+    ) -> Self {
+        Self::from_auth_json_path(
+            auth_json_path.into(),
+            grok_com_config.auth_scope(),
+            grok_com_config,
+            proxy_base_url.into(),
+        )
+    }
+
+    /// Convenience: `grok_home/auth.json` + [`Self::TEST_ISOLATED_PROXY`].
+    ///
+    /// Available to lib unit tests (`cfg(test)`) and integration crates via
+    /// [`Self::for_test_with_auth_path`]. Does not consult process env.
+    #[doc(hidden)]
+    pub fn for_test_home(grok_home: &Path, grok_com_config: GrokComConfig) -> Self {
+        Self::for_test_with_auth_path(
+            grok_home.join("auth.json"),
+            grok_com_config,
+            Self::TEST_ISOLATED_PROXY,
+        )
+    }
+
+    /// Lib-unit alias of [`Self::for_test_home`] (historical name).
+    #[cfg(test)]
+    pub(crate) fn new_test_isolated(grok_home: &Path, grok_com_config: GrokComConfig) -> Self {
+        Self::for_test_home(grok_home, grok_com_config)
     }
 
     /// Drops inherited `WebLogin` entries that `lookup_auth` skipped, so they are not re-evaluated on
@@ -811,9 +875,16 @@ impl AuthManager {
         }
     }
 
-    /// Cached in-memory token if outside the early-invalidation buffer.
-    pub(crate) fn current(&self) -> Option<GrokAuth> {
-        let auth = self.owned_inner().filter(|a| !self.is_token_expired(a))?;
+    /// Snapshot of the in-memory credential if outside the early-invalidation
+    /// buffer. Public so integration tests can assert isolation of
+    /// [`Self::for_test_home`] / [`Self::for_test_with_auth_path`].
+    pub fn current(&self) -> Option<GrokAuth> {
+        let auth = self
+            .inner
+            .read()
+            .as_ref()
+            .filter(|a| !self.is_token_expired(a))
+            .cloned()?;
         self.vet_cached(auth)
     }
 
@@ -919,66 +990,39 @@ impl AuthManager {
     /// Invariants:
     /// - **Disk write before any network I/O** (else a sibling process can
     ///   reuse the not-yet-rotated RT and the IdP returns `invalid_grant`).
-    /// - **Caller holds the `auth.json` file lock** (production callers:
-    ///   `refresh_chain` Success arm, `flow::run_auth_flow`).
+    /// - Unlocked callers serialize through `auth.json.lock` so a whole-map
+    ///   RMW cannot drop Kimi/Codex/Claude scopes. Refresh already holds
+    ///   that flock across the IdP call and must go through
+    ///   [`Self::update_under_held_lock`] — a second exclusive flock on a
+    ///   new fd deadlocks the same process on Linux.
     ///
     /// Returns the input `GrokAuth` BEFORE enrichment lands; callers
     /// needing the post-enrichment view re-read `current()`.
     pub(crate) async fn update(self: &Arc<Self>, auth: GrokAuth) -> std::io::Result<GrokAuth> {
-        let update_started = std::time::Instant::now();
-        let map = match read_auth_json_or_empty_recovering_corrupt(&self.path) {
-            Ok(map) => map,
-            Err(e) => {
-                // Non-recoverable error (PermissionDenied, etc.) — keep conservative.
-                tracing::warn!(error = %e, "auth: read failed, updating in-memory only");
-                xai_grok_telemetry::unified_log::warn(
-                    "auth update skipped disk write (read failed)",
-                    None,
-                    Some(serde_json::json!({ "error": e.to_string() })),
-                );
-                self.with_inner_write(|inner| *inner = Some(auth.clone()));
-                self.spawn_user_info_enrichment(auth.clone());
-                return Ok(auth);
-            }
-        };
-        let mut map = map;
-        // One entry per scope (personal and team share the scope key).
-        tracing::debug!(scope = %self.scope, "auth: storing token");
-        map.insert(self.scope.clone(), auth.clone());
-        let write_result = write_auth_json(&self.path, &map);
-        let elapsed_ms = update_started.elapsed().as_millis() as u64;
-        match &write_result {
-            Ok(()) => xai_grok_telemetry::unified_log::info(
-                "auth update disk written",
-                None,
-                Some(serde_json::json!({
-                    "rt_prefix": auth.refresh_token.as_deref().map(bearer_suffix),
-                    "key_prefix": bearer_suffix(&auth.key),
-                    "elapsed_ms": elapsed_ms,
-                })),
-            ),
-            Err(e) => xai_grok_telemetry::unified_log::error(
-                "auth update disk write failed",
-                None,
-                Some(serde_json::json!({
-                    "error": e.to_string(),
-                    "elapsed_ms": elapsed_ms,
-                })),
-            ),
-        }
-        // Always update in-memory, even if disk write failed. This lets the
-        // current session work with fresh credentials while the user fixes the
-        // filesystem (e.g. read-only disk). Without this, a disk failure leaves
-        // the stale/dead token in memory and the user is completely stuck.
-        *self.permanent_failure.write() = None;
-        self.with_inner_write(|inner| *inner = Some(auth.clone()));
-
-        // Fire-and-forget enrichment. Off the critical path -- a slow
-        // `/user` would otherwise widen the sibling-process
-        // `invalid_grant` race window.
+        let auth = self.commit_persisted_auth(
+            auth,
+            None,
+            "auth update disk written",
+            "auth update disk write failed",
+        )?;
         self.spawn_user_info_enrichment(auth.clone());
+        Ok(auth)
+    }
 
-        write_result?;
+    /// Like [`Self::update`], but reuses the refresh-held [`AuthFileLock`]
+    /// instead of opening a second flock.
+    pub(crate) async fn update_under_held_lock(
+        self: &Arc<Self>,
+        auth: GrokAuth,
+        lock: &AuthFileLock,
+    ) -> std::io::Result<GrokAuth> {
+        let auth = self.commit_persisted_auth(
+            auth,
+            Some(lock),
+            "auth update disk written",
+            "auth update disk write failed",
+        )?;
+        self.spawn_user_info_enrichment(auth.clone());
         Ok(auth)
     }
 
@@ -988,46 +1032,74 @@ impl AuthManager {
         &self,
         auth: GrokAuth,
     ) -> std::io::Result<GrokAuth> {
-        let started = std::time::Instant::now();
-        let map = match read_auth_json_or_empty_recovering_corrupt(&self.path) {
-            Ok(map) => map,
-            Err(e) => {
-                // Non-recoverable error — keep conservative.
-                tracing::warn!(error = %e, "auth: read failed, updating in-memory only (no enrichment)");
-                xai_grok_telemetry::unified_log::warn(
-                    "auth update skipped disk write (read failed, no enrichment)",
-                    None,
-                    Some(serde_json::json!({ "error": e.to_string() })),
-                );
-                self.with_inner_write(|inner| *inner = Some(auth.clone()));
-                return Ok(auth);
-            }
+        self.commit_persisted_auth(
+            auth,
+            None,
+            "auth update disk written (no enrichment)",
+            "auth update disk write failed (no enrichment)",
+        )
+    }
+
+    /// Whole-map RMW of this manager's scope. `held_lock` is the live refresh
+    /// flock when the caller already owns it; otherwise we acquire a short
+    /// exclusive lock so unlocked logins still merge with other providers.
+    fn persist_scope_entry(
+        &self,
+        auth: &GrokAuth,
+        held_lock: Option<&AuthFileLock>,
+    ) -> std::io::Result<()> {
+        let write = || {
+            let mut map = read_auth_json_or_empty_recovering_corrupt(&self.path)?;
+            // One entry per scope (personal and team share the scope key).
+            map.insert(self.scope.clone(), auth.clone());
+            write_auth_json(&self.path, &map)
         };
-        let mut map = map;
-        tracing::debug!(scope = %self.scope, "auth: storing token (no enrichment)");
-        map.insert(self.scope.clone(), auth.clone());
-        let write_result = write_auth_json(&self.path, &map);
+        match held_lock {
+            Some(lock) => with_held_auth_json_lock(&self.path, lock, write),
+            None => with_auth_json_scope_lock(&self.path, write),
+        }
+    }
+
+    fn commit_persisted_auth(
+        &self,
+        auth: GrokAuth,
+        held_lock: Option<&AuthFileLock>,
+        ok_msg: &'static str,
+        err_msg: &'static str,
+    ) -> std::io::Result<GrokAuth> {
+        let started = std::time::Instant::now();
+        tracing::debug!(scope = %self.scope, "auth: storing token");
+        let write_result = self.persist_scope_entry(&auth, held_lock);
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match &write_result {
             Ok(()) => xai_grok_telemetry::unified_log::info(
-                "auth update disk written (no enrichment)",
+                ok_msg,
                 None,
                 Some(serde_json::json!({
                     "rt_prefix": auth.refresh_token.as_deref().map(bearer_suffix),
                     "key_prefix": bearer_suffix(&auth.key),
                     "elapsed_ms": elapsed_ms,
+                    "scope": self.scope,
                 })),
             ),
-            Err(e) => xai_grok_telemetry::unified_log::error(
-                "auth update disk write failed (no enrichment)",
-                None,
-                Some(serde_json::json!({
-                    "error": e.to_string(),
-                    "elapsed_ms": elapsed_ms,
-                })),
-            ),
+            Err(e) => {
+                // Non-recoverable lock/IO error — keep conservative: memory only.
+                tracing::warn!(error = %e, "auth: disk update failed, updating in-memory only");
+                xai_grok_telemetry::unified_log::error(
+                    err_msg,
+                    None,
+                    Some(serde_json::json!({
+                        "error": e.to_string(),
+                        "elapsed_ms": elapsed_ms,
+                        "scope": self.scope,
+                    })),
+                );
+            }
         }
-        // Always update in-memory, even if disk write failed (see update()).
+        // Always update in-memory, even if disk write failed. This lets the
+        // current session work with fresh credentials while the user fixes the
+        // filesystem (e.g. read-only disk). Without this, a disk failure leaves
+        // the stale/dead token in memory and the user is completely stuck.
         *self.permanent_failure.write() = None;
         self.with_inner_write(|inner| *inner = Some(auth.clone()));
         write_result?;
@@ -1052,7 +1124,10 @@ impl AuthManager {
     /// Path to the `auth.json` this manager reads/writes (respects
     /// `GROK_AUTH_PATH` / constructor home). Prefer this over
     /// `grok_home()/auth.json` so temp-home tests and custom stores stay isolated.
-    pub(crate) fn auth_json_path(&self) -> &Path {
+    ///
+    /// Public so integration tests can assert isolation of
+    /// [`Self::for_test_with_auth_path`] without relying on env.
+    pub fn auth_json_path(&self) -> &Path {
         &self.path
     }
 
@@ -1636,8 +1711,9 @@ impl AuthManager {
         *self.devbox_override.lock() = Some(is_devbox);
     }
 
-    /// Last-resort devbox auth recovery: purge existing auth.json entirely
-    /// and mint fresh OIDC credentials via the remote devbox login helper.
+    /// Last-resort devbox auth recovery: drop the broken xAI scopes and mint
+    /// fresh OIDC credentials via the remote devbox login helper. Third-party
+    /// OAuth / BYOK scopes in `auth.json` are preserved.
     /// Only callable on devboxes (where the local service-account token is
     /// available).
     ///
@@ -1694,9 +1770,13 @@ impl AuthManager {
                 AuthError::transient_source(e)
             })?;
 
-        // Purge auth.json so we start clean — removes any corrupted,
-        // revoked, or legacy entries that caused the failure.
-        let _ = tokio::fs::remove_file(&self.path).await;
+        // Drop only the broken xAI scopes (current + legacy). Preserve
+        // third-party OAuth / BYOK scopes so a devbox remint does not
+        // force re-login to OpenAI Codex, Kimi, Claude, etc.
+        if let Err(e) = self.remove_scope(&self.scope) {
+            tracing::warn!(error = %e, "auth: devbox recovery failed to clear current scope");
+        }
+        let _ = self.remove_scope(LEGACY_SCOPE);
         self.clear_inner();
 
         let auth = self.save_without_enrichment(new_auth).await.map_err(|e| {
@@ -1728,43 +1808,45 @@ impl AuthManager {
     // ── Refresh chain (single mutation point) ─────────────────────────
 
     /// The only mutation point: persists on success, records the verdict on failure.
-    /// `_lock` type-enforces that the persisting `update()` runs under the file lock.
+    /// `lock` is the live refresh flock; persist reuses it (flock is not re-entrant).
     async fn apply_refresh_outcome(
         self: &Arc<Self>,
         outcome: RefreshOutcome,
         reason: RefreshReason,
         attempted_key: Option<String>,
-        _lock: &AuthFileLock,
+        lock: &AuthFileLock,
     ) -> Result<GrokAuth, AuthError> {
         let pre_key_suffix = attempted_key.as_deref().map(bearer_suffix);
         match outcome {
-            RefreshOutcome::Success(new_auth) => match self.update(*new_auth).await {
-                Ok(auth) => {
-                    let new_suffix = bearer_suffix(&auth.key);
-                    xai_grok_telemetry::unified_log::info(
-                        "auth.refresh.success",
-                        None,
-                        Some(serde_json::json!({
-                            "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
-                            "old_key_prefix": pre_key_suffix,
-                            "new_key_prefix": new_suffix,
-                            "key_changed": pre_key_suffix != Some(new_suffix),
-                        })),
-                    );
-                    tracing::info!(expires_at = ?auth.expires_at, "auth.refresh.success");
-                    self.refresh_notify.notify_waiters();
-                    Ok(auth)
+            RefreshOutcome::Success(new_auth) => {
+                match self.update_under_held_lock(*new_auth, lock).await {
+                    Ok(auth) => {
+                        let new_suffix = bearer_suffix(&auth.key);
+                        xai_grok_telemetry::unified_log::info(
+                            "auth.refresh.success",
+                            None,
+                            Some(serde_json::json!({
+                                "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
+                                "old_key_prefix": pre_key_suffix,
+                                "new_key_prefix": new_suffix,
+                                "key_changed": pre_key_suffix != Some(new_suffix),
+                            })),
+                        );
+                        tracing::info!(expires_at = ?auth.expires_at, "auth.refresh.success");
+                        self.refresh_notify.notify_waiters();
+                        Ok(auth)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "auth: failed to persist refreshed token");
+                        xai_grok_telemetry::unified_log::warn(
+                            "auth.refresh.persist_failed",
+                            None,
+                            Some(serde_json::json!({ "error": format!("{e}") })),
+                        );
+                        Err(AuthError::transient_source(e))
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "auth: failed to persist refreshed token");
-                    xai_grok_telemetry::unified_log::warn(
-                        "auth.refresh.persist_failed",
-                        None,
-                        Some(serde_json::json!({ "error": format!("{e}") })),
-                    );
-                    Err(AuthError::transient_source(e))
-                }
-            },
+            }
             RefreshOutcome::PermanentFailure {
                 error,
                 tried_key,

@@ -258,6 +258,8 @@ mod tests {
                 child_session_id: child.into(),
                 status: "completed".into(),
                 error: None,
+                termination_reason: None,
+                usage: None,
                 tool_calls: 0,
                 turns: 0,
                 duration_ms: 1,

@@ -1,23 +1,24 @@
 [package]
 name = "xai-grok-pager-bin"
-version = "1.0.12"
+version = "1.0.10-r2"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
-default-run = "xai-grok-pager"
+default-run = "hyper"
 
-# Composition-root binary for the Grok Build TUI. The artifact is still named
-# `xai-grok-pager`. This package exists so the binary can link both the pager
+# Composition-root binary for the Hyper / Grok Build TUI.
+# Community builds ship the artifact as `hyper` (coexists with the official
+# `grok` binary). This package exists so the binary can link both the pager
 # library and the optional `xai-grok-pager-minimal` render mode: `minimal`
 # depends on `xai-grok-pager`, so the pager library cannot depend back on it
 # (cargo cycle). The binary installs the minimal-mode IoC hooks at startup.
 [[bin]]
-name = "xai-grok-pager"
+name = "hyper"
 path = "src/main.rs"
 
 [dependencies]
 # The pager library (all application logic + the public API main.rs drives).
-xai-grok-pager = { path = "../../tui/xai-grok-pager" }
+xai-grok-pager = { path = "../../tui/xai-grok-pager", default-features = false }
 # Optional scrollback-native render mode, wired in via the fn-pointer seam.
 xai-grok-pager-minimal = { path = "../../tui/xai-grok-pager-minimal" }
 
@@ -27,6 +28,8 @@ xai-grok-update = { path = "../xai-grok-update" }
 xai-grok-version = { workspace = true }
 xai-grok-telemetry = { workspace = true }
 xai-grok-workspace = { workspace = true }
+xai-grok-dashboard = { path = "../xai-grok-dashboard" }
+xai-hyper-web = { path = "../xai-hyper-web" }
 xai-crash-handler = { path = "../../platform/xai-crash-handler" }
 xai-acp-lib = { workspace = true }
 
@@ -47,11 +50,18 @@ tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
 dunce = { workspace = true }
 semver = { workspace = true }
+rpassword = "7"
 xai-tty-utils = { workspace = true }
 # `collect_crashed()` for the startup crash notice.
 xai-grok-active-sessions = { workspace = true }
 xai-grok-config = { workspace = true }
 xai-grok-sandbox = { path = "../../tools/xai-grok-sandbox", default-features = false }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "logging",
+    "std",
+    "tls12",
+] }
 xai-grok-extra-ca = { workspace = true }
 
 # Binary hardening: compile-time string + control-flow obfuscation.
@@ -86,6 +96,10 @@ tempfile = { workspace = true }
 default = [
     "jemalloc",
     "sandbox-enforce",
+    # This fork ships as Hyper; enable community branding + updater guards by default.
+    "community-build",
+    # Codex Live (`/live`): enabled in the normal Hyper default set.
+    "codex-live",
     ]
 default-bazel = [
     "jemalloc",
@@ -96,6 +110,14 @@ jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc
 # xai-grok-workspace no longer enables sandbox-enforce by default, so enable it here.
 sandbox-enforce = ["xai-grok-pager/sandbox-enforce", "xai-grok-workspace/sandbox-enforce"]
 local-workspace = ["xai-grok-pager/local-workspace"]
-release-dist = [
-    "xai-grok-pager/release-dist",
-    ]
+release-dist = ["xai-grok-pager/release-dist"]
+# Community Hyper builds: use Hyper branding and the isolated community updater.
+# The updater reads only this fork's GitHub Releases, keeps managed payloads and
+# update state under ~/.hyper, and never invokes or overwrites ~/.grok/bin/grok.
+community-build = [
+    "xai-grok-pager/community-build",
+    "xai-grok-update/community-build",
+]
+# Codex Live (`/live`): forwarded into the pager library. Omitted from
+# `default-bazel` (no audio device / live internals in the test sandbox).
+codex-live = ["xai-grok-pager/codex-live"]

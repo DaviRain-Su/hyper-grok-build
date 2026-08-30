@@ -2910,6 +2910,7 @@ mod editor_paste_routing_tests {
             None,
             None,
             None,
+            Vec::new(),
         );
         agents.active_tab = AgentsTab::Personas;
         agent.agents_modal = Some(agents);

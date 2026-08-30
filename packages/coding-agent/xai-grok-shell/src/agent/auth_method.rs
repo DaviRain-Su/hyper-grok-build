@@ -1064,8 +1064,16 @@ mod tests {
             should_advertise_xai_api_key(false, models.values()),
             "presence-only helper still sees the env key"
         );
+        // The bundled platform catalog injects an `xai-direct` entry whose
+        // `env_key` resolves `XAI_API_KEY`, so the unfiltered list reports
+        // has_byok=true and advertises regardless of the probe. Exclude
+        // own-credential models to isolate the first-party env/probe branch.
         assert!(
-            !should_advertise_xai_api_key_with_env_ok(false, models.values(), false),
+            !should_advertise_xai_api_key_with_env_ok(
+                false,
+                models.values().filter(|m| !m.has_own_credentials()),
+                false,
+            ),
             "probe-unusable env key alone must not advertise"
         );
         let built = build_auth_methods(AuthMethodsBuildInputs {
