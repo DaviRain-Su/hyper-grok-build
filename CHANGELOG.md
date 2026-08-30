@@ -4,6 +4,19 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.12-r2] — 2026-08-31
+
+### Fixed
+- **Release CI stripped-binary guard** — restore the fork's
+  `release-dist` profile (`strip = "symbols"`, `debug = 0`). The upstream
+  1.0.12 merge flipped it to upstream's `strip = false, debug = 1`
+  (their CI extracts `.debug` sidecars / `.dSYM` bundles before
+  stripping; this fork's release pipeline does not), so the Linux
+  artifacts ballooned to ~1.5 GB and blew past the 256 MiB distribution
+  limit — `v1.0.12-r1` failed its x86_64 + aarch64 build jobs and
+  published no release assets. Same regression class as the 1.36 GB
+  v0.2.114-r2 incident.
+
 ## [1.0.12-r1] — 2026-08-30
 
 ### Added
