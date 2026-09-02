@@ -105,7 +105,7 @@ hyper                # start the TUI
 Pin a release (the bootstrap script still verifies `SHA256SUMS`):
 
 ```sh
-curl -fsSL https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.sh | sh -s -- --version v1.0.12-r2
+curl -fsSL https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.sh | sh -s -- --version v1.0.16-r1
 ```
 
 The installer installs into `~/.hyper/bin/hyper`
